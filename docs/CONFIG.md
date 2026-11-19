@@ -865,7 +865,7 @@ Keys: any single printable character is a valid key — letters `a`..`z`,
 `up`/`down`/`left`/`right`, `page_up`/`page_down` (aliases `pageup`/`pagedown`,
 `prior`/`next`), `home`/`end`, `enter` (alias `return`), `tab`,
 `escape` (alias `esc`), `backspace` (alias `bs`), `delete` (alias `del`),
-`menu` (aliases `context_menu`, `apps`: the Menu key beside the right Ctrl
+`menu` (aliases `context_menu`, `contextmenu`, `apps`: the Menu key beside the right Ctrl
 on PC keyboards; macOS never reports it), and the symbolic
 names `plus`/`minus`/`equal` for `+`/`-`/`=`.
 
@@ -1190,11 +1190,12 @@ mount. On Windows path hints are always copied),
 `new_ssh` (`ssh`), `context_menu`
 (`open_context_menu`: the right-click menu, opened at the text cursor
 rather than under the mouse pointer; `Menu` on Linux and Windows, and
-bindable to any key on macOS). Up and Down move the highlight, which starts
-on the first row, Enter picks it and Escape closes the menu; while it is
-open no key reaches the program in the pane. Shift+F10, the other common
-menu key, has no default because full-screen programs use it. Under the Kitty keyboard protocol a program that asks for every key
-no longer receives the Menu key; `keybind = menu=unbind` gives it back.
+bindable to any key on macOS). Up and Down move the highlight, which
+starts on the first row it can act on, Enter picks it and Escape closes the
+menu; while it is open no key reaches the program in the pane. Shift+F10,
+the other common menu key, has no default because full-screen programs use
+it. Under the Kitty keyboard protocol a program that asks for every key no
+longer receives the Menu key; `keybind = menu=unbind` gives it back.
 
 **Vi-mode**: `toggle_vi_mode` (`vi_mode` / `vi`) — enter keyboard-driven
 copy/navigation mode (default `Ctrl+Shift+Space`): `h`/`j`/`k`/`l` move,
