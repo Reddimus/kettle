@@ -157,6 +157,7 @@ pub(crate) fn preferred_trigger(trigger: Trigger) -> Option<String> {
         Key::Right => "Right".into(),
         Key::F(n @ 1..=35) => format!("F{n}"),
         Key::F(_) => return None,
+        Key::Menu => "Menu".into(),
     };
     let mut parts = Vec::new();
     for (modifier, name) in [

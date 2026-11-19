@@ -1958,9 +1958,19 @@ impl App {
     /// `col == cols` or `row == rows` mis-renders — xterm
     /// itself clamps the reported coordinate to the window.
     fn cursor_cell_in_rect(&self, ws: &WindowState, rect: Rect) -> (usize, usize) {
+        self.point_cell_in_rect(ws, rect, (ws.cursor.x as f32, ws.cursor.y as f32))
+    }
+
+    /// `cursor_cell_in_rect` for the point `(x, y)` rather than the pointer.
+    fn point_cell_in_rect(
+        &self,
+        ws: &WindowState,
+        rect: Rect,
+        (x, y): (f32, f32),
+    ) -> (usize, usize) {
         // Mouse-tracking reports a cell, not a selection boundary — the sub-cell
         // side is irrelevant here, so discard it.
-        let (p, _) = self.px_to_point(ws, rect, ws.cursor.x as f32, ws.cursor.y as f32);
+        let (p, _) = self.px_to_point(ws, rect, x, y);
         let (row, col) = (p.line.0.max(0) as usize, p.column.0);
         // Clamp to the terminal's grid, the size `resize_all` gave the pane's
         // PTY.
@@ -1998,6 +2008,23 @@ impl App {
             return None;
         }
         let (row, col) = self.cursor_cell_in_rect(ws, rect);
+        cached_link_at_cell(ws, row, col)
+    }
+
+    /// The link at `(x, y)` in the focused pane, as `link_at_cursor` finds
+    /// the one under the pointer: the context menu asks about the point it
+    /// opens over, which for a menu opened from the keyboard is the text
+    /// cursor and not the pointer.
+    pub(super) fn link_at_point<'a>(
+        &self,
+        ws: &'a WindowState,
+        (x, y): (f32, f32),
+    ) -> Option<&'a kettle_core::Link> {
+        let rect = self.focused_terminal(ws, self.area(ws))?;
+        if !rect_contains(rect, x, y) {
+            return None;
+        }
+        let (row, col) = self.point_cell_in_rect(ws, rect, (x, y));
         cached_link_at_cell(ws, row, col)
     }
 

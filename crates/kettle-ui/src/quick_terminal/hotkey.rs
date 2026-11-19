@@ -94,6 +94,8 @@ fn carbon_key(key: Key) -> Option<u32> {
         Key::PageDown => 121,
         Key::F(n) => *[122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111]
             .get(usize::from(n).checked_sub(1)?)?,
+        // kVK_ContextualMenu, the Menu key of a PC keyboard.
+        Key::Menu => 110,
     })
 }
 
@@ -131,6 +133,7 @@ fn x11_keysym(key: Key) -> Option<u32> {
         Key::PageDown => 0xff56,
         Key::End => 0xff57,
         Key::F(n @ 1..=12) => 0xffbd + u32::from(n),
+        Key::Menu => 0xff67,
         _ => return None,
     })
 }
@@ -710,6 +713,9 @@ mod tests {
         assert_eq!(x11_keysym(ctrl_grave.key), Some(0x60));
         assert_eq!(x11_keysym(cmd_escape.key), Some(0xff1b));
         assert_eq!(x11_keysym(Key::F(12)), Some(0xffc9));
+        let ctrl_menu = kettle_config::parse_quick_terminal_hotkey("ctrl+menu").unwrap();
+        assert_eq!(x11_keysym(ctrl_menu.key), Some(0xff67));
+        assert_eq!(carbon_key(ctrl_menu.key), Some(110));
         let option_a = kettle_config::parse_quick_terminal_hotkey("alt+a").unwrap();
         assert_eq!(carbon_key(carbon_trigger(option_a).key), Some(0));
         assert_eq!(carbon_mods(option_a.mods), 1 << 11);

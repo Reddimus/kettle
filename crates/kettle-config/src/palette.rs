@@ -656,7 +656,7 @@ mod tests {
             // OpenContextMenu is the right-click handler
             // itself — surfacing it inside the palette would be a
             // weird self-reference (palette → context menu → palette
-            // entry). Triggered by the mouse only, not user-typed.
+            // entry). Opened by a right click or the Menu key, not typed.
             OpenContextMenu,
             // Terminator-parity actions excluded from the palette
             // because they're either parametric (no enumeration target),
