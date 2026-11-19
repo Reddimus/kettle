@@ -585,6 +585,12 @@ impl App {
         initial_cfg.accent_seed = accent_seed_from_cwd(startup.cwd.as_deref());
         crate::startup_trace::mark(crate::startup_trace::Phase::ConfigLoaded);
         font_preload.request_family(&initial_cfg.font_family);
+        // Window 1's Vulkan instance needs no window, so it is created while
+        // the rest of startup runs. Only the config says whether Vulkan is
+        // the first attempt: under `gpu-backend = gl` or a GPU pin, Kettle
+        // must not load the Vulkan driver early, so this waits for it.
+        let early_gpu_instance =
+            kettle_render::EarlyGpuInstance::start(&initial_cfg, event_loop.owned_display_handle());
         let initial_triggers = compile_triggers(&initial_cfg.triggers);
         // Dropdown-parity: capture before `startup` moves into the App.
         let startup_version = startup
@@ -814,6 +820,7 @@ impl App {
             next_window_seq: 2,
             gpu: None,
             font_preload: Some(font_preload),
+            early_gpu_instance,
             launch_override: plan.launch_override,
             pre_launch_eligible: plan.pre_launch && !plan.may_restore,
             gpu_choices: Vec::new(),
@@ -1365,6 +1372,7 @@ impl App {
                 scale,
                 &self.cfg,
                 ws.startup_fonts.take(),
+                self.early_gpu_instance.take(),
             ))
         };
         // Disarm the watchdog the moment init returns, on BOTH the success and

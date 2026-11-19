@@ -421,6 +421,10 @@ pub struct App {
     /// The system fonts, loading on their own thread since `run_with`
     /// began. Window 1 takes them before its first spawn; later windows load their own.
     font_preload: Option<crate::font_preload::FontPreload>,
+    /// Window 1's Vulkan instance, being created on its own thread since the
+    /// config was read, where Vulkan is the first GPU attempt. Window 1's
+    /// renderer takes it.
+    early_gpu_instance: Option<kettle_render::EarlyGpuInstance>,
     /// Decided before the first spawn consumes command/cwd.
     launch_override: bool,
     pre_launch_eligible: bool,

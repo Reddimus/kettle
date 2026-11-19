@@ -7,6 +7,15 @@ impl<T> Term<T> {
         }
         for grid in [&mut self.grid, &mut self.inactive_grid] {
             for line in grid.topmost_line().0..grid.screen_lines() as i32 {
+                // Touch only rows with the flag: mutable access stores the
+                // full width of a compact history row.
+                let row = &grid[Line(line)];
+                if !row
+                    .into_iter()
+                    .any(|cell| cell.flags.contains(Flags::PARTIAL_WRAPLINE))
+                {
+                    continue;
+                }
                 for cell in &mut grid[Line(line)][..] {
                     cell.flags.remove(Flags::PARTIAL_WRAPLINE);
                 }

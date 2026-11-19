@@ -109,9 +109,9 @@ pub use geometry::{Rect4, cap_axis_cells, pane_grid_origin};
 #[cfg(test)]
 use geometry::{glyph_grid_col, snapshot_viewport_top};
 pub use gpu::{
-    AdapterEscalation, AdapterSelection, FrameOutcome, GpuAdapterInfo, GpuAdapterKey, GpuContext,
-    GpuFault, RendererRecoveryState, detect_gpus, enumerate_adapter_infos, escalation_for_attempt,
-    gpu_info, pin_match_rank_fields,
+    AdapterEscalation, AdapterSelection, EarlyGpuInstance, FrameOutcome, GpuAdapterInfo,
+    GpuAdapterKey, GpuContext, GpuFault, RendererRecoveryState, detect_gpus,
+    enumerate_adapter_infos, escalation_for_attempt, gpu_info, pin_match_rank_fields,
 };
 #[cfg(test)]
 use gpu::{
@@ -264,6 +264,8 @@ mod media_transport;
 mod media_viewport;
 
 mod outline;
+
+mod pipeline_build;
 
 mod present;
 
@@ -6678,6 +6680,9 @@ mod underline_style_tests;
 
 #[cfg(test)]
 mod gpu_tests;
+
+#[cfg(test)]
+mod gpu_startup_tests;
 
 #[cfg(test)]
 mod present_mode_tests;

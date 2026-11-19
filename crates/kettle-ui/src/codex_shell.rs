@@ -1050,9 +1050,12 @@ mod tests {
     #[test]
     fn wrapper_and_entry_paths_with_quotes_and_newlines_are_valid_shell_syntax() {
         let kettle = Path::new("/fixture/quote'and\nnewline\\/kettle");
+        // `-f` keeps zsh from sourcing the system startup files: Debian and
+        // Ubuntu's /etc/zsh/zshenv makes `zsh -n` exit 1, silently, before
+        // the script is ever checked.
         for (program, shell, flag) in [
             ("bash", CodexShell::Bash, "-n"),
-            ("zsh", CodexShell::Zsh, "-n"),
+            ("zsh", CodexShell::Zsh, "-fn"),
             ("fish", CodexShell::Fish, "--no-execute"),
             ("sh", CodexShell::Bash, "-n"),
         ] {

@@ -411,6 +411,23 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
+- The first window appears sooner. On Linux with an NVIDIA GPU under GNOME,
+  launch to the compositor's first frame went from 377 to 314 ms (median
+  of 15 cold starts each); other GPUs and platforms were not measured. GPU
+  setup no longer has wgpu build the shaders that validate indirect draws,
+  which Kettle never issues, and the first window's renderer compiles five
+  of its shaders at the same time as the rest of its setup instead of one
+  after another (except on OpenGL). On Linux and FreeBSD, where Kettle tries
+  Vulkan first, the first window's Vulkan instance is created while the
+  config is applied and the window comes up. With `gpu-backend = gl`, a
+  pinned GPU or a `gpu-power-preference` other than auto, and on macOS and
+  Windows, the instance is still created when the window needs it.
+  `kettle --gpu-info` now reports the adapter's own maximum buffer size; wgpu
+  capped it at 4 GiB while it validated indirect calls. Kettle's device still
+  asks for no more than before. On the same machine Kettle's idle memory
+  rose by about 3 MiB, from 170 to 173 MiB, most likely the driver's
+  allocations made while compiling on the other threads.
+
 - Theme and default selections keep selected text at 7:1 in both focus
   states, including ANSI colours. A clean perimeter preserves selection
   visibility where the fill alone cannot. Explicit user selection colours
@@ -896,6 +913,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   live bottom, and the scrollbar's hover target is wider.
 - `scrollback-bytes` defaults to 64 MB, so the default 10,000-line history
   fits at common window widths.
+- Scrollback holds far less memory. A line in history no longer stores the
+  blank cells that end it, so `seq 1 100000` in a maximized 1600x1000 pane
+  on Linux grows Kettle by 2.4 MiB instead of 43.3 MiB (169.2 MiB in all,
+  down from 212.3). Blanks with a background, an attribute or a link are
+  kept, and `scrollback-bytes` keeps the same number of lines as before.
+  Output of lines of one length scrolls as fast as before; lines of mixed
+  length scroll about 10% slower.
 - The context menu puts the actions for what you clicked first (Copy, Paste,
   Select All, and Open or Copy Link on a link) and groups pane, tab, title
   and appearance commands into submenus, so it no longer scrolls. Each
@@ -970,6 +994,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   entries against the shared removal budget as they are listed.
 
 ### Fixed
+
+- On Linux machines with many processors, about 12 or more, ffmpeg drew no
+  video poster, video frame or HEIC/AVIF photo. Left to choose, it started
+  filter and encoder threads for every processor, and their stacks and
+  allocator arenas outgrew the media worker's 1 GiB address space before it
+  wrote a picture. These one-shot decodes now run one filter thread and one
+  encoder thread, as playback already did.
 
 - The one-character form of the bracketed-paste end marker (U+009B followed
   by `201~`) opened the Confirm paste dialog and was then sent on by Paste

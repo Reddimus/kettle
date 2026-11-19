@@ -319,6 +319,48 @@ fn the_fonts_load_while_the_event_loop_starts() {
     assert!(take < spawn);
 }
 
+/// Window 1's Vulkan instance is created on its own thread from `run_with`,
+/// once the config with its command-line overrides says whether Vulkan is
+/// the first GPU attempt, and on the event loop's display. Window 1's
+/// renderer takes it inside the hung-driver watchdog, so waiting for it is
+/// guarded like creating it there; no other renderer gets it.
+#[test]
+fn window_one_takes_the_vulkan_instance_started_after_the_config() {
+    let src = super::production_source();
+    let run = src
+        .split_once("pub fn run_with(mut startup: crate::Options) -> Result<()> {")
+        .expect("run_with")
+        .1;
+    let run = &run[..run.find("event_loop.run_app(&mut app)").expect("run_app")];
+    let loaded = run
+        .find("crate::startup_trace::mark(crate::startup_trace::Phase::ConfigLoaded);")
+        .expect("config loaded");
+    let start = run
+        .find(
+            "kettle_render::EarlyGpuInstance::start(&initial_cfg, event_loop.owned_display_handle());",
+        )
+        .expect("run_with starts the early instance");
+    assert!(loaded < start, "the config is final before it decides");
+    assert!(run[start..].contains("early_gpu_instance,"));
+    assert_eq!(src.matches("EarlyGpuInstance::start(").count(), 1);
+    assert_eq!(src.matches("self.early_gpu_instance.take()").count(), 1);
+
+    let resumed = src
+        .split_once("fn resumed_inner(")
+        .expect("resumed_inner")
+        .1;
+    let at = |needle: &str| {
+        resumed
+            .find(needle)
+            .unwrap_or_else(|| panic!("resumed_inner lacks {needle}"))
+    };
+    let arm = at("let gpu_init_watchdog = GpuInitWatchdog::arm();");
+    let init = at("pollster::block_on(Renderer::new_with_display_handle(");
+    let take = at("self.early_gpu_instance.take(),");
+    let disarm = at("drop(gpu_init_watchdog);");
+    assert!(arm < init && init < take && take < disarm);
+}
+
 /// Startup drift guard: the window is hidden only while renderer init runs,
 /// then revealed for every visible startup state. `window_state = hidden`
 /// still stays hidden.
