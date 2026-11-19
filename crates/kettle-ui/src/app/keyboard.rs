@@ -475,6 +475,7 @@ fn parse_key_token(token: &str, infer_shift: bool) -> Option<(ModifiersState, Ke
                     "end" => Some(NamedKey::End),
                     "page_up" | "pageup" | "prior" => Some(NamedKey::PageUp),
                     "page_down" | "pagedown" | "next" => Some(NamedKey::PageDown),
+                    "menu" | "context_menu" | "contextmenu" | "apps" => Some(NamedKey::ContextMenu),
                     "f1" => Some(NamedKey::F1),
                     "f2" => Some(NamedKey::F2),
                     "f3" => Some(NamedKey::F3),

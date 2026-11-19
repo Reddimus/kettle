@@ -417,6 +417,20 @@ fn parse_send_key_grammar() {
         parse_send_key("space"),
         Some((none, Key::Named(NamedKey::Space)))
     );
+    // Every spelling a keybind accepts for the Menu key, so the control
+    // plane (`send_keys`, `dispatch_keybind`) can press the key it binds.
+    for menu in ["menu", "Menu", "context_menu", "contextmenu", "apps"] {
+        assert_eq!(
+            parse_send_key(menu),
+            Some((none, Key::Named(NamedKey::ContextMenu))),
+            "{menu}"
+        );
+        assert_eq!(
+            super::parse_ctl_logical_key(Some(&serde_json::json!(menu))),
+            Ok(Some(Key::Named(NamedKey::ContextMenu))),
+            "{menu}"
+        );
+    }
     // Chords, with aliases.
     assert_eq!(
         parse_send_key("ctrl+c"),

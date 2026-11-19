@@ -133,6 +133,7 @@ fn x11_keysym(key: Key) -> Option<u32> {
         Key::PageDown => 0xff56,
         Key::End => 0xff57,
         Key::F(n @ 1..=12) => 0xffbd + u32::from(n),
+        Key::Menu => 0xff67,
         _ => return None,
     })
 }
@@ -712,6 +713,9 @@ mod tests {
         assert_eq!(x11_keysym(ctrl_grave.key), Some(0x60));
         assert_eq!(x11_keysym(cmd_escape.key), Some(0xff1b));
         assert_eq!(x11_keysym(Key::F(12)), Some(0xffc9));
+        let ctrl_menu = kettle_config::parse_quick_terminal_hotkey("ctrl+menu").unwrap();
+        assert_eq!(x11_keysym(ctrl_menu.key), Some(0xff67));
+        assert_eq!(carbon_key(ctrl_menu.key), Some(110));
         let option_a = kettle_config::parse_quick_terminal_hotkey("alt+a").unwrap();
         assert_eq!(carbon_key(carbon_trigger(option_a).key), Some(0));
         assert_eq!(carbon_mods(option_a.mods), 1 << 11);
