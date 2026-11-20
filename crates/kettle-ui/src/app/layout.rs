@@ -578,12 +578,20 @@ impl App {
         let mut native_resize_failed = false;
         for (id, cols, rows, pixel_width, pixel_height) in plan {
             let history_pull = history_pulls.get(&id).copied().unwrap_or(usize::MAX);
-            if let Some(p) = ws.mux.panes.get_mut(&id)
-                && let Err(error) = p.term.try_resize_geometry_pulling_history(
-                    PtyGeometry::new(cols, rows, pixel_width, pixel_height),
-                    history_pull,
-                )
-            {
+            let Some(p) = ws.mux.panes.get_mut(&id) else {
+                continue;
+            };
+            let resized = p.term.try_resize_geometry_pulling_history(
+                PtyGeometry::new(cols, rows, pixel_width, pixel_height),
+                history_pull,
+            );
+            note_search_lane_resize(
+                &mut ws.search_lane_pushed,
+                ws.search.open,
+                id,
+                p.term.history_rows_pushed_by_last_resize(),
+            );
+            if let Err(error) = resized {
                 native_resize_failed = true;
                 log::warn!(
                     "pane {id} PTY resize failed; a bounded deadline retry is scheduled: {error:#}"
