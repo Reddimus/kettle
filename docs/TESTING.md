@@ -577,6 +577,13 @@ levels of a newly created directory tree through `READ_CONTROL` handles,
 verifies the current-user owner and protected full-access DACL, and creates
 child directories and files. Read-only verification must query the held
 directory rather than use the file-only `ReOpenFile` ACL-mutation path.
+`a_legacy_file_granting_only_modify_is_hardened` gives a file one protected
+Modify entry, confirms that the owner is then granted `WRITE_DAC` and refused
+`WRITE_OWNER`, and requires `open_existing_private_file` to harden and return
+it. The Administrators-owned cases of
+`the_hardening_plan_follows_owner_and_dacl` run only under an elevated token,
+as on the CI runner. No test performs the owner migration itself: it needs a
+file owned by Administrators opened by a token whose owner is the account.
 `staged_replacement_preserves_open_destination_handles` checks atomic
 replacement while an existing reader retains the old bytes. The renderer's
 `offscreen_screenshot_replaces_an_open_file_in_the_system_temp_directory`

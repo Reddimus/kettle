@@ -202,13 +202,3 @@ campaign and startup outlier remain inconclusive. These entries stay open.
   desktop evidence in `docs/TESTING.md`. Spoken search-result and caret feedback
   still needs an identified assistive-technology observation. Keep appearance
   skips in `docs/APPEARANCE-GATE.md` with their own artifact scope.
-
-- **Windows `WRITE_OWNER` request before DACL hardening.**
-  `open_existing_private_file` requests `WRITE_OWNER` before hardening the
-  DACL, which an account with only Modify permission is refused
-  (`crates/kettle-state`). Deferred because it needs a native Windows
-  reproduction to prove the fix and its regression. Close with a conditional
-  `WRITE_OWNER` request limited to the ownership-migration branch, with a
-  Windows test. (The companion lock-retirement race is fixed: a lock file is
-  now retired through its held handle.)
-
