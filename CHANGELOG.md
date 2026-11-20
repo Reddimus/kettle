@@ -970,6 +970,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   lowered afterwards could have been passed on to the program. Linux and
   macOS are unchanged.
 
+- `kettle video-frames` can no longer destroy a file that takes the output's
+  name while the sheet is being written. Kettle used to check the name and
+  then rename the sheet over it, so a video moved onto that name in between
+  was lost to the JPEG. The sheet now trades names with whatever is there
+  and removes the displaced file only when it is the one that was checked;
+  anything else is put back, or, if it cannot be, kept beside the output
+  under a name beginning `.kettle-`, and the command fails.
+  Replacing the last sheet works as before. On a filesystem that cannot
+  trade names the old file is moved aside first, and one that can neither
+  rename exclusively nor hard-link is refused.
+
 - A PNG pasted from the Linux clipboard is read up to 64 MiB (the X11 route
   allowed 256 MiB) and decoded with limits set before any pixel memory is
   allocated: 16,384 pixels a side and 256 MiB, where the decoder's defaults

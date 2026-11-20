@@ -157,7 +157,26 @@ full MCP server's `kettle_video_frames` open the file in their own process,
 start their own worker through the same client and launcher the GUI uses,
 and encode the sheet as one JPEG sized to its destination (any size for the
 command's file, the 768 KiB response line for MCP) with a text index of each
-frame's time.
+frame's time. The command publishes its file from a private sibling without a
+step that can destroy another file: the output's name is examined, then
+exchanged with the sibling's (`renameat2` `RENAME_EXCHANGE` on Linux,
+`renameatx_np` `RENAME_SWAP` on macOS), and what the exchange displaced is
+removed only when it is the file examined and the output's name holds the
+sheet, and exchanged back otherwise; if something else has already moved the
+displaced file off the private name, there is nothing to put back and the
+sheet stays. Nothing is published unless, just before it moves, the private
+name still holds the sheet Kettle wrote. A free name is taken with an
+exclusive rename. Where the exchange is refused (`EINVAL`, `ENOTSUP`,
+`ENOSYS`, `EXDEV`), and on Windows, which has none, the old output moves
+aside to a private name, the sibling takes the free name by an exclusive
+rename or a hard link, and the old output is then removed; this is not
+atomic, and a filesystem with neither step is refused before anything
+moves. Once a name has been exchanged or moved, every removal first checks
+that the name still holds the expected file; the check and the removal are
+two steps, as no system removes a name only while it holds a given file, so
+a file moved onto one of the command's unpredictable private names between
+them is not protected. On Windows no worker exists, so this path runs only
+in tests.
 Mermaid goes through merman 0.9.3, pinned exactly with its layout and
 painting family, under a resource-constrained policy and a two-second
 `OperationControl` deadline that starts before its fonts load. Kettle

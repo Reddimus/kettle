@@ -5,15 +5,6 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
 
 ## Security and boundaries
 
-- **A video moved onto the output name during frame publication.**
-  `crates/kettle/src/video_frames.rs` checks the destination's identity before
-  writing and then renames unconditionally, so a process that moves the input
-  video onto the output name in that window loses the video to the JPEG.
-  Deferred because a no-clobber rename changes the documented overwrite
-  behavior; the complete fix publishes with an exchange (Linux `RENAME_EXCHANGE`,
-  macOS `RENAME_SWAP`, Windows `ReplaceFile`) and swaps back when the displaced
-  file is not the one checked, with a native test per platform.
-
 - **D-Bus maintenance notices.** The product graph accepts the informational
   unmaintained notices RUSTSEC-2026-0370/0371/0372 for `zvariant 5.15.1`,
   `zvariant_derive 5.15.1` and `zbus_names 4.3.5`. The all-target exact reverse
