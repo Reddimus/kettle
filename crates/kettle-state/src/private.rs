@@ -4008,6 +4008,10 @@ mod windows {
     }
 
     fn private_acl(current_user: PSID) -> io::Result<Vec<u64>> {
+        single_allow_acl(current_user, FILE_ALL_ACCESS)
+    }
+
+    fn single_allow_acl(current_user: PSID, access: u32) -> io::Result<Vec<u64>> {
         // One ACCESS_ALLOWED_ACE has a four-byte SID placeholder. Add the
         // actual variable-length SID and round storage up to u64 alignment.
         // SAFETY: current_user comes from a validated TokenSid whose buffer
@@ -4027,9 +4031,7 @@ mod windows {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: the ACL has enough room and the validated SID remains alive.
-        if unsafe { AddAccessAllowedAceEx(acl, ACL_REVISION, 0, FILE_ALL_ACCESS, current_user) }
-            == 0
-        {
+        if unsafe { AddAccessAllowedAceEx(acl, ACL_REVISION, 0, access, current_user) } == 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(storage)
@@ -4761,16 +4763,28 @@ mod windows {
         if private_object_is_exact(&file)? {
             return Ok(file);
         }
+        // Rewriting the DACL needs WRITE_DAC, which an owner always holds.
+        // Only the legacy owner migration needs WRITE_OWNER, and a DACL that
+        // gives the account Modify withholds it, so asking for it on every
+        // legacy file refused the ones that can be hardened without it.
+        let hardening_access = exclusive_hardening_access(hardening_plan_for_file(&file)?);
         drop(file);
 
         // A broad legacy object is hardened only while held with no sharing.
-        // This fails closed if any handle opened under the old DACL survives.
-        let exclusive = open(shared_access | WRITE_DAC | WRITE_OWNER, 0)?;
+        // This fails closed if any handle with data or delete access opened
+        // under the old DACL survives. Sharing does not govern a handle that
+        // holds only metadata rights such as WRITE_DAC, so one of those can
+        // outlive the hardening; no user-mode call can revoke it.
+        let exclusive = open(shared_access | hardening_access, 0)?;
         require_regular_non_reparse(&exclusive, &path)?;
         require_single_link(&exclusive, &path)?;
         parent.verify()?;
         let identity = file_identity(&exclusive)?;
-        restrict_private_object_direct(&exclusive)?;
+        // The path may name another object by now, or this one may have a new
+        // owner. Every check and the plan itself are decided again on this
+        // handle, so a different object is judged on its own owner and DACL;
+        // only the access it was opened with carries over.
+        restrict_private_object_direct(&exclusive, hardening_access)?;
         drop(exclusive);
 
         // The DACL is now private, so reopening with cooperative sharing
@@ -5891,24 +5905,72 @@ mod windows {
         require_regular_non_reparse(file, Path::new("<open private file>"))?;
         require_single_link(file, Path::new("<open private file>"))?;
         let handle = reopen_for_acl(file)?;
+        // The migration below reopens the source file for WRITE_OWNER itself.
         restrict_private_object_on_handle(Some(file), handle.as_raw_handle() as HANDLE, None)
     }
 
-    fn restrict_private_object_direct(file: &File) -> io::Result<()> {
+    /// Harden `file` through its own handle, which was opened with `granted`
+    /// beyond data access. A plan that needs more is refused before any change.
+    fn restrict_private_object_direct(file: &File, granted: u32) -> io::Result<()> {
         require_regular_non_reparse(file, Path::new("<open private file>"))?;
         require_single_link(file, Path::new("<open private file>"))?;
         let handle = file.as_raw_handle() as HANDLE;
-        restrict_private_object_on_handle(None, handle, Some(handle))
+        restrict_private_object_on_handle(None, handle, Some((handle, granted)))
     }
 
-    fn restrict_private_object_on_handle(
-        source_file: Option<&File>,
-        handle: HANDLE,
-        owner_handle: Option<HANDLE>,
-    ) -> io::Result<()> {
+    /// What bringing an object to the private form takes.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum HardeningPlan {
+        /// The DACL is exact and the owner is acceptable: nothing to change.
+        AlreadyPrivate,
+        /// The DACL is exact but an older elevated build left Administrators
+        /// as owner. Only the owner changes, which needs `WRITE_OWNER`.
+        MigrateOwner,
+        /// The effective token owner owns the object and its DACL is broader.
+        /// Only the DACL changes, which needs `WRITE_DAC`.
+        RewriteDacl,
+    }
+
+    /// Rights the exclusive hardening handle needs beyond data access.
+    fn exclusive_hardening_access(plan: HardeningPlan) -> u32 {
+        match plan {
+            HardeningPlan::MigrateOwner => WRITE_DAC | WRITE_OWNER,
+            HardeningPlan::AlreadyPrivate | HardeningPlan::RewriteDacl => WRITE_DAC,
+        }
+    }
+
+    /// Refuse a handle opened with less than `plan` needs. That happens only
+    /// when the object changed between the first open and the exclusive one,
+    /// so the error says to try again: the next attempt classifies it afresh.
+    fn require_hardening_access(plan: HardeningPlan, granted: u32) -> io::Result<()> {
+        if exclusive_hardening_access(plan) & !granted == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::ResourceBusy,
+                "a legacy private file changed while it was being hardened; try again",
+            ))
+        }
+    }
+
+    fn hardening_plan_for_file(file: &File) -> io::Result<HardeningPlan> {
         let token = effective_token()?;
         let current_user = token_user_sid(&token)?;
         let current_owner = token_owner_sid(&token)?;
+        hardening_plan(
+            file.as_raw_handle() as HANDLE,
+            current_user.sid,
+            current_owner.sid,
+        )
+    }
+
+    /// Classify the object behind `handle`, which needs `READ_CONTROL`. An
+    /// object whose owner authorizes no change is refused.
+    fn hardening_plan(
+        handle: HANDLE,
+        current_user: PSID,
+        current_owner: PSID,
+    ) -> io::Result<HardeningPlan> {
         let mut owner = std::ptr::null_mut();
         let mut dacl = std::ptr::null_mut();
         let mut descriptor = std::ptr::null_mut();
@@ -5930,41 +5992,65 @@ mod windows {
             return Err(io::Error::from_raw_os_error(status as i32));
         }
         let descriptor = SecurityDescriptor(descriptor);
-        let already_private = dacl_is_current_user_only(descriptor.0, dacl, current_user.sid)?;
+        let already_private = dacl_is_current_user_only(descriptor.0, dacl, current_user)?;
         // New private objects are owned by TokenUser, which differs from
         // TokenOwner on an elevated administrator's token. One that is already
         // exactly private needs no change, so it needs no owner's authority.
-        // SAFETY: owner is a SID in the retained descriptor and current_user
-        // retains its validated token SID buffer; null owner short-circuits.
-        let owned_by_user = !owner.is_null() && unsafe { EqualSid(owner, current_user.sid) } != 0;
+        // SAFETY: owner is a SID in the retained descriptor and the caller
+        // retains the validated token SID buffer; null owner short-circuits.
+        let owned_by_user = !owner.is_null() && unsafe { EqualSid(owner, current_user) } != 0;
         if already_private && owned_by_user {
-            return Ok(());
+            return Ok(HardeningPlan::AlreadyPrivate);
         }
-        if !owner_authorizes_hardening(owner, current_owner.sid) {
+        if !owner_authorizes_hardening(owner, current_owner) {
             let administrators = builtin_administrators_sid()?;
             let legacy_elevated_owner =
                 // SAFETY: owner is a SID in the retained descriptor and administrators
                 // retains its well-known SID buffer; null owner short-circuits.
                 !owner.is_null() && unsafe { EqualSid(owner, administrators.sid) } != 0;
             if legacy_elevated_owner && already_private {
-                drop(descriptor);
-                if let Some(owner_handle) = owner_handle {
-                    migrate_legacy_administrators_owner_on_handle(owner_handle, current_user.sid)?;
-                } else {
-                    migrate_legacy_administrators_owner(
-                        source_file.expect("reopened ACL handle has a source file"),
-                        current_user.sid,
-                    )?;
-                }
-                return Ok(());
+                return Ok(HardeningPlan::MigrateOwner);
             }
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "refusing to change the ACL of an object not owned by the effective token owner",
             ));
         }
-        if already_private {
-            return Ok(());
+        Ok(if already_private {
+            HardeningPlan::AlreadyPrivate
+        } else {
+            HardeningPlan::RewriteDacl
+        })
+    }
+
+    /// `owner_handle` is the handle to change the owner through, with the
+    /// rights it was opened with beyond data access; without one, the owner
+    /// migration reopens `source_file` for `WRITE_OWNER`.
+    fn restrict_private_object_on_handle(
+        source_file: Option<&File>,
+        handle: HANDLE,
+        owner_handle: Option<(HANDLE, u32)>,
+    ) -> io::Result<()> {
+        let token = effective_token()?;
+        let current_user = token_user_sid(&token)?;
+        let current_owner = token_owner_sid(&token)?;
+        let plan = hardening_plan(handle, current_user.sid, current_owner.sid)?;
+        if let Some((_, granted)) = owner_handle {
+            require_hardening_access(plan, granted)?;
+        }
+        match plan {
+            HardeningPlan::AlreadyPrivate => return Ok(()),
+            HardeningPlan::MigrateOwner => {
+                return if let Some((owner_handle, _)) = owner_handle {
+                    migrate_legacy_administrators_owner_on_handle(owner_handle, current_user.sid)
+                } else {
+                    migrate_legacy_administrators_owner(
+                        source_file.expect("reopened ACL handle has a source file"),
+                        current_user.sid,
+                    )
+                };
+            }
+            HardeningPlan::RewriteDacl => {}
         }
 
         let mut acl_storage = private_acl(current_user.sid)?;
@@ -6244,6 +6330,39 @@ mod windows {
         grant_world_access_for_test(file, GENERIC_WRITE)
     }
 
+    /// Replace the DACL with one protected entry giving the account Modify:
+    /// read, write, execute and delete, without `WRITE_DAC` or `WRITE_OWNER`.
+    #[cfg(test)]
+    fn grant_only_modify_for_test(file: &File) -> io::Result<()> {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+        };
+        let current_user = current_user_sid()?;
+        let mut storage = single_allow_acl(
+            current_user.sid,
+            FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | DELETE,
+        )?;
+        let handle = reopen_for_acl(file)?;
+        // SAFETY: handle owns a WRITE_DAC handle and the initialized ACL
+        // remains allocated throughout SetSecurityInfo.
+        let status = unsafe {
+            SetSecurityInfo(
+                handle.as_raw_handle() as HANDLE,
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                storage.as_mut_ptr().cast::<ACL>(),
+                std::ptr::null(),
+            )
+        };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(status as i32))
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn grant_world_all_for_test(file: &File) -> io::Result<()> {
         grant_world_access_for_test(file, GENERIC_ALL)
@@ -6312,6 +6431,135 @@ mod windows {
             drop(create_private_file_new(&path).unwrap());
             let file = std::fs::File::open(&path).unwrap();
             restrict_private_object(&file).unwrap();
+        }
+
+        /// The file's owner may always rewrite its DACL, but changing the
+        /// owner takes a right that a Modify entry withholds. A legacy file
+        /// whose DACL gives the account Modify was refused outright while
+        /// every hardening open asked for `WRITE_OWNER`.
+        #[test]
+        fn a_legacy_file_granting_only_modify_is_hardened() {
+            let dir = crate::test_tempdir();
+            for append in [false, true] {
+                let path = dir.path().join(if append { "appended" } else { "legacy" });
+                std::fs::write(&path, b"legacy").unwrap();
+                let created = std::fs::File::open(&path).unwrap();
+                grant_only_modify_for_test(&created).unwrap();
+                drop(created);
+
+                let open_with = |access: u32| {
+                    std::fs::OpenOptions::new()
+                        .access_mode(access)
+                        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                        .open(&path)
+                };
+                // The fixture must withhold exactly the right under test, or
+                // this proves nothing: the owner keeps WRITE_DAC and is
+                // refused WRITE_OWNER.
+                drop(open_with(READ_CONTROL | WRITE_DAC).unwrap());
+                assert_eq!(
+                    open_with(READ_CONTROL | WRITE_OWNER).unwrap_err().kind(),
+                    io::ErrorKind::PermissionDenied,
+                    "the fixture must refuse WRITE_OWNER"
+                );
+                let fixture = open_with(READ_CONTROL).unwrap();
+                assert_eq!(
+                    hardening_plan_for_file(&fixture).unwrap(),
+                    HardeningPlan::RewriteDacl
+                );
+                assert!(!has_current_user_only_dacl(&fixture).unwrap());
+                drop(fixture);
+
+                let file = open_existing_private_file(&path, append).unwrap();
+                assert!(has_current_user_only_dacl(&file).unwrap());
+                assert!(owned_by_current_token_owner(&file).unwrap());
+                drop(file);
+                assert_eq!(std::fs::read(&path).unwrap(), b"legacy");
+            }
+        }
+
+        /// `WRITE_OWNER` is requested for the legacy owner migration alone.
+        #[test]
+        fn only_the_owner_migration_requests_write_owner() {
+            assert_eq!(
+                exclusive_hardening_access(HardeningPlan::MigrateOwner),
+                WRITE_DAC | WRITE_OWNER
+            );
+            for plan in [HardeningPlan::AlreadyPrivate, HardeningPlan::RewriteDacl] {
+                assert_eq!(exclusive_hardening_access(plan), WRITE_DAC, "{plan:?}");
+            }
+        }
+
+        /// A file replaced, or given a new owner, between the first open and
+        /// the exclusive one can need the owner migration although the
+        /// exclusive handle was opened without `WRITE_OWNER`. That is
+        /// reported as a change to retry, before anything is modified.
+        #[test]
+        fn a_plan_needing_more_than_the_handle_holds_is_refused_as_busy() {
+            let error = require_hardening_access(HardeningPlan::MigrateOwner, WRITE_DAC)
+                .expect_err("the owner migration needs WRITE_OWNER");
+            assert_eq!(error.kind(), io::ErrorKind::ResourceBusy);
+            for plan in [
+                HardeningPlan::AlreadyPrivate,
+                HardeningPlan::RewriteDacl,
+                HardeningPlan::MigrateOwner,
+            ] {
+                require_hardening_access(plan, exclusive_hardening_access(plan)).unwrap();
+                require_hardening_access(plan, WRITE_DAC | WRITE_OWNER).unwrap();
+            }
+        }
+
+        /// The plan follows the owner and the DACL. A file an elevated
+        /// process left owned by Administrators stands in for the legacy
+        /// case: seen with the account as token owner it needs the migration
+        /// once its DACL is exact, and is refused while its DACL is broader.
+        #[test]
+        fn the_hardening_plan_follows_owner_and_dacl() {
+            let dir = crate::test_tempdir();
+            let token = effective_token().unwrap();
+            let user = token_user_sid(&token).unwrap();
+            let owner = token_owner_sid(&token).unwrap();
+            let plan = |file: &File, token_owner: PSID| {
+                hardening_plan(file.as_raw_handle() as HANDLE, user.sid, token_owner)
+            };
+
+            let created_path = dir.path().join("created");
+            let created = create_private_file_new(&created_path).unwrap();
+            assert_eq!(
+                plan(&created, owner.sid).unwrap(),
+                HardeningPlan::AlreadyPrivate
+            );
+            drop(created);
+
+            let legacy_path = dir.path().join("legacy");
+            std::fs::write(&legacy_path, b"legacy").unwrap();
+            let legacy = std::fs::File::open(&legacy_path).unwrap();
+            grant_only_modify_for_test(&legacy).unwrap();
+            assert_eq!(
+                plan(&legacy, owner.sid).unwrap(),
+                HardeningPlan::RewriteDacl
+            );
+
+            let administrators = builtin_administrators_sid().unwrap();
+            // SAFETY: Both SID wrappers retain their initialized buffers through EqualSid.
+            if unsafe { EqualSid(owner.sid, administrators.sid) } == 0 {
+                eprintln!("skipped the Administrators-owned cases: the token is not elevated");
+                return;
+            }
+            assert_eq!(
+                plan(&legacy, user.sid).unwrap_err().kind(),
+                io::ErrorKind::PermissionDenied,
+                "Administrators ownership must not authorize rewriting a broad DACL"
+            );
+            restrict_private_object(&legacy).unwrap();
+            assert_eq!(
+                plan(&legacy, owner.sid).unwrap(),
+                HardeningPlan::AlreadyPrivate
+            );
+            assert_eq!(
+                plan(&legacy, user.sid).unwrap(),
+                HardeningPlan::MigrateOwner
+            );
         }
 
         #[test]
