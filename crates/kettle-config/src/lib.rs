@@ -2473,7 +2473,10 @@ pub fn ignored_settings_summary(entries: &[ConfigDiagnostic]) -> Option<String> 
     if entries.len() > MAX_LOGGED_DIAGNOSTICS {
         let _ = write!(out, "; and {} more", entries.len() - MAX_LOGGED_DIAGNOSTICS);
     }
-    out.push_str(". `kettle --check-config` lists them.");
+    out.push_str(
+        ". `kettle --check-config`, with the same `--config` or `--profile`, \
+         lists them.",
+    );
     Some(out)
 }
 
@@ -14568,7 +14571,8 @@ mod chrome_state_tests {
                  line 2 invalid value for trigger; line 3 invalid value for env; \
                  line 4 unknown key; line 5 has no `=`; \
                  line 6 unknown key (did you mean font-size?). \
-                 `kettle --check-config` lists them."
+                 `kettle --check-config`, with the same `--config` or `--profile`, \
+                 lists them."
             ),
             "{line}"
         );
@@ -14618,7 +14622,8 @@ mod chrome_state_tests {
             ignored_settings_summary(&diagnostics).as_deref(),
             Some(
                 "1 config setting(s) ignored: line 1 invalid value for full-screen. \
-                 `kettle --check-config` lists them."
+                 `kettle --check-config`, with the same `--config` or `--profile`, \
+                 lists them."
             )
         );
         // A suggestion is printed in the registry's spelling or not at all.
@@ -14632,7 +14637,9 @@ mod chrome_state_tests {
         assert_eq!(
             ignored_settings_summary(&made_up).as_deref(),
             Some(
-                "1 config setting(s) ignored: line 2 unknown key. `kettle --check-config` lists them."
+                "1 config setting(s) ignored: line 2 unknown key. \
+                 `kettle --check-config`, with the same `--config` or `--profile`, \
+                 lists them."
             )
         );
     }
