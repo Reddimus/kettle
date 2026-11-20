@@ -2112,6 +2112,10 @@ grapheme drawn as one glyph must not draw half a cell past the columns
 face. Only a
 host whose cascade reaches a text face with regional indicators first, such as
 FreeSans on Ubuntu desktops, shows the old two-letter flag.
+`chrome_titles_stay_on_one_line_in_every_lane` fits an ASCII title and the
+emoji title to every lane from 40 to 400 px, in a tab and a pane titlebar, and
+requires one laid-out line each: an exact fit used to wrap its tail out of the
+lane at 273 and 312 px with the bundled face.
 
 `kettle-render`'s `mark_fallback` unit tests need no GPU. They check the
 combining-class table, the placement maths (gaps, stacking, below marks that

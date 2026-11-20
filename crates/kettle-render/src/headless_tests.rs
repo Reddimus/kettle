@@ -7849,6 +7849,67 @@ fn chrome_titles_draw_emoji_in_the_colour_emoji_face() {
     eprintln!("CHROME_EMOJI_FACE_PASS: {emoji}");
 }
 
+/// A tab or pane title is fitted to its lane in columns of the cell width,
+/// and drawn on one line whatever its shaped width. A label that filled its
+/// lane exactly could shape a hair wider in floating point, or by an emoji
+/// glyph's fraction of a cell, and then wrapped at its last space, losing
+/// its tail and the ellipsis to a second line the lane clips.
+#[test]
+fn chrome_titles_stay_on_one_line_in_every_lane() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(800, 200) else {
+        no_gpu_adapter();
+        return;
+    };
+    cfg.show_titlebar = true;
+    let overlay = focused(true);
+    let snap = snapshot_of(20, 4, b"\x1b[?25l");
+    let mut wrapped = Vec::new();
+    for title in [
+        "build log for the nightly release of the project",
+        CHROME_EMOJI_TITLE,
+    ] {
+        for lane in 40..=400 {
+            let lane = lane as f32;
+            let mut tabs = TabBar::hidden();
+            tabs.height = 32.0;
+            tabs.band = (0.0, 0.0, 800.0, tabs.height);
+            tabs.segments.push(TabSeg {
+                idx: 0,
+                rect: (0.0, 0.0, lane + 16.0, tabs.height),
+                title_rect: (8.0, 0.0, lane, tabs.height),
+                hint: None,
+                close: (0.0, 0.0, 0.0, 0.0),
+                title: title.into(),
+                path: None,
+                active: true,
+                activity: TabActivity::Normal,
+            });
+            let mut terminal = pane(&snap, 800, 200);
+            terminal.rect = (0.0, 32.0, lane, 168.0);
+            terminal.titlebar = Some((0.0, 32.0, lane, 24.0));
+            terminal.terminal = (0.0, 56.0, lane, 144.0);
+            terminal.title = title;
+            let _ = renderer
+                .render_frame(&[terminal], &tabs, &cfg, &overlay)
+                .expect("frame");
+            for (name, buffer) in [
+                ("tab", &renderer.tab_buffers[0]),
+                ("pane", &renderer.pane_titlebar_buffers[0]),
+            ] {
+                let lines = buffer.layout_runs().count();
+                if lines != 1 {
+                    wrapped.push(format!(
+                        "{name} in a {lane} px lane: {lines} lines of {:?}",
+                        buffer.lines[0].text()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrapped.is_empty(), "{}", wrapped.join("\n"));
+}
+
 /// The command palette shapes a row's matched characters in the colour the
 /// row's own surface needs, so the selected row's matches read on its
 /// accent-tinted fill, and moving the selection reshapes the rows it leaves

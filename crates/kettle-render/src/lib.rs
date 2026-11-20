@@ -1191,6 +1191,10 @@ impl Renderer {
                 let buf = &mut self.pane_titlebar_buffers[i];
                 buf.set_metrics(metrics);
                 buf.set_size(Some(rw), Some(titlebar_h));
+                // One line, fitted in columns above: a label that fills the
+                // width can shape a fraction of a pixel wider, and wrapping
+                // would drop its tail to a row the strip clips.
+                buf.set_wrap(Wrap::None);
                 // `Buffer::set_text` re-shapes unconditionally, so gate it on
                 // text change and a steady title costs nothing. The focused
                 // pane's title is bold as well as tinted, a cue that does not
@@ -2828,6 +2832,8 @@ impl Renderer {
                 let buf = &mut self.tab_buffers[bi];
                 buf.set_metrics(tab_metrics);
                 buf.set_size(Some(title_w), Some(title_h));
+                // One line, as the pane titles: see there.
+                buf.set_wrap(Wrap::None);
                 // Re-shape only when the label actually changed.
                 if self.tab_texts[bi] != label {
                     fonts::set_chrome_text(
