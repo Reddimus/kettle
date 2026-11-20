@@ -1000,6 +1000,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Leave a visible export in place when its creation check fails instead of
   unlinking a name in an untrusted parent, and charge queued directory
   entries against the shared removal budget as they are listed.
+- Warnings about the config file no longer repeat what the file says. A
+  setting Kettle ignores is reported by line number and, for a known setting,
+  its name; a `trigger` whose pattern does not compile is reported by its
+  position. Before, the warning on stderr quoted the rejected value, the
+  unknown key or the whole line, which could be an `env` value, a trigger
+  pattern and its command, or anything pasted into the file by mistake.
+  `kettle --check-config` still prints the unknown keys and the rejected
+  values.
 
 ### Fixed
 
