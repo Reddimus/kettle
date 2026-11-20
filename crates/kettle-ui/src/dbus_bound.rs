@@ -15,6 +15,7 @@ use std::os::linux::net::SocketAddrExt as _;
 use std::os::unix::net::{SocketAddr, UnixStream};
 use std::str::FromStr as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use async_io::Async;
 use zbus::address::{Address, Transport, transport::UnixSocket};
@@ -37,15 +38,24 @@ const PRIMARY_HEADER: usize = 16;
 const MAX_DIALS: usize = 64;
 static DIALS: AtomicUsize = AtomicUsize::new(0);
 
+/// What a caller sets on a connection [`connect`] opens.
+///
+/// There is deliberately no way to request a well-known name or serve an
+/// object: `connect` can only check the bus's guid after `Hello`, so a bus it
+/// refuses must have seen nothing from Kettle beyond that.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Options {
+    /// Messages queued for each stream; zbus's default of 64 when `None`.
+    pub(crate) max_queued: Option<usize>,
+    pub(crate) method_timeout: Option<Duration>,
+}
+
 /// Connect to the bus at `address`, or to the session bus, through [`Bounded`].
 ///
 /// Only unix socket addresses are supported, which is what a Linux session bus
 /// listens on; any other transport is refused rather than read unbounded. The
 /// connection passes no file descriptors.
-pub(crate) async fn connect(
-    address: Option<&str>,
-    configure: impl FnOnce(Builder<'static>) -> Builder<'static>,
-) -> zbus::Result<Connection> {
+pub(crate) async fn connect(address: Option<&str>, options: Options) -> zbus::Result<Connection> {
     let address = match address {
         Some(address) => Address::from_str(address)?,
         None => Address::session()?,
@@ -66,11 +76,18 @@ pub(crate) async fn connect(
     let (read, write) = split.take();
     let read: Box<dyn ReadHalf> = Box::new(Bounded::new(read));
     let write: Box<dyn WriteHalf> = Box::new(write);
-    let connection = configure(Builder::socket(Split::new(read, write)))
-        .build()
-        .await?;
-    // `Builder::address` checks this during the handshake; a caller-supplied
-    // socket has no address to check against.
+    let mut builder = Builder::socket(Split::new(read, write));
+    if let Some(max_queued) = options.max_queued {
+        builder = builder.max_queued(max_queued);
+    }
+    if let Some(timeout) = options.method_timeout {
+        builder = builder.method_timeout(timeout);
+    }
+    let connection = builder.build().await?;
+    // `Builder::address` refuses a mismatch during the handshake, but zbus
+    // takes no guid with a caller's socket, so this runs once the connection
+    // is built: the bus has answered `Hello` and given it a unique name, and
+    // [`Options`] keeps anything else from having been sent.
     if let Some(expected) = address.guid()
         && expected.as_str() != connection.server_guid().as_str()
     {

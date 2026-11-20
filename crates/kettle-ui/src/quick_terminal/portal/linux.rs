@@ -76,9 +76,13 @@ impl Watch {
                 future::block_on(worker.run(
                     || ownership(&root),
                     || async {
-                        crate::dbus_bound::connect(None, |builder| {
-                            builder.max_queued(16).method_timeout(TIMEOUT)
-                        })
+                        crate::dbus_bound::connect(
+                            None,
+                            crate::dbus_bound::Options {
+                                max_queued: Some(16),
+                                method_timeout: Some(TIMEOUT),
+                            },
+                        )
                         .await
                     },
                 ));

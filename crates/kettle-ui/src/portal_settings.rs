@@ -158,9 +158,13 @@ async fn watch<S: SettingState>(
 
 async fn connection(address: Option<&str>) -> zbus::Result<Connection> {
     future::or(
-        crate::dbus_bound::connect(address, |builder| {
-            builder.max_queued(1).method_timeout(TIMEOUT)
-        }),
+        crate::dbus_bound::connect(
+            address,
+            crate::dbus_bound::Options {
+                max_queued: Some(1),
+                method_timeout: Some(TIMEOUT),
+            },
+        ),
         async {
             async_io::Timer::after(TIMEOUT).await;
             Err(zbus::Error::Failure(

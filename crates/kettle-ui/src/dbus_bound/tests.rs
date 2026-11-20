@@ -259,7 +259,7 @@ fn a_length_past_the_specification_closes_the_connection_unread() {
 #[test]
 fn a_bus_that_is_not_the_one_its_address_names_is_refused() {
     let bus = crate::test_bus::Bus::start();
-    let open = |address: String| future::block_on(connect(Some(&address), |builder| builder));
+    let open = |address: String| future::block_on(connect(Some(&address), Options::default()));
     let connection = open(bus.address.clone()).unwrap();
     let guid = connection.server_guid().to_string();
     open(format!("{},guid={guid}", bus.address)).unwrap();
@@ -280,9 +280,10 @@ fn an_abstract_socket_is_reached_and_other_transports_are_refused() {
     .unwrap();
     let (accepted, accept) = std::sync::mpsc::channel();
     std::thread::spawn(move || accepted.send(listener.accept().is_ok()));
-    let result = future::block_on(connect(Some(&format!("unix:abstract={name}")), |builder| {
-        builder
-    }));
+    let result = future::block_on(connect(
+        Some(&format!("unix:abstract={name}")),
+        Options::default(),
+    ));
     assert!(
         accept
             .recv_timeout(std::time::Duration::from_secs(5))
@@ -293,7 +294,7 @@ fn an_abstract_socket_is_reached_and_other_transports_are_refused() {
 
     for address in ["tcp:host=127.0.0.1,port=1", "unix:dir=/tmp"] {
         assert!(matches!(
-            future::block_on(connect(Some(address), |builder| builder)),
+            future::block_on(connect(Some(address), Options::default())),
             Err(zbus::Error::Unsupported)
         ));
     }
@@ -339,10 +340,25 @@ fn connection_attempts_that_wait_are_capped() {
     );
 }
 
-/// Every bus connection Kettle opens goes through `connect`: outside tests,
-/// nothing else in this crate may name one of zbus's connecting builders.
+/// Every bus connection Kettle opens goes through `connect`: outside tests and
+/// `dbus_bound.rs`, nothing in this crate may name zbus's connection builder
+/// or one of its connecting constructors.
 #[test]
 fn no_kettle_connection_is_built_around_the_bound() {
+    const NEEDLES: [&str; 12] = [
+        "connection::Builder",
+        "conn::Builder",
+        "Builder::session(",
+        "Builder::system(",
+        "Builder::address(",
+        "Builder::socket(",
+        "Builder::unix_stream(",
+        "Builder::tcp_stream(",
+        "Builder::vsock_stream(",
+        "Builder::authenticated_socket(",
+        "Connection::session(",
+        "Connection::system(",
+    ];
     fn visit(dir: &std::path::Path, found: &mut Vec<String>) {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
@@ -351,23 +367,19 @@ fn no_kettle_connection_is_built_around_the_bound() {
                 continue;
             }
             let name = path.to_string_lossy().into_owned();
-            if !name.ends_with(".rs") || name.ends_with("tests.rs") || name.ends_with("test_bus.rs")
+            if !name.ends_with(".rs")
+                || name.ends_with("tests.rs")
+                || name.ends_with("test_bus.rs")
+                || path.ends_with("src/dbus_bound.rs")
             {
                 continue;
             }
             let source = std::fs::read_to_string(&path).unwrap();
-            // Inline test modules build their fake services by address.
+            // Inline test modules build their fake services by address. One
+            // written another way is searched whole, so it fails here instead
+            // of hiding anything.
             let production = source.split("\nmod tests {").next().unwrap();
-            if [
-                "Builder::session(",
-                "Builder::system(",
-                "Connection::session(",
-                "Connection::system(",
-            ]
-            .iter()
-            .any(|needle| source.contains(needle))
-                || production.contains("Builder::address(")
-            {
+            if NEEDLES.iter().any(|needle| production.contains(needle)) {
                 found.push(name);
             }
         }

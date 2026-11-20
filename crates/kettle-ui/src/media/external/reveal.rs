@@ -207,9 +207,13 @@ mod file_manager {
         }
         future::block_on(future::or(
             async {
-                let connection = crate::dbus_bound::connect(None, |builder| {
-                    builder.max_queued(1).method_timeout(CALL_TIMEOUT)
-                })
+                let connection = crate::dbus_bound::connect(
+                    None,
+                    crate::dbus_bound::Options {
+                        max_queued: Some(1),
+                        method_timeout: Some(CALL_TIMEOUT),
+                    },
+                )
                 .await
                 .map_err(|_| OpenFailure::Viewer)?;
                 let mut name = owner(&connection, NAME)

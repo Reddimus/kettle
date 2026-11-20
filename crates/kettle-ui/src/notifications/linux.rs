@@ -23,9 +23,13 @@ impl Backend {
         let address = self.address.as_deref();
         #[cfg(not(test))]
         let address = None;
-        futures_lite::future::block_on(crate::dbus_bound::connect(address, |builder| {
-            builder.method_timeout(Duration::from_secs(1))
-        }))
+        futures_lite::future::block_on(crate::dbus_bound::connect(
+            address,
+            crate::dbus_bound::Options {
+                max_queued: None,
+                method_timeout: Some(Duration::from_secs(1)),
+            },
+        ))
         .map(Connection::from)
     }
 
