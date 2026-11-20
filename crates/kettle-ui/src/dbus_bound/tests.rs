@@ -262,7 +262,7 @@ fn a_bus_that_is_not_the_one_its_address_names_is_refused() {
     let open = |address: String| future::block_on(connect(Some(&address), Options::default()));
     let connection = open(bus.address.clone()).unwrap();
     let guid = connection.server_guid().to_string();
-    open(format!("{},guid={guid}", bus.address)).unwrap();
+    drop(open(format!("{},guid={guid}", bus.address)).unwrap());
     let other = "0123456789abcdef0123456789abcdef";
     assert_ne!(guid, other);
     assert!(matches!(
@@ -340,16 +340,48 @@ fn connection_attempts_that_wait_are_capped() {
     );
 }
 
+/// `source` without its inline `mod tests { .. }` modules, which build their
+/// fake services by address. rustfmt closes such a module with a `}` in the
+/// first column, and the code after it is kept; a module written another way,
+/// or one left open, is searched whole, so it fails the guard instead of
+/// hiding anything.
+fn without_inline_tests(source: &str) -> String {
+    let mut kept = String::new();
+    let mut rest = source;
+    while let Some(start) = rest.find("\nmod tests {") {
+        let Some(end) = rest[start..].find("\n}\n") else {
+            break;
+        };
+        kept.push_str(&rest[..start]);
+        rest = &rest[start + end + 2..];
+    }
+    kept.push_str(rest);
+    kept
+}
+
+#[test]
+fn the_guard_reads_the_code_after_an_inline_test_module() {
+    let source =
+        "fn before() {}\n#[cfg(test)]\nmod tests {\n    fn hidden() {}\n}\n\nfn after() {}\n";
+    let production = without_inline_tests(source);
+    assert!(production.contains("fn before() {}"), "{production}");
+    assert!(production.contains("fn after() {}"), "{production}");
+    assert!(!production.contains("fn hidden"), "{production}");
+    let open = "fn before() {}\nmod tests {\n    fn kept() {}\n";
+    assert_eq!(without_inline_tests(open), open);
+}
+
 /// Every bus connection Kettle opens goes through `connect`: outside tests and
 /// `dbus_bound.rs`, nothing in this crate may name zbus's connection builder
 /// or one of its connecting constructors.
 #[test]
 fn no_kettle_connection_is_built_around_the_bound() {
-    const NEEDLES: [&str; 12] = [
+    const NEEDLES: [&str; 13] = [
         "connection::Builder",
         "conn::Builder",
         "Builder::session(",
         "Builder::system(",
+        "Builder::ibus(",
         "Builder::address(",
         "Builder::socket(",
         "Builder::unix_stream(",
@@ -375,10 +407,7 @@ fn no_kettle_connection_is_built_around_the_bound() {
                 continue;
             }
             let source = std::fs::read_to_string(&path).unwrap();
-            // Inline test modules build their fake services by address. One
-            // written another way is searched whole, so it fails here instead
-            // of hiding anything.
-            let production = source.split("\nmod tests {").next().unwrap();
+            let production = without_inline_tests(&source);
             if NEEDLES.iter().any(|needle| production.contains(needle)) {
                 found.push(name);
             }

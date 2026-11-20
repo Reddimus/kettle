@@ -104,7 +104,7 @@ struct Dial(&'static AtomicUsize);
 impl Dial {
     fn begin(dials: &'static AtomicUsize) -> Option<Self> {
         dials
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |waiting| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |waiting| {
                 (waiting < MAX_DIALS).then_some(waiting + 1)
             })
             .ok()
