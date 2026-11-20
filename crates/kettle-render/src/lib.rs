@@ -1191,6 +1191,10 @@ impl Renderer {
                 let buf = &mut self.pane_titlebar_buffers[i];
                 buf.set_metrics(metrics);
                 buf.set_size(Some(rw), Some(titlebar_h));
+                // One line, fitted in columns above: a label that fills the
+                // width can shape a fraction of a pixel wider, and wrapping
+                // would drop its tail to a row the strip clips.
+                buf.set_wrap(Wrap::None);
                 // `Buffer::set_text` re-shapes unconditionally, so gate it on
                 // text change and a steady title costs nothing. The focused
                 // pane's title is bold as well as tinted, a cue that does not
@@ -1214,7 +1218,7 @@ impl Renderer {
                     } else {
                         attrs
                     };
-                    buf.set_text(&label, &attrs, Shaping::Advanced, None);
+                    fonts::set_chrome_text(buf, &label, &attrs, self.emoji_family);
                     self.pane_titlebar_texts[i] = key;
                 }
                 buf.shape_until_scroll(&mut self.font_system, false);
@@ -2181,10 +2185,18 @@ impl Renderer {
 
             // Search coordinates belong to the pane captured when the lane
             // opened, even if focus changes through automation or pane reap.
-            if pane_has_search {
-                // Match fills are resolved against each cell in the terminal walk.
-                // Underline the current match as well, so even identical theme fills
-                // leave the current result distinct from the other matches.
+            // Match fills are resolved against each cell in the terminal walk.
+            // Underline the current match as well when its fill is too close to
+            // the other matches' to set it apart. Only then: the line covers the
+            // descenders of the match's own text, which then looks set low.
+            if pane_has_search
+                && overlay.highlights.iter().any(|hl| hl.active)
+                && theme::current_match_needs_underline(
+                    cfg,
+                    theme,
+                    &mut self.minimum_contrast_cache,
+                )
+            {
                 for hl in overlay.highlights.iter().filter(|hl| hl.active) {
                     let ink = theme::highlight_colors_cached(
                         CellHighlight::Search(true),
@@ -2828,13 +2840,15 @@ impl Renderer {
                 let buf = &mut self.tab_buffers[bi];
                 buf.set_metrics(tab_metrics);
                 buf.set_size(Some(title_w), Some(title_h));
+                // One line, as the pane titles: see there.
+                buf.set_wrap(Wrap::None);
                 // Re-shape only when the label actually changed.
                 if self.tab_texts[bi] != label {
-                    buf.set_text(
+                    fonts::set_chrome_text(
+                        buf,
                         &label,
                         &Attrs::new().family(Family::Name(&family)),
-                        Shaping::Advanced,
-                        None,
+                        self.emoji_family,
                     );
                     self.tab_texts[bi] = label;
                 }
@@ -3083,11 +3097,11 @@ impl Renderer {
             self.tab_tooltip_buffer
                 .set_size(Some((sw - 16.0 * self.scale).max(1.0)), None);
             if self.tab_tooltip_text != *text {
-                self.tab_tooltip_buffer.set_text(
+                fonts::set_chrome_text(
+                    &mut self.tab_tooltip_buffer,
                     text,
                     &Attrs::new().family(Family::Name(&family)),
-                    Shaping::Advanced,
-                    None,
+                    self.emoji_family,
                 );
                 self.tab_tooltip_text.clone_from(text);
             }

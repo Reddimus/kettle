@@ -1873,9 +1873,17 @@ same helper. Because the grid is clickable, an open bar follows pane focus.
 `note_focus_change` calls `retarget_search_to_focus`, which moves the query and
 its toggles to the newly focused pane and scans that pane afresh without
 toggling the lane. The old pane gets its remembered query and, with no result
-focused, its pre-search viewport back. The right-click menu is the one modal
-allowed to coexist with the bar; keys go to the menu while it is up because
-its arm precedes search in the key handler.
+focused, its pre-search viewport back. Reserving the lane shrinks the panes
+above it, and a pane whose cursor sits above the new bottom loses only blank
+lines. `WindowState::search_lane_pushed` adds up, per pane, the rows each
+resize while the lane is open pushes off its primary screen into history,
+starting with the lane's own (`Terminal::history_rows_pushed_by_last_resize`,
+counted under the terminal lock). Closing the lane grows each pane with
+`Terminal::try_resize_geometry_pulling_history`, taking back only those rows,
+so lines above the lane stay put. A focused result's pane takes back no more
+than it is scrolled up, keeping its first visible row. The right-click menu is
+the one modal allowed to coexist with the bar; keys go to the menu while it is
+up because its arm precedes search in the key handler.
 
 Modal text fields and search share `kettle-ui::text_editor::TextEditor`: one
 bounded UTF-8 string, a caret and an optional selection anchor on extended
@@ -3798,6 +3806,20 @@ match. Hidden/card cells and row ends cannot be partners. The block cursor
 reuses these positioned masks and connector samples in cursor colour in both
 renderers; its cache distinguishes natural masks from stretched samples.
 
+A wide final still overhangs its open side, and a wide isolated letter its
+right, so highlight fills in bidi rows follow the drawn text. After shaping,
+the pane walk measures each row holding highlighted right-to-left cells once
+with `batching::drawn_cell_spans`: the same grid emit through a source that
+reads raster placements and never rasterizes into or evicts from the atlas.
+`terminal::HighlightReach` takes each run of highlighted visual cells
+(selection and search together) and widens the fills at its ends over the
+right-to-left text drawn past them, inside both the pane rect that clips its
+quads and the pixel columns its glyph scissor keeps; two runs reaching into
+one gap meet halfway. Selection runs carry the x their widened sides moved
+to, and the outline traces those, joining runs only where moved sides meet.
+Underlines, links and cursors stay on the cell grid, and rows without a bidi
+layout are untouched.
+
 This repairs connector gaps, not proportional glyph widths, fallback
 baselines, or contextual mark shaping. Preferring a metric-compatible Arabic
 face (option D) remains a separate follow-up; font selection is unchanged.
@@ -4634,6 +4656,25 @@ non-regression claim.
   alone and two with U+FE0F means exactly `Emoji=Yes, Emoji_Presentation=No`.
   The face is resolved once at renderer init from a short per-platform list, and
   a system with none of them keeps the platform cascade it had.
+- **A grapheme presented as emoji is asked for the colour-emoji face**: one
+  carrying U+FE0F, or a default-emoji base without U+FE0E
+  (`fonts::emoji_grapheme_ranges`). The span covers the whole grapheme, so a
+  flag's two regional indicators, a keycap or a ZWJ sequence is shaped in one
+  face. Without it cosmic-text takes each codepoint from the first face in its
+  cascade that has it, and on Linux FreeSans comes before Noto Color Emoji with
+  regional indicators drawn as boxed letters. The grid's row builder adds the
+  span per row. Tab labels, the GNOME header title, pane titlebars and the tab
+  tooltip set their text through `fonts::set_chrome_text`, whose span asks for
+  the face at regular weight: colour-emoji faces have one weight, and
+  cosmic-text takes a named family only at exactly the weight asked for, so a
+  bold title would otherwise get a bold text face. Chrome labels are measured
+  and shortened by whole graphemes (`labels::display_width`,
+  `take_cols_front` and `take_cols_back`), and a grapheme presented as emoji
+  measures at least its emoji-sequence width, as the colour face draws it: a
+  keycap or a text symbol with U+FE0F is two columns, though it sums to one by
+  codepoint. `set_chrome_text` keeps the lines `set_text` gives the text and
+  adds the spans per line, only on graphemes that are two columns as emoji
+  sequences: U+FE0F after a base it does not apply to stays in the text face.
 - **One parser thread plus one blocking pump thread per pane** — the pump reads
   the PTY master into a bounded recycled-buffer channel; the parser applies
   `Extractor::feed`, records image/side-channel chunks, drives text chunks into

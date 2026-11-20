@@ -624,6 +624,10 @@ pub(crate) trait GlyphSource {
     ) -> Option<super::glyphpipe::GlyphSlot> {
         None
     }
+
+    /// The emit placed one run of a grid cell's glyphs as `instances` of its
+    /// output. Arabic join shifts move them again before the emit returns.
+    fn drew(&mut self, _column: usize, _width: usize, _instances: std::ops::Range<usize>) {}
 }
 
 impl<F> GlyphSource for F
@@ -672,24 +676,7 @@ impl GlyphSource for AtlasGlyphs<'_> {
             font_system,
             ..
         } = self;
-        glyph_pipeline.placement(key, || {
-            let image = swash.get_image_uncached(font_system, key)?;
-            let kind = match image.content {
-                glyphon::SwashContent::Color => 0,
-                glyphon::SwashContent::Mask => 1,
-                glyphon::SwashContent::SubpixelMask => return None,
-            };
-            let placement = image.placement;
-            (placement.width > 0 && placement.height > 0).then_some(super::glyphpipe::GlyphSlot {
-                kind,
-                atlas_x: 0.0,
-                atlas_y: 0.0,
-                w: placement.width as f32,
-                h: placement.height as f32,
-                left: placement.left,
-                top: placement.top,
-            })
-        })
+        glyph_pipeline.placement(key, || raster_placement(swash, font_system, key))
     }
 
     fn fitted(
@@ -752,6 +739,117 @@ impl GlyphSource for AtlasGlyphs<'_> {
         let key = connector_key(self.font_system, base)?;
         self.slot(key).filter(|slot| slot.kind == 1)
     }
+}
+
+/// The kind, size and bearings of `key`'s raster image, with no atlas
+/// position.
+fn raster_placement(
+    swash: &mut SwashCache,
+    font_system: &mut FontSystem,
+    key: glyphon::cosmic_text::CacheKey,
+) -> Option<super::glyphpipe::GlyphSlot> {
+    let image = swash.get_image_uncached(font_system, key)?;
+    let kind = match image.content {
+        glyphon::SwashContent::Color => 0,
+        glyphon::SwashContent::Mask => 1,
+        glyphon::SwashContent::SubpixelMask => return None,
+    };
+    let placement = image.placement;
+    (placement.width > 0 && placement.height > 0).then_some(super::glyphpipe::GlyphSlot {
+        kind,
+        atlas_x: 0.0,
+        atlas_y: 0.0,
+        w: placement.width as f32,
+        h: placement.height as f32,
+        left: placement.left,
+        top: placement.top,
+    })
+}
+
+/// Glyph images by their raster placement alone. Nothing is rasterized into,
+/// or evicted from, the atlas, so instances already uploaded keep their
+/// pixels; the emit through it only measures where each cell is drawn.
+struct PlacedGlyphs<'a> {
+    glyph_pipeline: &'a mut GlyphPipeline,
+    swash: &'a mut SwashCache,
+    font_system: &'a mut FontSystem,
+    drawn: Vec<(usize, usize, std::ops::Range<usize>)>,
+}
+
+impl GlyphSource for &mut PlacedGlyphs<'_> {
+    fn slot(&mut self, key: glyphon::cosmic_text::CacheKey) -> Option<super::glyphpipe::GlyphSlot> {
+        if let Some(slot) = self.glyph_pipeline.resident(key) {
+            return Some(slot);
+        }
+        let PlacedGlyphs {
+            glyph_pipeline,
+            swash,
+            font_system,
+            ..
+        } = &mut **self;
+        glyph_pipeline.placement(key, || raster_placement(swash, font_system, key))
+    }
+
+    fn connector(
+        &mut self,
+        base: glyphon::cosmic_text::CacheKey,
+    ) -> Option<super::glyphpipe::GlyphSlot> {
+        let key = connector_key(self.font_system, base)?;
+        self.slot(key).filter(|slot| slot.kind == 1)
+    }
+
+    fn drew(&mut self, column: usize, width: usize, instances: std::ops::Range<usize>) {
+        self.drawn.push((column, width, instances));
+    }
+}
+
+/// The pixel x span the grid emit draws each cell of buffer `line` over,
+/// as `(column, width, left, right)`, one entry per run of a cell's glyphs.
+/// A glyph wider than its cell reaches past the cell's edges: an Arabic
+/// final or isolated letter, after its join shift.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn drawn_cell_spans(
+    buf: &TextBuffer,
+    marks: &[LineShifts],
+    line: usize,
+    origin: (f32, f32),
+    cell_width: f32,
+    positioning: GlyphPositioning,
+    glyph_pipeline: &mut GlyphPipeline,
+    swash: &mut SwashCache,
+    font_system: &mut FontSystem,
+    char_starts: &mut Vec<u32>,
+) -> Vec<(usize, usize, f32, f32)> {
+    let mut source = PlacedGlyphs {
+        glyph_pipeline,
+        swash,
+        font_system,
+        drawn: Vec::new(),
+    };
+    let mut out = Vec::new();
+    emit_positioned_glyphs(
+        &mut out,
+        buf,
+        marks,
+        origin,
+        cell_width,
+        positioning,
+        Some((line, None)),
+        GColor::rgb(0, 0, 0),
+        char_starts,
+        &mut source,
+    );
+    source
+        .drawn
+        .into_iter()
+        .filter_map(|(column, width, instances)| {
+            out.get(instances)?
+                .iter()
+                .map(|glyph| (glyph.pos[0], glyph.pos[0] + glyph.size[0]))
+                .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
+                .map(|(left, right)| (column, width, left, right))
+        })
+        .collect()
 }
 
 fn connector_key(
@@ -821,8 +919,8 @@ pub(crate) fn builtin_glyph_at(
 }
 
 /// The emit behind [`emit_cell_locked_glyphs`]. With `only`, a buffer line and
-/// grid column, it emits that cell's glyphs alone, placed exactly as in the
-/// full emit.
+/// optionally a grid column, it emits that line's or that cell's glyphs
+/// alone, placed exactly as in the full emit.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn emit_positioned_glyphs(
     out: &mut Vec<GlyphInstance>,
@@ -831,15 +929,19 @@ pub(crate) fn emit_positioned_glyphs(
     origin: (f32, f32),
     cell_width: f32,
     positioning: GlyphPositioning,
-    only: Option<(usize, usize)>,
+    only: Option<(usize, Option<usize>)>,
     default_color: GColor,
     char_starts: &mut Vec<u32>,
     mut glyph_source: impl GlyphSource,
 ) {
     let mut emoji_keys = Vec::new();
+    let only_column = only.and_then(|(_, column)| column);
     for run in buf.layout_runs() {
-        if only.is_some_and(|(line, _)| line != run.line_i) {
-            continue;
+        match only {
+            Some((line, _)) if run.line_i < line => continue,
+            // Layout runs come in line order.
+            Some((line, _)) if run.line_i > line => break,
+            _ => {}
         }
         let shifts: &[MarkShift] = match positioning {
             GlyphPositioning::Grid(_) => shifts_of(marks, run.line_i),
@@ -967,13 +1069,12 @@ pub(crate) fn emit_positioned_glyphs(
                     cell_locked_glyph_offset(cell_left, glyph, cluster_x)
                 });
                 let phys = glyph.physical((off_x, origin.1), 1.0);
-                let selected = only.is_none_or(|(_, column)| column == col);
+                let selected = only_column.is_none_or(|column| column == col);
                 let joining = glyph.metadata & 96 != 0 && joined.is_some();
                 if !selected
                     && (!joining
-                        || only.is_some_and(|(_, target)| {
-                            !joined.as_ref().unwrap().needs(col, target)
-                        }))
+                        || only_column
+                            .is_some_and(|target| !joined.as_ref().unwrap().needs(col, target)))
                 {
                     continue;
                 }
@@ -1109,9 +1210,14 @@ pub(crate) fn emit_positioned_glyphs(
                     instances: start..out.len(),
                 });
             }
+            if let Some(cell) = cell
+                && out.len() > start
+            {
+                glyph_source.drew(cell.column, cell.width, start..out.len());
+            }
         }
         if let Some(joined) = joined {
-            joined.finish(out, only.map(|(_, column)| column));
+            joined.finish(out, only_column);
         }
     }
 }
@@ -1201,7 +1307,7 @@ pub(crate) fn moved_cell_images(
         origin,
         cell_width,
         positioning,
-        Some(cell),
+        Some((line, Some(column))),
         GColor::rgb(0, 0, 0),
         char_starts,
         &mut source,

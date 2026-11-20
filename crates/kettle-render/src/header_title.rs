@@ -7,7 +7,7 @@
 //! have hidden CI render differences before. Characters it lacks fall back as
 //! every other chrome string's do.
 use crate::{Rect4, Renderer, TabSeg};
-use glyphon::{Attrs, Buffer as TextBuffer, Family, FontSystem, Metrics, Shaping, Weight, fontdb};
+use glyphon::{Attrs, Buffer as TextBuffer, Family, FontSystem, Metrics, Weight, fontdb};
 
 /// The family the bundled title face is registered under.
 pub(crate) const HEADER_TITLE_FAMILY: &str = "Kettle Header Title";
@@ -71,18 +71,19 @@ pub(crate) fn header_title_attrs(loaded: bool, fallback: &str) -> Attrs<'_> {
 }
 
 /// The advance of `text` on one line in `attrs` at `metrics`, shaped in
-/// `scratch`.
-pub(crate) fn measure_line(
+/// `scratch` with its emoji in `emoji_family`, as the title draws.
+pub(crate) fn measure_line<'a>(
     font_system: &mut FontSystem,
     scratch: &mut TextBuffer,
     text: &str,
-    attrs: &Attrs,
+    attrs: &Attrs<'a>,
+    emoji_family: Option<&'a str>,
     metrics: Metrics,
 ) -> f32 {
     scratch.set_metrics(metrics);
     scratch.set_wrap(glyphon::Wrap::None);
     scratch.set_size(None, None);
-    scratch.set_text(text, attrs, Shaping::Advanced, None);
+    crate::fonts::set_chrome_text(scratch, text, attrs, emoji_family);
     scratch.shape_until_scroll(font_system, false);
     scratch
         .layout_runs()
@@ -184,15 +185,17 @@ impl Renderer {
         if self.header_title_key.as_ref() == Some(&key) {
             return;
         }
+        let emoji = self.emoji_family;
         let (fonts, scratch) = (&mut self.font_system, &mut self.header_title_scratch);
         let fitted = fit_header_title(seg, format, notice, seg.title_rect.2, |text| {
-            measure_line(fonts, scratch, text, &attrs, metrics)
+            measure_line(fonts, scratch, text, &attrs, emoji, metrics)
         });
         self.header_title_width = measure_line(
             &mut self.font_system,
             &mut self.header_title_buffer,
             &fitted,
             &attrs,
+            emoji,
             metrics,
         );
         self.header_title_key = Some(key);
@@ -213,6 +216,7 @@ pub(crate) fn header_title_origin(lane: Rect4, width: f32, line_height: f32) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glyphon::Shaping;
 
     fn bundled_only() -> FontSystem {
         let mut fonts = FontSystem::new_with_locale_and_db("en-US".into(), fontdb::Database::new());
@@ -302,7 +306,7 @@ mod tests {
             let metrics = header_title_metrics(scale);
             let mut scratch = TextBuffer::new(&mut fonts, metrics);
             let mut width =
-                |text: &str| measure_line(&mut fonts, &mut scratch, text, &attrs, metrics);
+                |text: &str| measure_line(&mut fonts, &mut scratch, text, &attrs, None, metrics);
             for (title, path) in [
                 ("fixture", None),
                 (

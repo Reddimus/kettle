@@ -1392,3 +1392,78 @@ fn review_regression_regex_shortcut_leaves_terminal_input_alone_when_search_is_c
     assert!(compact.contains("!ws.search.open&&matches!(action,Action::ToggleSearchRegex)"),
         "the search-only shortcut must fall through before global dispatch");
 }
+
+/// Closing the search lane gives each pane back only the rows resizes pushed
+/// into its history while the lane was open. A plain resize would take back
+/// as many as the lane is tall, pulling older rows over a screen whose prompt
+/// sat above the lane and moving every line down. A focused result keeps its
+/// first visible row: its pane takes back no more than it is scrolled up.
+#[test]
+fn closing_search_takes_back_only_what_the_lane_pushed() {
+    use std::collections::HashMap;
+
+    use super::{note_search_lane_resize, search_lane_history_pulls};
+
+    // The lane's opening pushes nothing on pane 1 and two rows on pane 2; a
+    // smaller window while it is open pushes three more on pane 1. A pane
+    // opened under the lane has no record, a column change leaves one as it
+    // was, and a resize after the lane closed is not the lane's.
+    let mut records = HashMap::from([(1, 0), (2, 0), (3, 0)]);
+    for (open, pane, pushed) in [
+        (true, 1, Some(0)),
+        (true, 2, Some(2)),
+        (true, 1, Some(3)),
+        (true, 4, Some(1)),
+        (true, 3, None),
+        (false, 2, Some(5)),
+    ] {
+        note_search_lane_resize(&mut records, open, pane, pushed);
+    }
+    assert_eq!(records, HashMap::from([(1, 3), (2, 2), (3, 0)]));
+
+    let pushed = HashMap::from([(1, 2), (2, 0)]);
+    assert_eq!(search_lane_history_pulls(pushed.clone(), Some(1), None), pushed);
+    for (offset, pull) in [(0, 0), (1, 1), (2, 2), (9, 2)] {
+        assert_eq!(
+            search_lane_history_pulls(pushed.clone(), Some(1), Some(offset)),
+            HashMap::from([(1, pull), (2, 0)]),
+            "a focused result scrolled up {offset} rows"
+        );
+    }
+    assert_eq!(
+        search_lane_history_pulls(HashMap::new(), Some(3), Some(1)),
+        HashMap::from([(3, 1)]),
+        "a pane opened under the lane still keeps its focused result's row"
+    );
+
+    let src = include_str!("search.rs");
+    let open = finding_body(src, "attach_search_to_pane");
+    let seed = open
+        .find("ws.search_lane_pushed = ws.mux.panes.keys().map(|&id| (id, 0)).collect();")
+        .expect("a fresh open starts a record for every pane");
+    assert!(
+        seed < open.find("self.resize_all(ws);").unwrap(),
+        "the records must exist before reserving the lane resizes the panes"
+    );
+    let resize = finding_body(include_str!("layout.rs"), "resize_all_pulling_history")
+        .split_whitespace()
+        .collect::<String>();
+    assert!(
+        resize.contains(
+            "note_search_lane_resize(&mutws.search_lane_pushed,ws.search.open,id,\
+             p.term.history_rows_pushed_by_last_resize(),);"
+        ),
+        "every pane resize while the lane is open adds to its record"
+    );
+    let close = finding_body(src, "close_search");
+    assert!(
+        close.contains("std::mem::take(&mut ws.search_lane_pushed)")
+            && close.contains("self.resize_all_pulling_history(ws, &history_pulls);")
+            && !close.contains("self.resize_all(ws);"),
+        "closing gives back only what the lane pushed"
+    );
+    assert!(
+        close.contains("(!term.mode().contains(kettle_core::TermMode::ALT_SCREEN))"),
+        "a result on the alternate screen must not limit the primary screen's rows"
+    );
+}

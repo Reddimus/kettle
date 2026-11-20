@@ -868,6 +868,34 @@ fn search_fill(cfg: &kettle_config::Config, theme: &kettle_config::Theme) -> Rgb
     cfg.search_background.unwrap_or(theme.palette[3])
 }
 
+/// How much brighter or darker, as a contrast ratio, the current search
+/// match's fill must be than the other matches' for the fills alone to set it
+/// apart by strength and not only by hue.
+const CURRENT_MATCH_SEPARATION: f64 = 1.3;
+
+/// Whether the current search match needs an underline to stand apart from
+/// the other matches: only when the two fills, over the theme background,
+/// are closer than [`CURRENT_MATCH_SEPARATION`]. The underline sits on the
+/// descender rows of the match's own text, so it is not drawn otherwise.
+pub(crate) fn current_match_needs_underline(
+    cfg: &kettle_config::Config,
+    theme: &kettle_config::Theme,
+    cache: &mut MinimumContrastCache,
+) -> bool {
+    let [current, other] = [true, false].map(|current| {
+        highlight_colors_cached(
+            CellHighlight::Search(current),
+            cfg,
+            theme,
+            theme.foreground,
+            theme.background,
+            cache,
+        )
+        .1
+    });
+    color::contrast_ratio(current, other) < CURRENT_MATCH_SEPARATION
+}
+
 /// The fill a `highlight` paints over `background` and its text colour, with
 /// the fill resolved against `background` alone.
 pub(crate) fn highlight_colors_cached(
@@ -1225,6 +1253,40 @@ mod selection_contrast_tests {
             assert!(color::contrast_ratio(fill, bg) >= 3.0);
             assert!(color::contrast_ratio(fg, fill) >= 4.5);
         }
+    }
+
+    /// The default theme's current-match fill stands apart from the other
+    /// matches by strength, so it draws no underline over the match's
+    /// descenders. A current-match fill set to the other matches' own needs
+    /// the underline under every bundled theme.
+    #[test]
+    fn only_a_current_match_fill_like_the_others_needs_an_underline() {
+        let mut cache = MinimumContrastCache::default();
+        let cfg = kettle_config::Config::default();
+        assert!(!current_match_needs_underline(&cfg, &cfg.theme, &mut cache));
+        let mut underlined = 0;
+        for name in kettle_config::Theme::list() {
+            let theme = kettle_config::Theme::by_name(name);
+            let mut cfg = kettle_config::Config::default();
+            underlined += usize::from(current_match_needs_underline(&cfg, &theme, &mut cache));
+            let (_, other) = highlight_colors_cached(
+                CellHighlight::Search(false),
+                &cfg,
+                &theme,
+                theme.foreground,
+                theme.background,
+                &mut cache,
+            );
+            cfg.search_background = Some(other);
+            assert!(
+                current_match_needs_underline(&cfg, &theme, &mut cache),
+                "{name}"
+            );
+        }
+        eprintln!(
+            "{underlined} of {} bundled themes underline the current match",
+            kettle_config::Theme::list().len()
+        );
     }
 
     #[test]

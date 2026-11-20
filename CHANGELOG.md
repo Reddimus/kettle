@@ -1004,6 +1004,39 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- On Linux a flag such as 🇯🇵 drew as two boxed letters, and some emoji such
+  as ✅ drew in black and white, in tab titles, the GNOME header title and
+  pane title bars. These titles now draw emoji in the same colour emoji font
+  as the terminal. A title shortened to fit no longer cuts a flag, a skin
+  tone or a joined emoji such as 👩‍💻 in half.
+
+- A tab or pane title shortened to exactly fill its space could lose its
+  last words and its ellipsis to a second line that the tab bar cut off.
+  These titles now always stay on one line.
+
+- Search matches and selections in right-to-left lines now cover every
+  Arabic letter they hold. A letter drawn wider than its cell, such as a final
+  ص or ث in Noto Sans Arabic or DejaVu Sans, reached past the highlight, into
+  the window padding or the cells beside it, where the current match's dark
+  text nearly vanished. The highlight now extends as far as the
+  letters are drawn, for the current and other matches and for focused and
+  unfocused selections, and its outline follows. Nothing changes with
+  `bidi = false` or in lines without right-to-left text.
+
+- Closing the search bar no longer moves the text. When the prompt was above
+  the bottom of the window, as after `clear`, closing it pulled lines from
+  the scrollback back onto the screen and pushed everything down, so you lost
+  your place. Closing it now leaves the screen as it was before the bar
+  opened, or, when a search found a match, keeps the top line on screen where
+  it is.
+
+- The current search match no longer has a line along its bottom edge. The
+  line was the colour of the match's text and covered the lower part of
+  letters such as g, j, p, q and y, so the text looked set low in its
+  highlight. The current match already has its own colour; the line is now
+  drawn only when a theme makes that colour too close in brightness to the
+  other matches' to tell them apart, as about one bundled theme in five does.
+
 - On Linux machines with many processors, about 12 or more, ffmpeg drew no
   video poster, video frame or HEIC/AVIF photo. Left to choose, it started
   filter and encoder threads for every processor, and their stacks and

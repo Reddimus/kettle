@@ -2101,6 +2101,19 @@ assert flat-stroke continuity, word boundaries, style/selection ownership,
 and cursor placement;
 they print `ARABIC_GPU_SKIP` without an adapter. Those skips are not rendering
 passes. Windows fallback rendering requires a separate native check.
+`highlights_cover_the_drawn_width_of_arabic_words` draws a wide final sad at
+the row start and after Latin text, and an isolated sad, under the current
+and another search match and focused and unfocused selections, in Grid and
+Legacy at 1x and 2x over fractional padding. Each named face draws sad wider
+than its cell, and the test fails if a case does not overhang. The fill must
+cover exactly the pixel columns the word is drawn over, cells included.
+`highlights_off_bidi_rows_stay_on_the_grid` keeps every fill on cell edges
+with `bidi = false`, on the alternate screen and in rows without
+right-to-left text, and `a_selection_outline_follows_the_arabic_overhang`
+requires the outline of a low-contrast selection at the widened edge, not
+the cell edge. `HighlightReach` and the outline's pixel spans have unit
+tests that need no GPU or font: two runs reaching into one gap meet at its
+middle, and runs whose reach meets trace one perimeter.
 `emoji_ink_is_fitted_without_changing_grid_widths_or_baselines` checks actual
 glyph instances using the bundled font in both renderers and both 2027 modes;
 it reports `EMOJI_SIZING_GPU_SKIP` without an adapter.
@@ -2139,6 +2152,44 @@ The portable cursor-cache test checks retained keys and renderer transitions.
 frames' `chrome_prepares` and `text_prepares`, moving onto text and another emoji,
 and replacing the cursor cell. It reports `EMOJI_CURSOR_RETAIN_GPU_SKIP` without
 an adapter.
+
+Chrome titles draw emoji as the grid does. `title_fitting_never_splits_an_emoji_sequence`
+fits a title holding a ZWJ sequence, two adjacent flags, a skin tone and a
+keycap at every column budget through the tab, path, pane and single-line
+fitters, and checks that every grapheme left is whole. It needs no GPU or
+font. `emoji_graphemes_measure_as_wide_as_the_colour_face_draws_them` checks
+that a keycap or a text symbol with U+FE0F measures two columns, as the colour
+face draws it, while text presentation keeps one.
+`a_fitted_title_fits_its_budget_when_a_mark_joins_the_ellipsis` cuts titles
+where U+FE0F follows a line separator, so the kept selector joins the
+ellipsis, and checks every fitter stays within its budget.
+`a_tab_format_joining_the_title_still_leaves_it_room` checks that a tab format
+whose fixed text joins the title's grapheme (`#{title}`, `{title}` followed by
+U+FE0F) still gives the title its columns.
+`chrome_text_keeps_the_lines_set_text_gives_it` checks, with the bundled face
+alone, that chrome text with emoji keeps `set_text`'s lines and endings
+(U+2029, CR LF, a trailing newline) and asks for the emoji face exactly on
+each line's emoji sequences, not on U+FE0F after a space or an ellipsis.
+`chrome_titles_ask_for_the_colour_emoji_face_on_whole_emoji_graphemes`
+names a fixture colour-emoji family, renders two tabs, the tooltip, a focused
+pane's titlebar and the GNOME header's lone title, and checks that each emoji
+grapheme, and nothing else, asks for that family at regular weight on all its
+bytes and keeps the line's other attributes. It needs an adapter but no emoji
+font. With the host's colour-emoji face,
+`chrome_titles_draw_emoji_in_the_colour_emoji_face` checks that a tab title,
+the bold focused pane title and the bold header title shape each of those
+graphemes to the glyphs the face gives it alone: one flag glyph where the face
+has flags. It compares only graphemes the face draws itself, reports the rest
+as `CHROME_EMOJI_FACE_LACKS`, and requires the flag and the check mark. A
+grapheme drawn as one glyph must not draw half a cell past the columns
+`display_width` gives it. It reports `CHROME_EMOJI_FACE_SKIP` without such a
+face. Only a
+host whose cascade reaches a text face with regional indicators first, such as
+FreeSans on Ubuntu desktops, shows the old two-letter flag.
+`chrome_titles_stay_on_one_line_in_every_lane` fits an ASCII title and the
+emoji title to every lane from 40 to 400 px, in a tab and a pane titlebar, and
+requires one laid-out line each: an exact fit used to wrap its tail out of the
+lane at 273 and 312 px with the bundled face.
 
 `kettle-render`'s `mark_fallback` unit tests need no GPU. They check the
 combining-class table, the placement maths (gaps, stacking, below marks that

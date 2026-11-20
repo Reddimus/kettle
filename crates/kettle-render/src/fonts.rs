@@ -1,6 +1,6 @@
 use super::{
-    Arc, Attrs, Config, Family, FeatureTag, FontFeatures, FontSystem, Metrics, Renderer, Shaping,
-    SwashCache, TextBuffer, fontdb,
+    Arc, Attrs, AttrsList, Config, Family, FeatureTag, FontFeatures, FontSystem, Metrics, Renderer,
+    Shaping, SwashCache, TextBuffer, Weight, fontdb,
 };
 
 pub(crate) fn emoji_presentation(base: char, marks: &[char]) -> bool {
@@ -20,6 +20,63 @@ pub(crate) fn emoji_text(text: &str) -> bool {
     chars
         .next()
         .is_some_and(|base| emoji_presentation(base, &chars.collect::<Vec<_>>()))
+}
+
+/// The byte ranges of `text`'s graphemes presented as emoji: one carrying
+/// U+FE0F, or a default-emoji base without U+FE0E. Each range is a whole
+/// grapheme, so a flag's two regional indicators, a keycap or a ZWJ sequence
+/// is shaped in one face.
+pub(crate) fn emoji_grapheme_ranges(
+    text: &str,
+) -> impl Iterator<Item = std::ops::Range<usize>> + '_ {
+    use unicode_segmentation::UnicodeSegmentation;
+    text.grapheme_indices(true)
+        .filter(|(_, grapheme)| !grapheme.is_ascii() && emoji_text(grapheme))
+        .map(|(at, grapheme)| at..at + grapheme.len())
+}
+
+/// Set chrome `text` in `buffer` in `attrs`, asking for `emoji_family`, the
+/// colour-emoji face, on each grapheme presented as emoji, as the grid's rows
+/// do, and keeping `attrs` otherwise. The lines and line endings are the
+/// ones `set_text` gives the text.
+///
+/// Text shaped in one family gets each missing codepoint from the first face
+/// in cosmic-text's fallback cascade whose cmap has it. On Linux FreeSans
+/// comes before Noto Color Emoji and has the regional indicators and U+2705,
+/// so a flag in a tab title drew as two boxed letters and a check mark in
+/// monochrome while the grid drew both in colour.
+pub(crate) fn set_chrome_text<'a>(
+    buffer: &mut TextBuffer,
+    text: &str,
+    attrs: &Attrs<'a>,
+    emoji_family: Option<&'a str>,
+) {
+    buffer.set_text(text, attrs, Shaping::Advanced, None);
+    let Some(family) = emoji_family.filter(|_| !text.is_ascii()) else {
+        return;
+    };
+    // At the face's own weight: colour-emoji faces come in one regular
+    // weight, and cosmic-text takes a named family only at exactly the
+    // weight asked for. A bold title asking for it in bold went to the
+    // cascade's bold text faces: on Ubuntu a keycap drew in FreeMono Bold.
+    let emoji = attrs
+        .clone()
+        .family(Family::Name(family))
+        .weight(Weight::NORMAL);
+    for line in &mut buffer.lines {
+        use unicode_width::UnicodeWidthStr;
+        let mut spans = AttrsList::new(attrs);
+        // Only an emoji sequence, two columns as `display_width` counts it:
+        // U+FE0F after a base it does not apply to, such as a space or an
+        // ellipsis, stays in the text face that one column was fitted for.
+        let text = line.text();
+        for range in emoji_grapheme_ranges(text).filter(|range| text[range.clone()].width() >= 2) {
+            spans.add_span(range, &emoji);
+        }
+        if spans.spans_iter().next().is_some() {
+            line.set_attrs_list(spans);
+        }
+    }
 }
 
 #[cfg(test)]

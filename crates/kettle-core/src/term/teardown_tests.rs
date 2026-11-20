@@ -2559,6 +2559,7 @@ fn local_column_reflow_invalidates_active_and_finished_capture_without_a_shell()
             Some(&correlation),
             PtyGeometry::new(80, 25, 640, 400),
             Some(TermConfig::default()),
+            usize::MAX,
         );
         assert_eq!(correlation.lock().unwrap().start_line(token), Some(1));
         commit_local_geometry_inner(
@@ -2568,6 +2569,7 @@ fn local_column_reflow_invalidates_active_and_finished_capture_without_a_shell()
             Some(&correlation),
             PtyGeometry::new(40, 25, 320, 400),
             Some(TermConfig::default()),
+            usize::MAX,
         );
         let mut state = correlation.lock().unwrap();
         assert_eq!(state.start_line(token), Some(u64::MAX));
