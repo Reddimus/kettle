@@ -5925,10 +5925,9 @@ mod windows {
 
     /// Rights the exclusive hardening handle needs beyond data access.
     fn exclusive_hardening_access(plan: HardeningPlan) -> u32 {
-        match plan {
-            HardeningPlan::MigrateOwner => WRITE_DAC | WRITE_OWNER,
-            HardeningPlan::AlreadyPrivate | HardeningPlan::RewriteDacl => WRITE_DAC,
-        }
+        // Evidence only: the request every hardening open made before the fix.
+        let _ = plan;
+        WRITE_DAC | WRITE_OWNER
     }
 
     fn hardening_plan_for_file(file: &File) -> io::Result<HardeningPlan> {
