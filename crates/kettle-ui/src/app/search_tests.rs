@@ -1392,3 +1392,46 @@ fn review_regression_regex_shortcut_leaves_terminal_input_alone_when_search_is_c
     assert!(compact.contains("!ws.search.open&&matches!(action,Action::ToggleSearchRegex)"),
         "the search-only shortcut must fall through before global dispatch");
 }
+
+/// Closing the search lane gives each pane back only the rows the lane's
+/// opening pushed into its history. A plain resize would take back as many
+/// as the lane is tall, pulling older rows over a screen whose prompt sat
+/// above the lane and moving every line down. A focused result keeps its
+/// first visible row: its pane takes back no more than it is scrolled up.
+#[test]
+fn closing_search_takes_back_only_what_the_lane_pushed() {
+    use std::collections::HashMap;
+
+    use super::search_lane_history_pulls;
+
+    let pushed = HashMap::from([(1, 2), (2, 0)]);
+    assert_eq!(search_lane_history_pulls(pushed.clone(), Some(1), None), pushed);
+    for (offset, pull) in [(0, 0), (1, 1), (2, 2), (9, 2)] {
+        assert_eq!(
+            search_lane_history_pulls(pushed.clone(), Some(1), Some(offset)),
+            HashMap::from([(1, pull), (2, 0)]),
+            "a focused result scrolled up {offset} rows"
+        );
+    }
+    assert_eq!(
+        search_lane_history_pulls(HashMap::new(), Some(3), Some(1)),
+        HashMap::from([(3, 1)]),
+        "a pane opened under the lane still keeps its focused result's row"
+    );
+
+    let src = include_str!("search.rs");
+    let open = finding_body(src, "attach_search_to_pane");
+    assert!(
+        open.find("let screen_tops = reopened.then(|| search_lane_screen_tops(ws));")
+            < open.find("self.resize_all(ws);")
+            && open.contains("ws.search_lane_pushed = search_lane_screen_tops(ws)"),
+        "a fresh open records what reserving the lane pushed"
+    );
+    let close = finding_body(src, "close_search");
+    assert!(
+        close.contains("std::mem::take(&mut ws.search_lane_pushed)")
+            && close.contains("self.resize_all_pulling_history(ws, &history_pulls);")
+            && !close.contains("self.resize_all(ws);"),
+        "closing gives back only what the lane pushed"
+    );
+}

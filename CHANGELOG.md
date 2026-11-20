@@ -1010,6 +1010,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   unfocused selections, and its outline follows. Nothing changes with
   `bidi = false` or in lines without right-to-left text.
 
+- Closing the search bar no longer moves the text. When the prompt was above
+  the bottom of the window, as after `clear`, closing it pulled lines from
+  the scrollback back onto the screen and pushed everything down, so you lost
+  your place. Closing it now leaves the screen as it was before the bar
+  opened, or, when a search found a match, keeps the top line on screen where
+  it is.
+
 - On Linux machines with many processors, about 12 or more, ffmpeg drew no
   video poster, video frame or HEIC/AVIF photo. Left to choose, it started
   filter and encoder threads for every processor, and their stacks and

@@ -952,7 +952,17 @@ impl App {
             std::time::Instant::now(),
             reopened,
         );
+        // A fresh open reserves the lane, which shrinks the panes above it;
+        // following focus leaves the lane, and its record, as they are.
+        let screen_tops = reopened.then(|| search_lane_screen_tops(ws));
         self.resize_all(ws);
+        if let Some(before) = screen_tops {
+            ws.search_lane_pushed = search_lane_screen_tops(ws)
+                .into_iter()
+                .filter_map(|(id, after)| Some((id, after.checked_sub(*before.get(&id)?)?)))
+                .map(|(id, pushed)| (id, usize::try_from(pushed).unwrap_or(usize::MAX)))
+                .collect();
+        }
         // Reserving the responsive Search lane can shrink the terminal by several rows. In a
         // scrolled-back grid Alacritty increases display_offset to preserve the viewed content,
         // so derive the scan anchor only after that resize has settled.
@@ -1051,10 +1061,25 @@ impl App {
         ws.search.visible.clear();
         ws.search.visible_scan = None;
         ws.search.visible_turn_pending = false;
-        // Dropping the lane grows the grid, and Alacritty adjusts
-        // display_offset to keep the viewed content, so the viewport is
-        // restored only after that resize has settled.
-        self.resize_all(ws);
+        // Dropping the lane grows the grid. Each pane takes back from history
+        // only what the lane pushed there (`search_lane_history_pulls`), and
+        // Alacritty adjusts display_offset to keep the viewed content, so the
+        // viewport is restored only after that resize has settled.
+        let focused_offset = ws
+            .search
+            .focused
+            .and(ws.search.target_pane)
+            .and_then(|pane_id| ws.mux.panes.get(&pane_id))
+            .and_then(|pane| {
+                let term = pane.term.term.lock().ok()?;
+                Some(term.grid().display_offset())
+            });
+        let history_pulls = search_lane_history_pulls(
+            std::mem::take(&mut ws.search_lane_pushed),
+            ws.search.target_pane,
+            focused_offset,
+        );
+        self.resize_all_pulling_history(ws, &history_pulls);
         self.restore_search_viewport(ws);
         self.reset_blink_phase(ws);
         // The remembered query now has a single pane-scoped owner. Drop the
@@ -2317,6 +2342,44 @@ pub(super) struct SearchCarryOver {
 /// targets the focused pane or nothing is focused.
 pub(super) fn search_retarget(target_pane: Option<u64>, focus: Option<u64>) -> Option<u64> {
     focus.filter(|pane| Some(*pane) != target_pane)
+}
+
+/// Each pane's screen-top row identifier, which moves by the rows a resize
+/// pushes into history.
+fn search_lane_screen_tops(ws: &WindowState) -> std::collections::HashMap<u64, u64> {
+    ws.mux
+        .panes
+        .iter()
+        .filter_map(|(&id, pane)| {
+            let term = pane.term.term.lock().ok()?;
+            let grid = term.grid();
+            Some((
+                id,
+                grid.history_origin()
+                    .saturating_add(grid.history_size() as u64),
+            ))
+        })
+        .collect()
+}
+
+/// How many rows each pane takes back from its history as the search lane
+/// closes: the rows the lane's opening pushed there (`pushed`), so a screen
+/// whose cursor sat above the lane gets its blank lines back instead of
+/// older rows above its content. With a focused result (`focused_offset`,
+/// the target pane's display offset), the target takes back no more than its
+/// viewport is scrolled up, so its first visible row stays where the reader
+/// left it. A pane with no record, such as one opened while the lane was,
+/// resizes as any resize does.
+pub(super) fn search_lane_history_pulls(
+    mut pushed: std::collections::HashMap<u64, usize>,
+    target_pane: Option<u64>,
+    focused_offset: Option<usize>,
+) -> std::collections::HashMap<u64, usize> {
+    if let (Some(target), Some(offset)) = (target_pane, focused_offset) {
+        let pull = pushed.entry(target).or_insert(usize::MAX);
+        *pull = (*pull).min(offset);
+    }
+    pushed
 }
 
 /// The bar's state for `pane_id`, scanning from `display_offset`. A non-empty
