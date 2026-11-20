@@ -474,9 +474,11 @@ fn a_trigger_that_does_not_compile_is_logged_by_position_never_by_pattern() {
         lines,
         [
             "trigger 2 of 3 skipped: its pattern is not a valid regular expression; \
-             `kettle --check-config` shows the line",
+             `kettle --check-config`, with the same `--config` or `--profile`, \
+             shows the line",
             "trigger 3 of 3 skipped: its pattern is too large once compiled; \
-             `kettle --check-config` shows the line",
+             `kettle --check-config`, with the same `--config` or `--profile`, \
+             shows the line",
         ]
     );
     assert!(lines.iter().all(|line| !line.contains(secret)), "{lines:?}");

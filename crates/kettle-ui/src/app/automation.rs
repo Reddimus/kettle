@@ -1055,7 +1055,8 @@ pub(super) fn compile_triggers(
                 };
                 log::warn!(
                     "trigger {} of {} skipped: its pattern {reason}; \
-                     `kettle --check-config` shows the line",
+                     `kettle --check-config`, with the same `--config` or `--profile`, \
+                     shows the line",
                     index + 1,
                     triggers.len()
                 );
