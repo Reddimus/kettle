@@ -3784,9 +3784,11 @@ with `batching::drawn_cell_spans`: the same grid emit through a source that
 reads raster placements and never rasterizes into or evicts from the atlas.
 `terminal::HighlightReach` takes each run of highlighted visual cells
 (selection and search together) and widens the fills at its ends over the
-right-to-left text drawn past them, short of the next run and the pane edge.
-The selection outline traces the widened fill. Underlines, links and cursors
-stay on the cell grid, and rows without a bidi layout are untouched.
+right-to-left text drawn past them, within the pixel columns the pane's glyph
+scissor keeps; two runs reaching into one gap meet halfway. The selection
+outline traces the widened fill and joins runs whose reach meets. Underlines,
+links and cursors stay on the cell grid, and rows without a bidi layout are
+untouched.
 
 This repairs connector gaps, not proportional glyph widths, fallback
 baselines, or contextual mark shaping. Preferring a metric-compatible Arabic
