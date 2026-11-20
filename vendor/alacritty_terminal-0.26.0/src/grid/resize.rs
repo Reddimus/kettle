@@ -16,13 +16,37 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         T: ResetDiscriminant<D>,
         D: PartialEq,
     {
+        self.resize_pulling_history(reflow, lines, columns, usize::MAX);
+    }
+
+    /// Resize as [`Grid::resize`] does, except that added lines take at most
+    /// `history_pull` rows back from history. The rest are blank lines added
+    /// below the screen, so the lines already on it keep their places.
+    pub fn resize_pulling_history<D>(
+        &mut self,
+        reflow: bool,
+        lines: usize,
+        columns: usize,
+        history_pull: usize,
+    ) where
+        T: ResetDiscriminant<D>,
+        D: PartialEq,
+    {
         // Resize can scroll internally; only output may enforce this budget.
         let history_limit_on_growth = self.history_limit_on_growth.take();
         // Use empty template cell for resetting cells due to resize.
         let template = mem::take(&mut self.cursor.template);
 
         match self.lines.cmp(&lines) {
-            Ordering::Less => self.grow_lines(lines),
+            Ordering::Less => {
+                let pulled = self.lines + min(lines - self.lines, history_pull);
+                if pulled > self.lines {
+                    self.grow_lines(pulled);
+                }
+                if lines > self.lines {
+                    self.append_lines(lines);
+                }
+            },
             Ordering::Greater => self.shrink_lines(lines),
             Ordering::Equal => (),
         }
@@ -79,6 +103,28 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         self.display_offset = self.display_offset.saturating_sub(lines_added);
         self.decrease_scroll_limit(lines_added);
+    }
+
+    /// Add blank lines below the screen. History, the display offset, the
+    /// cursors and every existing line keep their places.
+    fn append_lines<D>(&mut self, target: usize)
+    where
+        T: ResetDiscriminant<D>,
+        D: PartialEq,
+    {
+        let lines_added = target - self.lines;
+
+        // Growing the visible lines reaches the added storage through the top
+        // of the screen. Rotating the ring by the same count puts every row
+        // back on its line and brings rows from past the oldest history row,
+        // which hold nothing, in at the bottom.
+        self.raw.grow_visible_lines(target);
+        self.lines = target;
+        self.raw.rotate(-(lines_added as isize));
+
+        for line in (target - lines_added..target).map(|line| Line(line as i32)) {
+            self.raw[line].reset(&self.cursor.template);
+        }
     }
 
     /// Remove lines from the visible area.

@@ -171,6 +171,15 @@ date. Recheck that before upgrading a crate or dropping a patch.
   keeps the cursor's row fixed, so splitting a pane scrolled its visible lines
   away while the rows under the prompt stayed empty. Two `grid/tests.rs`
   cases cover wrapping above and below the cursor.
+  `Grid::resize_pulling_history` and `Term::resize_pulling_history` grow the
+  screen taking at most a given number of rows back from history; the rest
+  are blank lines added below the screen, which keeps its lines, cursor,
+  display offset and row identifiers in place. `resize` passes no limit, as
+  upstream. Kettle's search bar reserves rows under the grid, and shrinking
+  with the cursor above the new bottom drops blank lines without touching
+  history, so closing the bar must not take history rows back over the
+  screen. Upstream has no such option. Two `grid/tests.rs` cases cover a
+  limit below the rows added and a full history.
   DCH (`CSI Ps P`) deletes at most the cells from the cursor to the end of
   the line. Upstream clamps the count to the line width instead, so a count
   past the end of the line also cleared cells before the cursor.

@@ -166,6 +166,93 @@ fn height_growth_preserves_retained_row_identifiers() {
     }
 }
 
+/// The letters a column of a one-column grid shows from `top` to the bottom
+/// of the screen, with a dot for a blank cell.
+fn column_text(grid: &Grid<Cell>, top: i32) -> String {
+    (top..grid.screen_lines() as i32)
+        .map(|line| match grid[Line(line)][Column(0)].c {
+            ' ' => '.',
+            c => c,
+        })
+        .collect()
+}
+
+/// A screen that shrank below the cursor's line lost only blank lines, so
+/// growing it back without taking rows from history gives the same screen:
+/// the lines stay in place, the blank lines come back at the bottom, and
+/// history keeps its rows and their identifiers. Taking every row back, as
+/// `resize` does, moves the screen's content down instead.
+#[test]
+fn growth_limited_by_history_pull_adds_blank_lines_below() {
+    let mut grid = Grid::<Cell>::new(4, 1, 10);
+    for (line, c) in ['a', 'b', 'c', 'd'].into_iter().enumerate() {
+        grid[Line(line as i32)][Column(0)] = cell(c);
+    }
+    grid.scroll_up(&(Line(0)..Line(4)), 2);
+    grid[Line(2)][Column(0)] = cell('z');
+    grid.cursor.point.line = Line(1);
+    assert_eq!(column_text(&grid, -2), "abcdz.");
+
+    grid.resize(true, 2, 1);
+    assert_eq!(column_text(&grid, -2), "abcd", "the cursor's line fits");
+
+    let mut pulled = grid.clone();
+    pulled.resize(true, 4, 1);
+    assert_eq!(column_text(&pulled, 0), "abcd", "resize takes history back");
+    assert_eq!(pulled.history_size(), 0);
+
+    grid.resize_pulling_history(true, 4, 1, 0);
+    assert_eq!(column_text(&grid, 0), "cd..", "the lines below come back blank");
+    assert_eq!(column_text(&grid, -2), "abcd..");
+    assert_eq!(grid.history_size(), 2);
+    assert_eq!(grid.history_origin(), 0);
+    assert_eq!(grid.cursor.point.line, Line(1));
+    assert_eq!(grid.display_offset(), 0);
+
+    // A partial allowance takes back the most recent rows only.
+    grid.resize(true, 2, 1);
+    grid.resize_pulling_history(true, 4, 1, 1);
+    assert_eq!(column_text(&grid, 0), "bcd.");
+    assert_eq!(grid.history_size(), 1);
+    assert_eq!(grid.cursor.point.line, Line(2));
+}
+
+/// With history at its capacity a limited growth still keeps every retained
+/// row and its identifier, and a scrolled-back viewport keeps its rows.
+#[test]
+fn growth_limited_by_history_pull_keeps_a_full_history() {
+    for pull in [0, 1] {
+        let mut grid = Grid::<Cell>::new(2, 1, 2);
+        grid[Line(0)][Column(0)] = cell('a');
+        for c in ['b', 'c', 'd'] {
+            grid[Line(1)][Column(0)] = cell(c);
+            grid.scroll_up(&(Line(0)..Line(2)), 1);
+        }
+        assert_eq!(column_text(&grid, -2), "bcd.", "a was evicted");
+        assert_eq!(grid.history_origin(), 1);
+        // `d`'s identifier, as `history_origin` defines row identifiers.
+        let id = |grid: &Grid<Cell>| {
+            let line = (0..grid.screen_lines() as i32)
+                .find(|&line| grid[Line(line)][Column(0)].c == 'd')
+                .unwrap();
+            grid.history_origin() + grid.history_size() as u64 + line as u64
+        };
+        let before = id(&grid);
+        grid.scroll_display(Scroll::Delta(2));
+
+        grid.resize_pulling_history(true, 4, 1, pull);
+
+        assert_eq!(grid.history_origin(), 1, "pull {pull}");
+        assert_eq!(grid.history_size(), 2 - pull, "pull {pull}");
+        assert_eq!(id(&grid), before, "pull {pull}");
+        let oldest = -(grid.history_size() as i32);
+        let blanks = ".".repeat(3 - pull);
+        assert_eq!(column_text(&grid, oldest), format!("bcd{blanks}"), "pull {pull}");
+        let viewport_top = -(grid.display_offset() as i32);
+        assert_eq!(grid[Line(viewport_top)][Column(0)].c, 'b', "pull {pull}");
+    }
+}
+
 /// Reflow is the other way rows leave the document for good. Narrowing wraps
 /// long lines into more rows than the history can hold, and the excess is
 /// dropped from the OLDEST end — so the origin has to move with it, exactly as
