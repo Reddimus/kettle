@@ -929,9 +929,9 @@ store queued meanwhile is served after the stalled load, and a paste past its
 deadline asks for no further format. On Windows CI,
 `a_stalled_windows_clipboard_owner_cannot_hold_the_ui_or_reorder_osc_52` runs
 the load and the queued store against a real delayed-rendering owner, a
-message-only window in the test process. It replaces the desktop clipboard, so elsewhere it runs only
-with `KETTLE_WINDOWS_CLIPBOARD_TEST=1`. `wayland::offer::tests` drive the Wayland negotiation against a
-loopback source, a thread in the test process and no real clipboard: the type
+message-only window in the test process. It replaces the desktop clipboard,
+so elsewhere it runs only with `KETTLE_WINDOWS_CLIPBOARD_TEST=1`.
+`wayland::offer::tests` drive the Wayland negotiation against a loopback source, a thread in the test process and no real clipboard: the type
 table (text and image, image alone, local, remote and malformed file lists,
 `x-special/gnome-copied-files`), `paste-files = off` against the text copy of
 the paths, each read's cap against a source that never ends, a stalled source
