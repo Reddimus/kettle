@@ -139,6 +139,60 @@ fn middle_ellipsis_respects_display_columns_not_chars() {
     assert_eq!(middle_ellipsis("abc", 1), "…");
 }
 
+/// A program title with every kind of multi-codepoint emoji: a ZWJ sequence,
+/// two adjacent flags, a skin tone and a keycap, between plain words.
+const EMOJI_TITLE: &str = "\u{1f469}\u{200d}\u{1f4bb} build \u{2705} \
+    \u{1f1ef}\u{1f1f5}\u{1f1fa}\u{1f1f8} \u{1f44d}\u{1f3fd} 1\u{fe0f}\u{20e3} done";
+
+/// Every grapheme of `fitted` is a whole grapheme of `source` or part of an
+/// ellipsis. A cut inside a cluster draws something the title never held:
+/// half a flag is a lone regional indicator, a boxed letter; a ZWJ sequence
+/// cut after its joiner is a different emoji; and the back of a Japanese
+/// flag then a US one (regional indicators J P U S) starts with P U, which
+/// draws as a third flag.
+fn assert_whole_graphemes(source: &str, fitted: &str, case: &str) {
+    use unicode_segmentation::UnicodeSegmentation;
+    let whole: Vec<&str> = source.graphemes(true).collect();
+    for grapheme in fitted.graphemes(true) {
+        assert!(
+            whole.contains(&grapheme) || matches!(grapheme, "…" | "."),
+            "{case}: {fitted:?} holds {grapheme:?}, which {source:?} does not"
+        );
+    }
+}
+
+#[test]
+fn title_fitting_never_splits_an_emoji_sequence() {
+    let path = format!("~/emoji/{EMOJI_TITLE}");
+    let full = display_width(&path);
+    for n in 0..=full + 1 {
+        for (name, source, fitted) in [
+            ("fit_tab_title", EMOJI_TITLE, fit_tab_title(EMOJI_TITLE, n)),
+            ("fit_tab_title path", path.as_str(), fit_tab_title(&path, n)),
+            ("fit_tab_path", path.as_str(), fit_tab_path(&path, n)),
+            (
+                "middle_ellipsis",
+                EMOJI_TITLE,
+                middle_ellipsis(EMOJI_TITLE, n),
+            ),
+            (
+                "fit_single_line_label",
+                EMOJI_TITLE,
+                fit_single_line_label(EMOJI_TITLE, n),
+            ),
+            (
+                "fit_pane_titlebar_title",
+                EMOJI_TITLE,
+                fit_pane_titlebar_title(None, "", EMOJI_TITLE, None, None, None, n),
+            ),
+        ] {
+            let case = format!("{name} at {n} columns");
+            assert!(display_width(&fitted) <= n, "{case}: {fitted:?}");
+            assert_whole_graphemes(source, &fitted, &case);
+        }
+    }
+}
+
 #[test]
 fn tab_title_keeps_full_path_when_budget_fits() {
     let title = "~/Repos/SPT-1/flight-event-line-server-go";

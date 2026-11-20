@@ -60,36 +60,43 @@ pub fn display_width(s: &str) -> usize {
     s.chars().map(|c| c.width().unwrap_or(0)).sum()
 }
 
-/// Take whole chars from the FRONT of `s` up to `cols` display columns.
+/// Take whole graphemes from the FRONT of `s` up to `cols` display columns.
+///
+/// A cut inside a grapheme draws something `s` never held: half a flag is a
+/// lone regional indicator, and a ZWJ sequence cut after its joiner is a
+/// different emoji. Each grapheme counts as [`display_width`] counts it.
 pub(crate) fn take_cols_front(s: &str, cols: usize) -> String {
-    use unicode_width::UnicodeWidthChar;
+    use unicode_segmentation::UnicodeSegmentation;
     let mut acc = 0usize;
-    let mut out = String::new();
-    for c in s.chars() {
-        let w = c.width().unwrap_or(0);
+    let mut end = 0;
+    for (at, grapheme) in s.grapheme_indices(true) {
+        let w = display_width(grapheme);
         if acc + w > cols {
             break;
         }
-        out.push(c);
         acc += w;
+        end = at + grapheme.len();
     }
-    out
+    s[..end].to_string()
 }
 
-/// Take whole chars from the BACK of `s` up to `cols` display columns.
+/// Take whole graphemes from the BACK of `s` up to `cols` display columns,
+/// as [`take_cols_front`] takes them from the front. Cut by codepoint, the
+/// back of a Japanese flag then a US one (regional indicators J P U S)
+/// starts with P U, which draws as a third flag.
 pub(crate) fn take_cols_back(s: &str, cols: usize) -> String {
-    use unicode_width::UnicodeWidthChar;
+    use unicode_segmentation::UnicodeSegmentation;
     let mut acc = 0usize;
-    let mut rev: Vec<char> = Vec::new();
-    for c in s.chars().rev() {
-        let w = c.width().unwrap_or(0);
+    let mut start = s.len();
+    for (at, grapheme) in s.grapheme_indices(true).rev() {
+        let w = display_width(grapheme);
         if acc + w > cols {
             break;
         }
-        rev.push(c);
         acc += w;
+        start = at;
     }
-    rev.iter().rev().collect()
+    s[start..].to_string()
 }
 
 /// Shorten `s` to at most `n` display columns with a MIDDLE ellipsis, preserving
