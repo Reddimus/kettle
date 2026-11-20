@@ -429,15 +429,30 @@ campaign and startup outlier remain inconclusive. These entries stay open.
 
 ## Platform
 
-- **Native clipboard acquisition can exceed paste bounds.** Independent review
-  of the clipboard fixes found that macOS `stringForType` materializes the
-  pasteboard string before the size check (`vendor/arboard-3.6.1/src/platform/osx.rs`),
-  and a delayed-rendering Windows owner can block synchronous `GetClipboardData`
-  beyond the deadline (`vendor/arboard-3.6.1/src/platform/windows.rs`). Deferred
-  because both require acquisition in a bounded helper process or thread that
-  lets the UI stop waiting while preserving OSC 52 store/load ordering. Close
-  with native tests for an oversized macOS string and a stalled Windows owner,
-  proving bounded resource use and UI wait time without reordering OSC 52.
+- **macOS pasteboard acquisition can exceed paste bounds.** Kettle asks the
+  macOS pasteboard on the window thread, and AppKit fetches a whole text
+  flavor before any size check (`vendor/arboard-3.6.1/src/platform/osx.rs`).
+  The Windows half of this entry closed on 2026-11-20: the clipboard is asked
+  on a worker thread the window stops waiting for
+  (`crates/kettle-ui/src/clipboard.rs`), with a native test against a
+  delayed-rendering owner. Measured the same day on macOS 27.3, with private
+  named pasteboards and a second process as owner:
+  - No AppKit call gives a flavor's size without fetching it. Reading
+    `types` or `pasteboardItems` cost nothing, but for a 128 MiB text each of
+    `dataForType:` and `stringForType:`, on the item or the pasteboard, took
+    the reader's physical footprint from 2 MiB to 387 MiB, and 258 MiB stayed
+    after the autorelease pool drained. Checking an `NSData` length first
+    therefore bounds nothing. The pasteboard took a 255 MiB flavor and
+    refused a 256 MiB one, so the platform's own cap is the only bound.
+  - An owner that provides its text lazily (`NSPasteboardItemDataProvider`)
+    and sleeps 40 seconds kept the reader inside `stringForType:` for all 40.
+  Deferred because bounding memory needs the read made in a helper process
+  with a footprint cap, which the window can also stop waiting for; a thread
+  would bound the wait alone. A helper changes which process macOS sees
+  reading the pasteboard, and that needs a live check, paste permission
+  included. Close with native tests on a private named pasteboard, for an
+  oversized string and for a late provider, proving bounded footprint and
+  wait time without reordering OSC 52.
 
 - **Windows MCP stdout progress.** `crates/kettle/src/mcp.rs` still uses a
   blocking writer on Windows. A slow reader can make progress without a write
