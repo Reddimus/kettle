@@ -65,7 +65,7 @@ fn clipboard() -> Clipboard {
     let thread = Some(std::thread::current().id());
     Clipboard {
         arboard: None,
-        wayland: Some(
+        worker: Some(
             TextWorker::start(move || {
                 Ok(Provider {
                     thread,
@@ -316,7 +316,7 @@ fn clipboard_only_with_fallback() -> Clipboard<Provider> {
             selections: ["fallback clipboard".into(), "external primary".into()],
             ..Default::default()
         }),
-        wayland: Some(
+        worker: Some(
             TextWorker::start(|| {
                 Ok(ClipboardOnly(Provider {
                     selections: ["native clipboard".into(), String::new()],
@@ -391,7 +391,7 @@ fn unsupported_primary_writes_use_fallback_and_keep_native_clipboard() {
     );
     // Observe each backend independently so routing both channels to the
     // fallback cannot pass by reading its own misplaced writes.
-    let native = clipboard.wayland.take();
+    let native = clipboard.worker.take();
     assert_eq!(
         clipboard
             .get_selection_bounded(false, 100, Instant::now() + worker::READ_TIMEOUT)
@@ -418,7 +418,7 @@ fn unsupported_primary_writes_use_fallback_and_keep_native_clipboard() {
             .unwrap(),
         "x11 clipboard"
     );
-    clipboard.wayland = native;
+    clipboard.worker = native;
     clipboard.arboard = None;
     assert!(matches!(
         clipboard.set_selection(true, "unavailable".into()),
@@ -465,7 +465,7 @@ fn holding(text: &str, pixels: bool, files: &[&str]) -> Clipboard<Provider> {
             files: files.iter().map(PathBuf::from).collect(),
             ..Default::default()
         }),
-        wayland: None,
+        worker: None,
     }
 }
 
@@ -648,7 +648,7 @@ fn native_files_and_images_are_pasted_without_arboard_and_arboard_is_not_asked()
     // No arboard at all: a Wayland session without XWayland.
     let mut clipboard = Clipboard::<Provider> {
         arboard: None,
-        wayland: native(
+        worker: native(
             |want| {
                 assert_eq!(want, ALL, "the policy reaches the provider");
                 PasteContent::Image(PasteImage::Png(vec![0x89, b'P', b'N', b'G']))
@@ -671,7 +671,7 @@ fn native_files_and_images_are_pasted_without_arboard_and_arboard_is_not_asked()
             pixels: Some(vec![9, 9, 9, 9]),
             ..Default::default()
         }),
-        wayland: native(|_| PasteContent::Refused(PasteRefusal::Files), None),
+        worker: native(|_| PasteContent::Refused(PasteRefusal::Files), None),
     };
     assert_eq!(outcome(clipboard.paste_content(ALL, 100)), "refused Files");
     assert!(matches!(
@@ -751,7 +751,7 @@ fn primary_is_native_while_the_protocol_is_there_and_falls_back_while_it_is_not(
             selections: [String::new(), "x11 primary".into()],
             ..Default::default()
         }),
-        wayland: Some(
+        worker: Some(
             TextWorker::start(move || Ok(Announced(Provider::default(), announced))).unwrap(),
         ),
     };
@@ -800,4 +800,546 @@ fn primary_is_native_while_the_protocol_is_there_and_falls_back_while_it_is_not(
         "copied"
     );
     assert_eq!(clipboard.arboard.as_ref().unwrap().selections[0], "");
+}
+
+/// A format-at-a-time clipboard whose owner leaves the first request for one
+/// format unanswered until it is released, as a Windows program that promised
+/// its text and renders it late does.
+struct LateOwner {
+    text: String,
+    stalls: Option<&'static str>,
+    entered: crossbeam_channel::Sender<std::thread::ThreadId>,
+    release: crossbeam_channel::Receiver<()>,
+    /// The formats asked for, in order.
+    asked: Arc<std::sync::Mutex<Vec<&'static str>>>,
+}
+
+impl LateOwner {
+    fn asked(&mut self, format: &'static str) {
+        self.asked.lock().unwrap().push(format);
+        if self.stalls == Some(format) {
+            self.stalls = None;
+            self.entered.send(std::thread::current().id()).unwrap();
+            let _ = self.release.recv_timeout(Duration::from_secs(5));
+        }
+    }
+}
+
+impl SelectionFallback for LateOwner {
+    fn store(&mut self, _: bool, text: String) -> Result<(), arboard::Error> {
+        self.text = text;
+        Ok(())
+    }
+
+    fn load(&mut self, _: bool, _: usize, _: Instant) -> Result<String, arboard::Error> {
+        self.asked("text");
+        Ok(self.text.clone())
+    }
+
+    fn files(&mut self) -> Result<Vec<PathBuf>, arboard::Error> {
+        self.asked("files");
+        Ok(Vec::new())
+    }
+
+    fn image(&mut self) -> Result<arboard::ImageData<'static>, arboard::Error> {
+        self.asked("image");
+        Err(arboard::Error::ContentNotAvailable)
+    }
+}
+
+/// A serialized clipboard holding `text`, whose owner is late with `stalls`.
+struct Late {
+    clipboard: Clipboard<LateOwner>,
+    /// The thread the late request was made on.
+    entered: crossbeam_channel::Receiver<std::thread::ThreadId>,
+    release: crossbeam_channel::Sender<()>,
+    asked: Arc<std::sync::Mutex<Vec<&'static str>>>,
+}
+
+fn late_owner(text: &str, stalls: &'static str) -> Late {
+    let (entered_tx, entered) = crossbeam_channel::bounded(1);
+    let (release, blocked) = crossbeam_channel::bounded(1);
+    let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (text, log) = (text.to_owned(), asked.clone());
+    let clipboard = Clipboard::serialized(move || {
+        Ok(LateOwner {
+            text,
+            stalls: Some(stalls),
+            entered: entered_tx,
+            release: blocked,
+            asked: log,
+        })
+    })
+    .unwrap();
+    Late {
+        clipboard,
+        entered,
+        release,
+        asked,
+    }
+}
+
+/// Wait until a request stands in the worker's queue, behind the one the
+/// owner has not answered.
+fn wait_until_queued(worker: &TextWorker) {
+    let give_up = Instant::now() + Duration::from_secs(5);
+    while worker.queued() == 0 {
+        assert!(Instant::now() < give_up, "no request was queued");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_serialized_clipboard_stops_waiting_for_a_late_owner_and_keeps_requests_in_order() {
+    let Late {
+        mut clipboard,
+        entered,
+        release,
+        ..
+    } = late_owner("late", "text");
+
+    // An OSC 52 load: the caller has its answer at the deadline, while the
+    // owner is still being waited for on another thread.
+    let started = Instant::now();
+    let read =
+        clipboard.get_selection_bounded(false, 100, Instant::now() + Duration::from_millis(100));
+    let waited = started.elapsed();
+    assert!(
+        matches!(read, Err(arboard::Error::Timeout)),
+        "a read its owner has not answered returned {read:?} after {waited:?}"
+    );
+    assert!(
+        waited < Duration::from_secs(1),
+        "the read held its caller for {waited:?}"
+    );
+    let asked_on = entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_ne!(asked_on, std::thread::current().id());
+
+    // The OSC 52 store that follows waits its turn behind that load: it is
+    // in the queue while the owner still stalls. The load's late text
+    // answers nothing, and does not replace the store.
+    let queue = clipboard.worker.clone().unwrap();
+    let writer = std::thread::spawn(move || {
+        let stored = clipboard.set_selection(false, "next".into());
+        (clipboard, stored)
+    });
+    wait_until_queued(&queue);
+    release.send(()).unwrap();
+    let (mut clipboard, stored) = writer.join().unwrap();
+    stored.unwrap();
+    assert_eq!(clipboard.get_text().unwrap(), "next");
+}
+
+#[test]
+fn a_serialized_clipboard_pastes_off_the_callers_thread_and_within_a_pastes_wait() {
+    let Late {
+        mut clipboard,
+        entered,
+        release,
+        asked,
+    } = late_owner("the text", "files");
+    // The file list is asked for first, and the owner is slow to answer: the
+    // paste has no text by the time a paste may wait.
+    let started = Instant::now();
+    let pasted = outcome(clipboard.paste_content(ALL, 100));
+    let waited = started.elapsed();
+    assert_eq!(pasted, "no text: Timeout", "after {waited:?}");
+    assert!(
+        waited < READ_WITHIN + Duration::from_secs(1),
+        "the paste held its caller for {waited:?}"
+    );
+    assert_ne!(
+        entered.recv_timeout(Duration::from_secs(5)).unwrap(),
+        std::thread::current().id()
+    );
+    // The file list arrives after the paste's deadline. The paste's text is
+    // then not asked for at all: nobody waits for it, and asking would keep
+    // the thread from the next request for as long again.
+    release.send(()).unwrap();
+    assert_eq!(clipboard.get_text().unwrap(), "the text");
+    assert_eq!(
+        *asked.lock().unwrap(),
+        ["files", "text"],
+        "only the read after the paste asks for the text"
+    );
+}
+
+#[test]
+fn a_paste_whose_text_came_late_does_not_ask_for_the_image() {
+    // No text: a paste in time would go on to the image.
+    let Late {
+        mut clipboard,
+        entered,
+        release,
+        asked,
+    } = late_owner("", "text");
+    assert_eq!(
+        outcome(clipboard.paste_content(ALL, 100)),
+        "no text: Timeout"
+    );
+    entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    release.send(()).unwrap();
+    assert_eq!(clipboard.get_text().unwrap(), "");
+    assert_eq!(
+        *asked.lock().unwrap(),
+        ["files", "text", "text"],
+        "a paste past its deadline asks the owner for nothing more"
+    );
+}
+
+/// A format-at-a-time clipboard that records the bounds its text is asked
+/// under.
+#[derive(Default)]
+struct Bounded {
+    asked: Vec<(usize, Duration)>,
+}
+
+impl SelectionFallback for Bounded {
+    fn store(&mut self, _: bool, _: String) -> Result<(), arboard::Error> {
+        Ok(())
+    }
+
+    fn load(&mut self, _: bool, max: usize, deadline: Instant) -> Result<String, arboard::Error> {
+        self.asked
+            .push((max, deadline.saturating_duration_since(Instant::now())));
+        Ok("field text".into())
+    }
+
+    fn files(&mut self) -> Result<Vec<PathBuf>, arboard::Error> {
+        Ok(Vec::new())
+    }
+
+    fn image(&mut self) -> Result<arboard::ImageData<'static>, arboard::Error> {
+        Err(arboard::Error::ContentNotAvailable)
+    }
+}
+
+#[test]
+fn text_for_a_field_is_read_under_a_pastes_size_and_time_bounds() {
+    let mut clipboard = Clipboard {
+        arboard: Some(Bounded::default()),
+        worker: None,
+    };
+    assert_eq!(clipboard.get_text().unwrap(), "field text");
+    let asked = clipboard.arboard.unwrap().asked;
+    assert_eq!(asked.len(), 1, "the text is asked for once");
+    let (max, within) = asked[0];
+    assert_eq!(max, 4 << 20);
+    assert!(
+        within <= READ_WITHIN && within > READ_WITHIN - Duration::from_secs(1),
+        "the text may take {within:?}"
+    );
+}
+
+/// A Windows clipboard owner that promises text and renders it late. The
+/// test below is the only one that touches the desktop's clipboard, and it
+/// runs only where that is expected: on a CI runner, or when asked for by
+/// name.
+#[cfg(windows)]
+mod late_windows_owner {
+    use std::ffi::c_void;
+    use std::ptr::{null, null_mut};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use crossbeam_channel::{Receiver, Sender, bounded};
+
+    type Handle = *mut c_void;
+    type WndProc = unsafe extern "system" fn(Handle, u32, usize, isize) -> isize;
+
+    #[repr(C)]
+    struct WndClassW {
+        style: u32,
+        wnd_proc: Option<WndProc>,
+        class_extra: i32,
+        window_extra: i32,
+        instance: Handle,
+        icon: Handle,
+        cursor: Handle,
+        background: Handle,
+        menu_name: *const u16,
+        class_name: *const u16,
+    }
+
+    #[repr(C)]
+    struct Msg {
+        hwnd: Handle,
+        message: u32,
+        wparam: usize,
+        lparam: isize,
+        time: u32,
+        point: [i32; 2],
+    }
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn RegisterClassW(class: *const WndClassW) -> u16;
+        fn CreateWindowExW(
+            ex_style: u32,
+            class_name: *const u16,
+            window_name: *const u16,
+            style: u32,
+            x: i32,
+            y: i32,
+            width: i32,
+            height: i32,
+            parent: Handle,
+            menu: Handle,
+            instance: Handle,
+            param: *mut c_void,
+        ) -> Handle;
+        fn DefWindowProcW(hwnd: Handle, message: u32, wparam: usize, lparam: isize) -> isize;
+        fn GetMessageW(message: *mut Msg, hwnd: Handle, first: u32, last: u32) -> i32;
+        fn DispatchMessageW(message: *const Msg) -> isize;
+        fn PostMessageW(hwnd: Handle, message: u32, wparam: usize, lparam: isize) -> i32;
+        fn DestroyWindow(hwnd: Handle) -> i32;
+        fn PostQuitMessage(code: i32);
+        fn OpenClipboard(owner: Handle) -> i32;
+        fn EmptyClipboard() -> i32;
+        fn SetClipboardData(format: u32, data: Handle) -> Handle;
+        fn CloseClipboard() -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetModuleHandleW(name: *const u16) -> Handle;
+        fn GlobalAlloc(flags: u32, bytes: usize) -> Handle;
+        fn GlobalLock(memory: Handle) -> *mut c_void;
+        fn GlobalUnlock(memory: Handle) -> i32;
+    }
+
+    const WM_DESTROY: u32 = 0x0002;
+    const WM_CLOSE: u32 = 0x0010;
+    const WM_RENDERFORMAT: u32 = 0x0305;
+    const CF_UNICODETEXT: u32 = 13;
+    const GMEM_MOVEABLE: u32 = 0x0002;
+    /// The parent of a message-only window: never shown, and still sent
+    /// `WM_RENDERFORMAT`.
+    const HWND_MESSAGE: isize = -3;
+
+    /// The longest the owner leaves a reader waiting. It is finite so that a
+    /// reader with no deadline of its own fails the test and does not hang it.
+    pub(super) const STALLS_FOR: Duration = Duration::from_secs(5);
+    /// What the owner renders once it does answer.
+    pub(super) const LATE_TEXT: &str = "late";
+
+    /// Tells the test the owner was asked, and holds the answer back.
+    type Stall = (Sender<()>, Receiver<()>);
+    static STALL: Mutex<Option<Stall>> = Mutex::new(None);
+
+    pub(super) fn allowed() -> bool {
+        let is = |name: &str, value: &str| {
+            std::env::var_os(name).is_some_and(|found| found.as_os_str() == value)
+        };
+        is("GITHUB_ACTIONS", "true") || is("KETTLE_WINDOWS_CLIPBOARD_TEST", "1")
+    }
+
+    unsafe extern "system" fn window_proc(
+        hwnd: Handle,
+        message: u32,
+        wparam: usize,
+        lparam: isize,
+    ) -> isize {
+        match message {
+            WM_RENDERFORMAT => {
+                // A reader is inside `GetClipboardData` until this returns.
+                let stall = STALL.lock().ok().and_then(|stall| stall.clone());
+                if let Some((entered, release)) = stall {
+                    let _ = entered.try_send(());
+                    let _ = release.recv_timeout(STALLS_FOR);
+                }
+                if wparam == CF_UNICODETEXT as usize {
+                    let text: Vec<u16> = LATE_TEXT.encode_utf16().chain([0]).collect();
+                    // SAFETY: the allocation holds `text` and its terminator.
+                    // The reader has the clipboard open, as rendering needs,
+                    // and the clipboard owns the memory once it is set.
+                    unsafe {
+                        let memory = GlobalAlloc(GMEM_MOVEABLE, text.len() * 2);
+                        let units = GlobalLock(memory).cast::<u16>();
+                        if !units.is_null() {
+                            std::ptr::copy_nonoverlapping(text.as_ptr(), units, text.len());
+                            GlobalUnlock(memory);
+                            SetClipboardData(CF_UNICODETEXT, memory);
+                        }
+                    }
+                }
+                0
+            }
+            WM_CLOSE => {
+                // SAFETY: `hwnd` is this thread's window.
+                unsafe { DestroyWindow(hwnd) };
+                0
+            }
+            WM_DESTROY => {
+                // SAFETY: ends this thread's message loop.
+                unsafe { PostQuitMessage(0) };
+                0
+            }
+            // SAFETY: the arguments are the ones this procedure was given.
+            _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+        }
+    }
+
+    pub(super) struct Owner {
+        hwnd: isize,
+        thread: Option<std::thread::JoinHandle<()>>,
+        /// Signalled when a reader has asked for the promised text.
+        pub(super) asked: Receiver<()>,
+        /// Lets the owner render its text.
+        pub(super) release: Sender<()>,
+    }
+
+    impl Owner {
+        /// Take the clipboard with text promised and not rendered.
+        pub(super) fn start() -> Self {
+            let (entered, asked) = bounded(1);
+            let (release, held) = bounded(1);
+            *STALL.lock().unwrap() = Some((entered, held));
+            let (ready, started) = bounded(1);
+            let thread = std::thread::spawn(move || {
+                let class: Vec<u16> = "KettleTestLateClipboardOwner\0".encode_utf16().collect();
+                // SAFETY: the class and its name outlive the window, which is
+                // created, used and destroyed on this thread.
+                let hwnd = unsafe {
+                    let instance = GetModuleHandleW(null());
+                    let registered = RegisterClassW(&WndClassW {
+                        style: 0,
+                        wnd_proc: Some(window_proc),
+                        class_extra: 0,
+                        window_extra: 0,
+                        instance,
+                        icon: null_mut(),
+                        cursor: null_mut(),
+                        background: null_mut(),
+                        menu_name: null(),
+                        class_name: class.as_ptr(),
+                    });
+                    if registered == 0 {
+                        null_mut()
+                    } else {
+                        CreateWindowExW(
+                            0,
+                            class.as_ptr(),
+                            class.as_ptr(),
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            HWND_MESSAGE as Handle,
+                            null_mut(),
+                            instance,
+                            null_mut(),
+                        )
+                    }
+                };
+                // SAFETY: plain clipboard calls from the window's own thread. A
+                // null handle promises the format: the owner is asked for the
+                // data, with `WM_RENDERFORMAT`, when a reader wants it.
+                let promised = !hwnd.is_null()
+                    && unsafe {
+                        let mut opened = false;
+                        for _ in 0..100 {
+                            if OpenClipboard(hwnd) != 0 {
+                                opened = true;
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(20));
+                        }
+                        let emptied = opened && EmptyClipboard() != 0;
+                        if emptied {
+                            SetClipboardData(CF_UNICODETEXT, null_mut());
+                        }
+                        (opened && CloseClipboard() != 0) && emptied
+                    };
+                ready.send(promised.then_some(hwnd as isize)).unwrap();
+                if hwnd.is_null() {
+                    return;
+                }
+                // SAFETY: the message loop of the thread that owns the window.
+                unsafe {
+                    let mut message = std::mem::zeroed::<Msg>();
+                    while GetMessageW(&mut message, null_mut(), 0, 0) > 0 {
+                        DispatchMessageW(&message);
+                    }
+                }
+            });
+            let hwnd = started
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the owner thread starts")
+                .expect("the owner takes the clipboard");
+            Self {
+                hwnd,
+                thread: Some(thread),
+                asked,
+                release,
+            }
+        }
+    }
+
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            if let Ok(mut stall) = STALL.lock() {
+                *stall = None;
+            }
+            // SAFETY: posting to a window handle; a stale handle is refused.
+            unsafe { PostMessageW(self.hwnd as Handle, WM_CLOSE, 0, 0) };
+            if let Some(thread) = self.thread.take()
+                && !std::thread::panicking()
+            {
+                thread.join().unwrap();
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_stalled_windows_clipboard_owner_cannot_hold_the_ui_or_reorder_osc_52() {
+    use late_windows_owner::{LATE_TEXT, Owner, STALLS_FOR};
+    if !late_windows_owner::allowed() {
+        eprintln!("SKIP: replaces the desktop clipboard; set KETTLE_WINDOWS_CLIPBOARD_TEST=1");
+        return;
+    }
+    let owner = Owner::start();
+    let mut clipboard = Clipboard::new().expect("the Windows clipboard");
+
+    // An OSC 52 load of text the owner promised and has not rendered. The
+    // owner stalls far longer than the read may take.
+    let within = Duration::from_millis(300);
+    assert!(STALLS_FOR > within * 10);
+    let started = Instant::now();
+    let read = clipboard.get_selection_bounded(false, 100, Instant::now() + within);
+    let waited = started.elapsed();
+    assert!(
+        matches!(read, Err(arboard::Error::Timeout)),
+        "a read the owner has not answered returned {read:?} after {waited:?}"
+    );
+    assert!(
+        waited < Duration::from_secs(2),
+        "the read held its caller for {waited:?}"
+    );
+    owner
+        .asked
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the owner was asked to render its text");
+
+    // The OSC 52 store that follows is made while the owner still stalls: it
+    // is in the queue before the owner is let go. It is served after the
+    // stalled load, whose late text answers no request and does not replace
+    // what was stored.
+    let queue = clipboard.worker.clone().unwrap();
+    let writer = std::thread::spawn(move || {
+        let stored = clipboard.set_selection(false, "next".into());
+        (clipboard, stored)
+    });
+    wait_until_queued(&queue);
+    owner.release.send(()).unwrap();
+    let (mut clipboard, stored) = writer.join().unwrap();
+    stored.expect("the store behind the stalled load");
+    let text = clipboard
+        .get_selection_bounded(false, 100, Instant::now() + READ_WITHIN)
+        .expect("the load after the store");
+    assert_ne!(text, LATE_TEXT);
+    assert_eq!(text, "next");
 }
