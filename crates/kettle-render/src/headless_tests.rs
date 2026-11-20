@@ -8759,3 +8759,83 @@ fn gnome_header_lone_title_is_bundled_bold_sans_fitted_to_its_lane() {
         }
     }
 }
+
+/// The current search match stands apart from the other matches by its
+/// fill, so nothing is drawn over its text: the cell's bottom rows, where
+/// descenders reach, keep the fill around them. An underline in the match's
+/// text colour along the cell bottom hid the descenders in a solid bar and
+/// made the text look set low. When the two fills cannot be told apart, the
+/// underline is still drawn.
+#[test]
+fn the_current_search_match_keeps_its_descender_rows_clear() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
+        eprintln!("current search match descenders skipped: no GPU adapter");
+        return;
+    };
+    cfg.show_titlebar = false;
+    cfg.background_opacity = 1.0;
+    let snap = snapshot_of(20, 2, b"\x1b[?25lgjpqy gjpqy");
+    let overlay = Overlay {
+        highlights: vec![HighlightRect {
+            col: 0,
+            row: 0,
+            width: 11,
+            active: true,
+        }],
+        ..focused(false)
+    };
+    let mut cache = MinimumContrastCache::default();
+    let colors = |cfg: &Config, current, cache: &mut MinimumContrastCache| {
+        theme::highlight_colors_cached(
+            CellHighlight::Search(current),
+            cfg,
+            &cfg.theme,
+            cfg.theme.foreground,
+            cfg.theme.background,
+            cache,
+        )
+    };
+    let near = |pixel: &image::Rgba<u8>, want: Rgb| {
+        [(pixel[0], want.r), (pixel[1], want.g), (pixel[2], want.b)]
+            .iter()
+            .all(|&(a, b)| a.abs_diff(b) <= 3)
+    };
+    let centres = |from: f32, to: f32| (from - 0.5).ceil() as u32..(to - 0.5).ceil() as u32;
+    let origin = pane_grid_origin((0.0, 0.0, 320.0, 120.0), (cfg.padding_x, cfg.padding_y));
+    let bottom = origin.1 + renderer.cell_h;
+    // The pixel rows a `2 * scale` px line along the cell bottom covers.
+    let rows = centres(bottom - 2.0 * renderer.scale, bottom);
+    let columns = centres(origin.0, origin.0 + 11.0 * renderer.cell_w);
+    let other_fill = colors(&cfg, false, &mut cache).1;
+    for (label, search_background, underlined) in [
+        ("theme fills", None, false),
+        ("identical fills", Some(other_fill), true),
+    ] {
+        cfg.search_background = search_background;
+        let (ink, fill) = colors(&cfg, true, &mut cache);
+        assert!(color::contrast_ratio(ink, fill) >= 4.5, "{label}");
+        let frame = capture(&mut renderer, &cfg, &[pane(&snap, 320, 120)], &overlay);
+        let (mut inked, mut filled, mut total) = (0, 0, 0);
+        for y in rows.clone() {
+            for x in columns.clone() {
+                let pixel = frame.get_pixel(x, y);
+                total += 1;
+                inked += usize::from(near(pixel, ink));
+                filled += usize::from(near(pixel, fill));
+            }
+        }
+        if underlined {
+            assert_eq!(
+                inked, total,
+                "{label}: the underline marks the current match"
+            );
+        } else {
+            assert!(
+                filled * 2 > total,
+                "{label}: the bottom rows hold {filled} fill and {inked} ink pixels of \
+                 {total}; a line there covers the descenders"
+            );
+        }
+    }
+}

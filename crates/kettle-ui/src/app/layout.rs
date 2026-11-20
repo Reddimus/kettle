@@ -539,6 +539,17 @@ impl App {
 
     /// Resize every pane's PTY to match its tile in the layout.
     pub(super) fn resize_all(&mut self, ws: &mut WindowState) {
+        self.resize_all_pulling_history(ws, &std::collections::HashMap::new());
+    }
+
+    /// `resize_all`, where a pane in `history_pulls` that gains rows takes at
+    /// most that many back from its history (see
+    /// `Terminal::try_resize_geometry_pulling_history`).
+    pub(super) fn resize_all_pulling_history(
+        &mut self,
+        ws: &mut WindowState,
+        history_pulls: &std::collections::HashMap<u64, usize>,
+    ) {
         // Never synthesize a layout from the helper fallbacks while the
         // renderer is temporarily absent during GPU recovery. Existing PTYs
         // retain their last good geometry; the atomic renderer rebuild calls
@@ -566,14 +577,21 @@ impl App {
         }
         let mut native_resize_failed = false;
         for (id, cols, rows, pixel_width, pixel_height) in plan {
-            if let Some(p) = ws.mux.panes.get_mut(&id)
-                && let Err(error) = p.term.try_resize_geometry(PtyGeometry::new(
-                    cols,
-                    rows,
-                    pixel_width,
-                    pixel_height,
-                ))
-            {
+            let history_pull = history_pulls.get(&id).copied().unwrap_or(usize::MAX);
+            let Some(p) = ws.mux.panes.get_mut(&id) else {
+                continue;
+            };
+            let resized = p.term.try_resize_geometry_pulling_history(
+                PtyGeometry::new(cols, rows, pixel_width, pixel_height),
+                history_pull,
+            );
+            note_search_lane_resize(
+                &mut ws.search_lane_pushed,
+                ws.search.open,
+                id,
+                p.term.history_rows_pushed_by_last_resize(),
+            );
+            if let Err(error) = resized {
                 native_resize_failed = true;
                 log::warn!(
                     "pane {id} PTY resize failed; a bounded deadline retry is scheduled: {error:#}"

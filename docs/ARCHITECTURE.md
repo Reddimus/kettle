@@ -1873,9 +1873,17 @@ same helper. Because the grid is clickable, an open bar follows pane focus.
 `note_focus_change` calls `retarget_search_to_focus`, which moves the query and
 its toggles to the newly focused pane and scans that pane afresh without
 toggling the lane. The old pane gets its remembered query and, with no result
-focused, its pre-search viewport back. The right-click menu is the one modal
-allowed to coexist with the bar; keys go to the menu while it is up because
-its arm precedes search in the key handler.
+focused, its pre-search viewport back. Reserving the lane shrinks the panes
+above it, and a pane whose cursor sits above the new bottom loses only blank
+lines. `WindowState::search_lane_pushed` adds up, per pane, the rows each
+resize while the lane is open pushes off its primary screen into history,
+starting with the lane's own (`Terminal::history_rows_pushed_by_last_resize`,
+counted under the terminal lock). Closing the lane grows each pane with
+`Terminal::try_resize_geometry_pulling_history`, taking back only those rows,
+so lines above the lane stay put. A focused result's pane takes back no more
+than it is scrolled up, keeping its first visible row. The right-click menu is
+the one modal allowed to coexist with the bar; keys go to the menu while it is
+up because its arm precedes search in the key handler.
 
 Modal text fields and search share `kettle-ui::text_editor::TextEditor`: one
 bounded UTF-8 string, a caret and an optional selection anchor on extended

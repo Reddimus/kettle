@@ -42,6 +42,7 @@ fn widening_discards_a_prompt_partially_merged_into_the_preceding_row() {
         None,
         desired,
         Some(TermConfig::default()),
+        usize::MAX,
     );
     assert!(
         prompts.lock().unwrap().is_empty(),
@@ -87,6 +88,7 @@ fn transient_resize_round_trip_keeps_the_current_single_row_prompt() {
         None,
         narrowed,
         Some(TermConfig::default()),
+        usize::MAX,
     );
     commit_local_geometry_inner(
         &term,
@@ -95,6 +97,7 @@ fn transient_resize_round_trip_keeps_the_current_single_row_prompt() {
         None,
         first,
         Some(TermConfig::default()),
+        usize::MAX,
     );
 
     let new_cursor = {
@@ -238,4 +241,206 @@ fn clearing_a_fresh_screen_keeps_the_prompt_on_the_top_row_after_growing() {
         .collect();
     assert_eq!(top, "prompt$");
     assert_eq!(terminal.grid().cursor.point.line.0, 0);
+}
+
+/// A 20 x 10 terminal that has printed `bytes`.
+fn printed(bytes: &[u8]) -> SharedTerm {
+    let (tx, _rx) = crossbeam_channel::unbounded();
+    let mut terminal = Term::new(
+        TermConfig::default(),
+        &TermSize::new(20, 10),
+        EventProxy::new(tx, Arc::new(|| {})),
+    );
+    let mut processor: Processor = Processor::new();
+    processor.advance(&mut terminal, bytes);
+    Arc::new(Mutex::new(terminal))
+}
+
+/// The text of each screen line, without trailing blanks.
+fn screen_text(term: &SharedTerm) -> Vec<String> {
+    let term = term.lock().unwrap();
+    (0..term.screen_lines() as i32)
+        .map(|line| {
+            let row = &term.grid()[alacritty_terminal::index::Line(line)];
+            (0..term.columns())
+                .map(|column| row[alacritty_terminal::index::Column(column)].c)
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+}
+
+/// Feed `bytes` to a terminal made by `printed`.
+fn print(term: &SharedTerm, bytes: &[u8]) {
+    let mut processor: Processor = Processor::new();
+    processor.advance(&mut *term.lock().unwrap(), bytes);
+}
+
+/// Resize a terminal made by `printed` to `rows` rows, taking at most
+/// `history_pull` rows back from history. Returns the rows the resize pushed
+/// off the primary screen into history, as the terminal counts them.
+fn resize_rows(term: &SharedTerm, rows: usize, history_pull: usize) -> usize {
+    let current = PtyGeometry::new(20, term.lock().unwrap().screen_lines(), 200, 100);
+    let geometry = Arc::new(Mutex::new(VersionedPtyGeometry {
+        geometry: current,
+        generation: 0,
+    }));
+    commit_local_geometry_inner(
+        term,
+        &geometry,
+        None,
+        None,
+        PtyGeometry::new(20, rows, 200, rows as u16 * 10),
+        Some(TermConfig::default()),
+        history_pull,
+    )
+    .expect("a row-only resize counts the rows it pushes")
+}
+
+/// Open and close a two-row bar under the 20 x 10 grid, such as the search
+/// bar: the screen shrinks while it is open and grows back when it closes.
+/// With `give_back`, closing takes back from history only the rows the
+/// opening pushed there; without it, closing is a plain resize. Returns the
+/// rows pushed.
+fn open_and_close_a_bar(term: &SharedTerm, give_back: bool) -> usize {
+    let pushed = resize_rows(term, 8, usize::MAX);
+    resize_rows(term, 10, if give_back { pushed } else { usize::MAX });
+    pushed
+}
+
+/// After `clear` the screen holds a short report and history holds what came
+/// before. Opening the bar takes only blank lines from below the prompt, so
+/// closing it gives back blank lines and the report stays where the reader
+/// saw it. A plain resize pulls the rows above `clear` back onto the screen
+/// and moves every line down.
+#[test]
+fn closing_a_bar_below_the_prompt_keeps_the_lines_above_it_in_place() {
+    let mut bytes: Vec<u8> = (1..=12)
+        .flat_map(|line| format!("old {line}\r\n").into_bytes())
+        .collect();
+    bytes.extend_from_slice(b"$ clear\r\n\x1b[H\x1b[2Jreport 1\r\nreport 2\r\n$ ");
+    let screen = ["report 1", "report 2", "$", "", "", "", "", "", "", ""];
+
+    let plain = printed(&bytes);
+    assert_eq!(screen_text(&plain), screen);
+    open_and_close_a_bar(&plain, false);
+    assert_eq!(screen_text(&plain)[..3], ["old 12", "$ clear", "report 1"]);
+
+    let term = printed(&bytes);
+    let history = term.lock().unwrap().grid().history_size();
+    for _ in 0..2 {
+        assert_eq!(
+            open_and_close_a_bar(&term, true),
+            0,
+            "only blank lines left"
+        );
+        assert_eq!(screen_text(&term), screen);
+    }
+    let term = term.lock().unwrap();
+    assert_eq!(term.grid().cursor.point.line.0, 2);
+    assert_eq!(term.grid().history_size(), history);
+    assert_eq!(term.grid().display_offset(), 0);
+}
+
+/// With the prompt on the bottom row, opening the bar pushes rows into
+/// history to keep the prompt in view. Taking exactly those rows back on
+/// closing restores the screen, as the plain resize does.
+#[test]
+fn closing_a_bar_over_a_bottom_prompt_takes_its_rows_back() {
+    let mut bytes: Vec<u8> = (1..=30)
+        .flat_map(|line| format!("line {line}\r\n").into_bytes())
+        .collect();
+    bytes.extend_from_slice(b"$ ");
+    for give_back in [false, true] {
+        let term = printed(&bytes);
+        let screen = screen_text(&term);
+        assert_eq!((&*screen[0], &*screen[9]), ("line 22", "$"));
+        let history = term.lock().unwrap().grid().history_size();
+        for _ in 0..2 {
+            assert_eq!(open_and_close_a_bar(&term, give_back), 2, "{give_back}");
+            assert_eq!(screen_text(&term), screen, "{give_back}");
+        }
+        let term = term.lock().unwrap();
+        assert_eq!(term.grid().cursor.point.line.0, 9, "{give_back}");
+        assert_eq!(term.grid().history_size(), history, "{give_back}");
+    }
+}
+
+/// The count and the limit are the primary screen's, whichever screen is
+/// active, since only it keeps history. A full-screen program on the
+/// alternate screen while the bar opens or closes must not decide how many
+/// rows the shell's screen gets back.
+#[test]
+fn a_bar_over_an_alternate_screen_gives_the_primary_screen_its_own_rows() {
+    let mut bottom: Vec<u8> = (1..=30)
+        .flat_map(|line| format!("line {line}\r\n").into_bytes())
+        .collect();
+    bottom.extend_from_slice(b"$ ");
+    let mut high: Vec<u8> = (1..=12)
+        .flat_map(|line| format!("old {line}\r\n").into_bytes())
+        .collect();
+    high.extend_from_slice(b"\x1b[H\x1b[2Jreport\r\n$ ");
+    // (shell output, alternate screen active while the bar opens, while it
+    // closes)
+    for (bytes, open_in_alt, close_in_alt) in [
+        (&bottom, true, false),
+        (&high, true, false),
+        (&bottom, false, true),
+        (&high, false, true),
+    ] {
+        let term = printed(bytes);
+        let screen = screen_text(&term);
+        if open_in_alt {
+            print(&term, b"\x1b[?1049h\x1b[Hfull screen");
+        }
+        let pushed = resize_rows(&term, 8, usize::MAX);
+        let expected = usize::from(screen[9] == "$") * 2;
+        assert_eq!(pushed, expected, "{:?}", &screen[..2]);
+        let switch: &[u8] = if close_in_alt {
+            b"\x1b[?1049h\x1b[Hfull screen"
+        } else {
+            b"\x1b[?1049l"
+        };
+        print(&term, switch);
+        resize_rows(&term, 10, pushed);
+        if close_in_alt {
+            print(&term, b"\x1b[?1049l");
+        }
+        assert_eq!(
+            screen_text(&term),
+            screen,
+            "alternate at open {open_in_alt}"
+        );
+    }
+}
+
+/// A window that shrinks while the bar is open pushes rows of its own, and a
+/// pane closes the bar taking those back too: the screen then matches the
+/// same window resize with no bar at all.
+#[test]
+fn rows_pushed_while_a_bar_is_open_come_back_when_it_closes() {
+    let mut bytes: Vec<u8> = (1..=12)
+        .flat_map(|line| format!("old {line}\r\n").into_bytes())
+        .collect();
+    bytes.extend_from_slice(b"\x1b[H\x1b[2Jl1\r\nl2\r\nl3\r\nl4\r\nl5\r\nl6\r\n$ ");
+
+    let plain = printed(&bytes);
+    resize_rows(&plain, 6, usize::MAX);
+
+    let term = printed(&bytes);
+    let opened = resize_rows(&term, 8, usize::MAX);
+    assert_eq!(opened, 0, "the prompt sat above the bar");
+    let shrunk = resize_rows(&term, 4, usize::MAX);
+    assert_eq!(
+        shrunk, 3,
+        "the smaller window pushed rows to keep the prompt"
+    );
+    resize_rows(&term, 6, opened + shrunk);
+
+    assert_eq!(screen_text(&term), screen_text(&plain));
+    assert_eq!(screen_text(&term)[0], "l2");
+    let (term, plain) = (term.lock().unwrap(), plain.lock().unwrap());
+    assert_eq!(term.grid().cursor.point, plain.grid().cursor.point);
+    assert_eq!(term.grid().history_size(), plain.grid().history_size());
 }

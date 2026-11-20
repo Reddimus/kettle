@@ -1009,6 +1009,12 @@ pub(crate) struct WindowState {
     /// Last query per pane, memory-only. Reopening search restores the pane's
     /// local query without persisting terminal contents to disk.
     pub(crate) search_queries: std::collections::HashMap<u64, String>,
+    /// Rows resizes pushed off each pane's primary screen into its history
+    /// while the search lane was open, starting with the lane's own opening.
+    /// Closing the lane takes back only these, so the lines above stay where
+    /// they were. It outlives retargeting, which rebuilds `search` without
+    /// moving the lane.
+    pub(crate) search_lane_pushed: std::collections::HashMap<u64, usize>,
     pub(crate) mods: ModifiersState,
     #[cfg(target_os = "macos")]
     pub(crate) macos_raw_mods: ModifiersState,
@@ -1760,6 +1766,7 @@ impl WindowState {
             mux,
             search: SearchState::default(),
             search_queries: std::collections::HashMap::new(),
+            search_lane_pushed: std::collections::HashMap::new(),
             mods: ModifiersState::empty(),
             #[cfg(target_os = "macos")]
             macos_raw_mods: ModifiersState::empty(),
