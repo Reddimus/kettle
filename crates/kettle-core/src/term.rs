@@ -3365,7 +3365,15 @@ fn commit_local_geometry(
     desired: PtyGeometry,
     grid_options: Option<TermConfig>,
 ) {
-    commit_local_geometry_inner(term, geometry, None, None, desired, grid_options);
+    commit_local_geometry_inner(
+        term,
+        geometry,
+        None,
+        None,
+        desired,
+        grid_options,
+        usize::MAX,
+    );
 }
 
 fn commit_local_geometry_inner(
@@ -3375,6 +3383,7 @@ fn commit_local_geometry_inner(
     correlation: Option<&Mutex<command_correlation::CommandCorrelation>>,
     desired: PtyGeometry,
     grid_options: Option<TermConfig>,
+    history_pull: usize,
 ) {
     // This lock order is an invariant shared with image placement and geometry
     // snapshots: Term first, geometry second.
@@ -3399,7 +3408,7 @@ fn commit_local_geometry_inner(
     let grid_resized = grid_options.is_some();
     if let Some(options) = grid_options {
         term.set_options_preserving_history(options);
-        term.resize(TermSize::new(desired.columns, desired.rows));
+        term.resize_pulling_history(TermSize::new(desired.columns, desired.rows), history_pull);
     }
     {
         let mut geometry = geometry
@@ -8670,6 +8679,19 @@ impl Terminal {
     /// Resize to exact geometry, preserving retry state when the native PTY
     /// rejects the request.
     pub fn try_resize_geometry(&mut self, desired: PtyGeometry) -> Result<()> {
+        self.try_resize_geometry_pulling_history(desired, usize::MAX)
+    }
+
+    /// Resize as [`Terminal::try_resize_geometry`] does, except that rows
+    /// added to the screen take at most `history_pull` rows back from history
+    /// and the rest come in blank below the screen's content. A bar that
+    /// closes under the grid gives back only the rows its opening pushed into
+    /// history, so the lines above it stay where they were.
+    pub fn try_resize_geometry_pulling_history(
+        &mut self,
+        desired: PtyGeometry,
+        history_pull: usize,
+    ) -> Result<()> {
         let current = self
             .geometry
             .lock()
@@ -8709,6 +8731,7 @@ impl Terminal {
             Some(&self.command_correlation),
             desired,
             grid_options,
+            history_pull,
         );
         if grid_changed {
             let oldest_abs = self
