@@ -11,7 +11,9 @@ pub(crate) struct SelectionRun {
 }
 
 /// Draw only the exposed edges of the union, inside the selection. Shared
-/// row boundaries have no stroke, including the overlapping part of a step.
+/// row boundaries have no stroke, including the overlapping part of a step,
+/// and runs whose reach meets on a row join without a seam. `runs` are
+/// sorted by row, then column.
 pub(crate) fn append_outline(
     target: &mut Vec<QuadInstance>,
     runs: &[SelectionRun],
@@ -21,16 +23,19 @@ pub(crate) fn append_outline(
     ink: Rgb,
 ) {
     let thickness = scale.round().max(1.0);
-    let span = |run: &SelectionRun| {
-        (
-            (origin.0 + run.columns.start as f32 * cell.0 - run.reach[0]).round(),
-            (origin.0 + run.columns.end as f32 * cell.0 + run.reach[1]).round(),
-        )
-    };
-    let y = |row: i32| (origin.1 + row as f32 * cell.1).round();
+    // Each row's pixel spans, `(row, left, right)`.
+    let mut spans: Vec<(i32, f32, f32)> = Vec::with_capacity(runs.len());
     for run in runs {
-        let (left, right) = span(run);
-        let (top, bottom) = (y(run.row), y(run.row + 1));
+        let left = (origin.0 + run.columns.start as f32 * cell.0 - run.reach[0]).round();
+        let right = (origin.0 + run.columns.end as f32 * cell.0 + run.reach[1]).round();
+        match spans.last_mut() {
+            Some((row, _, end)) if *row == run.row && left <= *end => *end = end.max(right),
+            _ => spans.push((run.row, left, right)),
+        }
+    }
+    let y = |row: i32| (origin.1 + row as f32 * cell.1).round();
+    for &(row, left, right) in &spans {
+        let (top, bottom) = (y(row), y(row + 1));
         let vertical = thickness.min((right - left).max(0.0));
         target.push(rect(left, top, vertical, bottom - top, ink, 1.0));
         target.push(rect(
@@ -41,14 +46,13 @@ pub(crate) fn append_outline(
             ink,
             1.0,
         ));
-        for (neighbor, edge) in [(run.row - 1, top), (run.row + 1, bottom - thickness)] {
+        for (neighbor, edge) in [(row - 1, top), (row + 1, bottom - thickness)] {
             let mut start = left;
-            let first = runs.partition_point(|other| other.row < neighbor);
-            for other in runs[first..]
+            let first = spans.partition_point(|other| other.0 < neighbor);
+            for &(_, other_left, other_right) in spans[first..]
                 .iter()
-                .take_while(|other| other.row == neighbor)
+                .take_while(|other| other.0 == neighbor)
             {
-                let (other_left, other_right) = span(other);
                 let end = other_left.min(right);
                 if end > start {
                     target.push(rect(start, edge, end - start, thickness, ink, 1.0));
@@ -88,6 +92,9 @@ mod tests {
             (1, 0..5, [0, 6]),
             (2, 0..2, [3, 0]),
             (2, 3..5, [2, 2]),
+            // Two runs whose reach meets across the cell between them.
+            (3, 0..2, [0, 4]),
+            (3, 3..5, [6, 0]),
         ]);
     }
 

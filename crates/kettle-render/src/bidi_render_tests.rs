@@ -833,12 +833,14 @@ fn dominant(
 #[test]
 fn highlights_cover_the_drawn_width_of_arabic_words() {
     let _serial = gpu_test_guard();
-    // The text, its highlighted logical columns and the visual columns those
-    // cells occupy.
+    // The text, its highlighted logical columns, the visual columns those
+    // cells occupy, and whether its sad overhangs them on the left (or the
+    // right). Every named face draws sad's final and isolated forms well
+    // over a cell wide at this size.
     let cases = [
-        ("نص", 0..=1, 0..2),
-        ("ab نص cd", 3..=4, 3..5),
-        ("ص", 0..=0, 0..1),
+        ("نص", 0..=1, 0..2, true),
+        ("ab نص cd", 3..=4, 3..5, true),
+        ("ص", 0..=0, 0..1, false),
     ];
     for family in crate::arabic_join_tests::ARABIC_FACES {
         let Some((mut renderer, mut cfg)) = arabic_renderer(family) else {
@@ -848,12 +850,11 @@ fn highlights_cover_the_drawn_width_of_arabic_words() {
         cfg.padding_x = 24.25;
         cfg.padding_y = 4.0;
         let (ox, _) = pane_grid_origin((0.0, 0.0, 640.0, 220.0), (cfg.padding_x, cfg.padding_y));
-        let mut overhangs = 0;
         for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
             cfg.text_renderer = mode;
             for scale in [1.0, 2.0] {
                 renderer.set_scale(scale);
-                for (text, logical, visual) in &cases {
+                for (text, logical, visual, leftward) in &cases {
                     for highlight in Highlight::ALL {
                         let context = format!("{family} {mode:?}@{scale} {text:?} {highlight:?}");
                         let mut snap = snapshot_of(30, 4, format!("{text}\x1b[?25l").as_bytes());
@@ -868,11 +869,15 @@ fn highlights_cover_the_drawn_width_of_arabic_words() {
                         let (ink_left, ink_right) =
                             ink_columns(&renderer, &rows, (left, right), frame.width())
                                 .unwrap_or_else(|| panic!("{context}: the word is drawn"));
-                        if ink_left >= grid_left && ink_right <= grid_right {
-                            eprintln!("ARABIC_OVERHANG_SKIP: {context} is drawn inside its cells");
-                            continue;
-                        }
-                        overhangs += 1;
+                        assert!(
+                            if *leftward {
+                                ink_left < grid_left - 1
+                            } else {
+                                ink_right > grid_right + 1
+                            },
+                            "{context}: the fixture's sad overhangs its cells: drawn over \
+                             {ink_left}..{ink_right}, cells {grid_left}..{grid_right}"
+                        );
                         let fill = dominant(&frame, grid_left..grid_right, &rows);
                         assert_ne!(fill, cfg.theme.background, "{context}: highlighted");
                         let colors: Vec<_> = std::iter::once(fill)
@@ -898,7 +903,6 @@ fn highlights_cover_the_drawn_width_of_arabic_words() {
                 }
             }
         }
-        assert!(overhangs > 0, "{family}: a wide sad overhangs its cell");
     }
 }
 
@@ -919,6 +923,7 @@ fn highlights_off_bidi_rows_stay_on_the_grid() {
                 (false, "ab نص cd", 3..=4),
                 (false, "ص", 0..=0),
                 (true, "ab cd", 0..=4),
+                (true, "\x1b[?1049hab نص cd", 3..=4),
             ] {
                 cfg.bidi = bidi;
                 for highlight in Highlight::ALL {

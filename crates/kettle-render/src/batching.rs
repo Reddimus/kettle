@@ -931,8 +931,11 @@ pub(crate) fn emit_positioned_glyphs(
     let mut emoji_keys = Vec::new();
     let only_column = only.and_then(|(_, column)| column);
     for run in buf.layout_runs() {
-        if only.is_some_and(|(line, _)| line != run.line_i) {
-            continue;
+        match only {
+            Some((line, _)) if run.line_i < line => continue,
+            // Layout runs come in line order.
+            Some((line, _)) if run.line_i > line => break,
+            _ => {}
         }
         let shifts: &[MarkShift] = match positioning {
             GlyphPositioning::Grid(_) => shifts_of(marks, run.line_i),

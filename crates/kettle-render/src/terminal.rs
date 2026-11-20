@@ -105,8 +105,10 @@ impl HighlightReach {
     /// Add one viewport row's runs. `cells` are its highlighted cells sorted
     /// by visual column, each with whether it is right-to-left text; `drawn`
     /// is the x span each visual column's text is drawn over. A run reaches
-    /// only over its right-to-left text, never into another run or past
-    /// `clip`, the pane edges that clip text.
+    /// only over its right-to-left text, within `clip`, the pixel columns
+    /// that keep the pane's text. The fills at a run's ends take its reach,
+    /// whichever highlight they are, so the run's fill stays one block. Two
+    /// runs reaching into the same gap meet halfway through their overlap.
     pub(crate) fn add_row(
         &mut self,
         cells: &[(i32, usize, bool)],
@@ -114,29 +116,48 @@ impl HighlightReach {
         (ox, cw): (f32, f32),
         clip: (f32, f32),
     ) {
-        let runs: Vec<_> = cells.chunk_by(|a, b| b.1 == a.1 + 1).collect();
-        for (index, run) in runs.iter().enumerate() {
-            let (row, first, last) = (run[0].0, run[0].1, run[run.len() - 1].1);
-            let (cell_left, cell_right) = (ox + first as f32 * cw, ox + (last + 1) as f32 * cw);
-            let floor = index.checked_sub(1).map_or(clip.0, |before| {
-                ox + (runs[before][runs[before].len() - 1].1 + 1) as f32 * cw
-            });
-            let ceiling = runs
-                .get(index + 1)
-                .map_or(clip.1, |after| ox + after[0].1 as f32 * cw);
-            let (left, right) = run
-                .iter()
-                .filter(|&&(_, _, rtl)| rtl)
-                .filter_map(|&(_, column, _)| drawn.get(column).copied().flatten())
-                .fold((cell_left, cell_right), |(a, b), (left, right)| {
-                    (a.min(left), b.max(right))
-                });
-            let (left, right) = (left.max(floor), right.min(ceiling));
-            if left < cell_left {
-                self.left.insert((row, first), left);
+        struct Run {
+            row: i32,
+            first: usize,
+            last: usize,
+            cells: (f32, f32),
+            reach: (f32, f32),
+        }
+        let mut runs: Vec<Run> = cells
+            .chunk_by(|a, b| b.1 == a.1 + 1)
+            .map(|run| {
+                let (first, last) = (run[0].1, run[run.len() - 1].1);
+                let cells = (ox + first as f32 * cw, ox + (last + 1) as f32 * cw);
+                let (left, right) = run
+                    .iter()
+                    .filter(|&&(_, _, rtl)| rtl)
+                    .filter_map(|&(_, column, _)| drawn.get(column).copied().flatten())
+                    .fold(cells, |(a, b), (left, right)| (a.min(left), b.max(right)));
+                Run {
+                    row: run[0].0,
+                    first,
+                    last,
+                    cells,
+                    reach: (left.max(clip.0), right.min(clip.1)),
+                }
+            })
+            .collect();
+        for index in 1..runs.len() {
+            let mut right = runs[index - 1].reach.1.min(runs[index].cells.0);
+            let mut left = runs[index].reach.0.max(runs[index - 1].cells.1);
+            if right > left {
+                right = (right + left) / 2.0;
+                left = right;
             }
-            if right > cell_right {
-                self.right.insert((row, last), right);
+            runs[index - 1].reach.1 = right;
+            runs[index].reach.0 = left;
+        }
+        for run in runs {
+            if run.reach.0 < run.cells.0 {
+                self.left.insert((run.row, run.first), run.reach.0);
+            }
+            if run.reach.1 > run.cells.1 {
+                self.right.insert((run.row, run.last), run.reach.1);
             }
         }
     }
@@ -252,6 +273,16 @@ mod highlight_reach_tests {
         assert_eq!(widened(6, 7), (65.0, 85.0, [0.0, 0.0]));
         // A one-cell fill at a run's end reaches with the run.
         assert_eq!(widened(4, 4), (45.0, 65.0, [0.0, 10.0]));
+        // Two runs reaching into the same one-cell gap, 15..25, overlap over
+        // 18..22 and meet at its middle.
+        let mut gap = vec![None; 3];
+        gap[0] = Some((5.0, 22.0));
+        gap[2] = Some((18.0, 35.0));
+        reach.add_row(&[(5, 0, true), (5, 2, true)], &gap, (ox, cw), (0.0, 200.0));
+        let (mut before, mut after) = (fill(0, 0), fill(2, 2));
+        assert_eq!(reach.widen(&mut before, 5, 0, 0), [0.0, 5.0]);
+        assert_eq!(reach.widen(&mut after, 5, 2, 2), [5.0, 0.0]);
+        assert_eq!(before.pos[0] + before.size[0], after.pos[0]);
         // Every other fill is untouched, bit for bit.
         for (row, first, last) in [(3, 0, 0), (3, 4, 4), (2, 1, 1), (2, 6, 6)] {
             let mut quad = fill(first, last);
@@ -1672,6 +1703,10 @@ impl Renderer {
             } else {
                 GlyphPositioning::GraphemeRows(cw)
             };
+            // The pixel columns the pane's glyph scissor keeps, rounded as
+            // `glyphpipe::pane_scissor` rounds them.
+            let (left, right) = (pv.terminal.0.max(0.0), pv.terminal.0 + pv.terminal.2);
+            let clip = (left.trunc(), left.trunc() + (right - left).max(0.0).trunc());
             let mut drawn = Vec::new();
             for cells in bidi_highlights.chunk_by(|a, b| a.0 == b.0) {
                 let Ok(line) = usize::try_from(cells[0].0) else {
@@ -1700,12 +1735,7 @@ impl Renderer {
                         }));
                     }
                 }
-                reach.add_row(
-                    cells,
-                    &drawn,
-                    (ox, cw),
-                    (pv.terminal.0, pv.terminal.0 + pv.terminal.2),
-                );
+                reach.add_row(cells, &drawn, (ox, cw), clip);
             }
         }
         // Selection. A block (Alt+drag) selection draws a per-row COLUMN
