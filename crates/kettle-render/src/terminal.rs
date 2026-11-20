@@ -163,30 +163,30 @@ impl HighlightReach {
     }
 
     /// Widen `fill`, over visual columns `first..=last` of viewport `row`, to
-    /// the text drawn there, and return how many pixels it now reaches past
-    /// its left and right edges. A fill no run reaches past is untouched.
+    /// the text drawn there, and return the x its left and right sides moved
+    /// to, if they moved. A fill no run reaches past is untouched.
     pub(crate) fn widen(
         &self,
         fill: &mut QuadInstance,
         row: i32,
         first: usize,
         last: usize,
-    ) -> [f32; 2] {
-        let mut reach = [0.0; 2];
+    ) -> [Option<f32>; 2] {
+        let mut moved = [None; 2];
         if let Some(&x) = self.left.get(&(row, first))
             && x < fill.pos[0]
         {
-            reach[0] = fill.pos[0] - x;
-            fill.size[0] += reach[0];
+            fill.size[0] += fill.pos[0] - x;
             fill.pos[0] = x;
+            moved[0] = Some(x);
         }
         if let Some(&x) = self.right.get(&(row, last))
             && x > fill.pos[0] + fill.size[0]
         {
-            reach[1] = x - (fill.pos[0] + fill.size[0]);
             fill.size[0] = x - fill.pos[0];
+            moved[1] = Some(x);
         }
-        reach
+        moved
     }
 }
 
@@ -261,18 +261,22 @@ mod highlight_reach_tests {
         };
         let widened = |first: usize, last: usize| {
             let mut quad = fill(first, last);
-            let past = reach.widen(&mut quad, 2, first, last);
-            (quad.pos[0], quad.pos[0] + quad.size[0], past)
+            let moved = reach.widen(&mut quad, 2, first, last);
+            (quad.pos[0], quad.pos[0] + quad.size[0], moved)
         };
         assert_eq!(
             widened(0, 1),
-            (0.0, 25.0, [5.0, 0.0]),
+            (0.0, 25.0, [Some(0.0), None]),
             "clipped to the pane"
         );
-        assert_eq!(widened(3, 4), (28.0, 65.0, [7.0, 10.0]), "short of 6..=7");
-        assert_eq!(widened(6, 7), (65.0, 85.0, [0.0, 0.0]));
+        assert_eq!(
+            widened(3, 4),
+            (28.0, 65.0, [Some(28.0), Some(65.0)]),
+            "short of 6..=7"
+        );
+        assert_eq!(widened(6, 7), (65.0, 85.0, [None, None]));
         // A one-cell fill at a run's end reaches with the run.
-        assert_eq!(widened(4, 4), (45.0, 65.0, [0.0, 10.0]));
+        assert_eq!(widened(4, 4), (45.0, 65.0, [None, Some(65.0)]));
         // Two runs reaching into the same one-cell gap, 15..25, overlap over
         // 18..22 and meet at its middle.
         let mut gap = vec![None; 3];
@@ -280,14 +284,14 @@ mod highlight_reach_tests {
         gap[2] = Some((18.0, 35.0));
         reach.add_row(&[(5, 0, true), (5, 2, true)], &gap, (ox, cw), (0.0, 200.0));
         let (mut before, mut after) = (fill(0, 0), fill(2, 2));
-        assert_eq!(reach.widen(&mut before, 5, 0, 0), [0.0, 5.0]);
-        assert_eq!(reach.widen(&mut after, 5, 2, 2), [5.0, 0.0]);
+        assert_eq!(reach.widen(&mut before, 5, 0, 0), [None, Some(20.0)]);
+        assert_eq!(reach.widen(&mut after, 5, 2, 2), [Some(20.0), None]);
         assert_eq!(before.pos[0] + before.size[0], after.pos[0]);
         // Every other fill is untouched, bit for bit.
         for (row, first, last) in [(3, 0, 0), (3, 4, 4), (2, 1, 1), (2, 6, 6)] {
             let mut quad = fill(first, last);
             let before = (quad.pos, quad.size);
-            assert_eq!(reach.widen(&mut quad, row, first, last), [0.0; 2]);
+            assert_eq!(reach.widen(&mut quad, row, first, last), [None; 2]);
             assert_eq!((quad.pos, quad.size), before, "row {row} {first}..={last}");
         }
     }
@@ -1703,10 +1707,14 @@ impl Renderer {
             } else {
                 GlyphPositioning::GraphemeRows(cw)
             };
-            // The pixel columns the pane's glyph scissor keeps, rounded as
-            // `glyphpipe::pane_scissor` rounds them.
+            // Inside both the pane rect, which clips its quads, and the
+            // pixel columns its glyph scissor keeps (`glyphpipe::pane_scissor`
+            // truncates the rect's left edge and width).
             let (left, right) = (pv.terminal.0.max(0.0), pv.terminal.0 + pv.terminal.2);
-            let clip = (left.trunc(), left.trunc() + (right - left).max(0.0).trunc());
+            let clip = (
+                left,
+                right.min(left.trunc() + (right - left).max(0.0).trunc()),
+            );
             let mut drawn = Vec::new();
             for cells in bidi_highlights.chunk_by(|a, b| a.0 == b.0) {
                 let Ok(line) = usize::try_from(cells[0].0) else {
@@ -1777,12 +1785,12 @@ impl Renderer {
                         1.0,
                     );
                     let last = run.end.max(run.start + 1) - 1;
-                    let past = reach.widen(&mut fill, vrow, run.start, last);
+                    let moved = reach.widen(&mut fill, vrow, run.start, last);
                     target.push(fill);
                     selection_runs.push(super::selection_outline::SelectionRun {
                         row: vrow,
                         columns: run,
-                        reach: past,
+                        moved,
                     });
                 }
             }
