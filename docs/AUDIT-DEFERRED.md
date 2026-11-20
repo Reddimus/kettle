@@ -12,14 +12,28 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   `cargo audit --deny warnings` remains enforced for every other notice and
   vulnerability. Reassess these exceptions when the guarded Linux desktop
   integration dependencies change. The vendor-validation graph has no waiver.
-  Moving to zbus 6 is blocked upstream: the newest `accesskit_unix` (0.24.1)
-  requires zbus 5.19 and `atspi` 0.29, and `atspi` 0.30 still requires zbus 5.
+  Moving to zbus 6 is blocked upstream. Checked 2026-11-20: zbus is at 6.4.0
+  and no longer depends on the three crates, but the newest `accesskit_unix`
+  (0.24.1, also AccessKit's `main`) requires zbus 5.19 and `atspi` 0.29, and
+  `atspi` 0.30 (also its `main`) still requires zbus 5; neither project has an
+  open change that moves. `notify-rust`, the third consumer in the audited
+  all-target graph (`Cargo.lock` has 4.18.2), builds on zbus 6 from 4.19.0
+  (2026-11-08). Moving Kettle's own zbus or `notify-rust` alone would add a
+  second zbus and leave all three crates in the graph through
+  `accesskit_unix`, so it closes nothing. Close when an `accesskit_unix`
+  release builds on zbus 6: move it, `notify-rust` and Kettle's own zbus
+  together, and once the three crates are gone from the audited graph remove
+  the three audit ignores and `scripts/check-dbus-scope.py`.
 
 - **Upstream `lru` advisory.** `Cargo.lock` still pins `lru 0.16.4` through
   `glyphon 0.12.0`; `deny.toml` ignores RUSTSEC-2026-0253. Deferred because the
   reviewed glyphon path does not call the affected `pop()` method, and a fork
   adds supply-chain surface. Close #207 when upstream accepts `lru >=0.18.2`;
   remove the audit ignores and `scripts/check-lru-scope.py` together.
+  Checked 2026-11-20: glyphon 0.12.0 is still the newest release, its `main`
+  still requires `lru 0.16.2`, and the change that would move it
+  (grovesNL/glyphon pull request 182, "Update `lru` to `0.18.2`", opened
+  2026-08-12) is still open. `lru` itself is at 0.19.0.
 - **`setsid()` descendants on macOS.** macOS has no child subreaper, so
   `kettle exec` and the in-process MCP `kettle_run` path cannot adopt
   descendants that leave the PTY session, and a timeout or cancellation can
@@ -235,17 +249,27 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   and concurrent-command isolation tests, including a fixture
   that double-forks and calls `setsid()` at once. A normal exit keeps
   leaving detached daemons running.
-- **D-Bus messages sized before they are read.** Kettle's receiver is now in
-  `crates/kettle-ui/src/portal_settings.rs`; its body check runs after transport
-  allocation. `zbus` 5.19 resizes its
-  receive buffer to a message's declared length (up to 128 MiB) before
-  reading the body, and the settings-portal subscription keeps the default
-  64-message queue whatever `max_queued` asks, so a hostile session-bus peer
-  can make Kettle allocate up to that much per message. Deferred because the
-  fix belongs in zbus's transport; Kettle cannot bound it from outside without
-  vendoring zbus, which is also blocked on the zbus 6 migration (#633–#635).
-  Close by moving to a zbus release that reads incrementally against a cap, or
-  vendoring the transport fix.
+- **D-Bus messages sized before they are read, on the accessibility
+  connections.** `zbus` 5.19 resizes its receive buffer to a message's
+  declared length (up to 128 MiB) before reading the body, and any peer on a
+  bus can address a message to a connection's unique name. The connections
+  Kettle opens itself (desktop settings, global shortcuts, notifications, the
+  image viewer hand-off and showing a file in the file manager) now read
+  through `crates/kettle-ui/src/dbus_bound.rs`, which checks the 16-byte
+  header first and drops a message longer than 64 KiB from a 4 KiB scratch
+  buffer (one past the specification's 128 MiB still ends the connection),
+  so those buffer at most 64 KiB of wire bytes a message and 4 MiB for a
+  stream that queues zbus's default 64 messages; what a message decodes into
+  is bounded by the checks each caller makes after it arrives. What remains is the session-bus and
+  accessibility-bus connections that `accesskit_unix` 0.24.1 opens for the
+  screen-reader tree: it builds them inside the crate with zbus's own
+  transport, so Kettle cannot put a reader in front of them without
+  vendoring `accesskit_unix` or zbus. Checked 2026-11-20: zbus 6.4.0 still
+  allocates a long message's declared length up front
+  (`src/runtime/io/reader.rs`) and has no receive limit to configure, and
+  `accesskit_unix` exposes no way to supply the connection. Close when zbus
+  reads against a configurable limit and `accesskit_unix` uses it, or when
+  `accesskit_unix` accepts a caller's connection.
 
 - **Paths and commands in log lines.** The change for code scanning alert #46
   (`rust/cleartext-logging`, `crates/kettle-ui/src/app/automation.rs`) keeps
