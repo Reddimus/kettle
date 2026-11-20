@@ -8,7 +8,7 @@ use std::time::Duration;
 use futures_lite::future;
 use kettle_ctl::agent_launch::HeldExecutable;
 use kettle_ctl::process::{self, ProcessIdentity};
-use zbus::{Connection, Message, connection::Builder, names::OwnedUniqueName};
+use zbus::{Connection, Message, names::OwnedUniqueName};
 
 use super::{LOUPE, OpenFailure, Viewer};
 
@@ -43,13 +43,11 @@ pub(super) fn open(file: &Path) -> Result<Option<Child>, OpenFailure> {
     let mut started = Started::default();
     future::block_on(future::or(
         async {
-            let connection = Builder::session()
-                .map_err(|_| OpenFailure::Viewer)?
-                .max_queued(1)
-                .method_timeout(CALL_TIMEOUT)
-                .build()
-                .await
-                .map_err(|_| OpenFailure::Viewer)?;
+            let connection = crate::dbus_bound::connect(None, |builder| {
+                builder.max_queued(1).method_timeout(CALL_TIMEOUT)
+            })
+            .await
+            .map_err(|_| OpenFailure::Viewer)?;
             let mut owner = owner(&connection, NAME)
                 .await
                 .map_err(|_| OpenFailure::Viewer)?;

@@ -981,6 +981,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   trade names the old file is moved aside first, and one that can neither
   rename exclusively nor hard-link is refused.
 
+- On Linux, a program on the session bus could send Kettle a D-Bus message
+  of up to 128 MiB and have Kettle set that much memory aside for it before
+  reading it. The connections Kettle opens for desktop settings (light or
+  dark, reduced motion, button layout), the global shortcut, notifications,
+  the image viewer and showing a file in its folder now look at a message's
+  declared length first and discard anything over 64 KiB without buffering
+  it; a length past the 128 MiB the protocol allows still ends the
+  connection, as before. The screen-reader connection, which a library
+  opens, is not covered. The connections Kettle opens itself now need a
+  session bus on a unix socket, which is the default on Linux desktops; a
+  session bus reached only over TCP is no longer used for them.
+
 - A PNG pasted from the Linux clipboard is read up to 64 MiB (the X11 route
   allowed 256 MiB) and decoded with limits set before any pixel memory is
   allocated: 16,384 pixels a side and 256 MiB, where the decoder's defaults

@@ -13,6 +13,7 @@ impl MotionPreference for Watch {
 const KEY: &str = "reduced-motion";
 use crate::test_bus::Bus;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize};
+use zbus::connection::Builder;
 use zbus::zvariant::Value;
 
 #[derive(Default)]
@@ -234,6 +235,41 @@ fn oversized_bodies_are_refused_before_deserialization() {
         .unwrap();
     assert!(matches!(bounded(&large), Err(zbus::Error::Failure(message))
         if message == "settings portal reply is too large"));
+}
+
+/// A message longer than the connection takes never reaches zbus, so it
+/// cannot make the watcher drop its connection and forget the setting.
+#[test]
+fn a_message_too_long_to_buffer_is_dropped_and_the_watch_carries_on() {
+    let bus = Bus::start();
+    let state = Arc::new(Settings::default());
+    let connection = future::block_on(server(&bus, state.clone()));
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let counted = wakes.clone();
+    let watch = Watch::start(
+        Arc::new(move || {
+            counted.fetch_add(1, Ordering::AcqRel);
+        }),
+        Some(bus.address.clone()),
+        KEY,
+    );
+    wait_for("initial preference", || {
+        watch.preference() == Preference::Normal
+    });
+    // A watcher that reconnected would read this and arrive at the same
+    // preference by another route, with one more wake.
+    state.value.store(1, Ordering::Release);
+    let long = "x".repeat(crate::dbus_bound::MAX_MESSAGE_BYTES as usize);
+    future::block_on(signal(&connection, Value::from(long)));
+    future::block_on(signal(&connection, Value::from(1u32)));
+    wait_for("reduced-motion signal", || {
+        watch.preference() == Preference::Reduced
+    });
+    // The watcher wakes right after it stores a preference, so once it has
+    // stopped every wake is counted. Unknown to Normal, then Normal to
+    // Reduced: it never cleared.
+    stop(watch);
+    assert_eq!(wakes.load(Ordering::Acquire), 2);
 }
 
 #[test]

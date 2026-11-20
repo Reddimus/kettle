@@ -6092,6 +6092,13 @@ System appearance is observed independently of a window's rendered palette.
 Linux appearance and reduced motion share a bounded XDG Settings worker
 transport (`kettle-ui/src/portal_settings.rs`): subscriptions precede snapshots,
 owner changes invalidate state, and retries and shutdown stay off the UI thread.
+That worker and every other session-bus connection Kettle opens itself (global
+shortcuts, notifications, the image viewer and file-manager hand-offs) connect
+through `kettle-ui/src/dbus_bound.rs`, which reads each message's 16-byte
+primary header first and discards a message declaring more than 64 KiB before
+zbus sizes a buffer for it (one declaring more than the protocol's 128 MiB
+still ends the connection); the AccessKit screen-reader connections are opened
+inside that crate and are not covered (see `docs/AUDIT-DEFERRED.md`).
 macOS observes system appearance separately because forcing NSWindow appearance
 to match the palette suppresses winit's window appearance notifications.
 Both sources enter the existing theme synchronization and all-window redraw

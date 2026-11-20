@@ -1,5 +1,6 @@
 use super::*;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use zbus::connection::Builder;
 use zbus::zvariant::ObjectPath;
 
 const SESSION_PATH: &str = "/org/freedesktop/portal/desktop/session/test/session";

@@ -172,7 +172,6 @@ mod file_manager {
 
     use futures_lite::future;
     use kettle_ctl::process;
-    use zbus::connection::Builder;
 
     use super::super::loupe::{CALL_TIMEOUT, OPEN_TIMEOUT, bounded, bus_query, owner};
     use super::{OpenFailure, RevealTarget};
@@ -208,13 +207,11 @@ mod file_manager {
         }
         future::block_on(future::or(
             async {
-                let connection = Builder::session()
-                    .map_err(|_| OpenFailure::Viewer)?
-                    .max_queued(1)
-                    .method_timeout(CALL_TIMEOUT)
-                    .build()
-                    .await
-                    .map_err(|_| OpenFailure::Viewer)?;
+                let connection = crate::dbus_bound::connect(None, |builder| {
+                    builder.max_queued(1).method_timeout(CALL_TIMEOUT)
+                })
+                .await
+                .map_err(|_| OpenFailure::Viewer)?;
                 let mut name = owner(&connection, NAME)
                     .await
                     .map_err(|_| OpenFailure::Viewer)?;
