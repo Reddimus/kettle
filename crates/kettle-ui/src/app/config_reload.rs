@@ -352,14 +352,9 @@ impl App {
             Some(path) => match read_config_for_reload(&path, self.config_trust) {
                 Ok(None) => (Config::default(), Vec::new()),
                 Ok(Some(loaded)) => {
-                    diagnostics = Some((path.clone(), loaded.diagnostics()));
-                    if !loaded.unknown_keys.is_empty() {
-                        log::warn!(
-                            "{}: unrecognized config keys: {}",
-                            path.display(),
-                            loaded.unknown_keys.join(", ")
-                        );
-                    }
+                    let entries = loaded.diagnostics();
+                    kettle_config::log_ignored_settings(&path, &entries);
+                    diagnostics = Some((path.clone(), entries));
                     (loaded.config, loaded.malformed_values)
                 }
                 Err(error) => {
