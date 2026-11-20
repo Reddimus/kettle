@@ -250,26 +250,26 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   that double-forks and calls `setsid()` at once. A normal exit keeps
   leaving detached daemons running.
 - **D-Bus messages sized before they are read, on the accessibility
-  connections.** `zbus` 5.19 resizes its receive buffer to a message's
-  declared length (up to 128 MiB) before reading the body, and any peer on a
-  bus can address a message to a connection's unique name. The connections
-  Kettle opens itself (desktop settings, global shortcuts, notifications, the
-  image viewer hand-off and showing a file in the file manager) now read
-  through `crates/kettle-ui/src/dbus_bound.rs`, which checks the 16-byte
-  header first and drops a message longer than 64 KiB from a 4 KiB scratch
-  buffer (one past the specification's 128 MiB still ends the connection),
-  so those buffer at most 64 KiB of wire bytes a message and 4 MiB for a
-  stream that queues zbus's default 64 messages; what a message decodes into
-  is bounded by the checks each caller makes after it arrives. What remains is the session-bus and
+  connections.** `zbus` 5.19 resizes its receive buffer to a message's declared
+  length (up to 128 MiB) before reading the body, and any peer on a bus can
+  address a message to a connection's unique name. The connections Kettle opens
+  itself (desktop settings, global shortcuts, notifications, the image viewer
+  hand-off and showing a file in the file manager) now read through
+  `crates/kettle-ui/src/dbus_bound.rs`, which checks the 16-byte header first
+  and drops a message longer than 64 KiB from a 4 KiB scratch buffer (one past
+  the specification's 128 MiB still ends the connection), so those buffer at
+  most 64 KiB of wire bytes a message and 4 MiB for a stream that queues zbus's
+  default 64 messages; what a message decodes into is bounded by the checks each
+  caller makes after it arrives. What remains is the session-bus and
   accessibility-bus connections that `accesskit_unix` 0.24.1 opens for the
-  screen-reader tree: it builds them inside the crate with zbus's own
-  transport, so Kettle cannot put a reader in front of them without
-  vendoring `accesskit_unix` or zbus. Checked 2026-11-20: zbus 6.4.0 still
-  allocates a long message's declared length up front
-  (`src/runtime/io/reader.rs`) and has no receive limit to configure, and
-  `accesskit_unix` exposes no way to supply the connection. Close when zbus
-  reads against a configurable limit and `accesskit_unix` uses it, or when
-  `accesskit_unix` accepts a caller's connection.
+  screen-reader tree: it builds them inside the crate with zbus's own transport,
+  so Kettle cannot put a reader in front of them without vendoring
+  `accesskit_unix` or zbus. Checked 2026-11-20: zbus 6.4.0 still allocates a
+  long message's declared length up front (`src/runtime/io/reader.rs`) and has
+  no receive limit to configure, and `accesskit_unix` exposes no way to supply
+  the connection. Close when zbus reads against a configurable limit and
+  `accesskit_unix` uses it, or when `accesskit_unix` accepts a caller's
+  connection.
 
 - **Paths and commands in log lines.** The change for code scanning alert #46
   (`rust/cleartext-logging`, `crates/kettle-ui/src/app/automation.rs`) keeps
