@@ -1001,6 +1001,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   last words and its ellipsis to a second line that the tab bar cut off.
   These titles now always stay on one line.
 
+- Search matches and selections in right-to-left lines now cover every
+  Arabic letter they hold. A letter drawn wider than its cell, such as a final
+  ص or ث in Noto Sans Arabic or DejaVu Sans, reached up to a cell past the
+  highlight, into the window padding or the cell beside it, where the current
+  match's dark text nearly vanished. The highlight now extends as far as the
+  letters are drawn, for the current and other matches and for focused and
+  unfocused selections, and its outline follows. Nothing changes with
+  `bidi = false` or in lines without right-to-left text.
+
 - On Linux machines with many processors, about 12 or more, ffmpeg drew no
   video poster, video frame or HEIC/AVIF photo. Left to choose, it started
   filter and encoder threads for every processor, and their stacks and

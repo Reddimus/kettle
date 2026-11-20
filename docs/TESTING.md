@@ -2040,6 +2040,16 @@ assert flat-stroke continuity, word boundaries, style/selection ownership,
 and cursor placement;
 they print `ARABIC_GPU_SKIP` without an adapter. Those skips are not rendering
 passes. Windows fallback rendering requires a separate native check.
+`highlights_cover_the_drawn_width_of_arabic_words` draws a wide final sad at
+the row start and after Latin text, and an isolated sad, under the current
+and another search match and focused and unfocused selections, in Grid and
+Legacy at 1x and 2x over fractional padding. The fill must cover exactly the
+pixel columns the word is drawn over, cells included; a face that draws the
+word inside its cells prints `ARABIC_OVERHANG_SKIP`.
+`highlights_off_bidi_rows_stay_on_the_grid` keeps every fill on cell edges
+with `bidi = false` and in rows without right-to-left text, and
+`a_selection_outline_follows_the_arabic_overhang` requires the outline of a
+low-contrast selection at the widened edge, not the cell edge.
 `emoji_ink_is_fitted_without_changing_grid_widths_or_baselines` checks actual
 glyph instances using the bundled font in both renderers and both 2027 modes;
 it reports `EMOJI_SIZING_GPU_SKIP` without an adapter.
