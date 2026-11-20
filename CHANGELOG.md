@@ -1017,6 +1017,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   opened, or, when a search found a match, keeps the top line on screen where
   it is.
 
+- The current search match no longer has a line along its bottom edge. The
+  line was the colour of the match's text and covered the lower part of
+  letters such as g, j, p, q and y, so the text looked set low in its
+  highlight. The current match already has its own colour; the line is now
+  drawn only when a theme makes that colour too close in brightness to the
+  other matches' to tell them apart, as about one bundled theme in five does.
+
 - On Linux machines with many processors, about 12 or more, ffmpeg drew no
   video poster, video frame or HEIC/AVIF photo. Left to choose, it started
   filter and encoder threads for every processor, and their stacks and

@@ -2185,10 +2185,18 @@ impl Renderer {
 
             // Search coordinates belong to the pane captured when the lane
             // opened, even if focus changes through automation or pane reap.
-            if pane_has_search {
-                // Match fills are resolved against each cell in the terminal walk.
-                // Underline the current match as well, so even identical theme fills
-                // leave the current result distinct from the other matches.
+            // Match fills are resolved against each cell in the terminal walk.
+            // Underline the current match as well when its fill is too close to
+            // the other matches' to set it apart. Only then: the line covers the
+            // descenders of the match's own text, which then looks set low.
+            if pane_has_search
+                && overlay.highlights.iter().any(|hl| hl.active)
+                && theme::current_match_needs_underline(
+                    cfg,
+                    theme,
+                    &mut self.minimum_contrast_cache,
+                )
+            {
                 for hl in overlay.highlights.iter().filter(|hl| hl.active) {
                     let ink = theme::highlight_colors_cached(
                         CellHighlight::Search(true),
