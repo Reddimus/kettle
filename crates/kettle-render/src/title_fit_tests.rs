@@ -193,6 +193,83 @@ fn title_fitting_never_splits_an_emoji_sequence() {
     }
 }
 
+/// A cut can leave a grapheme that starts with a mark, such as U+FE0F after
+/// a line separator, beside the ellipsis the fitter adds. Joined, the two
+/// are one grapheme, and the label must still measure within its budget.
+#[test]
+fn a_fitted_title_fits_its_budget_when_a_mark_joins_the_ellipsis() {
+    for source in [
+        "abcd\u{2028}\u{fe0f}z",
+        "/abcd\u{2028}\u{fe0f}z",
+        "~/dir/\u{2028}\u{fe0f}leaf",
+    ] {
+        for n in 0..=display_width(source) + 1 {
+            for (name, fitted) in [
+                ("fit_tab_title", fit_tab_title(source, n)),
+                ("fit_tab_path", fit_tab_path(source, n)),
+                ("middle_ellipsis", middle_ellipsis(source, n)),
+                ("fit_single_line_label", fit_single_line_label(source, n)),
+                (
+                    "fit_pane_titlebar_title",
+                    fit_pane_titlebar_title(None, "", source, None, None, None, n),
+                ),
+            ] {
+                assert!(
+                    display_width(&fitted) <= n,
+                    "{name} of {source:?} at {n} columns: {fitted:?} measures {}",
+                    display_width(&fitted)
+                );
+            }
+        }
+    }
+}
+
+/// The tab format's fixed text can join the title's graphemes: `#` before it
+/// or U+FE0F after it. How many times the title is substituted is still
+/// counted, so the title keeps its columns rather than dropping out.
+#[test]
+fn a_tab_format_joining_the_title_still_leaves_it_room() {
+    for format in ["#{title}\u{fe0f}", "{title}\u{fe0f}", "#{title}"] {
+        assert_eq!(
+            fit_tab_segment_title("1", None, 0, format, 400.0, 8.0),
+            "1",
+            "{format:?}"
+        );
+    }
+}
+
+/// Chrome titles draw a grapheme presented as emoji in the colour-emoji face,
+/// about two cells wide, so it measures at least two columns. A keycap and a
+/// text symbol with U+FE0F sum to one column by codepoint, and a title fitted
+/// by that drew past its lane. Text presentation and plain text keep their
+/// codepoint widths.
+#[test]
+fn emoji_graphemes_measure_as_wide_as_the_colour_face_draws_them() {
+    for (text, columns) in [
+        ("1\u{fe0f}\u{20e3}", 2),
+        ("\u{26a0}\u{fe0f}", 2),
+        ("\u{2764}\u{fe0f}", 2),
+        ("\u{2705}", 2),
+        ("\u{1f1ef}\u{1f1f5}", 2),
+        ("\u{1f44d}\u{1f3fd}", 4),
+        ("\u{26a0}", 1),
+        ("\u{26a0}\u{fe0e}", 1),
+        ("1\u{20e3}", 1),
+        ("e\u{301}", 1),
+        ("\u{4e2d}", 2),
+        ("ab", 2),
+        ("\u{26a0}\u{fe0f} 1\u{fe0f}\u{20e3} x", 7),
+    ] {
+        assert_eq!(display_width(text), columns, "{text:?}");
+    }
+    // A cut never keeps an emoji its columns cannot hold.
+    assert_eq!(fit_single_line_label("1\u{fe0f}\u{20e3}ab", 2), "…");
+    assert_eq!(
+        fit_single_line_label("1\u{fe0f}\u{20e3}ab", 3),
+        "1\u{fe0f}\u{20e3}…"
+    );
+}
+
 #[test]
 fn tab_title_keeps_full_path_when_budget_fits() {
     let title = "~/Repos/SPT-1/flight-event-line-server-go";

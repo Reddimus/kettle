@@ -1214,7 +1214,7 @@ impl Renderer {
                     } else {
                         attrs
                     };
-                    buf.set_text(&label, &attrs, Shaping::Advanced, None);
+                    fonts::set_chrome_text(buf, &label, &attrs, self.emoji_family);
                     self.pane_titlebar_texts[i] = key;
                 }
                 buf.shape_until_scroll(&mut self.font_system, false);
@@ -2830,11 +2830,11 @@ impl Renderer {
                 buf.set_size(Some(title_w), Some(title_h));
                 // Re-shape only when the label actually changed.
                 if self.tab_texts[bi] != label {
-                    buf.set_text(
+                    fonts::set_chrome_text(
+                        buf,
                         &label,
                         &Attrs::new().family(Family::Name(&family)),
-                        Shaping::Advanced,
-                        None,
+                        self.emoji_family,
                     );
                     self.tab_texts[bi] = label;
                 }
@@ -3083,11 +3083,11 @@ impl Renderer {
             self.tab_tooltip_buffer
                 .set_size(Some((sw - 16.0 * self.scale).max(1.0)), None);
             if self.tab_tooltip_text != *text {
-                self.tab_tooltip_buffer.set_text(
+                fonts::set_chrome_text(
+                    &mut self.tab_tooltip_buffer,
                     text,
                     &Attrs::new().family(Family::Name(&family)),
-                    Shaping::Advanced,
-                    None,
+                    self.emoji_family,
                 );
                 self.tab_tooltip_text.clone_from(text);
             }

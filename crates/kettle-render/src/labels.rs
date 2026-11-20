@@ -56,8 +56,33 @@ pub(crate) fn fit_key_hint(hint: &str, max_cols: usize) -> String {
 /// measure every overlay layout fits its text by. Callers that size a
 /// control for text the renderer will draw measure with this too.
 pub fn display_width(s: &str) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    if s.is_ascii() {
+        return codepoint_columns(s);
+    }
+    s.graphemes(true).map(grapheme_columns).sum()
+}
+
+fn codepoint_columns(s: &str) -> usize {
     use unicode_width::UnicodeWidthChar;
     s.chars().map(|c| c.width().unwrap_or(0)).sum()
+}
+
+/// A grapheme's columns: the sum of its codepoints' widths, and for one
+/// presented as emoji at least its width as an emoji sequence. Chrome titles
+/// draw those in the colour-emoji face about two cells wide, and a keycap or
+/// a text symbol with U+FE0F sums to one, so measured by codepoint it pushed
+/// the rest of a fitted title off its lane. The sequence width counts U+FE0F
+/// only after a base it applies to: an ellipsis a fitter puts before a kept
+/// U+FE0F joins it in one grapheme and stays one column.
+fn grapheme_columns(grapheme: &str) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    let columns = codepoint_columns(grapheme);
+    if !grapheme.is_ascii() && crate::fonts::emoji_text(grapheme) {
+        columns.max(grapheme.width())
+    } else {
+        columns
+    }
 }
 
 /// Take whole graphemes from the FRONT of `s` up to `cols` display columns.
@@ -70,7 +95,7 @@ pub(crate) fn take_cols_front(s: &str, cols: usize) -> String {
     let mut acc = 0usize;
     let mut end = 0;
     for (at, grapheme) in s.grapheme_indices(true) {
-        let w = display_width(grapheme);
+        let w = grapheme_columns(grapheme);
         if acc + w > cols {
             break;
         }
@@ -89,7 +114,7 @@ pub(crate) fn take_cols_back(s: &str, cols: usize) -> String {
     let mut acc = 0usize;
     let mut start = s.len();
     for (at, grapheme) in s.grapheme_indices(true).rev() {
-        let w = display_width(grapheme);
+        let w = grapheme_columns(grapheme);
         if acc + w > cols {
             break;
         }
@@ -202,7 +227,9 @@ pub fn fit_tab_segment_title(
     let fixed_label = kettle_config::template::fill(tab_format, &[("n", &n), ("title", "")]);
     let fixed_w = display_width(&fixed_label);
     let probe = kettle_config::template::fill(tab_format, &[("n", &n), ("title", "x")]);
-    let substitutions = display_width(&probe).saturating_sub(fixed_w);
+    // By codepoint, which adds up across a join: `#` before the title or
+    // U+FE0F after it joins the probe's `x` in one grapheme.
+    let substitutions = codepoint_columns(&probe).saturating_sub(codepoint_columns(&fixed_label));
     let maxc = avail
         .saturating_sub(fixed_w)
         .checked_div(substitutions)

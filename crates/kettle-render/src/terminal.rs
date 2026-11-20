@@ -1643,14 +1643,10 @@ impl Renderer {
                 if let Some(emoji_family) = emoji_family
                     && !text.is_ascii()
                 {
-                    use unicode_segmentation::UnicodeSegmentation;
-                    for (offset, grapheme) in text.grapheme_indices(true) {
-                        if !grapheme.is_ascii() && super::fonts::emoji_text(grapheme) {
-                            let emoji_attrs = run_attrs(cfg, &ff, *fg, *bold, *italic)
-                                .family(Family::Name(emoji_family));
-                            attrs_list
-                                .add_span(s + offset..s + offset + grapheme.len(), &emoji_attrs);
-                        }
+                    for range in super::fonts::emoji_grapheme_ranges(text) {
+                        let emoji_attrs = run_attrs(cfg, &ff, *fg, *bold, *italic)
+                            .family(Family::Name(emoji_family));
+                        attrs_list.add_span(s + range.start..s + range.end, &emoji_attrs);
                     }
                 }
             }
