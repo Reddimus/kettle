@@ -3777,6 +3777,20 @@ match. Hidden/card cells and row ends cannot be partners. The block cursor
 reuses these positioned masks and connector samples in cursor colour in both
 renderers; its cache distinguishes natural masks from stretched samples.
 
+A wide final still overhangs its open side, and a wide isolated letter its
+right, so highlight fills in bidi rows follow the drawn text. After shaping,
+the pane walk measures each row holding highlighted right-to-left cells once
+with `batching::drawn_cell_spans`: the same grid emit through a source that
+reads raster placements and never rasterizes into or evicts from the atlas.
+`terminal::HighlightReach` takes each run of highlighted visual cells
+(selection and search together) and widens the fills at its ends over the
+right-to-left text drawn past them, inside both the pane rect that clips its
+quads and the pixel columns its glyph scissor keeps; two runs reaching into
+one gap meet halfway. Selection runs carry the x their widened sides moved
+to, and the outline traces those, joining runs only where moved sides meet.
+Underlines, links and cursors stay on the cell grid, and rows without a bidi
+layout are untouched.
+
 This repairs connector gaps, not proportional glyph widths, fallback
 baselines, or contextual mark shaping. Preferring a metric-compatible Arabic
 face (option D) remains a separate follow-up; font selection is unchanged.
