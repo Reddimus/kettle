@@ -996,8 +996,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - On Windows the clipboard is read on its own thread. A program that holds
   the clipboard and is slow to hand over its text could freeze the window for
   as long as it took; now each clipboard read, for a paste, a paste preview
-  or a program's OSC 52 request, gives up after two seconds, and clipboard
-  requests are still served in the order they were made. Clipboard text read
+  or a program's OSC 52 request, gives up after two seconds, and an OSC 52
+  write never overtakes a read made before it. Clipboard text read
   for the find bar, a text field or a paste preview is refused when it is
   larger than the largest paste, 4 MiB; on macOS the system still fetches
   the whole text before Kettle can refuse it.
