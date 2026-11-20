@@ -1209,11 +1209,11 @@ impl<T> Term<T> {
         self.resize_pulling_history(size, usize::MAX);
     }
 
-    /// Resize as [`Term::resize`] does, except that lines added to the active
+    /// Resize as [`Term::resize`] does, except that lines added to the primary
     /// screen take at most `history_pull` rows back from its history; the rest
     /// are blank lines added below its content (see
-    /// [`Grid::resize_pulling_history`]). The inactive screen resizes as
-    /// [`Term::resize`] resizes it.
+    /// [`Grid::resize_pulling_history`]). The limit applies whether or not the
+    /// primary screen is active; the alternate screen keeps no history.
     pub fn resize_pulling_history<S: Dimensions>(&mut self, size: S, history_pull: usize) {
         let old_cols = self.columns();
         let old_lines = self.screen_lines();
@@ -1238,8 +1238,10 @@ impl<T> Term<T> {
         self.vi_mode_cursor.point.line += delta;
 
         let is_alt = self.mode.contains(TermMode::ALT_SCREEN);
-        self.grid.resize_pulling_history(!is_alt, num_lines, num_cols, history_pull);
-        self.inactive_grid.resize(is_alt, num_lines, num_cols);
+        let (active_pull, inactive_pull) =
+            if is_alt { (usize::MAX, history_pull) } else { (history_pull, usize::MAX) };
+        self.grid.resize_pulling_history(!is_alt, num_lines, num_cols, active_pull);
+        self.inactive_grid.resize_pulling_history(is_alt, num_lines, num_cols, inactive_pull);
 
         // Invalidate selection and tabs only when necessary.
         if old_cols != num_cols {
