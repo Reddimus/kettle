@@ -91,6 +91,84 @@ pub(crate) fn search_highlight_at(
         .then_some(span.active)
 }
 
+/// Where highlighted runs of cells in bidi rows start and end when the
+/// right-to-left text in them is drawn past their cell edges: the x of a
+/// run's left side, keyed by its viewport row and first visual column, and
+/// of its right side, keyed by its last.
+#[derive(Default)]
+pub(crate) struct HighlightReach {
+    left: std::collections::HashMap<(i32, usize), f32>,
+    right: std::collections::HashMap<(i32, usize), f32>,
+}
+
+impl HighlightReach {
+    /// Add one viewport row's runs. `cells` are its highlighted cells sorted
+    /// by visual column, each with whether it is right-to-left text; `drawn`
+    /// is the x span each visual column's text is drawn over. A run reaches
+    /// only over its right-to-left text, never into another run or past
+    /// `clip`, the pane edges that clip text.
+    pub(crate) fn add_row(
+        &mut self,
+        cells: &[(i32, usize, bool)],
+        drawn: &[Option<(f32, f32)>],
+        (ox, cw): (f32, f32),
+        clip: (f32, f32),
+    ) {
+        let runs: Vec<_> = cells.chunk_by(|a, b| b.1 == a.1 + 1).collect();
+        for (index, run) in runs.iter().enumerate() {
+            let (row, first, last) = (run[0].0, run[0].1, run[run.len() - 1].1);
+            let (cell_left, cell_right) = (ox + first as f32 * cw, ox + (last + 1) as f32 * cw);
+            let floor = index.checked_sub(1).map_or(clip.0, |before| {
+                ox + (runs[before][runs[before].len() - 1].1 + 1) as f32 * cw
+            });
+            let ceiling = runs
+                .get(index + 1)
+                .map_or(clip.1, |after| ox + after[0].1 as f32 * cw);
+            let (left, right) = run
+                .iter()
+                .filter(|&&(_, _, rtl)| rtl)
+                .filter_map(|&(_, column, _)| drawn.get(column).copied().flatten())
+                .fold((cell_left, cell_right), |(a, b), (left, right)| {
+                    (a.min(left), b.max(right))
+                });
+            let (left, right) = (left.max(floor), right.min(ceiling));
+            if left < cell_left {
+                self.left.insert((row, first), left);
+            }
+            if right > cell_right {
+                self.right.insert((row, last), right);
+            }
+        }
+    }
+
+    /// Widen `fill`, over visual columns `first..=last` of viewport `row`, to
+    /// the text drawn there, and return how many pixels it now reaches past
+    /// its left and right edges. A fill no run reaches past is untouched.
+    pub(crate) fn widen(
+        &self,
+        fill: &mut QuadInstance,
+        row: i32,
+        first: usize,
+        last: usize,
+    ) -> [f32; 2] {
+        let mut reach = [0.0; 2];
+        if let Some(&x) = self.left.get(&(row, first))
+            && x < fill.pos[0]
+        {
+            reach[0] = fill.pos[0] - x;
+            fill.size[0] += reach[0];
+            fill.pos[0] = x;
+        }
+        if let Some(&x) = self.right.get(&(row, last))
+            && x > fill.pos[0] + fill.size[0]
+        {
+            reach[1] = x - (fill.pos[0] + fill.size[0]);
+            fill.size[0] = x - fill.pos[0];
+        }
+        reach
+    }
+}
+
 /// A hyperlink underline in a pane's viewport (grid coords).
 #[derive(Clone, Copy)]
 pub struct LinkRect {
@@ -121,6 +199,66 @@ pub(crate) fn link_decoration(
         Some((link.explicit, LINK_REST_THICKNESS, 0.55))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod highlight_reach_tests {
+    use super::*;
+
+    #[test]
+    fn runs_reach_over_their_right_to_left_ink_only_up_to_their_neighbours() {
+        let (ox, cw) = (5.0, 10.0);
+        let mut drawn = vec![None; 10];
+        // Run 0..=1: its left cell overhangs past the pane's left edge.
+        drawn[0] = Some((-3.0, 15.0));
+        drawn[1] = Some((15.0, 25.0));
+        // Run 3..=4 overhangs both ends, into the gap and toward run 6..=7.
+        drawn[3] = Some((28.0, 40.0));
+        drawn[4] = Some((45.0, 72.0));
+        // Run 6..=7 is left-to-right text, whose overhang never counts.
+        drawn[6] = Some((60.0, 90.0));
+        let cells = [
+            (2, 0, true),
+            (2, 1, true),
+            (2, 3, true),
+            (2, 4, true),
+            (2, 6, false),
+            (2, 7, false),
+        ];
+        let mut reach = HighlightReach::default();
+        reach.add_row(&cells, &drawn, (ox, cw), (0.0, 200.0));
+        let fill = |first: usize, last: usize| {
+            rect(
+                ox + first as f32 * cw,
+                0.0,
+                (last + 1 - first) as f32 * cw,
+                10.0,
+                Rgb::new(0, 0, 0),
+                1.0,
+            )
+        };
+        let widened = |first: usize, last: usize| {
+            let mut quad = fill(first, last);
+            let past = reach.widen(&mut quad, 2, first, last);
+            (quad.pos[0], quad.pos[0] + quad.size[0], past)
+        };
+        assert_eq!(
+            widened(0, 1),
+            (0.0, 25.0, [5.0, 0.0]),
+            "clipped to the pane"
+        );
+        assert_eq!(widened(3, 4), (28.0, 65.0, [7.0, 10.0]), "short of 6..=7");
+        assert_eq!(widened(6, 7), (65.0, 85.0, [0.0, 0.0]));
+        // A one-cell fill at a run's end reaches with the run.
+        assert_eq!(widened(4, 4), (45.0, 65.0, [0.0, 10.0]));
+        // Every other fill is untouched, bit for bit.
+        for (row, first, last) in [(3, 0, 0), (3, 4, 4), (2, 1, 1), (2, 6, 6)] {
+            let mut quad = fill(first, last);
+            let before = (quad.pos, quad.size);
+            assert_eq!(reach.widen(&mut quad, row, first, last), [0.0; 2]);
+            assert_eq!((quad.pos, quad.size), before, "row {row} {first}..={last}");
+        }
     }
 }
 
@@ -764,9 +902,13 @@ impl Renderer {
         let mut builtins = std::mem::take(&mut self.pane_builtins[idx]);
         builtins.clear();
         let mut fallback_run = None;
+        // Per-cell fills, each with its viewport row and visual column.
         let mut search_quads = Vec::new();
         let mut highlight_decorations = Vec::new();
         let mut selection_cell_fills = Vec::new();
+        // The highlighted cells of rows drawn in bidi order: viewport row,
+        // visual column, and whether the cell is right-to-left text.
+        let mut bidi_highlights = Vec::new();
 
         for (snapshot_index, sc) in snap.cells.iter().enumerate() {
             let row = sc.line;
@@ -930,6 +1072,11 @@ impl Renderer {
                 None if selected => CellHighlight::Selection,
                 None => CellHighlight::None,
             };
+            if let Some(map) = map
+                && !matches!(highlight, CellHighlight::None)
+            {
+                bidi_highlights.push((vrow, vcol, map.is_rtl(col)));
+            }
             let highlight_bg = if matches!(highlight, CellHighlight::None) {
                 bg
             } else {
@@ -1080,23 +1227,31 @@ impl Renderer {
                 CellHighlight::Selection | CellHighlight::InactiveSelection
             ) && cell_background != selection_bg
             {
-                selection_cell_fills.push(rect(
-                    ox + vcol as f32 * cw,
-                    oy + vrow as f32 * ch,
-                    cw,
-                    ch,
-                    cell_background,
-                    1.0,
+                selection_cell_fills.push((
+                    rect(
+                        ox + vcol as f32 * cw,
+                        oy + vrow as f32 * ch,
+                        cw,
+                        ch,
+                        cell_background,
+                        1.0,
+                    ),
+                    vrow,
+                    vcol,
                 ));
             }
             if search.is_some() {
-                search_quads.push(rect(
-                    ox + vcol as f32 * cw,
-                    oy + vrow as f32 * ch,
-                    cw,
-                    ch,
-                    cell_background,
-                    1.0,
+                search_quads.push((
+                    rect(
+                        ox + vcol as f32 * cw,
+                        oy + vrow as f32 * ch,
+                        cw,
+                        ch,
+                        cell_background,
+                        1.0,
+                    ),
+                    vrow,
+                    vcol,
                 ));
             }
             // SGR 4 underline family / SGR 9 strikeout, both engine-tracked
@@ -1265,209 +1420,6 @@ impl Renderer {
             text_changed = true;
         }
         self.pane_builtins[idx] = builtins;
-
-        // Selection. A block (Alt+drag) selection draws a per-row COLUMN
-        // rectangle so the highlight matches the rectangular text that's copied;
-        // a linear selection wraps full lines. `selection_row_span` encodes both.
-        let mut selection_runs = Vec::new();
-        if let Some(sel) = snap.selection {
-            let (s, e) = (sel.start, sel.end);
-            for r in visible_selection_rows(s.line.0, e.line.0, display_off, screen_rows) {
-                // Selection lines are grid-absolute; map to the viewport row.
-                let vrow = r + display_off;
-                debug_assert!((0..screen_rows).contains(&vrow));
-                let (c0, c1) = selection_row_span(
-                    r,
-                    (s.line.0, s.column.0),
-                    (e.line.0, e.column.0),
-                    cols,
-                    sel.is_block,
-                );
-                let w = (c1 + 1).saturating_sub(c0).max(1);
-                let target = if inactive > 0.0 {
-                    &mut *decorations
-                } else {
-                    &mut *quads
-                };
-                // A logical span over reordered text covers several runs of
-                // drawn cells.
-                let runs = row_map(vrow).map_or_else(
-                    || std::iter::once(c0..c0 + w).collect(),
-                    |map| map.visual_runs(c0..=c0 + w - 1),
-                );
-                for run in runs {
-                    target.push(rect(
-                        ox + run.start as f32 * cw,
-                        oy + vrow as f32 * ch,
-                        run.len() as f32 * cw,
-                        ch,
-                        selection_bg,
-                        1.0,
-                    ));
-                    selection_runs.push(super::selection_outline::SelectionRun {
-                        row: vrow,
-                        columns: run,
-                    });
-                }
-            }
-        }
-
-        if inactive > 0.0 {
-            decorations.extend(selection_cell_fills);
-            decorations.extend(search_quads);
-        } else {
-            quads.extend(selection_cell_fills);
-            quads.extend(search_quads);
-        }
-        decorations.extend(highlight_decorations);
-        if let Some((low, high)) = outline_backdrops {
-            let ink = color::with_min_contrast_on_both(
-                selection_bg,
-                low,
-                high,
-                if window_focused { 3.0 } else { 2.0 },
-                true,
-            );
-            selection_runs.sort_by_key(|run| (run.row, run.columns.start));
-            let target = if inactive > 0.0 {
-                &mut *decorations
-            } else {
-                &mut *quads
-            };
-            super::selection_outline::append_outline(
-                target,
-                &selection_runs,
-                (ox, oy),
-                (cw, ch),
-                self.scale,
-                ink,
-            );
-        }
-
-        // The focused cursor blinks; inactive outlines remain steady.
-        // Shape comes from the engine's live `RenderableContent.cursor.shape`
-        // which DECSCUSR (`CSI Ps SP q`) updates per-pane — vim/neovim/fish
-        // use this to flip between block/underline/beam for normal/insert/
-        // replace modes. The engine is seeded from `cfg.cursor_style` at pane
-        // creation so the default still matches the user's config.
-        // DEC ?25l (vim, less, fzf) reaches us as `EShape::Hidden`, which
-        // `draw_cursor` excludes, so outside vi mode it hides every shape,
-        // including the HollowBlock outline.
-        // The cursor point is grid-absolute, including alacritty's native vi
-        // cursor. When scrolled back (`display_offset > 0`) it must convert to
-        // a viewport row like the cells and selection already do above — else
-        // a phantom cursor block paints over unrelated scrollback.
-        if draw_cursor {
-            // A wide glyph under a solid block cursor widens the
-            // block to both columns (and a spacer-parked cursor re-anchors to
-            // the lead glyph's cell). `cursor_wide_quad` is only ever set on
-            // the focused solid-Block path, so beam/underline/hollow shapes
-            // and unfocused windows are untouched.
-            let (bcol, bcells) = cursor_wide_quad.unwrap_or((cp.column.0, 1.0));
-            // A two-column character keeps its lead on the left when
-            // reordered, so the lead's visual column is the block's left edge.
-            let bx = ox + vis(cvrow, bcol) as f32 * cw;
-            // In right-to-left text a cell's logical start is its right edge.
-            let beam_right = row_map(cvrow).is_some_and(|map| map.is_rtl(cp.column.0));
-            let by = oy + cvrow as f32 * ch;
-            // OSC 12 cursor color override (stored in `term_colors[258]`)
-            // takes precedence over the theme, the same precedence rule the
-            // OSC 4/10/11/12 *query* path returns.
-            let cursor_color = if snap.vi_mode {
-                // Keep vi navigation distinct from both the application
-                // cursor and broadcast-mode yellow.
-                theme.palette[5]
-            } else {
-                color::cursor_block_color(theme, term_colors)
-            };
-            let on_card_fallback = matches!(
-                card_frame.cell_at(snap, cp.line.0, cp.column.0),
-                inline_cards::CardCell::Neutral | inline_cards::CardCell::Unknown
-            );
-            let cursor_quads = if on_card_fallback {
-                card_cursors
-            } else if !cursor_focused {
-                decorations
-            } else {
-                quads
-            };
-            let cursor_start = cursor_quads.len() as u32;
-            // Vi mode and inactive panes can use HollowBlock. DECSCUSR selects
-            // block, beam or underline; focus never changes the engine's state.
-            if shape == EShape::HollowBlock {
-                cursor_quads.push(rect(bx, by, cw, 1.0, cursor_color, 1.0));
-                cursor_quads.push(rect(bx, by + ch - 1.0, cw, 1.0, cursor_color, 1.0));
-                cursor_quads.push(rect(bx, by, 1.0, ch, cursor_color, 1.0));
-                cursor_quads.push(rect(bx + cw - 1.0, by, 1.0, ch, cursor_color, 1.0));
-            } else {
-                let (cwidth, alpha, cheight, yoff) = match shape {
-                    EShape::Beam => (cw * 0.15, 1.0, ch, 0.0),
-                    EShape::Underline => (cw, 1.0, 2.0, ch - 2.0),
-                    // A focused block cursor is solid. The inverted glyph under
-                    // it is drawn in the dedicated cursor-glyph pass (see below),
-                    // not recolored into the pane buffer, so a blink does not
-                    // reshape the row. `bcells` widens it over a wide
-                    // (CJK/emoji) glyph so the right half stays covered.
-                    EShape::Block | EShape::HollowBlock | EShape::Hidden => {
-                        (cw * bcells, 1.0, ch, 0.0)
-                    }
-                };
-                let cx = if shape == EShape::Beam && beam_right {
-                    bx + cw - cwidth
-                } else {
-                    bx
-                };
-                cursor_quads.push(rect(cx, by + yoff, cwidth, cheight, cursor_color, alpha));
-                // Queue the inverted foreground glyph to be
-                // drawn ON TOP of the solid block in its own pass. Only the
-                // full Block shape covers the glyph; beam/underline leave it
-                // visible in its normal color, so they need no overdraw.
-                if matches!(shape, EShape::Block)
-                    && let Some((gch, gcolor, gmarks, gattrs, gemoji)) = cursor_glyph_capture
-                {
-                    self.pending_cursor_glyph = Some(PendingCursorGlyph {
-                        x: bx,
-                        y: by,
-                        row_baseline: 0.0,
-                        ch: cursor_builtin.map_or(gch, |cell| cell.ch),
-                        text: match cursor_builtin {
-                            Some(cell) => cell.ch.to_string(),
-                            None => std::iter::once(gch).chain(gmarks.iter().copied()).collect(),
-                        },
-                        emoji_qualified: gmarks.contains(&'\u{FE0F}'),
-                        attrs: gattrs,
-                        color: gcolor,
-                        clip: if super::fonts::emoji_presentation(gch, gmarks) {
-                            let left = bx.max(pv.terminal.0);
-                            let right = (bx + cw * bcells).min(pv.terminal.0 + pv.terminal.2);
-                            (left, pv.terminal.1, (right - left).max(0.0), pv.terminal.3)
-                        } else {
-                            pv.terminal
-                        },
-                        marks: Vec::new(),
-                        builtin: cursor_builtin,
-                        emoji: (gemoji && cursor_builtin.is_none())
-                            .then(|| usize::try_from(cvrow).ok())
-                            .flatten()
-                            .map(|line| EmojiCursorCell {
-                                pane: [pv.terminal.0, pv.terminal.1, pv.terminal.2, pv.terminal.3],
-                                line,
-                                column: vis(cvrow, bcol),
-                            }),
-                    });
-                }
-            }
-            // vi mode's cursor never blinks, so only an application cursor
-            // gets a range the off phase can skip.
-            if !snap.vi_mode && cursor_focused {
-                let range = Some(cursor_start..cursor_quads.len() as u32);
-                if on_card_fallback {
-                    self.card_cursor_quad_range = range;
-                } else {
-                    self.cursor_quad_range = range;
-                }
-            }
-        }
 
         // Lay out the text buffer. Advance lines by the grid's
         // `cell_h` (which includes the cfg.cell_height multiplier) so the text
@@ -1709,6 +1661,267 @@ impl Renderer {
                 ));
             }
         }
+        // Right-to-left text can be drawn wider than its cells: a wide Arabic
+        // final overhangs its open side, a wide isolated letter its right. A
+        // highlighted run of a bidi row reaches as far as its text is drawn.
+        let mut reach = HighlightReach::default();
+        if bidi_highlights.iter().any(|&(_, _, rtl)| rtl) {
+            bidi_highlights.sort_unstable_by_key(|&(row, column, _)| (row, column));
+            let positioning = if cfg.text_renderer == TextRendererMode::Grid {
+                GlyphPositioning::Grid(cw)
+            } else {
+                GlyphPositioning::GraphemeRows(cw)
+            };
+            let mut drawn = Vec::new();
+            for cells in bidi_highlights.chunk_by(|a, b| a.0 == b.0) {
+                let Ok(line) = usize::try_from(cells[0].0) else {
+                    continue;
+                };
+                if !cells.iter().any(|&(_, _, rtl)| rtl) {
+                    continue;
+                }
+                drawn.clear();
+                drawn.resize(cols, None);
+                for (column, width, left, right) in super::batching::drawn_cell_spans(
+                    &self.pane_buffers[idx],
+                    &self.pane_mark_shifts[idx],
+                    line,
+                    (ox, oy),
+                    cw,
+                    positioning,
+                    &mut self.glyph_pipeline,
+                    &mut self.swash,
+                    &mut self.font_system,
+                    &mut self.glyph_char_starts,
+                ) {
+                    for span in drawn.iter_mut().skip(column).take(width) {
+                        *span = Some(span.map_or((left, right), |(a, b): (f32, f32)| {
+                            (a.min(left), b.max(right))
+                        }));
+                    }
+                }
+                reach.add_row(
+                    cells,
+                    &drawn,
+                    (ox, cw),
+                    (pv.terminal.0, pv.terminal.0 + pv.terminal.2),
+                );
+            }
+        }
+        // Selection. A block (Alt+drag) selection draws a per-row COLUMN
+        // rectangle so the highlight matches the rectangular text that's copied;
+        // a linear selection wraps full lines. `selection_row_span` encodes both.
+        let mut selection_runs = Vec::new();
+        if let Some(sel) = snap.selection {
+            let (s, e) = (sel.start, sel.end);
+            for r in visible_selection_rows(s.line.0, e.line.0, display_off, screen_rows) {
+                // Selection lines are grid-absolute; map to the viewport row.
+                let vrow = r + display_off;
+                debug_assert!((0..screen_rows).contains(&vrow));
+                let (c0, c1) = selection_row_span(
+                    r,
+                    (s.line.0, s.column.0),
+                    (e.line.0, e.column.0),
+                    cols,
+                    sel.is_block,
+                );
+                let w = (c1 + 1).saturating_sub(c0).max(1);
+                let target = if inactive > 0.0 {
+                    &mut *decorations
+                } else {
+                    &mut *quads
+                };
+                // A logical span over reordered text covers several runs of
+                // drawn cells.
+                let runs = row_map(vrow).map_or_else(
+                    || std::iter::once(c0..c0 + w).collect(),
+                    |map| map.visual_runs(c0..=c0 + w - 1),
+                );
+                for run in runs {
+                    let mut fill = rect(
+                        ox + run.start as f32 * cw,
+                        oy + vrow as f32 * ch,
+                        run.len() as f32 * cw,
+                        ch,
+                        selection_bg,
+                        1.0,
+                    );
+                    let last = run.end.max(run.start + 1) - 1;
+                    let past = reach.widen(&mut fill, vrow, run.start, last);
+                    target.push(fill);
+                    selection_runs.push(super::selection_outline::SelectionRun {
+                        row: vrow,
+                        columns: run,
+                        reach: past,
+                    });
+                }
+            }
+        }
+
+        let cell_fills =
+            selection_cell_fills
+                .into_iter()
+                .chain(search_quads)
+                .map(|(mut fill, row, column)| {
+                    reach.widen(&mut fill, row, column, column);
+                    fill
+                });
+        if inactive > 0.0 {
+            decorations.extend(cell_fills);
+        } else {
+            quads.extend(cell_fills);
+        }
+        decorations.extend(highlight_decorations);
+        if let Some((low, high)) = outline_backdrops {
+            let ink = color::with_min_contrast_on_both(
+                selection_bg,
+                low,
+                high,
+                if window_focused { 3.0 } else { 2.0 },
+                true,
+            );
+            selection_runs.sort_by_key(|run| (run.row, run.columns.start));
+            let target = if inactive > 0.0 {
+                &mut *decorations
+            } else {
+                &mut *quads
+            };
+            super::selection_outline::append_outline(
+                target,
+                &selection_runs,
+                (ox, oy),
+                (cw, ch),
+                self.scale,
+                ink,
+            );
+        }
+
+        // The focused cursor blinks; inactive outlines remain steady.
+        // Shape comes from the engine's live `RenderableContent.cursor.shape`
+        // which DECSCUSR (`CSI Ps SP q`) updates per-pane — vim/neovim/fish
+        // use this to flip between block/underline/beam for normal/insert/
+        // replace modes. The engine is seeded from `cfg.cursor_style` at pane
+        // creation so the default still matches the user's config.
+        // DEC ?25l (vim, less, fzf) reaches us as `EShape::Hidden`, which
+        // `draw_cursor` excludes, so outside vi mode it hides every shape,
+        // including the HollowBlock outline.
+        // The cursor point is grid-absolute, including alacritty's native vi
+        // cursor. When scrolled back (`display_offset > 0`) it must convert to
+        // a viewport row like the cells and selection already do above — else
+        // a phantom cursor block paints over unrelated scrollback.
+        if draw_cursor {
+            // A wide glyph under a solid block cursor widens the
+            // block to both columns (and a spacer-parked cursor re-anchors to
+            // the lead glyph's cell). `cursor_wide_quad` is only ever set on
+            // the focused solid-Block path, so beam/underline/hollow shapes
+            // and unfocused windows are untouched.
+            let (bcol, bcells) = cursor_wide_quad.unwrap_or((cp.column.0, 1.0));
+            // A two-column character keeps its lead on the left when
+            // reordered, so the lead's visual column is the block's left edge.
+            let bx = ox + vis(cvrow, bcol) as f32 * cw;
+            // In right-to-left text a cell's logical start is its right edge.
+            let beam_right = row_map(cvrow).is_some_and(|map| map.is_rtl(cp.column.0));
+            let by = oy + cvrow as f32 * ch;
+            // OSC 12 cursor color override (stored in `term_colors[258]`)
+            // takes precedence over the theme, the same precedence rule the
+            // OSC 4/10/11/12 *query* path returns.
+            let cursor_color = if snap.vi_mode {
+                // Keep vi navigation distinct from both the application
+                // cursor and broadcast-mode yellow.
+                theme.palette[5]
+            } else {
+                color::cursor_block_color(theme, term_colors)
+            };
+            let on_card_fallback = matches!(
+                card_frame.cell_at(snap, cp.line.0, cp.column.0),
+                inline_cards::CardCell::Neutral | inline_cards::CardCell::Unknown
+            );
+            let cursor_quads = if on_card_fallback {
+                card_cursors
+            } else if !cursor_focused {
+                decorations
+            } else {
+                quads
+            };
+            let cursor_start = cursor_quads.len() as u32;
+            // Vi mode and inactive panes can use HollowBlock. DECSCUSR selects
+            // block, beam or underline; focus never changes the engine's state.
+            if shape == EShape::HollowBlock {
+                cursor_quads.push(rect(bx, by, cw, 1.0, cursor_color, 1.0));
+                cursor_quads.push(rect(bx, by + ch - 1.0, cw, 1.0, cursor_color, 1.0));
+                cursor_quads.push(rect(bx, by, 1.0, ch, cursor_color, 1.0));
+                cursor_quads.push(rect(bx + cw - 1.0, by, 1.0, ch, cursor_color, 1.0));
+            } else {
+                let (cwidth, alpha, cheight, yoff) = match shape {
+                    EShape::Beam => (cw * 0.15, 1.0, ch, 0.0),
+                    EShape::Underline => (cw, 1.0, 2.0, ch - 2.0),
+                    // A focused block cursor is solid. The inverted glyph under
+                    // it is drawn in the dedicated cursor-glyph pass (see below),
+                    // not recolored into the pane buffer, so a blink does not
+                    // reshape the row. `bcells` widens it over a wide
+                    // (CJK/emoji) glyph so the right half stays covered.
+                    EShape::Block | EShape::HollowBlock | EShape::Hidden => {
+                        (cw * bcells, 1.0, ch, 0.0)
+                    }
+                };
+                let cx = if shape == EShape::Beam && beam_right {
+                    bx + cw - cwidth
+                } else {
+                    bx
+                };
+                cursor_quads.push(rect(cx, by + yoff, cwidth, cheight, cursor_color, alpha));
+                // Queue the inverted foreground glyph to be
+                // drawn ON TOP of the solid block in its own pass. Only the
+                // full Block shape covers the glyph; beam/underline leave it
+                // visible in its normal color, so they need no overdraw.
+                if matches!(shape, EShape::Block)
+                    && let Some((gch, gcolor, gmarks, gattrs, gemoji)) = cursor_glyph_capture
+                {
+                    self.pending_cursor_glyph = Some(PendingCursorGlyph {
+                        x: bx,
+                        y: by,
+                        row_baseline: 0.0,
+                        ch: cursor_builtin.map_or(gch, |cell| cell.ch),
+                        text: match cursor_builtin {
+                            Some(cell) => cell.ch.to_string(),
+                            None => std::iter::once(gch).chain(gmarks.iter().copied()).collect(),
+                        },
+                        emoji_qualified: gmarks.contains(&'\u{FE0F}'),
+                        attrs: gattrs,
+                        color: gcolor,
+                        clip: if super::fonts::emoji_presentation(gch, gmarks) {
+                            let left = bx.max(pv.terminal.0);
+                            let right = (bx + cw * bcells).min(pv.terminal.0 + pv.terminal.2);
+                            (left, pv.terminal.1, (right - left).max(0.0), pv.terminal.3)
+                        } else {
+                            pv.terminal
+                        },
+                        marks: Vec::new(),
+                        builtin: cursor_builtin,
+                        emoji: (gemoji && cursor_builtin.is_none())
+                            .then(|| usize::try_from(cvrow).ok())
+                            .flatten()
+                            .map(|line| EmojiCursorCell {
+                                pane: [pv.terminal.0, pv.terminal.1, pv.terminal.2, pv.terminal.3],
+                                line,
+                                column: vis(cvrow, bcol),
+                            }),
+                    });
+                }
+            }
+            // vi mode's cursor never blinks, so only an application cursor
+            // gets a range the off phase can skip.
+            if !snap.vi_mode && cursor_focused {
+                let range = Some(cursor_start..cursor_quads.len() as u32);
+                if on_card_fallback {
+                    self.card_cursor_quad_range = range;
+                } else {
+                    self.cursor_quad_range = range;
+                }
+            }
+        }
+
+        let buf = &self.pane_buffers[idx];
         if cursor_focused
             && recolor_cursor_cell.is_some()
             && let Some(cursor) = self.pending_cursor_glyph.as_mut()

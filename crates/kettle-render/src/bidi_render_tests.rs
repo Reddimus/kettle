@@ -685,3 +685,352 @@ fn arabic_hidden_cells_and_row_ends_have_no_outward_seam() {
         }
     }
 }
+
+/// The four fills a pane paints under highlighted cells.
+#[derive(Clone, Copy, Debug)]
+enum Highlight {
+    Match,
+    OtherMatch,
+    Selection,
+    UnfocusedSelection,
+}
+
+impl Highlight {
+    const ALL: [Self; 4] = [
+        Self::Match,
+        Self::OtherMatch,
+        Self::Selection,
+        Self::UnfocusedSelection,
+    ];
+
+    /// Highlight logical `columns` of row 0.
+    fn apply(
+        self,
+        snap: &mut crate::snapshot::PaneSnapshot,
+        overlay: &mut Overlay,
+        columns: std::ops::RangeInclusive<usize>,
+    ) {
+        use alacritty_terminal::selection::SelectionRange;
+        use kettle_core::{Column, Line, Point};
+        match self {
+            Self::Match | Self::OtherMatch => overlay.highlights.push(HighlightRect {
+                row: 0,
+                col: *columns.start(),
+                width: columns.end() + 1 - columns.start(),
+                active: matches!(self, Self::Match),
+            }),
+            Self::Selection | Self::UnfocusedSelection => {
+                snap.selection = Some(SelectionRange::new(
+                    Point::new(Line(0), Column(*columns.start())),
+                    Point::new(Line(0), Column(*columns.end())),
+                    false,
+                ));
+                overlay.window_focused = matches!(self, Self::Selection);
+            }
+        }
+    }
+
+    /// The perimeter colour a low-contrast selection fill also draws.
+    fn outline(self, renderer: &Renderer, cfg: &Config) -> Option<Rgb> {
+        let focused = match self {
+            Self::Match | Self::OtherMatch => return None,
+            Self::Selection => true,
+            Self::UnfocusedSelection => false,
+        };
+        super::theme::PaneSelectionFills::new(
+            &cfg.theme,
+            cfg.theme.background,
+            renderer.selection_backdrop_alpha,
+            &mut MinimumContrastCache::default(),
+        )
+        .outline(&cfg.theme, focused)
+    }
+}
+
+/// The first pixel column (or row) a rectangle edge at `x` paints: the first
+/// whose centre it covers.
+fn first_pixel(x: f32) -> i64 {
+    (x - 0.5).ceil() as i64
+}
+
+/// The frame's pixel rows of viewport row `row` of a pane at the origin.
+fn row_pixels(renderer: &Renderer, cfg: &Config, row: usize) -> std::ops::Range<u32> {
+    let (_, oy) = pane_grid_origin((0.0, 0.0, 640.0, 220.0), (cfg.padding_x, cfg.padding_y));
+    let top = oy + row as f32 * renderer.cell_h;
+    first_pixel(top) as u32..first_pixel(top + renderer.cell_h) as u32
+}
+
+/// The pixel columns covered by the glyph images of `rows` that reach into
+/// `[left, right)`: the text of those cells as drawn, clipped to the frame.
+fn ink_columns(
+    renderer: &Renderer,
+    rows: &std::ops::Range<u32>,
+    (left, right): (f32, f32),
+    width: u32,
+) -> Option<(i64, i64)> {
+    renderer
+        .glyph_instances
+        .iter()
+        .filter(|glyph| {
+            let middle = glyph.pos[1] + glyph.size[1] / 2.0;
+            middle >= rows.start as f32
+                && middle < rows.end as f32
+                && glyph.pos[0] < right
+                && glyph.pos[0] + glyph.size[0] > left
+        })
+        .map(|glyph| (glyph.pos[0] as i64, (glyph.pos[0] + glyph.size[0]) as i64))
+        .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
+        .map(|(a, b)| (a.max(0), b.min(i64::from(width))))
+}
+
+fn near(pixel: &image::Rgba<u8>, color: Rgb) -> bool {
+    pixel[0].abs_diff(color.r) <= 8
+        && pixel[1].abs_diff(color.g) <= 8
+        && pixel[2].abs_diff(color.b) <= 8
+}
+
+/// The share of pixel column `x` within `rows` painted one of `colors`.
+fn painted(frame: &image::RgbaImage, x: i64, rows: &std::ops::Range<u32>, colors: &[Rgb]) -> f32 {
+    let Ok(x) = u32::try_from(x) else { return 0.0 };
+    if x >= frame.width() {
+        return 0.0;
+    }
+    let hits = rows
+        .clone()
+        .filter(|&y| {
+            colors
+                .iter()
+                .any(|&color| near(frame.get_pixel(x, y), color))
+        })
+        .count();
+    hits as f32 / rows.len().max(1) as f32
+}
+
+/// The colour most pixels of `columns` x `rows` show.
+fn dominant(
+    frame: &image::RgbaImage,
+    columns: std::ops::Range<i64>,
+    rows: &std::ops::Range<u32>,
+) -> Rgb {
+    let mut counts = std::collections::HashMap::new();
+    for x in columns {
+        for y in rows.clone() {
+            let p = frame.get_pixel(x as u32, y);
+            *counts.entry((p[0], p[1], p[2])).or_insert(0u32) += 1;
+        }
+    }
+    let ((r, g, b), _) = counts
+        .into_iter()
+        .max_by_key(|&(color, count)| (count, color))
+        .unwrap();
+    Rgb::new(r, g, b)
+}
+
+/// A highlighted Arabic word's fill spans exactly the pixels its letters are
+/// drawn over. A final wider than its cell overhangs on its open side, into
+/// the padding or the cells before it, and an isolated letter overhangs to
+/// its right; the fill reaches as far, and no further.
+#[test]
+fn highlights_cover_the_drawn_width_of_arabic_words() {
+    let _serial = gpu_test_guard();
+    // The text, its highlighted logical columns and the visual columns those
+    // cells occupy.
+    let cases = [
+        ("نص", 0..=1, 0..2),
+        ("ab نص cd", 3..=4, 3..5),
+        ("ص", 0..=0, 0..1),
+    ];
+    for family in crate::arabic_join_tests::ARABIC_FACES {
+        let Some((mut renderer, mut cfg)) = arabic_renderer(family) else {
+            continue;
+        };
+        // Fractional, so cell edges fall between pixels while glyphs do not.
+        cfg.padding_x = 24.25;
+        cfg.padding_y = 4.0;
+        let (ox, _) = pane_grid_origin((0.0, 0.0, 640.0, 220.0), (cfg.padding_x, cfg.padding_y));
+        let mut overhangs = 0;
+        for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+            cfg.text_renderer = mode;
+            for scale in [1.0, 2.0] {
+                renderer.set_scale(scale);
+                for (text, logical, visual) in &cases {
+                    for highlight in Highlight::ALL {
+                        let context = format!("{family} {mode:?}@{scale} {text:?} {highlight:?}");
+                        let mut snap = snapshot_of(30, 4, format!("{text}\x1b[?25l").as_bytes());
+                        let mut overlay = focused(false);
+                        highlight.apply(&mut snap, &mut overlay, logical.clone());
+                        let frame =
+                            capture(&mut renderer, &cfg, &[pane(&snap, 640, 220)], &overlay);
+                        let rows = row_pixels(&renderer, &cfg, 0);
+                        let left = ox + visual.start as f32 * renderer.cell_w;
+                        let right = ox + visual.end as f32 * renderer.cell_w;
+                        let (grid_left, grid_right) = (first_pixel(left), first_pixel(right));
+                        let (ink_left, ink_right) =
+                            ink_columns(&renderer, &rows, (left, right), frame.width())
+                                .unwrap_or_else(|| panic!("{context}: the word is drawn"));
+                        if ink_left >= grid_left && ink_right <= grid_right {
+                            eprintln!("ARABIC_OVERHANG_SKIP: {context} is drawn inside its cells");
+                            continue;
+                        }
+                        overhangs += 1;
+                        let fill = dominant(&frame, grid_left..grid_right, &rows);
+                        assert_ne!(fill, cfg.theme.background, "{context}: highlighted");
+                        let colors: Vec<_> = std::iter::once(fill)
+                            .chain(highlight.outline(&renderer, &cfg))
+                            .collect();
+                        let (lo, hi) = (ink_left.min(grid_left), ink_right.max(grid_right));
+                        for x in lo..hi {
+                            let share = painted(&frame, x, &rows, &colors);
+                            assert!(
+                                share >= 0.1,
+                                "{context}: column {x} of the text's {lo}..{hi} is drawn but \
+                                 not highlighted ({share:.2}); its cells are {grid_left}..{grid_right}"
+                            );
+                        }
+                        for x in [lo - 1, hi] {
+                            let share = painted(&frame, x, &rows, &colors);
+                            assert!(
+                                share < 0.05,
+                                "{context}: column {x}, past the text's {lo}..{hi}, is highlighted ({share:.2})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(overhangs > 0, "{family}: a wide sad overhangs its cell");
+    }
+}
+
+/// Without bidi, and in rows without right-to-left text, every highlight
+/// fill stays on the cell grid as before.
+#[test]
+fn highlights_off_bidi_rows_stay_on_the_grid() {
+    let _serial = gpu_test_guard();
+    for family in crate::arabic_join_tests::ARABIC_FACES {
+        let Some((mut renderer, mut cfg)) = arabic_renderer(family) else {
+            continue;
+        };
+        cfg.padding_x = 24.25;
+        let (ox, oy) = pane_grid_origin((0.0, 0.0, 640.0, 220.0), (cfg.padding_x, cfg.padding_y));
+        for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+            cfg.text_renderer = mode;
+            for (bidi, text, columns) in [
+                (false, "ab نص cd", 3..=4),
+                (false, "ص", 0..=0),
+                (true, "ab cd", 0..=4),
+            ] {
+                cfg.bidi = bidi;
+                for highlight in Highlight::ALL {
+                    let context = format!("{family} {mode:?} bidi={bidi} {text:?} {highlight:?}");
+                    let mut snap = snapshot_of(30, 4, format!("{text}\x1b[?25l").as_bytes());
+                    let mut overlay = focused(false);
+                    highlight.apply(&mut snap, &mut overlay, columns.clone());
+                    capture(&mut renderer, &cfg, &[pane(&snap, 640, 220)], &overlay);
+                    assert!(!renderer.pane_bidi[0].any(), "{context}: no bidi layout");
+                    let quads: Vec<QuadInstance> = renderer.quads.uploaded().unwrap().collect();
+                    let cells: Vec<_> = quads
+                        .iter()
+                        .filter(|quad| quad.pos[1] == oy && quad.size[1] == renderer.cell_h)
+                        .collect();
+                    assert!(!cells.is_empty(), "{context}: a highlight is drawn");
+                    let on_grid = |x: f32| {
+                        let column = (x - ox) / renderer.cell_w;
+                        (column - column.round()).abs() < 1e-3
+                    };
+                    for quad in cells {
+                        assert!(
+                            on_grid(quad.pos[0]) && on_grid(quad.pos[0] + quad.size[0]),
+                            "{context}: {:?} wide {:?} is off the grid",
+                            quad.pos,
+                            quad.size
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A selection's outline traces its fill, widened over a final's overhang,
+/// not the cell edge inside it.
+#[test]
+fn a_selection_outline_follows_the_arabic_overhang() {
+    let _serial = gpu_test_guard();
+    let Some(theme) = kettle_config::Theme::list().iter().find_map(|name| {
+        let theme = kettle_config::Theme::by_name(name);
+        super::theme::PaneSelectionFills::new(
+            &theme,
+            theme.background,
+            1.0,
+            &mut MinimumContrastCache::default(),
+        )
+        .outline(&theme, true)
+        .is_some()
+        .then_some(theme)
+    }) else {
+        eprintln!("SELECTION_OUTLINE_SKIP: no bundled theme outlines its selection");
+        return;
+    };
+    for family in crate::arabic_join_tests::ARABIC_FACES {
+        let Some((mut renderer, mut cfg)) = arabic_renderer(family) else {
+            continue;
+        };
+        cfg.theme = theme.clone();
+        cfg.padding_x = 24.25;
+        cfg.padding_y = 4.0;
+        let (ox, _) = pane_grid_origin((0.0, 0.0, 640.0, 220.0), (cfg.padding_x, cfg.padding_y));
+        for scale in [1.0, 2.0] {
+            renderer.set_scale(scale);
+            let context = format!("{family}@{scale}");
+            let mut snap = snapshot_of(30, 4, "نص\x1b[?25l".as_bytes());
+            let mut overlay = focused(false);
+            Highlight::Selection.apply(&mut snap, &mut overlay, 0..=1);
+            let frame = capture(&mut renderer, &cfg, &[pane(&snap, 640, 220)], &overlay);
+            let outline = Highlight::Selection
+                .outline(&renderer, &cfg)
+                .expect("the fixture theme outlines its selection");
+            let rows = row_pixels(&renderer, &cfg, 0);
+            let left = ox;
+            let right = ox + 2.0 * renderer.cell_w;
+            let (ink_left, _) = ink_columns(&renderer, &rows, (left, right), frame.width())
+                .unwrap_or_else(|| panic!("{context}: the word is drawn"));
+            assert!(
+                ink_left < first_pixel(left) - 1,
+                "{context}: the final overhangs"
+            );
+            // The outline's sides: strokes as tall as the row, in its colour.
+            // Its fill can sit within a few levels of that colour, so the
+            // strokes are told apart as quads, not pixels.
+            let ink = [outline.r, outline.g, outline.b].map(|c| f32::from(c) / 255.0);
+            let sides: Vec<f32> = renderer
+                .quads
+                .uploaded()
+                .unwrap()
+                .filter(|quad| {
+                    quad.color[..3]
+                        .iter()
+                        .zip(ink)
+                        .all(|(a, b)| (a - b).abs() < 0.5 / 255.0)
+                        && quad.size[0] < quad.size[1]
+                        && quad.size[1] > renderer.cell_h / 2.0
+                        && quad.pos[1] < rows.end as f32
+                        && quad.pos[1] + quad.size[1] > rows.start as f32
+                })
+                .map(|quad| quad.pos[0])
+                .collect();
+            assert_eq!(
+                sides.iter().copied().reduce(f32::min),
+                Some(ink_left as f32),
+                "{context}: the outline's left side is at the drawn edge, not the \
+                 cell edge {}: {sides:?}",
+                left.round()
+            );
+            assert!(
+                !sides.contains(&left.round()),
+                "{context}: no side through the letter: {sides:?}"
+            );
+            assert_eq!(sides.len(), 2, "{context}: {sides:?}");
+        }
+    }
+}

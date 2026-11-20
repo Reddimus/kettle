@@ -5,6 +5,9 @@ use crate::{QuadInstance, Rgb, rect};
 pub(crate) struct SelectionRun {
     pub row: i32,
     pub columns: Range<usize>,
+    /// How many pixels the run's fill reaches past its left and right cell
+    /// edges, over right-to-left text drawn wider than its cells.
+    pub reach: [f32; 2],
 }
 
 /// Draw only the exposed edges of the union, inside the selection. Shared
@@ -18,10 +21,15 @@ pub(crate) fn append_outline(
     ink: Rgb,
 ) {
     let thickness = scale.round().max(1.0);
-    let x = |column: usize| (origin.0 + column as f32 * cell.0).round();
+    let span = |run: &SelectionRun| {
+        (
+            (origin.0 + run.columns.start as f32 * cell.0 - run.reach[0]).round(),
+            (origin.0 + run.columns.end as f32 * cell.0 + run.reach[1]).round(),
+        )
+    };
     let y = |row: i32| (origin.1 + row as f32 * cell.1).round();
     for run in runs {
-        let (left, right) = (x(run.columns.start), x(run.columns.end));
+        let (left, right) = span(run);
         let (top, bottom) = (y(run.row), y(run.row + 1));
         let vertical = thickness.min((right - left).max(0.0));
         target.push(rect(left, top, vertical, bottom - top, ink, 1.0));
@@ -34,23 +42,24 @@ pub(crate) fn append_outline(
             1.0,
         ));
         for (neighbor, edge) in [(run.row - 1, top), (run.row + 1, bottom - thickness)] {
-            let mut start = run.columns.start;
+            let mut start = left;
             let first = runs.partition_point(|other| other.row < neighbor);
             for other in runs[first..]
                 .iter()
                 .take_while(|other| other.row == neighbor)
             {
-                let end = other.columns.start.min(run.columns.end);
+                let (other_left, other_right) = span(other);
+                let end = other_left.min(right);
                 if end > start {
-                    target.push(rect(x(start), edge, x(end) - x(start), thickness, ink, 1.0));
+                    target.push(rect(start, edge, end - start, thickness, ink, 1.0));
                 }
-                start = start.max(other.columns.end);
-                if start >= run.columns.end {
+                start = start.max(other_right);
+                if start >= right {
                     break;
                 }
             }
-            if start < run.columns.end {
-                target.push(rect(x(start), edge, right - x(start), thickness, ink, 1.0));
+            if start < right {
+                target.push(rect(start, edge, right - start, thickness, ink, 1.0));
             }
         }
     }
@@ -63,34 +72,44 @@ mod tests {
 
     #[test]
     fn outline_follows_exposed_union_edges_at_native_scales() {
-        let runs = [
-            SelectionRun {
-                row: 0,
-                columns: 1..5,
-            },
-            SelectionRun {
-                row: 1,
-                columns: 0..5,
-            },
-            SelectionRun {
-                row: 2,
-                columns: 0..3,
-            },
-            SelectionRun {
-                row: 3,
-                columns: 0..1,
-            },
-            SelectionRun {
-                row: 3,
-                columns: 2..3,
-            },
-        ];
+        traces_the_union(&[
+            (0, 1..5, [0, 0]),
+            (1, 0..5, [0, 0]),
+            (2, 0..3, [0, 0]),
+            (3, 0..1, [0, 0]),
+            (3, 2..3, [0, 0]),
+        ]);
+    }
+
+    #[test]
+    fn outline_follows_fills_reaching_past_their_cells() {
+        traces_the_union(&[
+            (0, 1..3, [4, 0]),
+            (1, 0..5, [0, 6]),
+            (2, 0..2, [3, 0]),
+            (2, 3..5, [2, 2]),
+        ]);
+    }
+
+    /// The outline of `runs` (row, columns, reach in 1x pixels) paints
+    /// exactly the union's edge pixels, at 1x and 2x.
+    fn traces_the_union(runs: &[(i32, Range<usize>, [i32; 2])]) {
         for scale in [1, 2] {
             let (cw, ch, ox, oy) = (10 * scale, 12 * scale, 3 * scale, 5 * scale);
+            let runs: Vec<_> = runs
+                .iter()
+                .map(|(row, columns, reach)| SelectionRun {
+                    row: *row,
+                    columns: columns.clone(),
+                    reach: reach.map(|px| (px * scale) as f32),
+                })
+                .collect();
             let mut selected = HashSet::new();
             for run in &runs {
+                let left = ox + run.columns.start as i32 * cw - run.reach[0] as i32;
+                let right = ox + run.columns.end as i32 * cw + run.reach[1] as i32;
                 for y in oy + run.row * ch..oy + (run.row + 1) * ch {
-                    for x in ox + run.columns.start as i32 * cw..ox + run.columns.end as i32 * cw {
+                    for x in left..right {
                         selected.insert((x, y));
                     }
                 }
