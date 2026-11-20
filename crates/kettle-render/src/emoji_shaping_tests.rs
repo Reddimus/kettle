@@ -609,3 +609,66 @@ fn available_emoji_font_shapes_supported_clusters_without_decomposing() {
         assert_eq!(images, 1, "{text:?}");
     }
 }
+
+/// Chrome text keeps the lines and line endings `set_text` gives it, emoji
+/// or not, and asks for the colour-emoji face on each whole emoji sequence of
+/// each line at its own offsets. A rich-text setter split U+2029 into a
+/// second line the one-line chrome hides, added a line for CR LF and dropped
+/// a trailing empty one. U+FE0F after a base it does not apply to, such as a
+/// space or an ellipsis, asks for nothing: the colour face would draw the
+/// space an em wide where the title was fitted for one column. No face of the
+/// fixture name exists: the spans are what is asked for.
+#[test]
+fn chrome_text_keeps_the_lines_set_text_gives_it() {
+    use unicode_segmentation::UnicodeSegmentation;
+    const EMOJI: &str = "Kettle Fixture Colour Emoji";
+    let mut fonts = fixture_fonts();
+    let attrs = Attrs::new().family(Family::Name(kettle_config::font::FAMILY));
+    let cases: [(&str, &[&str]); 8] = [
+        (
+            "\u{2705}\u{2029}tail \u{1f1ef}\u{1f1f5}",
+            &["\u{2705}", "\u{1f1ef}\u{1f1f5}"],
+        ),
+        ("\u{2705}\r\nend", &["\u{2705}"]),
+        ("\u{2705}\n", &["\u{2705}"]),
+        ("a\u{2028}\u{2705}b", &["\u{2705}"]),
+        (
+            "1\u{fe0f}\u{20e3} \u{26a0}\u{fe0f}",
+            &["1\u{fe0f}\u{20e3}", "\u{26a0}\u{fe0f}"],
+        ),
+        ("A \u{fe0f}B", &[]),
+        ("\u{2026}\u{fe0f}x", &[]),
+        ("plain", &[]),
+    ];
+    for (text, want) in cases {
+        let mut plain = TextBuffer::new(&mut fonts, Metrics::new(16.0, 20.0));
+        plain.set_text(text, &attrs, Shaping::Advanced, None);
+        let mut chrome = TextBuffer::new(&mut fonts, Metrics::new(16.0, 20.0));
+        super::fonts::set_chrome_text(&mut chrome, text, &attrs, Some(EMOJI));
+        let lines = |buffer: &TextBuffer| {
+            buffer
+                .lines
+                .iter()
+                .map(|line| (line.text().to_owned(), line.ending()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(lines(&chrome), lines(&plain), "{text:?}");
+        let mut asked = Vec::new();
+        for line in &chrome.lines {
+            let spans = line.attrs_list();
+            for (at, grapheme) in line.text().grapheme_indices(true) {
+                let bytes = (at..at + grapheme.len())
+                    .filter(|&byte| spans.get_span(byte).family == Family::Name(EMOJI))
+                    .count();
+                assert!(
+                    bytes == 0 || bytes == grapheme.len(),
+                    "{text:?}: {grapheme:?} is split"
+                );
+                if bytes > 0 {
+                    asked.push(grapheme);
+                }
+            }
+        }
+        assert_eq!(asked, want, "{text:?}");
+    }
+}

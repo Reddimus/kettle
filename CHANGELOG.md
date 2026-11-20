@@ -991,6 +991,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- On Linux a flag such as 🇯🇵 drew as two boxed letters, and some emoji such
+  as ✅ drew in black and white, in tab titles, the GNOME header title and
+  pane title bars. These titles now draw emoji in the same colour emoji font
+  as the terminal. A title shortened to fit no longer cuts a flag, a skin
+  tone or a joined emoji such as 👩‍💻 in half.
+
+- A tab or pane title shortened to exactly fill its space could lose its
+  last words and its ellipsis to a second line that the tab bar cut off.
+  These titles now always stay on one line.
+
 - On Linux machines with many processors, about 12 or more, ffmpeg drew no
   video poster, video frame or HEIC/AVIF photo. Left to choose, it started
   filter and encoder threads for every processor, and their stacks and

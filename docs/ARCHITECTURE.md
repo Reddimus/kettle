@@ -4576,6 +4576,25 @@ non-regression claim.
   alone and two with U+FE0F means exactly `Emoji=Yes, Emoji_Presentation=No`.
   The face is resolved once at renderer init from a short per-platform list, and
   a system with none of them keeps the platform cascade it had.
+- **A grapheme presented as emoji is asked for the colour-emoji face**: one
+  carrying U+FE0F, or a default-emoji base without U+FE0E
+  (`fonts::emoji_grapheme_ranges`). The span covers the whole grapheme, so a
+  flag's two regional indicators, a keycap or a ZWJ sequence is shaped in one
+  face. Without it cosmic-text takes each codepoint from the first face in its
+  cascade that has it, and on Linux FreeSans comes before Noto Color Emoji with
+  regional indicators drawn as boxed letters. The grid's row builder adds the
+  span per row. Tab labels, the GNOME header title, pane titlebars and the tab
+  tooltip set their text through `fonts::set_chrome_text`, whose span asks for
+  the face at regular weight: colour-emoji faces have one weight, and
+  cosmic-text takes a named family only at exactly the weight asked for, so a
+  bold title would otherwise get a bold text face. Chrome labels are measured
+  and shortened by whole graphemes (`labels::display_width`,
+  `take_cols_front` and `take_cols_back`), and a grapheme presented as emoji
+  measures at least its emoji-sequence width, as the colour face draws it: a
+  keycap or a text symbol with U+FE0F is two columns, though it sums to one by
+  codepoint. `set_chrome_text` keeps the lines `set_text` gives the text and
+  adds the spans per line, only on graphemes that are two columns as emoji
+  sequences: U+FE0F after a base it does not apply to stays in the text face.
 - **One parser thread plus one blocking pump thread per pane** — the pump reads
   the PTY master into a bounded recycled-buffer channel; the parser applies
   `Extractor::feed`, records image/side-channel chunks, drives text chunks into

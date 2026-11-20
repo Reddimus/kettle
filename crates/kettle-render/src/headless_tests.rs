@@ -7557,6 +7557,359 @@ fn default_emoji_without_a_selector_asks_for_the_colour_face() {
     assert_ne!(family_at("\u{231a}", 1), glyphon::Family::Name(family));
 }
 
+/// A program title with a ZWJ sequence, a check mark, a flag, a skin tone,
+/// a keycap and a text symbol asking for emoji: the title the 6.0 panel set
+/// (C21-H01), plus the keycap and the symbol.
+const CHROME_EMOJI_TITLE: &str = "\u{1f469}\u{200d}\u{1f4bb} build \u{2705} \
+    \u{1f1ef}\u{1f1f5} \u{1f44d}\u{1f3fd} 1\u{fe0f}\u{20e3} \u{26a0}\u{fe0f} done";
+
+/// The graphemes of `CHROME_EMOJI_TITLE` that are presented as emoji.
+const CHROME_EMOJI_GRAPHEMES: [&str; 6] = [
+    "\u{1f469}\u{200d}\u{1f4bb}",
+    "\u{2705}",
+    "\u{1f1ef}\u{1f1f5}",
+    "\u{1f44d}\u{1f3fd}",
+    "1\u{fe0f}\u{20e3}",
+    "\u{26a0}\u{fe0f}",
+];
+
+/// The graphemes of `line` that ask for the `emoji` family, checking that
+/// each asks for it on every byte, so the whole cluster is shaped in one
+/// face, at the face's own regular weight, and keeps the line's other
+/// attributes. cosmic-text takes a named family only at exactly the weight
+/// asked for, and colour-emoji faces have one weight: a bold title asking
+/// for the face in bold was given a bold text face instead.
+fn emoji_graphemes_of(line: &glyphon::BufferLine, emoji: &str) -> Vec<String> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let text = line.text();
+    let attrs = line.attrs_list();
+    let defaults = attrs.defaults();
+    let mut found = Vec::new();
+    for (at, grapheme) in text.grapheme_indices(true) {
+        let spans: Vec<_> = (at..at + grapheme.len())
+            .map(|byte| attrs.get_span(byte))
+            .collect();
+        let asked = spans
+            .iter()
+            .filter(|span| span.family == glyphon::Family::Name(emoji))
+            .count();
+        if asked == 0 {
+            continue;
+        }
+        assert_eq!(asked, spans.len(), "{text:?}: {grapheme:?} is split");
+        for span in spans {
+            assert_eq!(
+                span.weight,
+                glyphon::Weight::NORMAL,
+                "{text:?}: {grapheme:?} asks for the face in a weight it lacks"
+            );
+            assert!(
+                span.family(defaults.family).weight(defaults.weight) == defaults,
+                "{text:?}: {grapheme:?} lost the line's other attributes"
+            );
+        }
+        found.push(grapheme.to_owned());
+    }
+    found
+}
+
+/// A tab strip of two tabs titled `title`, wide enough to hold it whole,
+/// with `title` as the tooltip too.
+fn emoji_title_tabs(title: &str, width: f32) -> TabBar {
+    let mut tabs = TabBar::hidden();
+    tabs.height = 32.0;
+    tabs.band = (0.0, 0.0, width, tabs.height);
+    tabs.tooltip = Some(title.into());
+    for idx in 0..2 {
+        let rect = (idx as f32 * width / 2.0, 0.0, width / 2.0, tabs.height);
+        tabs.segments.push(TabSeg {
+            idx,
+            rect,
+            title_rect: (rect.0 + 8.0, 0.0, rect.2 - 16.0, rect.3),
+            hint: None,
+            close: (0.0, 0.0, 0.0, 0.0),
+            title: title.into(),
+            path: None,
+            active: idx == 0,
+            activity: TabActivity::Normal,
+        });
+    }
+    tabs
+}
+
+/// The GNOME header's lone title, `title`, in a lane wide enough for it.
+fn emoji_title_header(title: &str, width: f32) -> TabBar {
+    let mut tabs = gnome_header_tabs(width, 1.0, 1);
+    tabs.segments[0].title = title.into();
+    tabs.segments[0].rect = (100.0, 0.0, width - 200.0, tabs.height);
+    tabs.segments[0].title_rect = tabs.segments[0].rect;
+    tabs
+}
+
+/// Chrome titles ask for the colour-emoji face on each grapheme presented as
+/// emoji, as the grid's rows do, over the whole grapheme. Shaped in the
+/// terminal's family alone, the fallback cascade picks each codepoint's
+/// face: on Linux FreeSans comes before Noto Color Emoji and has the
+/// regional indicators and U+2705, so a flag drew as two boxed letters and
+/// a check mark in monochrome. The face named here need not exist: the
+/// spans are what the shaper is asked for, whatever fonts the host has.
+#[test]
+fn chrome_titles_ask_for_the_colour_emoji_face_on_whole_emoji_graphemes() {
+    const EMOJI: &str = "Kettle Fixture Colour Emoji";
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(800, 240) else {
+        no_gpu_adapter();
+        return;
+    };
+    // Before the first frame: the chrome caches key on text.
+    renderer.emoji_family = Some(EMOJI);
+    cfg.show_titlebar = true;
+    let snap = snapshot_of(20, 4, b"\x1b[?25l");
+    let mut terminal = pane(&snap, 800, 240);
+    terminal.rect = (0.0, 32.0, 800.0, 208.0);
+    terminal.titlebar = Some((0.0, 32.0, 800.0, 24.0));
+    terminal.terminal = (0.0, 56.0, 800.0, 184.0);
+    terminal.title = CHROME_EMOJI_TITLE;
+    let tabs = emoji_title_tabs(CHROME_EMOJI_TITLE, 800.0);
+    capture_with_tabs(&mut renderer, &cfg, &[terminal], &focused(true), &tabs);
+    for (name, buffer) in [
+        ("the active tab", &renderer.tab_buffers[0]),
+        ("a background tab", &renderer.tab_buffers[1]),
+        ("the tooltip", &renderer.tab_tooltip_buffer),
+        (
+            "the focused pane's titlebar",
+            &renderer.pane_titlebar_buffers[0],
+        ),
+    ] {
+        let line = &buffer.lines[0];
+        assert!(
+            line.text().contains(CHROME_EMOJI_TITLE),
+            "{name}: the fixture must fit whole: {:?}",
+            line.text()
+        );
+        assert_eq!(
+            emoji_graphemes_of(line, EMOJI),
+            CHROME_EMOJI_GRAPHEMES,
+            "{name}"
+        );
+    }
+    let snap = snapshot_of(20, 4, b"\x1b[?25l");
+    let mut terminal = pane(&snap, 800, 240);
+    terminal.rect = (0.0, 46.0, 800.0, 194.0);
+    terminal.terminal = terminal.rect;
+    let header = emoji_title_header(CHROME_EMOJI_TITLE, 800.0);
+    capture_with_tabs(&mut renderer, &cfg, &[terminal], &focused(true), &header);
+    let line = &renderer.header_title_buffer.lines[0];
+    assert_eq!(
+        line.text(),
+        CHROME_EMOJI_TITLE,
+        "the header title fits whole"
+    );
+    assert_eq!(line.attrs_list().defaults().weight, glyphon::Weight::BOLD);
+    assert_eq!(
+        emoji_graphemes_of(line, EMOJI),
+        CHROME_EMOJI_GRAPHEMES,
+        "the header title"
+    );
+    assert!(
+        renderer.header_title_width > 0.0,
+        "the header title is measured as it is drawn"
+    );
+}
+
+/// With the host's colour-emoji face, a chrome title draws each emoji
+/// grapheme exactly as that face shapes it alone, the grid's choice: a flag
+/// is the face's one flag glyph (two letter glyphs where the face has no
+/// flags, as Segoe UI Emoji), never a text face's boxed letters, in the
+/// regular tab titles and in the bold focused pane title and header title.
+/// Only graphemes the face itself covers are compared, at least the flag and
+/// the check mark. Skipped on a host without such a face.
+#[test]
+fn chrome_titles_draw_emoji_in_the_colour_emoji_face() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(800, 160) else {
+        no_gpu_adapter();
+        return;
+    };
+    let Some(emoji) = renderer.emoji_family else {
+        eprintln!("CHROME_EMOJI_FACE_SKIP: no colour-emoji face");
+        return;
+    };
+    // The face's own shaping of each grapheme, the reference: `None` where
+    // the face lacks it and shaping fell back to another face, which would
+    // make a match prove nothing.
+    let mut alone = |grapheme: &str| {
+        let mut buffer = TextBuffer::new(&mut renderer.font_system, Metrics::new(16.0, 20.0));
+        buffer.set_text(
+            grapheme,
+            &Attrs::new().family(glyphon::Family::Name(emoji)),
+            Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(&mut renderer.font_system, false);
+        let glyphs: Vec<_> = buffer
+            .layout_runs()
+            .flat_map(|run| run.glyphs.iter().map(|g| (g.font_id, g.glyph_id)))
+            .collect();
+        let db = renderer.font_system.db();
+        let in_face = |id| {
+            db.face(id)
+                .is_some_and(|face| face.families.iter().any(|(name, _)| name == emoji))
+        };
+        (!glyphs.is_empty() && glyphs.iter().all(|&(id, glyph)| glyph != 0 && in_face(id)))
+            .then_some(glyphs)
+    };
+    let reference: Vec<_> = CHROME_EMOJI_GRAPHEMES.map(&mut alone).into();
+    for (grapheme, want) in CHROME_EMOJI_GRAPHEMES.iter().zip(&reference) {
+        if want.is_none() {
+            eprintln!("CHROME_EMOJI_FACE_LACKS: {grapheme:?} in {emoji}");
+        }
+    }
+    for covered in ["\u{2705}", "\u{1f1ef}\u{1f1f5}"] {
+        let i = CHROME_EMOJI_GRAPHEMES.iter().position(|g| *g == covered);
+        assert!(
+            i.is_some_and(|i| reference[i].is_some()),
+            "{emoji} must draw {covered:?} itself"
+        );
+    }
+    let reference: Vec<_> = CHROME_EMOJI_GRAPHEMES
+        .iter()
+        .zip(reference)
+        .filter_map(|(grapheme, want)| Some((*grapheme, want?)))
+        .collect();
+    let shaped = |buffer: &TextBuffer, grapheme: &str| {
+        let text = buffer.lines[0].text();
+        let at = text.find(grapheme).expect("the grapheme is drawn");
+        buffer
+            .layout_runs()
+            .flat_map(|run| run.glyphs.iter())
+            .filter(|g| g.start >= at && g.end <= at + grapheme.len())
+            .map(|g| (g.font_id, g.glyph_id))
+            .collect::<Vec<_>>()
+    };
+    let advances = |buffer: &TextBuffer, grapheme: &str| {
+        let at = buffer.lines[0].text().find(grapheme).unwrap();
+        buffer
+            .layout_runs()
+            .flat_map(|run| run.glyphs.iter())
+            .filter(|g| g.start >= at && g.end <= at + grapheme.len())
+            .map(|g| g.w)
+            .collect::<Vec<f32>>()
+    };
+    cfg.show_titlebar = true;
+    let snap = snapshot_of(20, 4, b"\x1b[?25l");
+    let mut terminal = pane(&snap, 800, 160);
+    terminal.rect = (0.0, 32.0, 800.0, 128.0);
+    terminal.titlebar = Some((0.0, 32.0, 800.0, 24.0));
+    terminal.terminal = (0.0, 56.0, 800.0, 104.0);
+    terminal.title = CHROME_EMOJI_TITLE;
+    let tabs = emoji_title_tabs(CHROME_EMOJI_TITLE, 800.0);
+    capture_with_tabs(&mut renderer, &cfg, &[terminal], &focused(true), &tabs);
+    let cell = renderer.overlay_text_cell_width();
+    for (grapheme, want) in &reference {
+        assert_eq!(
+            shaped(&renderer.tab_buffers[0], grapheme),
+            *want,
+            "{grapheme:?} in a tab title, in {emoji}"
+        );
+        // The tab strip fits titles by columns of the cell width. One emoji
+        // glyph is not a whole number of cells, but it must not draw a cell
+        // past the columns it is measured as, or the fitted title overflows.
+        // Glyphs without an advance do not count (Apple Color Emoji shapes a
+        // keycap and U+26A0 U+FE0F as two); a face with no flags draws two
+        // letters, which this does not cover.
+        let advances = advances(&renderer.tab_buffers[0], grapheme);
+        if advances.iter().filter(|w| **w > 0.0).count() == 1 {
+            let drawn: f32 = advances.iter().sum();
+            let measured = display_width(grapheme) as f32 * cell;
+            assert!(
+                drawn <= measured + cell * 0.5,
+                "{grapheme:?} draws {drawn} px wide but measures {measured} px, in {emoji}"
+            );
+        }
+        assert_eq!(
+            shaped(&renderer.pane_titlebar_buffers[0], grapheme),
+            *want,
+            "{grapheme:?} in the bold focused pane title, in {emoji}"
+        );
+    }
+    cfg.show_titlebar = false;
+    let mut terminal = pane(&snap, 800, 160);
+    terminal.rect = (0.0, 46.0, 800.0, 114.0);
+    terminal.terminal = terminal.rect;
+    let header = emoji_title_header(CHROME_EMOJI_TITLE, 800.0);
+    capture_with_tabs(&mut renderer, &cfg, &[terminal], &focused(true), &header);
+    for (grapheme, want) in &reference {
+        assert_eq!(
+            shaped(&renderer.header_title_buffer, grapheme),
+            *want,
+            "{grapheme:?} in the bold header title, in {emoji}"
+        );
+    }
+    eprintln!("CHROME_EMOJI_FACE_PASS: {emoji}");
+}
+
+/// A tab or pane title is fitted to its lane in columns of the cell width,
+/// and drawn on one line whatever its shaped width. A label that filled its
+/// lane exactly could shape a hair wider in floating point, or by an emoji
+/// glyph's fraction of a cell, and then wrapped at its last space, losing
+/// its tail and the ellipsis to a second line the lane clips.
+#[test]
+fn chrome_titles_stay_on_one_line_in_every_lane() {
+    let _serial = gpu_test_guard();
+    let Some((mut renderer, mut cfg)) = renderer(800, 200) else {
+        no_gpu_adapter();
+        return;
+    };
+    cfg.show_titlebar = true;
+    let overlay = focused(true);
+    let snap = snapshot_of(20, 4, b"\x1b[?25l");
+    let mut wrapped = Vec::new();
+    for title in [
+        "build log for the nightly release of the project",
+        CHROME_EMOJI_TITLE,
+    ] {
+        for lane in 40..=400 {
+            let lane = lane as f32;
+            let mut tabs = TabBar::hidden();
+            tabs.height = 32.0;
+            tabs.band = (0.0, 0.0, 800.0, tabs.height);
+            tabs.segments.push(TabSeg {
+                idx: 0,
+                rect: (0.0, 0.0, lane + 16.0, tabs.height),
+                title_rect: (8.0, 0.0, lane, tabs.height),
+                hint: None,
+                close: (0.0, 0.0, 0.0, 0.0),
+                title: title.into(),
+                path: None,
+                active: true,
+                activity: TabActivity::Normal,
+            });
+            let mut terminal = pane(&snap, 800, 200);
+            terminal.rect = (0.0, 32.0, lane, 168.0);
+            terminal.titlebar = Some((0.0, 32.0, lane, 24.0));
+            terminal.terminal = (0.0, 56.0, lane, 144.0);
+            terminal.title = title;
+            let _ = renderer
+                .render_frame(&[terminal], &tabs, &cfg, &overlay)
+                .expect("frame");
+            for (name, buffer) in [
+                ("tab", &renderer.tab_buffers[0]),
+                ("pane", &renderer.pane_titlebar_buffers[0]),
+            ] {
+                let lines = buffer.layout_runs().count();
+                if lines != 1 {
+                    wrapped.push(format!(
+                        "{name} in a {lane} px lane: {lines} lines of {:?}",
+                        buffer.lines[0].text()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrapped.is_empty(), "{}", wrapped.join("\n"));
+}
+
 /// The command palette shapes a row's matched characters in the colour the
 /// row's own surface needs, so the selected row's matches read on its
 /// accent-tinted fill, and moving the selection reshapes the rows it leaves
