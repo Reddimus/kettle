@@ -1003,9 +1003,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - Search matches and selections in right-to-left lines now cover every
   Arabic letter they hold. A letter drawn wider than its cell, such as a final
-  ص or ث in Noto Sans Arabic or DejaVu Sans, reached up to a cell past the
-  highlight, into the window padding or the cell beside it, where the current
-  match's dark text nearly vanished. The highlight now extends as far as the
+  ص or ث in Noto Sans Arabic or DejaVu Sans, reached past the highlight, into
+  the window padding or the cells beside it, where the current match's dark
+  text nearly vanished. The highlight now extends as far as the
   letters are drawn, for the current and other matches and for focused and
   unfocused selections, and its outline follows. Nothing changes with
   `bidi = false` or in lines without right-to-left text.
