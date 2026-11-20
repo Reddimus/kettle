@@ -991,6 +991,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- On Windows, Kettle could fail to open one of its own files, such as a
+  saved session or a recording, when the file's permissions gave your account
+  Modify rather than Full control. Before tightening the permissions it asked
+  Windows for the right to change the file's owner, which Modify does not
+  include, and Windows refused. It now asks for that right only when it has
+  to move a file from the Administrators group to your account, so a file
+  whose permissions Kettle may tighten opens, and its permissions are then
+  limited to your account.
+
 - On Linux a flag such as 🇯🇵 drew as two boxed letters, and some emoji such
   as ✅ drew in black and white, in tab titles, the GNOME header title and
   pane title bars. These titles now draw emoji in the same colour emoji font

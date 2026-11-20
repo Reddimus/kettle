@@ -51,6 +51,22 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   Close by moving to a zbus release that reads incrementally against a cap, or
   vendoring the transport fix.
 
+- **Windows metadata-only handles survive legacy hardening.**
+  `open_existing_private_file` in `crates/kettle-state/src/private.rs`
+  hardens a broad legacy file while holding it with no sharing, which refuses
+  the open while any handle with data or delete access survives. Windows does
+  not apply sharing to a handle holding only rights such as `READ_CONTROL`,
+  `WRITE_DAC` or `WRITE_OWNER`, so a principal the old DACL granted one of
+  those can keep such a handle across the rewrite and change the permissions
+  afterwards. Found on 2026-11-20 in review of the conditional `WRITE_OWNER`
+  request; it applies to every legacy file hardened before that change too.
+  Deferred because no user-mode call revokes another process's handle and
+  enumerating system handles needs privileged, undocumented interfaces. Close
+  with a hardening path that does not rely on the sharing check, such as
+  copying the data into a newly created private file and replacing the
+  original through a held handle, with a Windows test that keeps a
+  `WRITE_DAC`-only handle open across the call.
+
 ## Terminal and protocol
 
 - **Extractor policy hooks for the streaming control kernel.**
@@ -202,13 +218,3 @@ campaign and startup outlier remain inconclusive. These entries stay open.
   desktop evidence in `docs/TESTING.md`. Spoken search-result and caret feedback
   still needs an identified assistive-technology observation. Keep appearance
   skips in `docs/APPEARANCE-GATE.md` with their own artifact scope.
-
-- **Windows `WRITE_OWNER` request before DACL hardening.**
-  `open_existing_private_file` requests `WRITE_OWNER` before hardening the
-  DACL, which an account with only Modify permission is refused
-  (`crates/kettle-state`). Deferred because it needs a native Windows
-  reproduction to prove the fix and its regression. Close with a conditional
-  `WRITE_OWNER` request limited to the ownership-migration branch, with a
-  Windows test. (The companion lock-retirement race is fixed: a lock file is
-  now retired through its held handle.)
-
