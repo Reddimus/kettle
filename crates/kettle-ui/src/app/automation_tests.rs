@@ -451,6 +451,38 @@ fn trigger_command_reaps_exited_child() {
 }
 
 #[test]
+fn a_trigger_that_does_not_compile_is_logged_by_position_never_by_pattern() {
+    use kettle_config::{OutputTrigger, TriggerAction};
+    let secret = "FAKE_SECRET_do_not_log";
+    let trigger = |pattern: String| OutputTrigger {
+        pattern,
+        action: TriggerAction::Urgency,
+    };
+    let triggers = [
+        trigger("fine".into()),
+        // A syntax error: `regex::Error` would print the pattern back.
+        trigger(format!("{secret}(")),
+        // Valid, but past the compiled-size limit.
+        trigger(format!("({secret}\\pL{{500}}){{500}}")),
+    ];
+    let (compiled, lines) = kettle_test_support::lines_logged(
+        |target| target.ends_with("::automation"),
+        || super::compile_triggers(&triggers),
+    );
+    assert_eq!(compiled.len(), 1);
+    assert_eq!(
+        lines,
+        [
+            "trigger 2 of 3 skipped: its pattern is not a valid regular expression; \
+             `kettle --check-config` shows the line",
+            "trigger 3 of 3 skipped: its pattern is too large once compiled; \
+             `kettle --check-config` shows the line",
+        ]
+    );
+    assert!(lines.iter().all(|line| !line.contains(secret)), "{lines:?}");
+}
+
+#[test]
 fn match_triggers_finds_pattern_anywhere_in_text() {
     // The matching engine fires on the first regex hit, returns its
     // action, and no-ops when nothing matches. Patterns are unanchored.
