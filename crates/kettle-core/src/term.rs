@@ -3376,6 +3376,9 @@ fn commit_local_geometry(
     );
 }
 
+/// Returns how many rows the resize pushed off the primary screen into its
+/// history, measured under the `Term` lock so no output is counted, or `None`
+/// when the columns changed and reflow makes the rows incomparable.
 fn commit_local_geometry_inner(
     term: &SharedTerm,
     geometry: &Arc<Mutex<VersionedPtyGeometry>>,
@@ -3384,7 +3387,7 @@ fn commit_local_geometry_inner(
     desired: PtyGeometry,
     grid_options: Option<TermConfig>,
     history_pull: usize,
-) {
+) -> Option<usize> {
     // This lock order is an invariant shared with image placement and geometry
     // snapshots: Term first, geometry second.
     let mut term = term.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -3406,10 +3409,18 @@ fn commit_local_geometry_inner(
         )
     };
     let grid_resized = grid_options.is_some();
+    let primary_top = |term: &Term<EventProxy>| {
+        let grid = term.primary_grid();
+        stable_grid_line_id(grid.history_origin(), grid.history_size(), 0)
+    };
+    let top_before = primary_top(&term);
     if let Some(options) = grid_options {
         term.set_options_preserving_history(options);
         term.resize_pulling_history(TermSize::new(desired.columns, desired.rows), history_pull);
     }
+    let history_pushed = (old_columns == desired.columns).then(|| {
+        usize::try_from(primary_top(&term).saturating_sub(top_before)).unwrap_or(usize::MAX)
+    });
     {
         let mut geometry = geometry
             .lock()
@@ -3444,6 +3455,7 @@ fn commit_local_geometry_inner(
             preceding_row_wrapped,
         );
     }
+    history_pushed
 }
 
 #[cfg(test)]
@@ -3777,6 +3789,9 @@ pub struct Terminal {
     /// the next identical UI resize still retries instead of being suppressed
     /// by the already-updated terminal grid.
     applied_pty_geometry: PtyGeometry,
+    /// What the last resize pushed off the primary screen into its history;
+    /// see [`Terminal::history_rows_pushed_by_last_resize`].
+    history_pushed_by_last_resize: Option<usize>,
     /// Per-pane output wake publication gate. Paint scheduling stays quiescent
     /// while a window is hidden/minimized, but the UI deliberately leaves this
     /// transport wake enabled when a recorder or Lua output sidechannel must
@@ -7326,6 +7341,7 @@ impl Terminal {
             output_start_seen: output_start_seen_for_struct,
             geometry: shared_geometry,
             applied_pty_geometry: geometry,
+            history_pushed_by_last_resize: Some(0),
             output_wake,
             latched,
             osc52_copy_allowed,
@@ -8682,16 +8698,26 @@ impl Terminal {
         self.try_resize_geometry_pulling_history(desired, usize::MAX)
     }
 
+    /// How many rows the last resize pushed off the primary screen into its
+    /// history, counted under the terminal lock so output is not included;
+    /// `None` when it changed the columns, whose reflow makes rows
+    /// incomparable. The local grid change, and so this count, stands even
+    /// when the native PTY resize failed.
+    pub fn history_rows_pushed_by_last_resize(&self) -> Option<usize> {
+        self.history_pushed_by_last_resize
+    }
+
     /// Resize as [`Terminal::try_resize_geometry`] does, except that rows
-    /// added to the screen take at most `history_pull` rows back from history
-    /// and the rest come in blank below the screen's content. A bar that
-    /// closes under the grid gives back only the rows its opening pushed into
-    /// history, so the lines above it stay where they were.
+    /// added to the primary screen take at most `history_pull` rows back from
+    /// its history and the rest come in blank below the screen's content. A
+    /// bar that closes under the grid gives back only the rows its opening
+    /// pushed into history, so the lines above it stay where they were.
     pub fn try_resize_geometry_pulling_history(
         &mut self,
         desired: PtyGeometry,
         history_pull: usize,
     ) -> Result<()> {
+        self.history_pushed_by_last_resize = Some(0);
         let current = self
             .geometry
             .lock()
@@ -8724,7 +8750,7 @@ impl Terminal {
         } else {
             None
         };
-        commit_local_geometry_inner(
+        self.history_pushed_by_last_resize = commit_local_geometry_inner(
             &self.term,
             &self.geometry,
             Some(&self.prompts),

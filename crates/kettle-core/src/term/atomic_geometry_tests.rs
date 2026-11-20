@@ -271,37 +271,41 @@ fn screen_text(term: &SharedTerm) -> Vec<String> {
         .collect()
 }
 
+/// Feed `bytes` to a terminal made by `printed`.
+fn print(term: &SharedTerm, bytes: &[u8]) {
+    let mut processor: Processor = Processor::new();
+    processor.advance(&mut *term.lock().unwrap(), bytes);
+}
+
+/// Resize a terminal made by `printed` to `rows` rows, taking at most
+/// `history_pull` rows back from history. Returns the rows the resize pushed
+/// off the primary screen into history, as the terminal counts them.
+fn resize_rows(term: &SharedTerm, rows: usize, history_pull: usize) -> usize {
+    let current = PtyGeometry::new(20, term.lock().unwrap().screen_lines(), 200, 100);
+    let geometry = Arc::new(Mutex::new(VersionedPtyGeometry {
+        geometry: current,
+        generation: 0,
+    }));
+    commit_local_geometry_inner(
+        term,
+        &geometry,
+        None,
+        None,
+        PtyGeometry::new(20, rows, 200, rows as u16 * 10),
+        Some(TermConfig::default()),
+        history_pull,
+    )
+    .expect("a row-only resize counts the rows it pushes")
+}
+
 /// Open and close a two-row bar under the 20 x 10 grid, such as the search
 /// bar: the screen shrinks while it is open and grows back when it closes.
 /// With `give_back`, closing takes back from history only the rows the
-/// opening pushed there, measured by the screen's top row identifier;
-/// without it, closing is a plain resize. Returns the rows pushed.
+/// opening pushed there; without it, closing is a plain resize. Returns the
+/// rows pushed.
 fn open_and_close_a_bar(term: &SharedTerm, give_back: bool) -> usize {
-    let full = PtyGeometry::new(20, 10, 200, 100);
-    let open = PtyGeometry::new(20, 8, 200, 80);
-    let geometry = Arc::new(Mutex::new(VersionedPtyGeometry {
-        geometry: full,
-        generation: 0,
-    }));
-    let screen_top = || {
-        let term = term.lock().unwrap();
-        stable_grid_line_id(term.grid().history_origin(), term.grid().history_size(), 0)
-    };
-    let commit = |desired, history_pull| {
-        commit_local_geometry_inner(
-            term,
-            &geometry,
-            None,
-            None,
-            desired,
-            Some(TermConfig::default()),
-            history_pull,
-        );
-    };
-    let before = screen_top();
-    commit(open, usize::MAX);
-    let pushed = (screen_top() - before) as usize;
-    commit(full, if give_back { pushed } else { usize::MAX });
+    let pushed = resize_rows(term, 8, usize::MAX);
+    resize_rows(term, 10, if give_back { pushed } else { usize::MAX });
     pushed
 }
 
@@ -361,4 +365,82 @@ fn closing_a_bar_over_a_bottom_prompt_takes_its_rows_back() {
         assert_eq!(term.grid().cursor.point.line.0, 9, "{give_back}");
         assert_eq!(term.grid().history_size(), history, "{give_back}");
     }
+}
+
+/// The count and the limit are the primary screen's, whichever screen is
+/// active, since only it keeps history. A full-screen program on the
+/// alternate screen while the bar opens or closes must not decide how many
+/// rows the shell's screen gets back.
+#[test]
+fn a_bar_over_an_alternate_screen_gives_the_primary_screen_its_own_rows() {
+    let mut bottom: Vec<u8> = (1..=30)
+        .flat_map(|line| format!("line {line}\r\n").into_bytes())
+        .collect();
+    bottom.extend_from_slice(b"$ ");
+    let mut high: Vec<u8> = (1..=12)
+        .flat_map(|line| format!("old {line}\r\n").into_bytes())
+        .collect();
+    high.extend_from_slice(b"\x1b[H\x1b[2Jreport\r\n$ ");
+    // (shell output, alternate screen active while the bar opens, while it
+    // closes)
+    for (bytes, open_in_alt, close_in_alt) in [
+        (&bottom, true, false),
+        (&high, true, false),
+        (&bottom, false, true),
+        (&high, false, true),
+    ] {
+        let term = printed(bytes);
+        let screen = screen_text(&term);
+        if open_in_alt {
+            print(&term, b"\x1b[?1049h\x1b[Hfull screen");
+        }
+        let pushed = resize_rows(&term, 8, usize::MAX);
+        let expected = usize::from(screen[9] == "$") * 2;
+        assert_eq!(pushed, expected, "{:?}", &screen[..2]);
+        let switch: &[u8] = if close_in_alt {
+            b"\x1b[?1049h\x1b[Hfull screen"
+        } else {
+            b"\x1b[?1049l"
+        };
+        print(&term, switch);
+        resize_rows(&term, 10, pushed);
+        if close_in_alt {
+            print(&term, b"\x1b[?1049l");
+        }
+        assert_eq!(
+            screen_text(&term),
+            screen,
+            "alternate at open {open_in_alt}"
+        );
+    }
+}
+
+/// A window that shrinks while the bar is open pushes rows of its own, and a
+/// pane closes the bar taking those back too: the screen then matches the
+/// same window resize with no bar at all.
+#[test]
+fn rows_pushed_while_a_bar_is_open_come_back_when_it_closes() {
+    let mut bytes: Vec<u8> = (1..=12)
+        .flat_map(|line| format!("old {line}\r\n").into_bytes())
+        .collect();
+    bytes.extend_from_slice(b"\x1b[H\x1b[2Jl1\r\nl2\r\nl3\r\nl4\r\nl5\r\nl6\r\n$ ");
+
+    let plain = printed(&bytes);
+    resize_rows(&plain, 6, usize::MAX);
+
+    let term = printed(&bytes);
+    let opened = resize_rows(&term, 8, usize::MAX);
+    assert_eq!(opened, 0, "the prompt sat above the bar");
+    let shrunk = resize_rows(&term, 4, usize::MAX);
+    assert_eq!(
+        shrunk, 3,
+        "the smaller window pushed rows to keep the prompt"
+    );
+    resize_rows(&term, 6, opened + shrunk);
+
+    assert_eq!(screen_text(&term), screen_text(&plain));
+    assert_eq!(screen_text(&term)[0], "l2");
+    let (term, plain) = (term.lock().unwrap(), plain.lock().unwrap());
+    assert_eq!(term.grid().cursor.point, plain.grid().cursor.point);
+    assert_eq!(term.grid().history_size(), plain.grid().history_size());
 }
