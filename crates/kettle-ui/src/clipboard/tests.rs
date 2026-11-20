@@ -889,6 +889,44 @@ fn wait_until_queued(worker: &TextWorker) {
     }
 }
 
+/// Wait until the worker has taken every queued request.
+fn wait_until_taken(worker: &TextWorker) {
+    let give_up = Instant::now() + Duration::from_secs(5);
+    while worker.queued() != 0 {
+        assert!(Instant::now() < give_up, "the worker took no request");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A short read is retried when it expired before the worker took it: a
+/// loaded runner can start the worker late, and an expired request is then
+/// rightly never put to the owner. Gives the thread the owner was asked on.
+fn read_until_the_owner_is_asked<T>(
+    queue: &TextWorker,
+    within: Duration,
+    mut read: impl FnMut(Instant) -> Result<String, arboard::Error>,
+    asked: impl Fn() -> Option<T>,
+) -> T {
+    for _ in 0..5 {
+        let started = Instant::now();
+        let result = read(started + within);
+        let waited = started.elapsed();
+        assert!(
+            matches!(result, Err(arboard::Error::Timeout)),
+            "a read its owner has not answered returned {result:?} after {waited:?}"
+        );
+        assert!(
+            waited < within + Duration::from_secs(1),
+            "the read held its caller for {waited:?}"
+        );
+        wait_until_taken(queue);
+        if let Some(asked) = asked() {
+            return asked;
+        }
+    }
+    panic!("the owner was never asked");
+}
+
 #[test]
 fn a_serialized_clipboard_stops_waiting_for_a_late_owner_and_keeps_requests_in_order() {
     let Late {
@@ -900,25 +938,18 @@ fn a_serialized_clipboard_stops_waiting_for_a_late_owner_and_keeps_requests_in_o
 
     // An OSC 52 load: the caller has its answer at the deadline, while the
     // owner is still being waited for on another thread.
-    let started = Instant::now();
-    let read =
-        clipboard.get_selection_bounded(false, 100, Instant::now() + Duration::from_millis(100));
-    let waited = started.elapsed();
-    assert!(
-        matches!(read, Err(arboard::Error::Timeout)),
-        "a read its owner has not answered returned {read:?} after {waited:?}"
+    let queue = clipboard.worker.clone().unwrap();
+    let asked_on = read_until_the_owner_is_asked(
+        &queue,
+        Duration::from_millis(100),
+        |deadline| clipboard.get_selection_bounded(false, 100, deadline),
+        || entered.recv_timeout(Duration::from_secs(1)).ok(),
     );
-    assert!(
-        waited < Duration::from_secs(1),
-        "the read held its caller for {waited:?}"
-    );
-    let asked_on = entered.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_ne!(asked_on, std::thread::current().id());
 
     // The OSC 52 store that follows waits its turn behind that load: it is
     // in the queue while the owner still stalls. The load's late text
     // answers nothing, and does not replace the store.
-    let queue = clipboard.worker.clone().unwrap();
     let writer = std::thread::spawn(move || {
         let stored = clipboard.set_selection(false, "next".into());
         (clipboard, stored)
@@ -1253,7 +1284,12 @@ mod late_windows_owner {
                         (opened && CloseClipboard() != 0) && emptied
                     };
                 ready.send(promised.then_some(hwnd as isize)).unwrap();
-                if hwnd.is_null() {
+                if !promised {
+                    if !hwnd.is_null() {
+                        // SAFETY: the window was created on this thread, and
+                        // no `Owner` will be made to close it.
+                        unsafe { DestroyWindow(hwnd) };
+                    }
                     return;
                 }
                 // SAFETY: the message loop of the thread that owns the window.
@@ -1308,27 +1344,18 @@ fn a_stalled_windows_clipboard_owner_cannot_hold_the_ui_or_reorder_osc_52() {
     // owner stalls far longer than the read may take.
     let within = Duration::from_millis(300);
     assert!(STALLS_FOR > within * 10);
-    let started = Instant::now();
-    let read = clipboard.get_selection_bounded(false, 100, Instant::now() + within);
-    let waited = started.elapsed();
-    assert!(
-        matches!(read, Err(arboard::Error::Timeout)),
-        "a read the owner has not answered returned {read:?} after {waited:?}"
+    let queue = clipboard.worker.clone().unwrap();
+    read_until_the_owner_is_asked(
+        &queue,
+        within,
+        |deadline| clipboard.get_selection_bounded(false, 100, deadline),
+        || owner.asked.recv_timeout(Duration::from_secs(1)).ok(),
     );
-    assert!(
-        waited < Duration::from_secs(2),
-        "the read held its caller for {waited:?}"
-    );
-    owner
-        .asked
-        .recv_timeout(Duration::from_secs(5))
-        .expect("the owner was asked to render its text");
 
     // The OSC 52 store that follows is made while the owner still stalls: it
     // is in the queue before the owner is let go. It is served after the
     // stalled load, whose late text answers no request and does not replace
     // what was stored.
-    let queue = clipboard.worker.clone().unwrap();
     let writer = std::thread::spawn(move || {
         let stored = clipboard.set_selection(false, "next".into());
         (clipboard, stored)
