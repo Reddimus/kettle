@@ -423,17 +423,6 @@ campaign and startup outlier remain inconclusive. These entries stay open.
   with native tests for an oversized macOS string and a stalled Windows owner,
   proving bounded resource use and UI wait time without reordering OSC 52.
 
-- **Descriptor sweep on generic Unix.** On Unix systems other than Linux and
-  macOS, `vendor/portable-pty-0.9.0/src/unix.rs` sweeps to a finite hard
-  `RLIMIT_NOFILE` within its cap, otherwise to the capped soft limit. An open
-  descriptor above subsequently lowered limits is missed. Kettle ships for
-  Linux, macOS and Windows only. `closefrom` in `pre_exec` would also close
-  the standard library's exec-error pipe. Close with complete per-platform
-  descriptor enumeration or a close-on-exec mechanism that covers the fork
-  window, or fail spawning where completeness cannot be guaranteed. Validate
-  on the intended BSD with a descriptor above lowered hard and soft limits
-  and a failing-exec control; a parent-only snapshot can miss later opens.
-
 - **Windows MCP stdout progress.** `crates/kettle/src/mcp.rs` still uses a
   blocking writer on Windows. A slow reader can make progress without a write
   returning before the 30-second stall limit, so the server can misclassify

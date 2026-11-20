@@ -957,6 +957,14 @@ enumerates `/proc/self/fd` in the child with raw `getdents64`, while macOS's
 fallback walks to the parent-read `kern.maxfilesperproc`, independently of
 lowered process limits. Synthetic directory-record tests run on every Unix
 host; the Linux enumeration itself requires the native Linux vendor gate.
+On any other Unix the spawn is refused. Linux and macOS hosts run
+`a_unix_without_a_complete_descriptor_sweep_gets_no_bound`, which pins that
+the function the generic branch returns gives no limit-derived bound; whether
+that branch calls it is checked only by
+`spawning_is_refused_without_a_complete_descriptor_sweep`, which is built only
+on such a Unix, and no gate builds or runs it. It was run on 2026-11-20 on
+Linux with the Linux `cfg` in that file renamed so that Linux took the generic
+path, where it passed, and failed with the previous code; no BSD has run it.
 
 `cosmic-text` stays outside the vendor validation workspace.
 The product build and audit cover it; renderer paragraph-separator tests cover
