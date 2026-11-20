@@ -993,6 +993,15 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   session bus on a unix socket, which is the default on Linux desktops; a
   session bus reached only over TCP is no longer used for them.
 
+- On Windows the clipboard is read on its own thread. A program that holds
+  the clipboard and is slow to hand over its text could freeze the window for
+  as long as it took; now each clipboard read, for a paste, a paste preview
+  or a program's OSC 52 request, gives up after two seconds, and clipboard
+  requests are still served in the order they were made. Clipboard text read
+  for the find bar, a text field or a paste preview is refused when it is
+  larger than the largest paste, 4 MiB; on macOS the system still fetches
+  the whole text before Kettle can refuse it.
+
 - A PNG pasted from the Linux clipboard is read up to 64 MiB (the X11 route
   allowed 256 MiB) and decoded with limits set before any pixel memory is
   allocated: 16,384 pixels a side and 256 MiB, where the decoder's defaults

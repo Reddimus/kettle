@@ -66,7 +66,7 @@ impl TextWorker {
         let (requests, incoming) = bounded::<Request>(1);
         let (ready, initialized) = bounded(1);
         std::thread::Builder::new()
-            .name("kettle-wayland-clipboard".into())
+            .name("kettle-clipboard".into())
             .spawn(move || {
                 let mut provider = match create() {
                     Ok(provider) => provider,
@@ -136,6 +136,12 @@ impl TextWorker {
         result
             .recv_deadline(deadline)
             .map_err(|_| arboard::Error::Timeout)?
+    }
+
+    /// The requests waiting behind the one being served.
+    #[cfg(test)]
+    pub(super) fn queued(&self) -> usize {
+        self.requests.len()
     }
 
     pub(super) fn supports_primary(&self) -> bool {
