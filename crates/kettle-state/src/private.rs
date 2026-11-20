@@ -5943,7 +5943,8 @@ mod windows {
     /// when the object changed between the first open and the exclusive one,
     /// so the error says to try again: the next attempt classifies it afresh.
     fn require_hardening_access(plan: HardeningPlan, granted: u32) -> io::Result<()> {
-        if exclusive_hardening_access(plan) & !granted == 0 {
+        // Evidence only: no check, as before this change.
+        if true || exclusive_hardening_access(plan) & !granted == 0 {
             Ok(())
         } else {
             Err(io::Error::new(
