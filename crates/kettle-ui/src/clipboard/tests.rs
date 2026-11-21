@@ -804,36 +804,45 @@ fn primary_is_native_while_the_protocol_is_there_and_falls_back_while_it_is_not(
 
 /// A format-at-a-time clipboard whose owner leaves the first request for one
 /// format unanswered until it is released, as a Windows program that promised
-/// its text and renders it late does.
+/// its text and renders it late does. A late text is rendered onto the
+/// clipboard when it comes, so a store served while the owner stalled would
+/// be overwritten by the text from before it.
 struct LateOwner {
-    text: String,
+    text: Arc<std::sync::Mutex<String>>,
     stalls: Option<&'static str>,
     entered: crossbeam_channel::Sender<std::thread::ThreadId>,
     release: crossbeam_channel::Receiver<()>,
-    /// The formats asked for, in order.
+    /// The formats asked for and the stores made, in order.
     asked: Arc<std::sync::Mutex<Vec<&'static str>>>,
 }
 
 impl LateOwner {
-    fn asked(&mut self, format: &'static str) {
+    /// Whether the owner stalled on this request.
+    fn asked(&mut self, format: &'static str) -> bool {
         self.asked.lock().unwrap().push(format);
         if self.stalls == Some(format) {
             self.stalls = None;
             self.entered.send(std::thread::current().id()).unwrap();
             let _ = self.release.recv_timeout(Duration::from_secs(5));
+            return true;
         }
+        false
     }
 }
 
 impl SelectionFallback for LateOwner {
     fn store(&mut self, _: bool, text: String) -> Result<(), arboard::Error> {
-        self.text = text;
+        self.asked.lock().unwrap().push("store");
+        *self.text.lock().unwrap() = text;
         Ok(())
     }
 
     fn load(&mut self, _: bool, _: usize, _: Instant) -> Result<String, arboard::Error> {
-        self.asked("text");
-        Ok(self.text.clone())
+        let promised = self.text.lock().unwrap().clone();
+        if self.asked("text") {
+            *self.text.lock().unwrap() = promised.clone();
+        }
+        Ok(promised)
     }
 
     fn files(&mut self) -> Result<Vec<PathBuf>, arboard::Error> {
@@ -860,7 +869,8 @@ fn late_owner(text: &str, stalls: &'static str) -> Late {
     let (entered_tx, entered) = crossbeam_channel::bounded(1);
     let (release, blocked) = crossbeam_channel::bounded(1);
     let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let (text, log) = (text.to_owned(), asked.clone());
+    let text = Arc::new(std::sync::Mutex::new(text.to_owned()));
+    let log = asked.clone();
     let clipboard = Clipboard::serialized(move || {
         Ok(LateOwner {
             text,
@@ -901,8 +911,10 @@ fn wait_until_taken(worker: &TextWorker) {
 /// A short read is retried when it expired before the worker took it: a
 /// loaded runner can start the worker late, and an expired request is then
 /// rightly never put to the owner. Gives the thread the owner was asked on.
+/// A clipboard with no worker is asked on the caller's thread, and its read
+/// is never retried.
 fn read_until_the_owner_is_asked<T>(
-    queue: &TextWorker,
+    queue: Option<&TextWorker>,
     within: Duration,
     mut read: impl FnMut(Instant) -> Result<String, arboard::Error>,
     asked: impl Fn() -> Option<T>,
@@ -919,7 +931,9 @@ fn read_until_the_owner_is_asked<T>(
             waited < within + Duration::from_secs(1),
             "the read held its caller for {waited:?}"
         );
-        wait_until_taken(queue);
+        if let Some(queue) = queue {
+            wait_until_taken(queue);
+        }
         if let Some(asked) = asked() {
             return asked;
         }
@@ -933,14 +947,14 @@ fn a_serialized_clipboard_stops_waiting_for_a_late_owner_and_keeps_requests_in_o
         mut clipboard,
         entered,
         release,
-        ..
+        asked,
     } = late_owner("late", "text");
 
     // An OSC 52 load: the caller has its answer at the deadline, while the
     // owner is still being waited for on another thread.
-    let queue = clipboard.worker.clone().unwrap();
+    let queue = clipboard.worker.clone();
     let asked_on = read_until_the_owner_is_asked(
-        &queue,
+        queue.as_ref(),
         Duration::from_millis(100),
         |deadline| clipboard.get_selection_bounded(false, 100, deadline),
         || entered.recv_timeout(Duration::from_secs(1)).ok(),
@@ -954,11 +968,21 @@ fn a_serialized_clipboard_stops_waiting_for_a_late_owner_and_keeps_requests_in_o
         let stored = clipboard.set_selection(false, "next".into());
         (clipboard, stored)
     });
-    wait_until_queued(&queue);
+    wait_until_queued(queue.as_ref().unwrap());
+    assert_eq!(
+        *asked.lock().unwrap(),
+        ["text"],
+        "the store reached the owner while its load stalled"
+    );
     release.send(()).unwrap();
     let (mut clipboard, stored) = writer.join().unwrap();
     stored.unwrap();
     assert_eq!(clipboard.get_text().unwrap(), "next");
+    assert_eq!(
+        *asked.lock().unwrap(),
+        ["text", "store", "text"],
+        "the store is served after the stalled load, once"
+    );
 }
 
 #[test]
@@ -1346,7 +1370,7 @@ fn a_stalled_windows_clipboard_owner_cannot_hold_the_ui_or_reorder_osc_52() {
     assert!(STALLS_FOR > within * 10);
     let queue = clipboard.worker.clone().unwrap();
     read_until_the_owner_is_asked(
-        &queue,
+        Some(&queue),
         within,
         |deadline| clipboard.get_selection_bounded(false, 100, deadline),
         || owner.asked.recv_timeout(Duration::from_secs(1)).ok(),
