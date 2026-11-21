@@ -174,9 +174,12 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   reaped and the grandchild reparented to launchd, none of 1,000 such
   grandchildren had lost it (none of 500 with the file rule below). A member
   cannot remove its profile or apply another: `sandbox_init` inside one
-  failed with `EPERM`. An unsandboxed, unprivileged supervisor can ask which
-  processes carry the rule with `sandbox_check`, which is private API. Only
-  macOS 27.3 was tested.
+  failed with `EPERM`. Applying a profile identical to the one in force
+  succeeded (`sandbox-exec` of the same mark inside the mark exited 0);
+  any different profile, including a plain `(allow default)`, failed. An
+  unsandboxed, unprivileged supervisor can ask which processes carry the
+  rule with `sandbox_check`, which is private API. Only macOS 27.3 was
+  tested.
 
   The rule has to be chosen with care. A rule that denies reads of one
   existing per-command file fails twice. Other processes' own sandboxes and
@@ -201,32 +204,44 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   on the command's behalf are outside the profile, as they are not
   descendants.
 
-  The cost is why it is not shipped. Inside the profile, a nested
+  The cost is why it is not shipped, and it has two parts. First, inside
+  the profile a nested
   `sandbox-exec -p '(version 1)(allow default)' /usr/bin/true` exited 71
-  after `sandbox_apply` failed with `EPERM`. Every command that applies its
-  own Seatbelt profile would fail under `kettle exec`: this repository's
-  documented `sandbox-exec ... cargo test` run (`docs/TESTING.md`), build and
-  agent tools that sandbox their own subprocesses, and a nested Kettle's
-  media worker, which could not confine itself. When `kettle exec` itself
-  runs in a sandbox, it cannot apply the mark at all. The `(allow default)`
-  profile in `docs/TESTING.md` also refuses set-user-id bits; nothing else
-  such a profile may change for a command, nor whether it survives `exec`
-  of a set-user-id binary, was tested. A profile could also refuse
+  with `sandbox-exec: sandbox_apply: Operation not permitted`. Every command
+  that applies a Seatbelt profile of its own, which in practice always
+  differs from the per-command mark, would fail under `kettle exec`: this
+  repository's documented `sandbox-exec ... cargo test` run
+  (`docs/TESTING.md`), build and agent tools that sandbox their own
+  subprocesses, a nested `kettle exec`, whose per-command mark differs, and
+  a nested Kettle's media worker, which could not confine itself. When
+  `kettle exec` itself runs in a sandbox, it cannot apply the mark at all.
+  Second, inside the profile `exec` of a set-user-id binary fails with
+  `EPERM`, as `docs/TESTING.md` already notes for `ps`: `sandbox-exec` of
+  `/bin/ps`, `/usr/bin/sudo` and `/usr/bin/top` under the mark each printed
+  `execvp() ... failed: Operation not permitted` and exited 71, while
+  `/bin/ps` ran outside the sandbox. `su`, `login`, `at` and `crontab` are
+  also set-user-id root on macOS 27.3, so any command that uses `sudo`,
+  `ps` or `top` would break. An exception such as
+  `(allow process-exec (literal "/bin/ps") (with no-sandbox))` let `ps` run
+  under the mark, but only by running it outside the profile, which drops
+  the mark for that program and anything it starts. Nothing else such a
+  profile may change for a command was tested. A profile could also refuse
   `setsid()` outright, as the media worker's does, but that breaks
   legitimate daemons. This is the route to choose, perhaps as an opt-in, if
-  breaking nested sandboxes is an acceptable price for macOS containment;
-  that is the owner's call.
+  breaking nested sandboxes and set-user-id programs is an acceptable price
+  for macOS containment; that is the owner's call.
 
   Deferred until Kettle can keep kernel ownership of each command's escaped
   descendants, ownership they cannot drop and that holds after the
   command's root is gone, and can stop them safely on timeout or
-  cancellation, without breaking commands that sandbox themselves. On
-  macOS 27 and later the Endpoint Security descendants client is the
-  candidate if Apple grants Kettle the entitlement; nothing beyond its
-  refusal has been tested. The Seatbelt mark above met the ownership test
-  on the Mac tested but breaks nested sandboxes; shipping it, even as an
-  opt-in, needs the owner to accept that. Close with native macOS timeout,
-  cancellation and concurrent-command isolation tests, including a fixture
+  cancellation, without breaking commands that sandbox themselves or run
+  set-user-id programs. On macOS 27 and later the Endpoint Security
+  descendants client is the candidate if Apple grants Kettle the
+  entitlement; nothing beyond its refusal has been tested. The Seatbelt
+  mark above met the ownership test on the Mac tested but breaks nested
+  sandboxes and set-user-id programs; shipping it, even as an opt-in, needs
+  the owner to accept that. Close with native macOS timeout, cancellation
+  and concurrent-command isolation tests, including a fixture
   that double-forks and calls `setsid()` at once. A normal exit keeps
   leaving detached daemons running.
 - **D-Bus messages sized before they are read.** Kettle's receiver is now in
