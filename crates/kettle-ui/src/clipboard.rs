@@ -7,13 +7,13 @@
 //! asked in that order.
 //!
 //! A read is answered by whichever program owns the clipboard, and that
-//! program may not answer. On Wayland and on Windows the clipboard is
+//! program may not answer. On Wayland, macOS and Windows the clipboard is
 //! therefore asked on one worker thread (`worker`): the UI stops waiting at
 //! the read's deadline, and requests are served one at a time in the order
 //! they were made, so an OSC 52 store never overtakes the load before it.
-//! X11 reads carry their own deadline inside arboard. macOS is still asked on
-//! the caller's thread, with no deadline that reaches into AppKit
-//! (docs/AUDIT-DEFERRED.md).
+//! X11 reads carry their own deadline inside arboard. A thread bounds the
+//! wait, not the memory: macOS and Windows hand over a whole flavor before
+//! its size can be checked (docs/AUDIT-DEFERRED.md).
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -22,7 +22,7 @@ use winit::raw_window_handle::RawDisplayHandle;
 
 #[cfg(target_os = "linux")]
 mod wayland;
-#[cfg(any(target_os = "linux", windows, test))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
 mod worker;
 
 #[cfg(any(target_os = "linux", test))]
@@ -92,32 +92,46 @@ pub(crate) struct Clipboard<F = arboard::Clipboard> {
     /// Asked on the caller's thread.
     arboard: Option<F>,
     /// Asked on a thread the caller can stop waiting for: the Wayland bridge,
-    /// and on Windows arboard itself.
-    #[cfg(any(target_os = "linux", windows, test))]
+    /// and on macOS and Windows arboard itself.
+    #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
     worker: Option<worker::TextWorker>,
 }
 
 impl Clipboard {
     pub(crate) fn new() -> Option<Self> {
-        // Windows passes a read on to the program that owns the clipboard and
-        // waits for its answer inside `GetClipboardData`, with the clipboard
-        // held open. No deadline reaches into that call, so it is made on the
-        // worker thread.
-        #[cfg(windows)]
-        let clipboard = Self::serialized(arboard::Clipboard::new);
-        #[cfg(not(windows))]
-        let clipboard = arboard::Clipboard::new().map(|arboard| Self {
-            arboard: Some(arboard),
-            #[cfg(any(target_os = "linux", test))]
-            worker: None,
-        });
-        match clipboard {
+        match Self::open(arboard::Clipboard::new) {
             Ok(clipboard) => Some(clipboard),
             Err(error) => {
                 log::warn!("arboard clipboard unavailable: {error}");
                 None
             }
         }
+    }
+
+    /// The clipboard `create` opens, asked where this platform must ask it.
+    /// Windows passes a read on to the program that owns the clipboard and
+    /// waits for its answer inside `GetClipboardData`, with the clipboard
+    /// held open; AppKit waits inside `stringForType:` for an owner that
+    /// provides its data lazily. No deadline reaches into either call, so on
+    /// both the clipboard is created and asked on the worker thread.
+    #[cfg(any(target_os = "macos", windows))]
+    fn open(
+        create: impl FnOnce() -> Result<arboard::Clipboard, arboard::Error> + Send + 'static,
+    ) -> Result<Self, arboard::Error> {
+        Self::serialized(create)
+    }
+
+    /// Elsewhere arboard is asked on the caller's thread: X11 reads carry
+    /// their own deadline, and Wayland attaches its bridge as the worker.
+    #[cfg(not(any(target_os = "macos", windows)))]
+    fn open(
+        create: impl FnOnce() -> Result<arboard::Clipboard, arboard::Error>,
+    ) -> Result<Self, arboard::Error> {
+        create().map(|arboard| Self {
+            arboard: Some(arboard),
+            #[cfg(any(target_os = "linux", test))]
+            worker: None,
+        })
     }
 
     #[cfg(target_os = "linux")]
@@ -140,10 +154,23 @@ impl Clipboard {
 }
 
 /// A format-at-a-time clipboard as the worker thread asks it.
-#[cfg(any(windows, test))]
+#[cfg(any(target_os = "macos", windows, test))]
 struct Serialized<F>(F);
 
-#[cfg(any(windows, test))]
+/// Runs one request. On macOS its AppKit objects are released when it
+/// returns: the worker thread lives as long as the window and has no pool of
+/// its own to drain.
+#[cfg(target_os = "macos")]
+fn one_request<T>(request: impl FnOnce() -> T) -> T {
+    objc2_06::rc::autoreleasepool(|_| request())
+}
+
+#[cfg(all(not(target_os = "macos"), any(windows, test)))]
+fn one_request<T>(request: impl FnOnce() -> T) -> T {
+    request()
+}
+
+#[cfg(any(target_os = "macos", windows, test))]
 impl<F: SelectionFallback + Send + 'static> worker::TextProvider for Serialized<F> {
     fn load(
         &mut self,
@@ -151,7 +178,7 @@ impl<F: SelectionFallback + Send + 'static> worker::TextProvider for Serialized<
         max: usize,
         deadline: Instant,
     ) -> Result<String, arboard::Error> {
-        self.0.load(primary, max, deadline)
+        one_request(|| self.0.load(primary, max, deadline))
     }
 
     fn store(
@@ -160,21 +187,21 @@ impl<F: SelectionFallback + Send + 'static> worker::TextProvider for Serialized<
         text: String,
         _deadline: Instant,
     ) -> Result<(), arboard::Error> {
-        self.0.store(primary, text)
+        one_request(|| self.0.store(primary, text))
     }
 
     fn paste(&mut self, want: PasteWant, text_max: usize, deadline: Instant) -> PasteContent {
         // One deadline for the whole paste: a file list that came late leaves
         // the text unasked, and the thread free for the next request.
-        fallback_paste(&mut self.0, want, text_max, Some(deadline))
+        one_request(|| fallback_paste(&mut self.0, want, text_max, Some(deadline)))
     }
 
     fn files(&mut self, _deadline: Instant) -> Option<Vec<PathBuf>> {
-        self.0.files().ok()
+        one_request(|| self.0.files().ok())
     }
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(target_os = "macos", windows, test))]
 impl<F: SelectionFallback + Send + 'static> Clipboard<F> {
     /// A format-at-a-time clipboard that is created and asked on the worker
     /// thread only. Its owner can keep that thread waiting, not the caller:
@@ -318,7 +345,7 @@ impl<F: SelectionFallback> Clipboard<F> {
     /// client as an ordinary offer, and a second probe would only double the
     /// worst-case wait.
     pub(crate) fn paste_content(&mut self, want: PasteWant, text_max: usize) -> PasteContent {
-        #[cfg(any(target_os = "linux", windows, test))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
         if let Some(worker) = &self.worker {
             return worker.paste(want, text_max, Instant::now() + READ_WITHIN);
         }
@@ -330,15 +357,15 @@ impl<F: SelectionFallback> Clipboard<F> {
 
     /// CLIPBOARD text for a field or a preview, under a paste's bounds: no
     /// more than the largest paste, and no longer than a paste may wait. On
-    /// macOS both are checked only once AppKit has returned the text
-    /// (docs/AUDIT-DEFERRED.md).
+    /// macOS and Windows the size is checked only once the system has handed
+    /// the text over (docs/AUDIT-DEFERRED.md).
     pub(crate) fn get_text(&mut self) -> Result<String, arboard::Error> {
         self.get_selection_bounded(false, FIELD_TEXT_MAX, Instant::now() + READ_WITHIN)
     }
 
     /// The local files CLIPBOARD names, for a preview of what a paste brings.
     pub(crate) fn file_list(&mut self) -> Result<Vec<PathBuf>, arboard::Error> {
-        #[cfg(any(target_os = "linux", windows, test))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
         if let Some(worker) = &self.worker {
             return worker.files(Instant::now() + READ_WITHIN);
         }
@@ -357,7 +384,7 @@ impl<F: SelectionFallback> Clipboard<F> {
         primary: bool,
         text: String,
     ) -> Result<(), arboard::Error> {
-        #[cfg(any(target_os = "linux", windows, test))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
         if let Some(worker) = &self.worker
             && (!primary || worker.supports_primary())
         {
@@ -376,7 +403,7 @@ impl<F: SelectionFallback> Clipboard<F> {
         max: usize,
         deadline: Instant,
     ) -> Result<String, arboard::Error> {
-        #[cfg(any(target_os = "linux", windows, test))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
         if let Some(worker) = &self.worker
             && (!primary || worker.supports_primary())
         {

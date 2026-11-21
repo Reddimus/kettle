@@ -746,6 +746,12 @@ them.
   set before the decoder reads the header and charged for the decoded buffer
   before it is allocated, with the RGBA8 copy held to the same 256 MiB. These
   are Kettle's policy for an untrusted clipboard image, not an upstream defect.
+- Patch (2026-11-20): `Clipboard::with_macos_pasteboard_name` opens a named
+  macOS pasteboard instead of the general one. It is hidden from the docs and
+  used only by tests: Kettle's native test of a late pasteboard owner, and the
+  vendored round-trip test, each own a uniquely named pasteboard and never
+  touch the system clipboard. Reads and writes go through the same code as the
+  general pasteboard's.
 - Upstream: backport the decoder line from
   [b4e0616](https://github.com/1Password/arboard/commit/b4e061622caa1356425f81073d9685166017c7f9).
   On 2026-10-14 the latest published version was still 3.6.1. The upstream
@@ -754,7 +760,8 @@ them.
   standalone examples and their tools. Only example target stanzas are removed
   from the normalized manifest; test dependencies and optional features remain.
 - Validation: `just vendor-clipboard-check` formats and lints on the current OS.
-  macOS round-trips native image pixels without touching the clipboard.
+  macOS round-trips native image pixels and text on a private named pasteboard
+  without touching the clipboard.
   Linux also runs the display-free CRLF/encoded-CR and pasted-PNG limit tests,
   and the INCR regression against real xclip under `xvfb-run` when both tools are installed (PR CI
   installs them). Nautilus copy/paste remains a separate native GNOME check.
