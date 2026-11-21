@@ -401,8 +401,9 @@ impl App {
     }
 
     /// Whether `key` with the window's modifiers pastes where it lands: the
-    /// platform paste chord of a modal field or the find bar, or a keybind
-    /// for Paste or Paste Selection.
+    /// platform paste chord while a modal field or the find bar has the
+    /// keyboard (`chord_pastes`), or a keybind for Paste or Paste Selection.
+    /// In a pane the chord is a key like any other unless it is bound.
     pub(super) fn key_pastes(
         &self,
         ws: &WindowState,
@@ -410,11 +411,7 @@ impl App {
         physical: Option<&PhysicalKey>,
         unshifted: Option<&Key>,
     ) -> bool {
-        let text_key = match key {
-            Key::Character(text) => Some(text.as_str()),
-            _ => None,
-        };
-        crate::modal_input::is_paste_chord(text_key, ws.mods)
+        chord_pastes(ws, key)
             || resolve_keybind_action(&self.cfg.keybinds, Some(key), physical, ws.mods, unshifted)
                 .is_some_and(|(_, action)| {
                     matches!(
@@ -1892,6 +1889,17 @@ pub(super) fn key_drops_clipboard_wait(
         && !repeat
         && !pastes
         && !crate::cursor_exit_log::is_modifier(logical, physical)
+}
+
+/// Whether `key` is the platform paste chord where the chord pastes: in a
+/// modal field's shared editor or the find bar.
+pub(super) fn chord_pastes(ws: &WindowState, key: &Key) -> bool {
+    let text_key = match key {
+        Key::Character(text) => Some(text.as_str()),
+        _ => None,
+    };
+    (modal_editor(ws).is_some() || top_modal(ws) == Some(KeyModal::Search))
+        && crate::modal_input::is_paste_chord(text_key, ws.mods)
 }
 
 /// Whether an assistive-technology request drops a paste still waiting for
