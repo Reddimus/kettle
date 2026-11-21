@@ -93,9 +93,10 @@ and the key that restores them.
 macOS also has `Cmd+T`, `Cmd+D` and `Shift+Cmd+D` (split beside and
 below), `Shift+Cmd+]` and `Shift+Cmd+[` (next and previous tab),
 `Shift+Cmd+W` (close the window), `Cmd+A` (select all), `Cmd+C/V`, `Cmd+F`
-and `Cmd+,`; the gear before `▾ +` in the title bar opens Settings too. Run
+and `Cmd+,`; the gear before `+ ▾` in the title bar opens Settings too. Run
 `kettle --list-keybinds` for the full map, or choose **Keyboard Shortcuts** in
-the macOS Help menu or **Keyboard shortcuts** in the new-tab **▾** menu: the
+the macOS Help menu or **Keyboard shortcuts** in the new-tab **▾** menu on
+Linux and Windows: the
 command palette then lists only the commands that have a shortcut, with the
 shortcut beside each, and you can search it and press Enter to run one.
 With nothing typed, the palette lists its commands under headings, most used

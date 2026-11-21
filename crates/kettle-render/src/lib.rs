@@ -139,7 +139,7 @@ use overlays::input_bar_colors;
 pub use overlays::{
     ConfirmDialogButton, ConfirmDialogDetail, ConfirmDialogFinding, ConfirmDialogOverlay,
     ContextMenu, ContextMenuRow, HintLabel, ImePreedit, MediaPasteReceiptGeometry,
-    MediaPasteReceiptHit, MediaPasteReceiptKind, MediaPasteReceiptOverlay, MenuToggle,
+    MediaPasteReceiptHit, MediaPasteReceiptKind, MediaPasteReceiptOverlay, MenuStatus, MenuToggle,
     NotificationGeometry, Overlay, StatusBar, TabActivity, TabBar, TabSeg, TitleEditOverlay,
     UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay, WindowControl, WindowControlButton,
     context_menu_row_rects, format_media_size, hint_label_rect, media_paste_receipt_geometry, menu,
@@ -150,8 +150,8 @@ pub use overlays::{
 };
 use overlays::{
     MAX_LANE_IMAGES, NEW_TAB_MENU_GLYPH, NEW_TAB_PLUS_GLYPH, context_menu_panel_width,
-    media_paste_receipt_text, menu_chrome_quads, push_input_bar, scroll_arrow_glyphs,
-    toast_buffer_text,
+    media_paste_receipt_text, menu_chrome_quads, push_input_bar, push_resize_overlay_chrome,
+    scroll_arrow_glyphs, toast_buffer_text,
 };
 #[cfg(test)]
 use overlays::{
@@ -3168,7 +3168,7 @@ impl Renderer {
                 .context_menu_parents
                 .iter()
                 .chain(overlay.context_menu.iter())
-                .map(|menu| menu.rows.len())
+                .map(ContextMenu::text_buffer_count)
                 .sum();
             while self.context_menu_buffers.len() < row_count {
                 let b = TextBuffer::new(&mut self.font_system, metrics);
@@ -3302,7 +3302,32 @@ impl Renderer {
                         db.shape_until_scroll(&mut self.font_system, false);
                     }
                 }
-                row_base += menu.rows.len();
+                if let Some(status) = &menu.status {
+                    let band = menu.status_rect().expect("status band");
+                    for (index, line) in status.lines.iter().enumerate() {
+                        let i = row_base + menu.rows.len() + index;
+                        let slot = status.line_rect(band, index);
+                        let buffer = &mut self.context_menu_buffers[i];
+                        buffer.set_metrics(metrics);
+                        buffer.set_size(Some(slot.2), Some(slot.3));
+                        buffer.set_wrap(Wrap::None);
+                        if self.context_menu_texts[i] != *line
+                            || self.context_menu_match_keys[i] != 0
+                        {
+                            buffer.set_text(
+                                line,
+                                &Attrs::new().family(Family::Name(&family)),
+                                Shaping::Advanced,
+                                None,
+                            );
+                            self.context_menu_texts[i].clone_from(line);
+                        }
+                        // A slot can alternate between a matched row and status.
+                        self.context_menu_match_keys[i] = 0;
+                        buffer.shape_until_scroll(&mut self.font_system, false);
+                    }
+                }
+                row_base += menu.text_buffer_count();
             }
         }
 
@@ -3998,13 +4023,14 @@ impl Renderer {
             let chip_h = ch * fit + pad;
             let cx = (sw - chip_w) / 2.0;
             let cy = (sh - chip_h) / 2.0;
-            menu_q.push(rect(cx, cy, chip_w, chip_h, theme.palette[0], 0.92));
-            // 1px accent outline so the chip reads on same-color content.
-            let acc = cfg.accent_color.unwrap_or(theme.palette[4]);
-            menu_q.push(rect(cx, cy, chip_w, 1.0, acc, 1.0));
-            menu_q.push(rect(cx, cy + chip_h - 1.0, chip_w, 1.0, acc, 1.0));
-            menu_q.push(rect(cx, cy, 1.0, chip_h, acc, 1.0));
-            menu_q.push(rect(cx + chip_w - 1.0, cy, 1.0, chip_h, acc, 1.0));
+            let acc = self.ui_accent(cfg, theme);
+            let ink = push_resize_overlay_chrome(
+                &mut menu_q,
+                (cx, cy, chip_w, chip_h),
+                theme,
+                acc,
+                &mut self.chrome_colors,
+            );
             menu_areas.push(TextArea {
                 buffer: &self.resize_overlay_buffer,
                 left: cx + pad,
@@ -4016,11 +4042,7 @@ impl Renderer {
                     right: (cx + chip_w) as i32,
                     bottom: (cy + chip_h) as i32,
                 },
-                default_color: GColor::rgb(
-                    theme.foreground.r,
-                    theme.foreground.g,
-                    theme.foreground.b,
-                ),
+                default_color: gc(ink),
                 custom_glyphs: &[],
             });
         }
@@ -5250,6 +5272,31 @@ impl Renderer {
                     });
                 }
             }
+            // The pinned status band is part of this level's card, so its
+            // lines draw with the level's own labels.
+            if let Some(status) = &menu.status {
+                let band = menu.status_rect().expect("status band");
+                let fg = self
+                    .chrome_colors
+                    .secondary(theme.foreground, theme.background);
+                for index in 0..status.lines.len() {
+                    let (x, y, w, h) = status.line_rect(band, index);
+                    areas.push(TextArea {
+                        buffer: &self.context_menu_buffers[menu_row_base + menu.rows.len() + index],
+                        left: x,
+                        top: y,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: x as i32,
+                            top: y as i32,
+                            right: (x + w) as i32,
+                            bottom: (y + h) as i32,
+                        },
+                        default_color: GColor::rgb(fg.r, fg.g, fg.b),
+                        custom_glyphs: &[],
+                    });
+                }
+            }
             if let Some((_, layout)) = &footer_layout {
                 for (line, buffer) in layout.lines.iter().zip(&self.theme_footer_buffers) {
                     let (x, y, w, h) = line.bounds;
@@ -5270,7 +5317,7 @@ impl Renderer {
                 }
             }
             menu_level_areas.push(areas);
-            menu_row_base += menu.rows.len();
+            menu_row_base += menu.text_buffer_count();
         }
 
         // Settings surfaces use the menu layer, before all modal text.

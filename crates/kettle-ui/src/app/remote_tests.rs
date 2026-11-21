@@ -337,7 +337,8 @@ fn remote_reconnect_environment_child() {
         );
     }
     assert_eq!(std::env::var("PRIVATE_TOKEN").unwrap(), "from-config");
-    println!("RECONNECT_ENV_AND_ARGV0_PRESERVED");
+    // libtest can leave its progress label on the current PTY row.
+    println!("\nRECONNECT_ENV_AND_ARGV0_PRESERVED");
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -420,6 +421,32 @@ fn remote_reconnect_environment_fixture() -> (
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+fn remote_reconnect_failure_snapshot(mux: &Mux, pane: u64) -> String {
+    let Some(pane) = mux.panes.get(&pane) else {
+        return "owned pane unavailable".into();
+    };
+    let term = &pane.term;
+    let screen = match term.screen_text(0) {
+        Some(screen) => {
+            let mut chars = screen.text.chars();
+            let mut text: String = chars.by_ref().take(4096).collect();
+            if chars.next().is_some() {
+                text.push_str("\n[viewport truncated after 4096 characters]");
+            }
+            format!("{text:?}")
+        }
+        None => "unavailable (screen_text(0) returned None)".into(),
+    };
+    let child_pid = term.child_pid();
+    let child_exit = term.child_exit_code_unreaped();
+    let pty_read_progress = term.pty_read_progress();
+    format!(
+        "owned_child_pid={child_pid:?}; child_exit_code_unreaped={child_exit:?}; \
+         pty_read_progress={pty_read_progress:?}; viewport={screen}"
+    )
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn remote_reconnect_preserves_client_environment_and_invocation() {
     let (cfg, geometry, command) = remote_reconnect_environment_fixture();
@@ -441,8 +468,17 @@ fn remote_reconnect_preserves_client_environment_and_invocation() {
         let passed = wait_for_pane_screen(&mux, target, |text, _| {
             text.contains("RECONNECT_ENV_AND_ARGV0_PRESERVED")
         });
+        let diagnostic = if passed {
+            String::new()
+        } else {
+            remote_reconnect_failure_snapshot(&mux, target)
+        };
         mux.kill_children();
-        assert!(passed, "client must receive captured env and invocation");
+        assert!(
+            passed,
+            "client must receive captured env and invocation; \
+             stage=initial-launch existing_pane={existing_pane} pane={target}; {diagnostic}"
+        );
     }
 }
 
@@ -467,9 +503,19 @@ fn remote_reconnect_replays_preserve_environment_and_invocation() {
         )
         .unwrap();
         let original = mux.active_focus().unwrap();
-        assert!(wait_for_pane_screen(&mux, original, |text, _| {
+        let passed = wait_for_pane_screen(&mux, original, |text, _| {
             text.contains("RECONNECT_ENV_AND_ARGV0_PRESERVED")
-        }));
+        });
+        let diagnostic = if passed {
+            String::new()
+        } else {
+            remote_reconnect_failure_snapshot(&mux, original)
+        };
+        assert!(
+            passed,
+            "{replay} original client must receive captured env and invocation; \
+             stage=original-launch pane={original}; {diagnostic}"
+        );
         match replay {
             "duplicate-pane" => mux
                 .duplicate_focused_pane_geometry(
@@ -512,10 +558,15 @@ fn remote_reconnect_replays_preserve_environment_and_invocation() {
         let passed = wait_for_pane_screen(&mux, target, |text, _| {
             text.contains("RECONNECT_ENV_AND_ARGV0_PRESERVED")
         });
-        let screen = mux.panes[&target].term.screen_text(0).unwrap().text;
+        let diagnostic = if passed {
+            String::new()
+        } else {
+            remote_reconnect_failure_snapshot(&mux, target)
+        };
         assert!(
             passed,
-            "{replay} lost the captured launch settings: {screen}"
+            "{replay} lost the captured launch settings; \
+             stage=replay-target pane={target}; {diagnostic}"
         );
         mux.duplicate_focused_tab_geometry(&cfg, geometry, Arc::new(|| {}))
             .unwrap();
@@ -523,8 +574,17 @@ fn remote_reconnect_replays_preserve_environment_and_invocation() {
         let passed = wait_for_pane_screen(&mux, target, |text, _| {
             text.contains("RECONNECT_ENV_AND_ARGV0_PRESERVED")
         });
+        let diagnostic = if passed {
+            String::new()
+        } else {
+            remote_reconnect_failure_snapshot(&mux, target)
+        };
         mux.kill_children();
-        assert!(passed, "{replay} must retain settings for the next replay");
+        assert!(
+            passed,
+            "{replay} must retain settings for the next replay; \
+             stage=subsequent-replay pane={target}; {diagnostic}"
+        );
     }
 }
 

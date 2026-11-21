@@ -112,7 +112,7 @@ fn hint_context_menu_and_palette_offer_the_action_with_the_live_shortcut() {
         &bindings,
         &tr,
         None,
-        &[],
+        Some(&[]),
         false,
         kettle_config::BroadcastDefault::default(),
     );

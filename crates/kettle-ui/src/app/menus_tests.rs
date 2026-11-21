@@ -108,6 +108,7 @@ fn new_tab_menu_items_has_wt_bottom_rows() {
     ];
     let items = App::new_tab_menu_items(
         &shells,
+        Some(&[]),
         &kettle_i18n::Translator::new(kettle_i18n::Language::En),
     );
     assert_eq!(
@@ -664,9 +665,10 @@ fn picker_overlay_projection_installs_the_vertical_context_menu() {
             &kettle_config::keybinds::defaults(),
             &kettle_i18n::Translator::new(kettle_i18n::Language::En),
             None,
-            &[], false, kettle_config::BroadcastDefault::default(),
+            Some(&[]), false, kettle_config::BroadcastDefault::default(),
         ),
         (480.0, 240.0),
+        (8.0, 16.0),
         (8.0, 16.0),
         0.0,
     )
@@ -684,6 +686,7 @@ fn picker_overlay_projection_installs_the_vertical_context_menu() {
     let menu = picker_context_menu(
         themes,
         (480.0, 240.0),
+        (8.0, 16.0),
         (8.0, 16.0),
         0.0,
     )
@@ -1307,7 +1310,7 @@ fn pending_shell_action_runs_the_latest_shortcut_on_completion() {
         (kettle_i18n::Language::Es, "Detectando shells…"),
     ] {
         let tr = kettle_i18n::Translator::new(language);
-        let items = App::shell_menu_items(None, &tr);
+        let items = App::shell_menu_items(None, Some(&[]), &tr);
         assert!(matches!(items.as_slice(), [ContextMenuItem::Info { label, .. }] if label == text));
     }
     assert_eq!(
@@ -1330,12 +1333,12 @@ fn pending_shell_action_runs_the_latest_shortcut_on_completion() {
 fn loading_shell_menu_survives_construction_and_can_refresh() {
     for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
         let tr = kettle_i18n::Translator::new(language);
-        let items = filter_disabled(App::shell_menu_items(None, &tr));
+        let items = filter_disabled(App::shell_menu_items(None, Some(&[]), &tr));
         assert_eq!(items.len(), 1, "the loading menu must have a visible row");
         assert!(!super::item_is_dispatchable(&items[0]));
         assert!(App::shell_menu_is_loading(&items, &tr));
         let shells = vec![("Test shell".into(), vec!["test-shell".into()])];
-        let ready = filter_disabled(App::shell_menu_items(Some(&shells), &tr));
+        let ready = filter_disabled(App::shell_menu_items(Some(&shells), Some(&[]), &tr));
         assert!(!App::shell_menu_is_loading(&ready, &tr));
         assert!(ready.iter().any(|item| matches!(item,
             ContextMenuItem::NewTabShell { argv, .. } if argv == &["test-shell"])));
@@ -1497,6 +1500,7 @@ fn ancestor_menu_press_survives_dismissal_and_dispatches() {
         panel_w_clamped: 160.0,
         panel_h_clamped: height,
         a11y_label: None,
+        status: None,
         picker_header_height: 0.0,
         picker_footer: None,
     };
@@ -1734,6 +1738,7 @@ fn painted_menu_rows_match_hit_testing_and_accessibility_bounds() {
         panel_w_clamped: 200.0,
         panel_h_clamped: height,
         a11y_label: None,
+        status: None,
         picker_header_height: 0.0,
         picker_footer: None,
     };
@@ -2334,11 +2339,11 @@ fn compact_header_menu_origin_survives_loading_submenus_and_dismissal() {
         let tr = kettle_i18n::Translator::new(language);
         let shells = vec![("sh".to_string(), vec!["sh".to_string()])];
         let origin = MenuOrigin::NewTab { compact: true };
-        assert!(App::shell_menu_is_loading(&origin.shell_items(None, &tr), &tr));
+        assert!(App::shell_menu_is_loading(&origin.shell_items(None, None, &tr), &tr));
         let mut state = ContextMenuState {
             origin,
             anchor: (10.0, 32.0), anchor_scale: 1.0,
-            items: origin.shell_items(Some(&shells), &tr),
+            items: origin.shell_items(Some(&shells), None, &tr),
             highlight: 0, drill_stack: Vec::new(), scroll_offset: 0,
             typeahead_buf: String::new(), typeahead_until: None,
         };
@@ -2352,7 +2357,7 @@ fn compact_header_menu_origin_survives_loading_submenus_and_dismissal() {
         assert_eq!(state.origin, origin);
         assert!(state.leave_submenu());
         assert_eq!(state.origin, origin);
-        let full = MenuOrigin::NewTab { compact: false }.shell_items(Some(&shells), &tr);
+        let full = MenuOrigin::NewTab { compact: false }.shell_items(Some(&shells), None, &tr);
         assert!(actions(&full).contains(&Action::OpenSettings));
         let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
         ws.context_menu = Some(state);

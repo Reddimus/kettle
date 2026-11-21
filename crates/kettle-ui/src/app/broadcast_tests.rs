@@ -277,7 +277,7 @@ fn the_palette_labels_the_chord_with_the_scope_it_turns_on() {
                 Action::ToggleBroadcastPanesInTab,
             ),
         ] {
-            let entries = palette_entries(None, &tr, &[], default);
+            let entries = palette_entries(None, &tr, Some(&[]), default);
             let label = |action: &Action| {
                 entries
                     .iter()

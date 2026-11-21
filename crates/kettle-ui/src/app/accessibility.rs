@@ -134,8 +134,9 @@ impl App {
                     window.scale_factor() as f32,
                 )
             });
-            let modal = modal_accessibility_projection(
+            let modal = modal_accessibility_projection_for_window(
                 overlay,
+                ws,
                 surface,
                 (
                     self.overlay_text_cell_width(ws),
@@ -783,8 +784,9 @@ impl App {
                 })
             })
             .unwrap_or((800.0, 600.0));
-        let mut modal = modal_accessibility_projection(
+        let mut modal = modal_accessibility_projection_for_window(
             overlay,
+            ws,
             surface,
             (
                 self.overlay_text_cell_width(ws),
@@ -1020,6 +1022,9 @@ impl App {
             }
         }
         overlay.palette_query.hash(&mut hasher);
+        if let Some(status) = palette_profile_accessibility_status(overlay, ws, &self.ui_text) {
+            status.hash(&mut hasher);
+        }
         overlay.layout_picker_query.hash(&mut hasher);
         overlay.theme_picker_query.hash(&mut hasher);
         overlay.ssh_query.hash(&mut hasher);
@@ -2377,9 +2382,36 @@ pub(super) const MODAL_KIND_THEMES: u64 = 10;
 pub(super) const MODAL_KIND_SETTINGS: u64 = 11;
 pub(super) const MODAL_KIND_SETTINGS_SEARCH: u64 = 12;
 const MODAL_KIND_SETTINGS_GROUP: u64 = 13;
-const MODAL_KIND_SETTINGS_SECTION: u64 = 15;
+const MODAL_KIND_PALETTE_STATUS: u64 = 14;
+const MODAL_KIND_SETTINGS_SECTION: u64 = 16;
 /// The Settings dialog's Reset button, for the selected row.
-pub(super) const MODAL_KIND_SETTINGS_RESET: u64 = 14;
+pub(super) const MODAL_KIND_SETTINGS_RESET: u64 = 15;
+
+// Two modal kinds sharing a number would give two nodes one AccessKit id.
+const _: () = {
+    let kinds = [
+        MODAL_KIND_PALETTE,
+        MODAL_KIND_LAYOUTS,
+        MODAL_KIND_SSH,
+        MODAL_KIND_TITLE,
+        MODAL_KIND_THEMES,
+        MODAL_KIND_SETTINGS,
+        MODAL_KIND_SETTINGS_SEARCH,
+        MODAL_KIND_SETTINGS_GROUP,
+        MODAL_KIND_PALETTE_STATUS,
+        MODAL_KIND_SETTINGS_RESET,
+        MODAL_KIND_SETTINGS_SECTION,
+    ];
+    let mut i = 0;
+    while i < kinds.len() {
+        let mut j = i + 1;
+        while j < kinds.len() {
+            assert!(kinds[i] != kinds[j], "two modal kinds share a number");
+            j += 1;
+        }
+        i += 1;
+    }
+};
 
 /// The Settings Reset button's node.
 pub(super) fn accessibility_settings_reset_id() -> NodeId {
@@ -2709,6 +2741,48 @@ fn push_picker_accessibility(
     if projection.focus.is_none() {
         projection.focus = selected.or(Some(input_id));
     }
+}
+
+fn palette_profile_accessibility_status(
+    overlay: &Overlay,
+    ws: &WindowState,
+    tr: &kettle_i18n::Translator,
+) -> Option<&'static str> {
+    (overlay.palette_query.is_some() && ws.palette_profiles.is_none())
+        .then(|| tr.text(kettle_i18n::Text::MenuProfilesPending))
+}
+
+/// Keep semantic status independent of the header's fitted hint and prefix.
+pub(super) fn modal_accessibility_projection_for_window(
+    overlay: &Overlay,
+    ws: &WindowState,
+    surface: (f32, f32),
+    metrics: (f32, f32),
+    scale_factor: f32,
+    tr: &kettle_i18n::Translator,
+) -> ModalAccessibilityProjection {
+    let mut projection =
+        modal_accessibility_projection(overlay, surface, metrics, scale_factor, tr);
+    let Some(status) = palette_profile_accessibility_status(overlay, ws, tr) else {
+        return projection;
+    };
+    let dialog_id = accessibility_modal_id(MODAL_KIND_PALETTE, 0);
+    let status_id = accessibility_modal_id(MODAL_KIND_PALETTE_STATUS, 0);
+    let Some((_, dialog)) = projection.nodes.iter_mut().find(|(id, _)| *id == dialog_id) else {
+        return projection;
+    };
+    let mut children = dialog.children().to_vec();
+    children.push(status_id);
+    dialog.set_children(children);
+    let input_id = accessibility_modal_id(MODAL_KIND_PALETTE, 1);
+    if let Some((_, input)) = projection.nodes.iter_mut().find(|(id, _)| *id == input_id) {
+        input.set_description(status);
+    }
+    let mut node = Node::new(Role::Status);
+    node.set_label(status);
+    node.set_live(accesskit::Live::Polite);
+    projection.nodes.push((status_id, node));
+    projection
 }
 
 /// The SSH launcher's status line, announced politely as search announces
@@ -4226,6 +4300,7 @@ mod context_menu_nesting_tests {
 
     fn panel(label: &str, anchor: (f32, f32)) -> ContextMenu {
         ContextMenu {
+            status: None,
             picker_header_height: 0.0,
             picker_footer: None,
             anchor,

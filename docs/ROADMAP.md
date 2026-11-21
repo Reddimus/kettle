@@ -18,12 +18,12 @@ multi-window isolation.
 The UI-state gate has headless path-safety and injected geometry fixtures,
 Linux matrix capture/comparison through a private headless Weston GL/llvmpipe
 runner with bundled-font and adapter provenance, and a macOS matrix geometry
-CI step; see [Testing](TESTING.md#ui-states). The Linux environment still needs
-its first actual hosted native CI run and artifact inspection. Initial Linux
-baselines need review and promotion from the final merged build after font/C08
-landing. Until then Linux CI reports capture-only operation. Keep native
-geometry evidence tied to the script/build that produced it; portable fixture
-tests and environment preparation do not establish a Linux pixel gate.
+CI step; see [Testing](TESTING.md#ui-states). The initial 80 Linux baselines come
+from hosted CI run 42383598778; [their provenance](../tests/ui-states/README.md) records the exact
+source, binary, fonts, renderer and cleanup. CI now compares captures with those
+baselines. This private headless Weston gate does not establish native GNOME or
+KDE behavior, macOS pixel parity, IME or accessibility acceptance. Keep geometry
+and pixel evidence tied to the script and build that produced it.
 
 ### Interactive application coverage
 

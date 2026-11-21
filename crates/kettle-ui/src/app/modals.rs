@@ -93,6 +93,20 @@ pub(super) fn edit_modal_text(
     crate::modal_input::edit_key(editor, key, mods, read, write)
 }
 
+pub(super) fn place_picker_header(
+    field: &mut kettle_render::TextFieldOverlay,
+    menu: &ContextMenu,
+    pending_palette: bool,
+) {
+    field.rect = menu.header_rect();
+    if pending_palette && menu.status.is_none() {
+        // The smallest restored windows have room for input and one action
+        // only. Keep Escape visible beside long queries; accessibility still
+        // exposes the complete pending explanation.
+        field.prefix = " Esc ".to_string();
+    }
+}
+
 impl App {
     /// Shared native/control press dispatch. Returning true owns the entire click.
     pub(super) fn dismiss_modal_outside(&mut self, ws: &mut WindowState, button: u8) -> bool {
@@ -188,7 +202,8 @@ impl App {
             field_hit
                 || self
                     .picker_menu(ws)
-                    // The whole card, the theme picker's footer included.
+                    // The whole card: the query header, any pinned status band
+                    // and the theme picker's footer included.
                     .is_some_and(|menu| rect_contains(menu.card_rect(), x, y))
         };
         Some((kind, inside))
@@ -271,10 +286,12 @@ impl App {
             || ws.theme_picker_input.is_some()
             || ws.layout_picker_input.is_some()
             || ws.ssh_input.is_some();
-        if picker {
-            // The header of the card the frame paints, from the same layout.
-            rect = self.picker_menu(ws)?.picker_header_rect();
-        }
+        // The header of the card the frame paints, from the same layout.
+        let picker_menu = if picker {
+            Some(self.picker_menu(ws)?)
+        } else {
+            None
+        };
         if ws.settings_text_edit.is_none()
             && !ws
                 .settings_nav
@@ -330,6 +347,13 @@ impl App {
                 5
             },
         };
+        if let Some(menu) = &picker_menu {
+            place_picker_header(
+                &mut field,
+                menu,
+                ws.palette_input.is_some() && ws.palette_profiles.is_none(),
+            );
+        }
         let cw = self.modal_field_cell_width(ws, &field);
         // The theme picker's Tab hint is the first part to go in a narrow header.
         if ws.theme_picker_input.is_some() && !field.hint.is_empty() {
@@ -1717,7 +1741,7 @@ impl App {
         let cmds = palette_view_entries(
             self.update_notice().as_ref(),
             &self.ui_text,
-            &ws.palette_profiles,
+            ws.palette_profiles.as_deref(),
             self.cfg.broadcast_default,
             &self.cfg.keybinds,
             ws.palette_bound_only,

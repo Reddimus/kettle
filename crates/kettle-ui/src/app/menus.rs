@@ -20,9 +20,10 @@ impl MenuOrigin {
     pub(super) fn shell_items(
         self,
         shells: Option<&[kettle_core::term::ShellChoice]>,
+        profiles: Option<&[String]>,
         tr: &kettle_i18n::Translator,
     ) -> Vec<ContextMenuItem> {
-        let mut items = App::shell_menu_items(shells, tr);
+        let mut items = App::shell_menu_items(shells, profiles, tr);
         if matches!(self, Self::NewTab { compact: true })
             && let Some(end) = items.iter().position(|item| {
                 matches!(
@@ -567,25 +568,7 @@ impl App {
     }
 
     pub(super) fn append_profile_submenu_items(&self, items: &mut Vec<ContextMenuItem>) {
-        let profile_names = kettle_config::Config::list_profiles();
-        if profile_names.is_empty() {
-            return;
-        }
-        items.push(ContextMenuItem::Separator);
-        let inner: Vec<ContextMenuItem> = profile_names
-            .into_iter()
-            .map(|name| ContextMenuItem::ProfileChoice {
-                label: name.clone(),
-                profile: name,
-            })
-            .collect();
-        items.push(ContextMenuItem::Submenu {
-            label: self
-                .ui_text
-                .text(kettle_i18n::Text::MenuProfile)
-                .to_string(),
-            items: inner,
-        });
+        append_profile_choices(items, self.profile_inventory.snapshot(), &self.ui_text);
     }
 
     /// Append a "Theme…" entry that opens the searchable theme picker, which
@@ -984,18 +967,12 @@ impl App {
 
     /// The new-tab `▾` dropdown's rows — the detected
     /// shells, then Windows Terminal's bottom section (Settings / Command
-    /// palette / Keyboard shortcuts / Help / About) behind a separator. Pure over the shell list so the
-    /// menu shape is unit-testable.
+    /// palette / Keyboard shortcuts / Help / About) behind a separator. Pure
+    /// over the cached shell and profile lists so the menu shape is
+    /// unit-testable.
     pub(super) fn new_tab_menu_items(
         shells: &[kettle_core::term::ShellChoice],
-        tr: &kettle_i18n::Translator,
-    ) -> Vec<ContextMenuItem> {
-        Self::new_tab_menu_with_profiles(shells, &kettle_config::Config::list_profiles(), tr)
-    }
-
-    pub(super) fn new_tab_menu_with_profiles(
-        shells: &[kettle_core::term::ShellChoice],
-        profiles: &[String],
+        profiles: Option<&[String]>,
         tr: &kettle_i18n::Translator,
     ) -> Vec<ContextMenuItem> {
         use kettle_i18n::Text as T;
@@ -1007,15 +984,7 @@ impl App {
         items.push(ContextMenuItem::Separator);
         items.push(ContextMenuItem::Submenu {
             label: tr.text(T::MenuNewWindowProfile).to_string(),
-            items: profile_launch_entries(profiles, tr)
-                .into_iter()
-                .map(|(label, action)| ContextMenuItem::DynamicItem {
-                    label: label.shown(tr).to_string(),
-                    action,
-                    enabled: true,
-                    toggle: None,
-                })
-                .collect(),
+            items: profile_launch_items(profiles, tr),
         });
         for (label, action) in [
             (T::MenuSaveLayout, Action::SaveLayout),
@@ -1110,10 +1079,11 @@ impl App {
 
     pub(super) fn shell_menu_items(
         shells: Option<&[kettle_core::term::ShellChoice]>,
+        profiles: Option<&[String]>,
         tr: &kettle_i18n::Translator,
     ) -> Vec<ContextMenuItem> {
         match shells {
-            Some(shells) => Self::new_tab_menu_items(shells, tr),
+            Some(shells) => Self::new_tab_menu_items(shells, profiles, tr),
             None => vec![ContextMenuItem::info(
                 tr.text(kettle_i18n::Text::MenuDetectingShells),
             )],
@@ -1151,7 +1121,7 @@ impl App {
         origin: MenuOrigin,
         anchor: (f32, f32),
     ) {
-        let items = origin.shell_items(shells, &self.ui_text);
+        let items = origin.shell_items(shells, self.profile_inventory.snapshot(), &self.ui_text);
         self.show_context_menu(ws, items, anchor.0, anchor.1);
         if let Some(menu) = ws.context_menu.as_mut() {
             menu.origin = origin;
@@ -1659,6 +1629,7 @@ impl App {
                 .as_ref()
                 .and_then(|m| m.origin.label(&self.ui_text))
                 .or_else(|| ws.context_menu_a11y_label.clone()),
+            status: None,
             picker_header_height: 0.0,
             picker_footer: None,
         })

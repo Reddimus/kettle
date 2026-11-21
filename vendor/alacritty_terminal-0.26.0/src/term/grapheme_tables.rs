@@ -2651,6 +2651,15 @@ pub(super) const SPACING_MARK: &[(u32, u32)] = &[
     (0x1D280, 0x1D281),
 ];
 
+pub(super) const VIRAMA_SPACING_MARK: &[(u32, u32)] = &[
+    (0x1B44, 0x1B44),
+    (0xA9C0, 0xA9C0),
+    (0x111C0, 0x111C0),
+    (0x11235, 0x11235),
+    (0x1134D, 0x1134D),
+    (0x116B6, 0x116B6),
+];
+
 pub(super) const INCB: &[(u32, u32, InCb)] = &[
     (0x300, 0x36F, InCb::Extend),
     (0x483, 0x487, InCb::Extend),

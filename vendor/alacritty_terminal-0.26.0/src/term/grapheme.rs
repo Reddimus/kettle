@@ -73,6 +73,21 @@ pub(super) fn emoji_modifier(c: char) -> bool {
     matches!(c, '\u{1f3fb}'..='\u{1f3ff}')
 }
 
+/// Mode-2027 scalar contribution, separate from shaping-base eligibility.
+pub(super) fn scalar_width(c: char) -> Option<usize> {
+    use unicode_width::UnicodeWidthChar;
+    if emoji_presentation(c) {
+        Some(2)
+    } else if gcb(c) == Gcb::Prepend || matches!(c, '\u{ad}' | '\u{a8fa}' | '\u{17a4}' | '\u{17d8}')
+    {
+        // Match the application-side width model for visible prefixes and the
+        // dependency's explicitly tailored singletons, only in grapheme mode.
+        Some(1)
+    } else {
+        c.width()
+    }
+}
+
 /// Width of a single stored cluster; prefixes without a spacing base use one cell.
 pub(super) fn cluster_width(codepoints: &[char]) -> usize {
     let mut state = GraphemeWidth::default();
@@ -123,16 +138,7 @@ impl GraphemeWidth {
 
         self.sinhala_linker =
             c == '\u{dca}' || (self.sinhala_linker && matches!(gcb(c), Gcb::Extend | Gcb::Zwj));
-        let width = if emoji_presentation(c) {
-            2
-        } else if prepended_concatenation_mark(c) || c == '\u{ad}' {
-            // Format characters with a visible glyph: number signs such as
-            // U+0600 span the digits after them, and a soft hyphen shows at a
-            // break. wcwidth gives each one cell; unicode-width gives zero.
-            1
-        } else {
-            c.width().unwrap_or(0)
-        };
+        let width = scalar_width(c).unwrap_or(0);
         let measured = width > 0;
         // VS15 narrows any two-cell variation base: emoji presentation and
         // East Asian Wide bases such as U+3030 alike.
@@ -149,7 +155,9 @@ impl GraphemeWidth {
             && self
                 .previous
                 .is_some_and(|base| property(base, tables::EMOJI_VARIATION_BASE)))
-            || (self.base.is_some() && property(c, tables::SPACING_MARK))
+            || (self.base.is_some()
+                && property(c, tables::SPACING_MARK)
+                && !property(c, tables::VIRAMA_SPACING_MARK))
         {
             self.cells = 2;
         } else if measured {
@@ -173,27 +181,26 @@ impl GraphemeWidth {
     }
 }
 
-/// Prepended_Concatenation_Mark (PropList.txt), a stable Unicode property.
-fn prepended_concatenation_mark(c: char) -> bool {
-    matches!(
-        c,
-        '\u{600}'..='\u{605}'
-            | '\u{6dd}'
-            | '\u{70f}'
-            | '\u{890}'..='\u{891}'
-            | '\u{8e2}'
-            | '\u{110bd}'
-            | '\u{110cd}'
-    )
+pub(super) fn base_offset(text: &str) -> usize {
+    base_offset_with(text, is_scalar_base)
 }
 
-pub(super) fn base_offset(text: &str) -> usize {
+pub(super) fn shaping_base_offset(text: &str) -> usize {
+    base_offset_with(text, is_base)
+}
+
+fn base_offset_with(text: &str, is_base: fn(char) -> bool) -> usize {
     text.char_indices()
         .find(|(_, c)| is_base(*c))
         .map_or(0, |(byte, _)| byte)
 }
 
 pub(super) fn is_base(c: char) -> bool {
+    // A8FA is a spacing base only for owned grapheme shaping and retention.
+    c == '\u{a8fa}' || is_scalar_base(c)
+}
+
+fn is_scalar_base(c: char) -> bool {
     use unicode_width::UnicodeWidthChar;
     if c.is_ascii() {
         return !c.is_ascii_control();
@@ -275,14 +282,57 @@ impl GraphemeState {
 mod tests {
     use super::*;
 
+    #[test]
+    fn mode_on_scalar_contributions_and_shaping_bases_stay_distinct() {
+        for c in ['\u{d4e}', '\u{a8fa}', '\u{17a4}', '\u{17d8}', '\u{ad}'] {
+            assert_eq!(scalar_width(c), Some(1));
+        }
+        assert!(is_base('\u{a8fa}'));
+        assert_eq!(shaping_base_offset("\u{d4e}\u{a8fa}"), '\u{d4e}'.len_utf8());
+        assert!(!is_base('\u{d4e}'));
+        assert!(!is_base('\u{600}'));
+        assert!(!is_base('\u{ad}'));
+        assert_eq!(scalar_width('\u{301}'), Some(0));
+        assert_eq!(scalar_width('\u{80}'), None);
+    }
+
+    #[test]
+    fn scalar_classification_and_owned_shaping_keep_separate_bases() {
+        let text = "\u{600}\u{a8fa}\u{fe0f}\u{e33}";
+        assert_eq!(base_offset(text), 8, "scalar rendering keeps the Thai base");
+        assert_eq!(shaping_base_offset(text), 2, "owned shaping anchors A8FA");
+        let text = "\u{a8fa}\u{1f3fb}";
+        assert_eq!(
+            base_offset(text),
+            3,
+            "scalar rendering keeps the modifier base"
+        );
+        assert_eq!(shaping_base_offset(text), 0, "owned shaping anchors A8FA");
+        for text in ["", "A", "\u{600}A", "\u{ad}A", "\u{301}"] {
+            assert_eq!(base_offset(text), shaping_base_offset(text), "{text:?}");
+        }
+    }
+
     /// The ASCII fast path in `Term::input_grapheme` must leave exactly the
     /// state the full path does, whatever came before.
     #[test]
     fn printable_ascii_shortcut_matches_the_full_state_machine() {
         let prefixes: &[&str] = &[
-            "", "a", " ", "\u{600}", "\u{110bd}", "\u{1f44d}", "\u{1f44d}\u{200d}",
-            "\u{915}\u{94d}", "\u{1f1ef}", "e\u{301}", "\u{d9a}\u{dca}\u{200d}",
-            "\u{1100}", "#\u{fe0f}", "\u{2764}", "\u{fe0f}",
+            "",
+            "a",
+            " ",
+            "\u{600}",
+            "\u{110bd}",
+            "\u{1f44d}",
+            "\u{1f44d}\u{200d}",
+            "\u{915}\u{94d}",
+            "\u{1f1ef}",
+            "e\u{301}",
+            "\u{d9a}\u{dca}\u{200d}",
+            "\u{1100}",
+            "#\u{fe0f}",
+            "\u{2764}",
+            "\u{fe0f}",
         ];
         for prefix in prefixes {
             let mut state = GraphemeState::default();

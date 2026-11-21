@@ -7,8 +7,8 @@ use crate::search::{
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextFieldOverlay {
-    /// A contained picker header keeps the complete hint only when the query
-    /// and a caret-sized gap fit beside it.
+    /// A contained picker header reserves room for the full query and a caret
+    /// gap before fitting complete hint segments ending with the Esc action.
     pub picker_header: bool,
     /// What a picker's empty query field says it is for, in the secondary
     /// text colour. Paint only: it is never the field's value.
@@ -32,8 +32,8 @@ pub struct TextFieldLayout {
     pub selection: Vec<Rect4>,
 }
 
-/// Prefixes fit at most 30% of the field. Picker headers show the whole hint
-/// beside a fitting query or drop it; other fields fit hints by segments.
+/// Prefixes fit at most 30% of the field. Picker headers never abbreviate the
+/// final action or displace the full query; other fields may ellipsize hints.
 /// An empty picker query's placeholder comes before the hint: the hint gives
 /// way when only that lets the placeholder show, and is back once a query
 /// replaces it. Measuring and painting share these strings and their clipped
@@ -46,12 +46,7 @@ pub fn text_field_labels(field: &TextFieldOverlay, cw: f32) -> (String, String) 
     };
     let prefix = super::fit_single_line_label(&field.prefix, budget);
     let hint = if field.picker_header {
-        let needed = super::display_width(&prefix)
-            + super::display_width(&field.text).max(1)
-            + 2
-            + super::display_width(&field.hint)
-            + 2;
-        let hint = format!("{}  ", field.hint);
+        let hint = picker_header_hint(field, &prefix, cw);
         // The editor slot's width with and without the hint, as
         // `text_field_rects` lays it out.
         let prefix_w = super::display_width(&prefix) as f32 * cw;
@@ -59,15 +54,55 @@ pub fn text_field_labels(field: &TextFieldOverlay, cw: f32) -> (String, String) 
         let crowds_placeholder = wants_placeholder(field, cw)
             && !placeholder_fits(&field.placeholder, field.rect.2 - prefix_w - hint_w, cw)
             && placeholder_fits(&field.placeholder, field.rect.2 - prefix_w, cw);
-        if needed as f32 * cw <= field.rect.2 && !field.hint.is_empty() && !crowds_placeholder {
-            hint
-        } else {
+        if crowds_placeholder {
             String::new()
+        } else {
+            hint
         }
     } else {
         super::fit_key_hint(&field.hint, budget)
     };
     (prefix, hint)
+}
+
+fn picker_header_hint(field: &TextFieldOverlay, prefix: &str, cw: f32) -> String {
+    if !cw.is_finite() || cw <= 0.0 || !field.rect.2.is_finite() || field.hint.is_empty() {
+        return String::new();
+    }
+    let reserved = super::display_width(prefix) + super::display_width(&field.text).max(1) + 4;
+    let fits = |hint: &str| (reserved + super::display_width(hint)) as f32 * cw <= field.rect.2;
+    if fits(&field.hint) {
+        return format!("{}  ", field.hint);
+    }
+    let Some(last) = field
+        .hint
+        .strip_prefix('(')
+        .and_then(|hint| hint.strip_suffix(')'))
+        .and_then(|hint| hint.rsplit(" · ").next())
+        .filter(|last| {
+            last.strip_prefix("Esc ")
+                .is_some_and(|action| !action.is_empty())
+        })
+    else {
+        return String::new();
+    };
+    // Generic fields may ellipsize their last action. Pickers must keep it whole.
+    let minimum = format!("({last})");
+    if !fits(&minimum) {
+        return String::new();
+    }
+    // Division can round an exactly fitting fractional-width column down.
+    let columns = (field.rect.2 / cw).round() as usize;
+    let columns = if columns as f32 * cw > field.rect.2 {
+        columns.saturating_sub(1)
+    } else {
+        columns
+    };
+    let budget = columns
+        .saturating_sub(reserved)
+        .max(super::display_width(&minimum));
+    let hint = super::fit_key_hint(&field.hint, budget);
+    format!("{hint}  ")
 }
 
 /// Whether `field` would show a placeholder in a slot wide enough: a picker
@@ -479,6 +514,21 @@ mod tests {
 mod picker_header_tests {
     use super::*;
 
+    fn field(hint: &str) -> TextFieldOverlay {
+        TextFieldOverlay {
+            picker_header: true,
+            placeholder: String::new(),
+            text: "año".into(),
+            cursor_byte: 4,
+            selection: None,
+            horizontal_scroll: 0,
+            rect: (16.0, 70.0, 720.0, 30.0),
+            prefix: "  ⌘ ".into(),
+            hint: hint.into(),
+            accent_palette: 5,
+        }
+    }
+
     /// The command palette's key hint, as the UI builds it, in `tr`.
     fn palette_hint(tr: &kettle_i18n::Translator) -> String {
         use kettle_i18n::Text;
@@ -504,6 +554,108 @@ mod picker_header_tests {
             prefix: "  \u{2318} ".into(),
             hint: hint.into(),
             accent_palette: 5,
+        }
+    }
+
+    #[test]
+    fn picker_hint_fallback_preserves_complete_actions_at_exact_boundaries() {
+        for (full, middle, last, columns) in [
+            (
+                "(Enter run · Tab/↑↓ select · Esc cancel)",
+                "(Enter run · Esc cancel)",
+                "(Esc cancel)",
+                [51.0, 35.0, 23.0],
+            ),
+            (
+                "(Enter ejecutar · Tab/↑↓ seleccionar · Esc cancelar)",
+                "(Enter ejecutar · Esc cancelar)",
+                "(Esc cancelar)",
+                [63.0, 42.0, 25.0],
+            ),
+        ] {
+            for cw in [5.69, 7.25, 7.37, 8.0, 8.3, 9.6, 13.0] {
+                for (cols, expected, below) in [
+                    (columns[0], full, middle),
+                    (columns[1], middle, last),
+                    (columns[2], last, ""),
+                ] {
+                    for offset in [-0.01, 0.0, 0.01] {
+                        let mut field = field(full);
+                        field.rect.2 = cols * cw + offset;
+                        let expected = if offset < 0.0 { below } else { expected };
+                        let expected = if expected.is_empty() {
+                            String::new()
+                        } else {
+                            format!("{expected}  ")
+                        };
+                        assert_eq!(
+                            text_field_labels(&field, cw).1,
+                            expected,
+                            "{cw}/{cols}/{offset}"
+                        );
+                        let [prefix, editor, hint] = text_field_rects(&field, cw);
+                        assert_eq!(editor.0, prefix.0 + prefix.2);
+                        assert!((editor.0 + editor.2 - hint.0).abs() < 0.001);
+                        assert!((hint.0 + hint.2 - field.rect.0 - field.rect.2).abs() < 0.001);
+                        if !expected.is_empty() {
+                            assert!(editor.2 + 0.001 >= 5.0 * cw);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn picker_hint_fallback_budgets_the_entire_projected_query() {
+        let mut field = field("(Enter run · Tab/↑↓ select · Esc cancel)");
+        field.rect.2 = 168.0;
+        field.text.clear();
+        field.cursor_byte = 0;
+        assert_eq!(text_field_labels(&field, 8.0).1, "(Esc cancel)  ");
+        field.rect.2 -= 0.01;
+        assert!(text_field_labels(&field, 8.0).1.is_empty());
+        field.rect.2 = 328.0;
+        for query in ["a\u{301}", "界", "👩‍💻", "שלום abc", "año"] {
+            field.text = query.into();
+            for scroll in [0, 1, 100] {
+                field.horizontal_scroll = scroll;
+                field.cursor_byte = query.len();
+                field.selection = Some((0, query.len()));
+                let hint = text_field_labels(&field, 8.0).1;
+                assert!(hint.ends_with("Esc cancel)  "), "{query:?}: {hint:?}");
+                assert!(!hint.contains('…'));
+                let editor = text_field_rects(&field, 8.0)[1];
+                assert!(editor.2 >= (crate::display_width(query).max(1) + 2) as f32 * 8.0);
+            }
+        }
+        field.text = "long projected query including preedit ".repeat(4);
+        for cursor in [0, field.text.len()] {
+            field.cursor_byte = cursor;
+            assert!(text_field_labels(&field, 8.0).1.is_empty());
+            assert_eq!(text_field_rects(&field, 8.0)[1].2, 296.0);
+        }
+    }
+
+    #[test]
+    fn picker_hint_fallback_does_not_reinterpret_other_hint_shapes() {
+        for hint in [
+            "",
+            "plain hint",
+            "(Enter run · Other action)",
+            "Enter run · Esc cancel",
+        ] {
+            let mut field = field(hint);
+            assert_eq!(text_field_labels(&field, 8.0).1.trim_end(), hint);
+            field.rect.2 = 80.0;
+            assert!(text_field_labels(&field, 8.0).1.is_empty());
+        }
+        for cw in [0.0, -8.0, f32::INFINITY, f32::NAN] {
+            assert!(
+                text_field_labels(&field("(Enter run · Esc cancel)"), cw)
+                    .1
+                    .is_empty()
+            );
         }
     }
 

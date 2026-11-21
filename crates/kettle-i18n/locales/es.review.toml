@@ -45,6 +45,8 @@
 # to draft pending review of the revised text in rendered UI.
 
 [status]
+menu_profiles_pending = "draft"
+picker_profiles_pending = "draft"
 settings_group_colors_text = "draft"
 settings_group_window = "draft"
 settings_group_cursor = "draft"
@@ -63,6 +65,7 @@ a11y_window_close = "accepted"
 
 tab_new_options = "accepted"
 
+notify_profile_launch_busy = "draft"
 notify_profile_launch_failed_body = "accepted"
 notify_profile_launch_failed = "accepted"
 notify_profiles_failed_body = "accepted"

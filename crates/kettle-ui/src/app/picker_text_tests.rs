@@ -8,6 +8,63 @@ const EN: Translator = Translator::new(Language::En);
 const ES: Translator = Translator::new(Language::Es);
 
 #[test]
+fn narrow_picker_hints_keep_each_callers_translated_escape_action() {
+    for tr in [&EN, &ES] {
+        for keys in [
+            vec![
+                ("Enter", Text::PickerHintRun),
+                ("Tab/↑↓", Text::PickerHintSelect),
+                ("Esc", Text::PickerHintCancel),
+            ],
+            vec![
+                ("Enter", Text::PickerHintKeep),
+                ("↑↓", Text::PickerHintSelect),
+                ("Esc", Text::PickerHintRestore),
+            ],
+            vec![
+                ("Enter", Text::PickerHintSpawn),
+                ("Tab/↑↓", Text::PickerHintSelect),
+                ("Esc", Text::PickerHintCancel),
+            ],
+            vec![
+                ("Enter", Text::PickerHintConnect),
+                ("Tab", Text::PickerHintComplete),
+                ("↑↓", Text::PickerHintSelect),
+                ("Esc", Text::PickerHintCancel),
+            ],
+        ] {
+            let full = picker_hint(tr, &keys);
+            let mut field = kettle_render::TextFieldOverlay {
+                placeholder: String::new(),
+                picker_header: true,
+                text: "año".into(),
+                cursor_byte: 4,
+                selection: None,
+                horizontal_scroll: 0,
+                rect: (0.0, 0.0, 224.0, 30.0),
+                prefix: "  ⌘ ".into(),
+                hint: full.clone(),
+                accent_palette: 5,
+            };
+            let action = keys.last().unwrap().1;
+            assert_eq!(
+                kettle_render::text_field_labels(&field, 8.0).1,
+                format!("(Esc {})  ", tr.text(action))
+            );
+            field.rect.2 = 1000.0;
+            assert_eq!(
+                kettle_render::text_field_labels(&field, 8.0).1,
+                format!("{full}  ")
+            );
+            field.rect.2 = 224.0;
+            field.text = "full projected query ".repeat(8);
+            field.horizontal_scroll = 120;
+            assert!(kettle_render::text_field_labels(&field, 8.0).1.is_empty());
+        }
+    }
+}
+
+#[test]
 fn picker_hints_keep_their_keys_and_translate_their_actions() {
     let palette = [
         ("Enter", Text::PickerHintRun),
@@ -109,6 +166,7 @@ fn modal_accessibility_names_follow_the_ui_language() {
             panel_w_clamped: 100.0,
             panel_h_clamped: 100.0,
             a11y_label: None,
+            status: None,
             picker_header_height: 0.0,
             picker_footer: None,
         }),
@@ -222,7 +280,7 @@ fn picker_rows_and_empty_states_follow_the_ui_language() {
             &bindings,
             &ES,
             None,
-            &[],
+            Some(&[]),
             false,
             kettle_config::BroadcastDefault::default(),
         )
@@ -238,7 +296,7 @@ fn picker_rows_and_empty_states_follow_the_ui_language() {
         &bindings,
         &ES,
         None,
-        &[],
+        Some(&[]),
         false,
         kettle_config::BroadcastDefault::default(),
     );
@@ -251,7 +309,7 @@ fn picker_rows_and_empty_states_follow_the_ui_language() {
             &bindings,
             &EN,
             None,
-            &[],
+            Some(&[]),
             false,
             kettle_config::BroadcastDefault::default(),
         )
@@ -417,7 +475,8 @@ fn ssh_rows_project_their_painted_hint_and_never_select_the_placeholder() {
     // Row 0's option, found by the label the row paints (fitted to the card).
     let option = |query: &str, imported: &[String]| {
         let list = ssh_picker_list(query, 0, &[], imported, &EN);
-        let menu = picker_context_menu(list, (800.0, 600.0), (8.0, 16.0), 0.0).unwrap();
+        let menu =
+            picker_context_menu(list, (800.0, 600.0), (8.0, 16.0), (8.0, 16.0), 0.0).unwrap();
         let painted = menu.rows[0].hint.trim().to_string();
         let label = menu.rows[0].label.clone();
         let overlay = kettle_render::Overlay {
@@ -478,7 +537,7 @@ fn described_palette_rows(
     let entries = super::palette_view_entries(
         None,
         tr,
-        &[],
+        Some(&[]),
         kettle_config::BroadcastDefault::default(),
         &bindings,
         false,
@@ -489,7 +548,7 @@ fn described_palette_rows(
         &bindings,
         tr,
         None,
-        &[],
+        Some(&[]),
         false,
         kettle_config::BroadcastDefault::default(),
     );
@@ -512,12 +571,13 @@ fn described_palette_rows(
             kettle_config::keybinds::hint_label_for_platform(&bindings, &entry.action, macos)
                 .unwrap_or_default();
         let list = super::PickerList {
+            status: None,
             card_scale: 1.0,
             rows: vec![row],
             selected: 0,
             footer: None,
         };
-        let mut menu = super::picker_context_menu(list, (1280.0, 820.0), cell, 32.0).unwrap();
+        let mut menu = super::picker_context_menu(list, (1280.0, 820.0), cell, cell, 32.0).unwrap();
         let row = menu.rows.remove(0);
         out.push((entry.action.clone(), row, menu));
     }
@@ -585,11 +645,12 @@ fn palette_options_describe_shortcut_then_description() {
                 &bindings,
                 &tr,
                 None,
-                &[],
+                Some(&[]),
                 false,
                 kettle_config::BroadcastDefault::default(),
             );
-            let menu = super::picker_context_menu(list, surface, (7.8, 16.25), 32.0).unwrap();
+            let menu = super::picker_context_menu(list, surface, (7.8, 16.25), (7.8, 16.25), 32.0)
+                .unwrap();
             let overlay = kettle_render::Overlay {
                 palette_query: Some(String::new()),
                 context_menu: Some(menu),
@@ -654,7 +715,7 @@ fn empty_palette_starts_with_tabs_then_splits_and_a_query_has_no_headings() {
             &bindings,
             &tr,
             None,
-            &[],
+            Some(&[]),
             false,
             kettle_config::BroadcastDefault::default(),
         );
@@ -695,7 +756,7 @@ fn empty_palette_starts_with_tabs_then_splits_and_a_query_has_no_headings() {
                 &bindings,
                 &tr,
                 None,
-                &[],
+                Some(&[]),
                 false,
                 kettle_config::BroadcastDefault::default(),
             );
@@ -707,7 +768,7 @@ fn empty_palette_starts_with_tabs_then_splits_and_a_query_has_no_headings() {
             &bindings,
             &tr,
             None,
-            &[],
+            Some(&[]),
             true,
             kettle_config::BroadcastDefault::default(),
         );
@@ -727,7 +788,7 @@ fn selection_and_accessibility_skip_the_headings() {
         let entries = super::palette_view_entries(
             None,
             &tr,
-            &[],
+            Some(&[]),
             kettle_config::BroadcastDefault::default(),
             &bindings,
             false,
@@ -739,7 +800,7 @@ fn selection_and_accessibility_skip_the_headings() {
                 &bindings,
                 &tr,
                 None,
-                &[],
+                Some(&[]),
                 false,
                 kettle_config::BroadcastDefault::default(),
             );
@@ -766,7 +827,7 @@ fn selection_and_accessibility_skip_the_headings() {
             &bindings,
             &tr,
             None,
-            &[],
+            Some(&[]),
             false,
             kettle_config::BroadcastDefault::default(),
         );
@@ -778,7 +839,9 @@ fn selection_and_accessibility_skip_the_headings() {
             .map(|(index, row)| (index, row.label.clone()))
             .collect();
         assert_eq!(headings.len(), 14);
-        let menu = super::picker_context_menu(list, (1280.0, 820.0), (7.8, 16.25), 32.0).unwrap();
+        let menu =
+            super::picker_context_menu(list, (1280.0, 820.0), (7.8, 16.25), (7.8, 16.25), 32.0)
+                .unwrap();
         let overlay = kettle_render::Overlay {
             palette_query: Some(String::new()),
             context_menu: Some(menu),
@@ -836,7 +899,7 @@ fn palette_options_report_their_place_among_all_results() {
         let entries = super::palette_view_entries(
             None,
             &tr,
-            &[],
+            Some(&[]),
             kettle_config::BroadcastDefault::default(),
             &bindings,
             false,
@@ -848,12 +911,13 @@ fn palette_options_report_their_place_among_all_results() {
                 &bindings,
                 &tr,
                 None,
-                &[],
+                Some(&[]),
                 false,
                 kettle_config::BroadcastDefault::default(),
             );
             let menu =
-                super::picker_context_menu(list, (1280.0, 820.0), (7.8, 16.25), 32.0).unwrap();
+                super::picker_context_menu(list, (1280.0, 820.0), (7.8, 16.25), (7.8, 16.25), 32.0)
+                    .unwrap();
             let overlay = kettle_render::Overlay {
                 palette_query: Some(query.into()),
                 context_menu: Some(menu),

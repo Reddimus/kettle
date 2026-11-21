@@ -40,9 +40,12 @@ fn control_only_action_names() -> Vec<String> {
         .expect("kettle-ui/src/app/ is readable")
         .map(|entry| entry.expect("app/ entry").path())
         .filter(|path| {
-            path.file_stem()
-                .and_then(|stem| stem.to_str())
-                .is_some_and(|stem| stem != "tests" && !stem.ends_with("_tests"))
+            path.is_file()
+                && path.extension().is_some_and(|extension| extension == "rs")
+                && path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .is_some_and(|stem| stem != "tests" && !stem.ends_with("_tests"))
         })
         .collect();
     modules.sort();

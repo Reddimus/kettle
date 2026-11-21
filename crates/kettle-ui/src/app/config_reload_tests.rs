@@ -786,6 +786,76 @@ fn cursor_settings_are_applied_to_running_panes_on_reload() {
     assert!(apply.contains("set_cursor_defaults(self.cfg.cursor_style, self.cfg.cursor_blink)"));
 }
 
+#[test]
+fn cached_profile_cycle_refuses_deleted_target_without_changing_active_state() {
+    use super::config_reload::{pick_next_profile, stage_profile_switch};
+    use kettle_config::ConfigTrust;
+
+    let root = kettle_test_support::private_tempdir("kettle-profile-switch-deleted-");
+    let original = root.join("a.config");
+    let removed = root.join("b.config");
+    std::fs::write(&original, "font-size = 19.5\n").unwrap();
+    std::fs::write(&removed, "font-size = 22\n").unwrap();
+    let names = vec!["a".to_string(), "b".to_string()];
+    assert_eq!(pick_next_profile(Some("a"), &names, true), "b");
+    std::fs::remove_file(&removed).unwrap();
+    let mut active = Some(original.clone());
+    let mut trust = ConfigTrust::ExplicitPath;
+    let mut prepared = None;
+    let error = stage_profile_switch(removed, &mut active, &mut trust, &mut prepared).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(active.as_ref(), Some(&original));
+    assert!(matches!(trust, ConfigTrust::ExplicitPath));
+    assert!(prepared.is_none());
+    assert_eq!(std::fs::read_to_string(original).unwrap(), "font-size = 19.5\n");
+}
+
+#[test]
+fn profile_switch_uses_one_prepared_snapshot_if_target_disappears_after_read() {
+    use super::config_reload::{read_config_for_reload_or_prepared, stage_profile_switch};
+    use kettle_config::ConfigTrust;
+
+    let root = kettle_test_support::private_tempdir("kettle-profile-switch-snapshot-");
+    let path = root.join("work.config");
+    std::fs::write(&path, "font-size = 19.5\n").unwrap();
+    let mut active = None;
+    let mut trust = ConfigTrust::ExplicitPath;
+    let mut prepared = None;
+    stage_profile_switch(path.clone(), &mut active, &mut trust, &mut prepared).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let loaded = read_config_for_reload_or_prepared(&path, trust, &mut prepared)
+        .unwrap()
+        .expect("a successful switch installs its same prepared snapshot");
+    assert_eq!(loaded.config.font_size, 19.5);
+    assert_eq!(loaded.text, "font-size = 19.5\n");
+    assert!(prepared.is_none());
+    assert!(matches!(trust, ConfigTrust::VerifyDirectory));
+    assert_eq!(active.as_ref(), Some(&path));
+}
+
+#[test]
+fn profile_switch_read_failure_preserves_state_and_prepared_reload_is_path_bound() {
+    use super::config_reload::{read_config_for_reload_or_prepared, stage_profile_switch};
+    use kettle_config::ConfigTrust;
+
+    let root = kettle_test_support::private_tempdir("kettle-profile-switch-path-");
+    let first = root.join("a.config");
+    let second = root.join("b.config");
+    std::fs::write(&first, "font-size = 19.5\n").unwrap();
+    std::fs::write(&second, "font-size = 22\n").unwrap();
+    let mut active = Some(second.clone());
+    let mut trust = ConfigTrust::ExplicitPath;
+    let mut prepared = None;
+    assert!(stage_profile_switch(root.to_path_buf(), &mut active, &mut trust, &mut prepared).is_err());
+    assert_eq!(active.as_ref(), Some(&second));
+    assert!(matches!(trust, ConfigTrust::ExplicitPath));
+    assert!(prepared.is_none());
+    stage_profile_switch(first, &mut active, &mut trust, &mut prepared).unwrap();
+    let loaded = read_config_for_reload_or_prepared(&second, trust, &mut prepared).unwrap().unwrap();
+    assert_eq!(loaded.config.font_size, 22.0);
+    assert!(prepared.is_none(), "a snapshot for another path must not survive");
+}
+
 /// A reload installs the saved theme, and the file watcher reloads outside
 /// any window event, so the window's next frame would show the saved theme
 /// under an open picker's preview. Applying a reload puts the preview back

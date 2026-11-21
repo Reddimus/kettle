@@ -1455,8 +1455,9 @@ impl App {
         } else {
             None
         };
-        let modal_projection = modal_accessibility_projection(
+        let modal_projection = modal_accessibility_projection_for_window(
             &diagnostic_overlay,
+            target,
             (surface.0 as f32, surface.1 as f32),
             (
                 self.overlay_text_cell_width(target),
@@ -3974,6 +3975,7 @@ pub(super) fn picker_diagnostic_geometry(overlay: &Overlay) -> Option<serde_json
     Some(serde_json::json!({
         "rect": rect_json(menu.card_rect()),
         "rows_rect": rect_json(menu.rows_rect()),
+        "status_rect": menu.status_rect().map(rect_json),
         // Headings are not rows a probe can select or press, so they are
         // left out. `index` is the painted row (an empty palette's first
         // command is row 1, under the Tabs heading); `option` is the command

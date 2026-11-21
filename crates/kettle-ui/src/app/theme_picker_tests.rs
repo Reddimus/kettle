@@ -253,7 +253,7 @@ fn the_picker_reads_out_its_name_and_each_rows_appearance() {
         let list = theme_picker_list("tokyonight", 0, "TokyoNight Night", tr);
         let overlay = kettle_render::Overlay {
             theme_picker_query: Some("tokyonight".into()),
-            context_menu: picker_context_menu(list, (800.0, 600.0), (8.0, 16.0), 0.0),
+            context_menu: picker_context_menu(list, (800.0, 600.0), (8.0, 16.0), (8.0, 16.0), 0.0),
             ..kettle_render::Overlay::default()
         };
         modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, tr)
@@ -323,7 +323,8 @@ fn builtin_theme_picker_localizes_labels_and_keeps_selection_identifiers() {
 #[test]
 fn picker_scrolling_leaves_the_selected_row_fully_visible() {
     let list = theme_picker_list("", 20, "Builtin Dark", &EN);
-    let menu = super::picker_context_menu(list, (320.0, 160.0), (8.0, 16.0), 0.0).unwrap();
+    let menu =
+        super::picker_context_menu(list, (320.0, 160.0), (8.0, 16.0), (8.0, 16.0), 0.0).unwrap();
     // A picker's rows fill its panel: there are no arrow strips.
     let (inset, content_h) = kettle_render::menu::picker_scroll_content(menu.panel_h_clamped);
     assert_eq!((inset, content_h), (0.0, menu.panel_h_clamped));
@@ -414,6 +415,7 @@ fn picker_rows_and_wheel_scroll_all_four_modal_projections() {
             open_picker_list(ws, &cfg, "dark-theme", &ES, None).unwrap(),
             surface,
             cell,
+            cell,
             0.0,
         )
         .unwrap()
@@ -421,7 +423,7 @@ fn picker_rows_and_wheel_scroll_all_four_modal_projections() {
     for kind in 0..4 {
         let mut ws = WindowState::new(0, Mux::new());
         match kind {
-            0 => ws.palette_input = Some((Default::default(), 0)),
+            0 => super::profiles::open_profile_palette(&mut ws, Some(&[])),
             1 => ws.theme_picker_input = Some(state("", 0, "Builtin Dark")),
             2 => {
                 ws.layout_picker_entries = (0..40).map(|i| format!("layout-{i}")).collect();
@@ -564,7 +566,7 @@ fn picker_result_presses_select_the_visible_row() {
     for kind in 0..4 {
         let mut ws = WindowState::new(0, Mux::new());
         match kind {
-            0 => ws.palette_input = Some((Default::default(), 0)),
+            0 => super::profiles::open_profile_palette(&mut ws, Some(&[])),
             1 => ws.theme_picker_input = Some(state("", 0, "Builtin Dark")),
             2 => {
                 ws.layout_picker_entries = vec!["alpha".into(), "beta".into()];
@@ -576,6 +578,7 @@ fn picker_result_presses_select_the_visible_row() {
             picker_context_menu(
                 open_picker_list(ws, &cfg, "dark-theme", &ES, None).unwrap(),
                 (800.0, 600.0),
+                (8.0, 16.0),
                 (8.0, 16.0),
                 0.0,
             )
@@ -878,7 +881,7 @@ fn rows_other_than_themes_carry_no_swatches() {
             &kettle_config::keybinds::defaults(),
             &EN,
             None,
-            &[],
+            None,
             false,
             kettle_config::BroadcastDefault::default(),
         ),
@@ -888,7 +891,7 @@ fn rows_other_than_themes_carry_no_swatches() {
             &kettle_config::keybinds::defaults(),
             &EN,
             None,
-            &[],
+            None,
             false,
             kettle_config::BroadcastDefault::default(),
         ),
@@ -968,8 +971,8 @@ fn a_narrow_picker_drops_swatches_before_the_name() {
         ((640.0, 820.0), (10.0, 20.0)),
     ] {
         let list = theme_picker_list("tokyonight", 0, "TokyoNight Night", &EN);
-        let menu =
-            picker_context_menu(list, surface, cell, 0.0).expect("the window fits the picker");
+        let menu = picker_context_menu(list, surface, cell, cell, 0.0)
+            .expect("the window fits the picker");
         let columns = kettle_render::menu::panel_columns(menu.panel_w_clamped, cell.0);
         let all_fit = originals
             .rows
@@ -1024,7 +1027,7 @@ fn swatches_leave_the_accessible_rows_unchanged() {
             }
             let overlay = kettle_render::Overlay {
                 theme_picker_query: Some("tokyonight".into()),
-                context_menu: picker_context_menu(list, surface, (8.0, 16.0), 0.0),
+                context_menu: picker_context_menu(list, surface, (8.0, 16.0), (8.0, 16.0), 0.0),
                 ..kettle_render::Overlay::default()
             };
             modal_accessibility_projection(&overlay, surface, (8.0, 16.0), 1.0, &EN)
@@ -1116,7 +1119,7 @@ fn the_theme_picker_fills_a_tall_window_with_rows_and_its_footer() {
             let mut ws = WindowState::new(0, Mux::new());
             ws.theme_picker_input = Some(state("", 0, "TokyoNight Night"));
             let list = open_picker_list(&ws, &cfg, "dark-theme", tr, None).unwrap();
-            let menu = picker_context_menu(list, surface, cell, top).unwrap();
+            let menu = picker_context_menu(list, surface, cell, cell, top).unwrap();
             let footer = menu.picker_footer.as_ref().expect("a footer");
             assert!(footer.show_sample, "{scale}x: card");
             assert_eq!(footer.status_lines, 2, "{scale}x");
@@ -1145,11 +1148,12 @@ fn the_theme_picker_fills_a_tall_window_with_rows_and_its_footer() {
                 &kettle_config::keybinds::defaults(),
                 &EN,
                 None,
-                &[],
+                Some(&[]),
                 false,
                 kettle_config::BroadcastDefault::default(),
             ),
             surface,
+            cell,
             cell,
             top,
         )
@@ -1178,7 +1182,8 @@ fn a_short_window_drops_the_theme_sample_before_the_rows() {
         let mut ws = WindowState::new(0, Mux::new());
         ws.theme_picker_input = Some(state("", 0, "TokyoNight Night"));
         let list = open_picker_list(&ws, &cfg, "dark-theme", &EN, None).unwrap();
-        let Some(menu) = picker_context_menu(list, (1280.0, height as f32), cell, 32.0) else {
+        let Some(menu) = picker_context_menu(list, (1280.0, height as f32), cell, cell, 32.0)
+        else {
             continue;
         };
         let (_, content_h) = kettle_render::menu::picker_scroll_content(menu.panel_h_clamped);
@@ -1216,6 +1221,7 @@ fn the_contrast_button_takes_its_press_and_saves_through_settings() {
     let menu = picker_context_menu(
         open_picker_list(&ws, &cfg, "dark-theme", &EN, None).unwrap(),
         (1280.0, 820.0),
+        cell,
         cell,
         32.0,
     )
@@ -1270,7 +1276,9 @@ fn the_theme_picker_footer_has_an_accessible_text() {
         let mut ws = WindowState::new(0, Mux::new());
         ws.theme_picker_input = Some(state("", 0, "TokyoNight Night"));
         let list = super::open_picker_list(&ws, &cfg, "dark-theme", tr, None).unwrap();
-        let menu = super::picker_context_menu(list, (1280.0, 820.0), (8.4, 17.0), 32.0).unwrap();
+        let menu =
+            super::picker_context_menu(list, (1280.0, 820.0), (8.4, 17.0), (8.4, 17.0), 32.0)
+                .unwrap();
         let overlay = kettle_render::Overlay {
             theme_picker_query: Some(String::new()),
             context_menu: Some(menu),
@@ -1517,6 +1525,7 @@ fn the_contrast_button_is_a_button_and_the_sides_a_radio_group() {
             let menu = picker_context_menu(
                 open_picker_list(&ws, &cfg, key, tr, None).unwrap(),
                 (1280.0, 820.0),
+                cell,
                 cell,
                 32.0,
             )
@@ -1780,12 +1789,24 @@ fn a_narrow_theme_picker_header_drops_the_tab_hint_first() {
                 8.0,
             )
             .1;
-            let full_fits = !kettle_render::text_field_labels(&field, 8.0).1.is_empty();
-            if full_fits {
+            // Whole, as the painter shows it; a picker header's fallback
+            // may still paint a shortened hint when neither fits.
+            let shows_whole = |hint: &str| {
+                kettle_render::text_field_labels(
+                    &kettle_render::TextFieldOverlay {
+                        hint: hint.into(),
+                        ..field.clone()
+                    },
+                    8.0,
+                )
+                .1 == format!("{hint}  ")
+            };
+            if shows_whole(&full) {
                 assert_eq!(hint, full, "{width}");
                 saw_full = true;
-            } else if !painted.is_empty() {
+            } else if shows_whole(&short) {
                 assert_eq!(hint, short, "{width}");
+                assert_eq!(painted, format!("{short}  "), "{width}");
                 saw_short = true;
             }
         }
@@ -1867,6 +1888,7 @@ fn each_side_of_the_status_line_takes_a_press_and_a_screen_reader_click() {
         let menu = picker_context_menu(
             open_picker_list(&ws, &cfg, "dark-theme", tr, None).unwrap(),
             (1280.0, 820.0),
+            cell,
             cell,
             32.0,
         )
