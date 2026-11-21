@@ -121,6 +121,13 @@ impl Clipboard {
 		}
 	}
 
+	/// The pasteboard of this name instead of the general one (Kettle patch).
+	/// A test owns a uniquely named pasteboard that no other program uses.
+	pub(crate) fn with_pasteboard_name(name: &str) -> Clipboard {
+		let name = NSString::from_str(name);
+		Clipboard { pasteboard: NSPasteboard::pasteboardWithName(&name) }
+	}
+
 	fn clear(&mut self) {
 		self.pasteboard.clearContents();
 	}
@@ -466,5 +473,25 @@ mod tests {
 				.into_rgba8();
 		assert_eq!(decoded.dimensions(), (2, 2));
 		assert_eq!(decoded.into_raw(), pixels);
+	}
+
+	#[test]
+	fn a_named_pasteboard_keeps_its_text_from_the_general_one() {
+		let name = format!(
+			"com.kettle.test.arboard.{}.{:?}",
+			std::process::id(),
+			std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap()
+		);
+		let other_name = format!("{name}.other");
+		let mut clipboard = crate::Clipboard::with_macos_pasteboard_name(&name);
+		let mut other = crate::Clipboard::with_macos_pasteboard_name(&other_name);
+		clipboard.set_text("named").unwrap();
+		let read = (clipboard.get_text(), other.get_text());
+		for pasteboard in [&clipboard.platform.pasteboard, &other.platform.pasteboard] {
+			// SAFETY: a plain message to a pasteboard this test created.
+			let () = unsafe { msg_send![&**pasteboard, releaseGlobally] };
+		}
+		assert_eq!(read.0.unwrap(), "named");
+		assert!(matches!(read.1, Err(Error::ContentNotAvailable)), "{:?}", read.1);
 	}
 }

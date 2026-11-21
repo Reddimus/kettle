@@ -1394,3 +1394,180 @@ fn a_stalled_windows_clipboard_owner_cannot_hold_the_ui_or_reorder_osc_52() {
     assert_ne!(text, LATE_TEXT);
     assert_eq!(text, "next");
 }
+
+/// A second process that owns a private, uniquely named pasteboard and
+/// promises its text lazily, as an `NSPasteboardItemDataProvider`. AppKit
+/// delivers a provider's requests on its main run loop, so the owner is a
+/// JavaScript for Automation script, whose `run` is on the main thread, and
+/// not a thread of the test process. The system pasteboard is not touched.
+#[cfg(target_os = "macos")]
+mod late_macos_owner {
+    use std::path::Path;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    /// The longest the owner leaves a reader waiting. It is finite so that a
+    /// reader with no deadline of its own fails the test and does not hang it.
+    pub(super) const STALLS_FOR: Duration = Duration::from_secs(5);
+    /// What the owner provides once it does answer.
+    pub(super) const LATE_TEXT: &str = "late";
+
+    /// Arguments: the pasteboard's name, a private directory for the
+    /// handshake files, and how long the owner may stall, in seconds.
+    const SCRIPT: &str = r#"
+ObjC.import('AppKit');
+ObjC.import('Foundation');
+function run(argv) {
+    const [name, dir, stallSeconds] = argv;
+    const files = $.NSFileManager.defaultManager;
+    const mark = (file) => files.createFileAtPathContentsAttributes(dir + '/' + file, $(), $());
+    ObjC.registerSubclass({
+        name: 'KettleTestLatePasteboardProvider',
+        protocols: ['NSPasteboardItemDataProvider'],
+        methods: {
+            'pasteboard:item:provideDataForType:': {
+                types: ['void', ['id', 'id', 'id']],
+                implementation: function (board, item, type) {
+                    // A reader is inside `stringForType:` until this returns.
+                    mark('asked');
+                    const until = $.NSDate.dateWithTimeIntervalSinceNow(Number(stallSeconds));
+                    while (!files.fileExistsAtPath(dir + '/release') && until.timeIntervalSinceNow > 0)
+                        $.NSThread.sleepForTimeInterval(0.01);
+                    item.setStringForType('late', type);
+                },
+            },
+        },
+    });
+    const board = $.NSPasteboard.pasteboardWithName(name);
+    const item = $.NSPasteboardItem.alloc.init;
+    item.setDataProviderForTypes($.KettleTestLatePasteboardProvider.alloc.init,
+        $(['public.utf8-plain-text']));
+    board.clearContents;
+    if (!board.writeObjects($([item]))) return 'the private pasteboard refused the item';
+    mark('ready');
+    const end = $.NSDate.dateWithTimeIntervalSinceNow(120);
+    while (!files.fileExistsAtPath(dir + '/quit') && end.timeIntervalSinceNow > 0)
+        $.NSRunLoop.mainRunLoop.runUntilDate($.NSDate.dateWithTimeIntervalSinceNow(0.02));
+    board.releaseGlobally;
+    return '';
+}
+"#;
+
+    pub(super) struct Owner {
+        child: Child,
+        dir: tempfile::TempDir,
+        pub(super) name: String,
+    }
+
+    fn wait_for(path: &Path, within: Duration) -> bool {
+        let give_up = Instant::now() + within;
+        while !path.exists() {
+            if Instant::now() >= give_up {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        true
+    }
+
+    impl Owner {
+        /// Take a new private pasteboard with text promised and not provided.
+        pub(super) fn start() -> Self {
+            let dir = tempfile::tempdir().expect("a private directory");
+            let script = dir.path().join("owner.js");
+            std::fs::write(&script, SCRIPT).expect("the owner script");
+            let name = format!(
+                "com.kettle.test.late-owner.{}.{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            );
+            let child = Command::new("/usr/bin/osascript")
+                .args(["-l", "JavaScript"])
+                .arg(&script)
+                .arg(&name)
+                .arg(dir.path())
+                .arg(STALLS_FOR.as_secs().to_string())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .spawn()
+                .expect("osascript starts");
+            let owner = Self { child, dir, name };
+            assert!(
+                wait_for(&owner.dir.path().join("ready"), Duration::from_secs(20)),
+                "the owner did not take its private pasteboard"
+            );
+            owner
+        }
+
+        /// Whether a reader has asked for the promised text.
+        pub(super) fn asked(&self, within: Duration) -> bool {
+            wait_for(&self.dir.path().join("asked"), within)
+        }
+
+        /// Lets the owner provide its text.
+        pub(super) fn release(&self) {
+            std::fs::write(self.dir.path().join("release"), b"").unwrap();
+        }
+    }
+
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            let _ = std::fs::write(self.dir.path().join("release"), b"");
+            let _ = std::fs::write(self.dir.path().join("quit"), b"");
+            let give_up = Instant::now() + STALLS_FOR + Duration::from_secs(5);
+            while Instant::now() < give_up {
+                if matches!(self.child.try_wait(), Ok(Some(_))) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // The owner is this test's own child.
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_late_macos_pasteboard_owner_cannot_hold_the_ui_or_reorder_osc_52() {
+    use late_macos_owner::{LATE_TEXT, Owner, STALLS_FOR};
+    let owner = Owner::start();
+    let name = owner.name.clone();
+    let mut clipboard =
+        Clipboard::open(move || Ok(arboard::Clipboard::with_macos_pasteboard_name(&name)))
+            .expect("the private pasteboard");
+
+    // An OSC 52 load of text the owner promised and has not provided. The
+    // owner stalls far longer than the read may take.
+    let within = Duration::from_millis(300);
+    assert!(STALLS_FOR > within * 10);
+    let queue = clipboard.worker.clone();
+    read_until_the_owner_is_asked(
+        queue.as_ref(),
+        within,
+        |deadline| clipboard.get_selection_bounded(false, 100, deadline),
+        || owner.asked(Duration::from_secs(1)).then_some(()),
+    );
+
+    // The OSC 52 store that follows is made while the owner still stalls: it
+    // is in the queue before the owner is let go. It is served after the
+    // stalled load, whose late text answers no request and does not replace
+    // what was stored.
+    let writer = std::thread::spawn(move || {
+        let stored = clipboard.set_selection(false, "next".into());
+        (clipboard, stored)
+    });
+    wait_until_queued(queue.as_ref().unwrap());
+    owner.release();
+    let (mut clipboard, stored) = writer.join().unwrap();
+    stored.expect("the store behind the stalled load");
+    let text = clipboard
+        .get_selection_bounded(false, 100, Instant::now() + READ_WITHIN)
+        .expect("the load after the store");
+    assert_ne!(text, LATE_TEXT);
+    assert_eq!(text, "next");
+}

@@ -923,15 +923,21 @@ fallback, PRIMARY support that appears and goes while the worker runs,
 cap/deadline errors, stale-reply isolation, initialization failure, the
 files-text-image order on a format-at-a-time clipboard, `paste-files = off`,
 native files and images without arboard, and that the Wayland path adds no
-dependency. They also cover the worker thread Windows asks its clipboard on,
-with an injected late owner: the caller has its timeout at the deadline, a
-store queued meanwhile is served after the stalled load, and a paste past its
-deadline asks for no further format. On Windows CI,
+dependency. They also cover the worker thread macOS and Windows ask their
+clipboard on, with an injected late owner: the caller has its timeout at the
+deadline, a store queued meanwhile is served after the stalled load, and a
+paste past its deadline asks for no further format. On macOS,
+`a_late_macos_pasteboard_owner_cannot_hold_the_ui_or_reorder_osc_52` runs the
+load and the queued store against a real lazy owner: an `osascript` process
+that promises text on a private, uniquely named pasteboard and provides it only
+when let go. It does not touch the system pasteboard, so it runs everywhere. On
+Windows CI,
 `a_stalled_windows_clipboard_owner_cannot_hold_the_ui_or_reorder_osc_52` runs
-the load and the queued store against a real delayed-rendering owner, a
-message-only window in the test process. It replaces the desktop clipboard,
-so elsewhere it runs only with `KETTLE_WINDOWS_CLIPBOARD_TEST=1`.
-`wayland::offer::tests` drive the Wayland negotiation against a loopback source, a thread in the test process and no real clipboard: the type
+the same check against a real delayed-rendering owner, a message-only window
+in the test process. It replaces the desktop clipboard, so elsewhere it runs
+only with `KETTLE_WINDOWS_CLIPBOARD_TEST=1`. `wayland::offer::tests` drive the
+Wayland negotiation against a loopback source, a thread in the test process
+and no real clipboard: the type
 table (text and image, image alone, local, remote and malformed file lists,
 `x-special/gnome-copied-files`), `paste-files = off` against the text copy of
 the paths, each read's cap against a source that never ends, a stalled source
