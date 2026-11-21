@@ -3827,6 +3827,31 @@ fn typing_drops_a_paste_still_waiting_for_the_clipboard() {
     }
 }
 
+/// The bare paste chord joins a waiting paste only where it pastes: in a
+/// modal field or the find bar. In a pane it is a key like any other, which
+/// reaches the program unless a keybind makes it Paste.
+#[test]
+fn the_paste_chord_joins_a_wait_only_where_it_pastes() {
+    use winit::keyboard::{Key, ModifiersState};
+    let shortcut = if cfg!(target_os = "macos") {
+        ModifiersState::SUPER
+    } else {
+        ModifiersState::CONTROL
+    };
+    let v = Key::Character("v".into());
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.mods = shortcut;
+    assert!(!super::chord_pastes(&ws, &v), "a pane");
+    ws.search.open = true;
+    assert!(super::chord_pastes(&ws, &v), "the find bar");
+    ws.search.open = false;
+    ws.palette_input = Some((Default::default(), 0));
+    assert!(super::chord_pastes(&ws, &v), "a modal field");
+    assert!(!super::chord_pastes(&ws, &Key::Character("c".into())));
+    ws.mods = ModifiersState::empty();
+    assert!(!super::chord_pastes(&ws, &v), "a plain v types");
+}
+
 /// An assistive-technology request that edits text, moves the selection or
 /// focus, or presses a control drops a waiting paste, as a key or a click
 /// does; one that only scrolls or reads does not.
