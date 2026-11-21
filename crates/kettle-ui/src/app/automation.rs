@@ -1031,11 +1031,15 @@ impl Drop for TriggerCommandSlot<'_> {
 /// App constructor + `reload_config` path use exactly the same
 /// regex set after a config edit. An empty input returns an empty
 /// vec — `match_triggers` short-circuits on that.
+///
+/// The warning names the trigger by its position in the config and gives a
+/// fixed reason. A pattern is config content, and `regex::Error` prints the
+/// whole pattern back, so neither goes to the log.
 pub(super) fn compile_triggers(
     triggers: &[kettle_config::OutputTrigger],
 ) -> Vec<(regex::Regex, kettle_config::TriggerAction)> {
     let mut out = Vec::with_capacity(triggers.len());
-    for t in triggers {
+    for (index, t) in triggers.iter().enumerate() {
         // Multi-line: the snapshot joins viewport rows with '\n', and `^` / `$`
         // should anchor to each row.
         match regex::RegexBuilder::new(&t.pattern)
@@ -1044,7 +1048,18 @@ pub(super) fn compile_triggers(
         {
             Ok(re) => out.push((re, t.action.clone())),
             Err(e) => {
-                log::warn!("trigger pattern {:?} failed to compile: {e}", t.pattern);
+                let reason = match e {
+                    regex::Error::Syntax(_) => "is not a valid regular expression",
+                    regex::Error::CompiledTooBig(_) => "is too large once compiled",
+                    _ => "could not be compiled",
+                };
+                log::warn!(
+                    "trigger {} of {} skipped: its pattern {reason}; \
+                     `kettle --check-config`, with the same `--config` or `--profile`, \
+                     shows the line",
+                    index + 1,
+                    triggers.len()
+                );
             }
         }
     }

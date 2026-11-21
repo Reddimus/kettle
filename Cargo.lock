@@ -2508,6 +2508,7 @@ dependencies = [
 name = "kettle-test-support"
 version = "5.9.0"
 dependencies = [
+ "log",
  "tempfile",
  "toml",
 ]

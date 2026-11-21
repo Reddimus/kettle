@@ -743,60 +743,13 @@ mod tests {
 
     mod reader {
         use super::super::*;
-        use std::sync::{Mutex, OnceLock};
-
-        /// Log lines this module emitted, by thread, so concurrent tests do
-        /// not see each other's lines.
-        struct Capture(Mutex<Vec<(std::thread::ThreadId, String)>>);
-
-        impl log::Log for Capture {
-            fn enabled(&self, _: &log::Metadata<'_>) -> bool {
-                true
-            }
-            fn log(&self, record: &log::Record<'_>) {
-                if record
-                    .target()
-                    .starts_with(module_path!().trim_end_matches("::tests::reader"))
-                {
-                    self.0
-                        .lock()
-                        .unwrap()
-                        .push((std::thread::current().id(), record.args().to_string()));
-                }
-            }
-            fn flush(&self) {}
-        }
-
-        fn capture() -> &'static Capture {
-            static CAPTURE: OnceLock<&'static Capture> = OnceLock::new();
-            CAPTURE.get_or_init(|| {
-                let capture: &'static Capture =
-                    Box::leak(Box::new(Capture(Mutex::new(Vec::new()))));
-                log::set_logger(capture).expect("no other logger in this test binary");
-                log::set_max_level(log::LevelFilter::Trace);
-                capture
-            })
-        }
-
         /// Import through the logging wrapper and return this thread's lines.
         fn import_logged(path: &Path) -> (SshAliases, Vec<String>) {
-            let capture = capture();
-            let me = std::thread::current().id();
-            capture
-                .0
-                .lock()
-                .unwrap()
-                .retain(|(thread, _)| *thread != me);
-            let aliases = user_ssh_host_aliases(path);
-            let lines = capture
-                .0
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|(thread, _)| *thread == me)
-                .map(|(_, line)| line.clone())
-                .collect();
-            (aliases, lines)
+            let module = module_path!().trim_end_matches("::tests::reader");
+            kettle_test_support::lines_logged(
+                |target| target.starts_with(module),
+                || user_ssh_host_aliases(path),
+            )
         }
 
         fn assert_private(lines: &[String], home: &Path, needles: &[&str]) {

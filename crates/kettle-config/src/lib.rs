@@ -2238,8 +2238,9 @@ pub struct Config {
     /// `trigger = REGEX` config lines (default action: Urgency).
     /// Stored as strings; kettle-ui compiles them to
     /// `regex::Regex` at startup and on reload, so a malformed regex on
-    /// one trigger doesn't sink the whole config load — invalid
-    /// patterns are logged via `log::warn!` and dropped.
+    /// one trigger doesn't sink the whole config load — an invalid
+    /// pattern is dropped with a `log::warn!` that names its position,
+    /// never the pattern.
     pub triggers: Vec<OutputTrigger>,
     /// Terminator parity (`terminatorlib/plugins/
     /// custom_commands.py` → "Custom Commands" menu). User-defined
@@ -2364,12 +2365,19 @@ impl LoadedConfig {
         let mut result = Vec::new();
         let unknown: std::collections::HashSet<_> = self.unknown_keys.iter().collect();
         let malformed: std::collections::HashSet<_> = self.malformed_values.iter().collect();
+        // A value is checked in its section, so the same `key = value` can be
+        // rejected on one line and accepted on another.
+        let malformed_lines: std::collections::HashSet<_> = Config::malformed_entries(&self.text)
+            .into_iter()
+            .map(|(line, _)| line)
+            .collect();
         for entry in parse::parse(&self.text) {
             let invalid = format!("{} = {:?}", entry.raw_key, entry.value);
-            if unknown.contains(&entry.raw_key) || malformed.contains(&invalid) {
+            let invalid = malformed.contains(&invalid) && malformed_lines.contains(&entry.line);
+            if unknown.contains(&entry.raw_key) || invalid {
                 result.push(ConfigDiagnostic {
                     line: entry.line,
-                    kind: if malformed.contains(&invalid) {
+                    kind: if invalid {
                         ConfigDiagnosticKind::InvalidValue {
                             expected: if entry.in_keybindings {
                                 None
@@ -2414,6 +2422,80 @@ impl LoadedConfig {
         result.sort_by_key(|diagnostic| diagnostic.line);
         result
     }
+}
+
+/// How many ignored settings one log line describes before it only counts.
+const MAX_LOGGED_DIAGNOSTICS: usize = 8;
+
+/// One line for the log about the settings the loader ignored, or `None` when
+/// it ignored nothing.
+///
+/// The line carries line numbers and registered key names only. A config holds
+/// `env` values, trigger patterns and commands, and an unrecognized or
+/// malformed line can be anything the user pasted, so neither a value nor an
+/// unregistered key is repeated here; `kettle --check-config` shows them to
+/// the person who asks.
+pub fn ignored_settings_summary(entries: &[ConfigDiagnostic]) -> Option<String> {
+    use std::fmt::Write as _;
+
+    if entries.is_empty() {
+        return None;
+    }
+    let mut out = format!("{} config setting(s) ignored: ", entries.len());
+    for (index, entry) in entries.iter().take(MAX_LOGGED_DIAGNOSTICS).enumerate() {
+        if index > 0 {
+            out.push_str("; ");
+        }
+        let _ = write!(out, "line {} ", entry.line);
+        match &entry.kind {
+            ConfigDiagnosticKind::UnknownKey { suggestion } => {
+                match suggestion.and_then(registered_config_key) {
+                    Some(key) => {
+                        let _ = write!(out, "unknown key (did you mean {key}?)");
+                    }
+                    None => out.push_str("unknown key"),
+                }
+            }
+            ConfigDiagnosticKind::InvalidValue { .. } => match registered_config_key(&entry.key) {
+                Some(key) => {
+                    let _ = write!(out, "invalid value for {key}");
+                }
+                None => out.push_str("invalid value"),
+            },
+            ConfigDiagnosticKind::MalformedLine {
+                missing_equals: true,
+            } => out.push_str("has no `=`"),
+            ConfigDiagnosticKind::MalformedLine {
+                missing_equals: false,
+            } => out.push_str("contains a NUL byte"),
+        }
+    }
+    if entries.len() > MAX_LOGGED_DIAGNOSTICS {
+        let _ = write!(out, "; and {} more", entries.len() - MAX_LOGGED_DIAGNOSTICS);
+    }
+    out.push_str(
+        ". `kettle --check-config`, with the same `--config` or `--profile`, \
+         lists them.",
+    );
+    Some(out)
+}
+
+/// Warn once about the settings ignored in the config at `path`, without
+/// repeating any of the file's content.
+pub fn log_ignored_settings(path: &Path, entries: &[ConfigDiagnostic]) {
+    if let Some(summary) = ignored_settings_summary(entries) {
+        log::warn!("{}: {summary}", path.display());
+    }
+}
+
+/// The registry's spelling of `key`, so a log line can name a setting without
+/// echoing text from the file.
+fn registered_config_key(key: &str) -> Option<&'static str> {
+    if !key.is_ascii() || key.len() > 64 {
+        return None;
+    }
+    let key = key.to_ascii_lowercase().replace('_', "-");
+    CONFIG_KEYS.iter().copied().find(|listed| *listed == key)
 }
 
 /// Provenance of the config path selected for a read.
@@ -3877,22 +3959,13 @@ impl Config {
     }
 
     pub fn load_from_with_trust(path: &Path, trust: ConfigTrust) -> Config {
-        let (cfg, unknown, malformed) = Self::load_from_with_diagnostics_and_trust(path, trust);
-        if !unknown.is_empty() {
-            log::warn!(
-                "{}: unrecognized config keys: {}",
-                path.display(),
-                unknown.join(", ")
-            );
+        match Self::read_or_log(path, trust) {
+            Some(loaded) => {
+                log_ignored_settings(path, &loaded.diagnostics());
+                loaded.config
+            }
+            None => Config::default(),
         }
-        if !malformed.is_empty() {
-            log::warn!(
-                "{}: malformed values (ignored): {}",
-                path.display(),
-                malformed.join(", ")
-            );
-        }
-        cfg
     }
 
     pub fn read_from_with_diagnostics(path: &Path) -> std::io::Result<LoadedConfig> {
@@ -3931,9 +4004,9 @@ impl Config {
     }
 
     /// Parse the config at `path` and also return the unknown-keys and
-    /// malformed-values diagnostics. `load_from` wraps this with a
-    /// `log::warn!` for each. A missing file or read error is logged and
-    /// yields `(default(), [], [])`.
+    /// malformed-values diagnostics. `load_from` reads the same way and
+    /// logs one value-free line about them. A missing file or read error is
+    /// logged and yields `(default(), [], [])`.
     ///
     /// Reads through `read_from_with_trust`, which startup, `ReloadConfig`
     /// and `--check-config` also call. It bounds the read at 1 MiB on the
@@ -3964,19 +4037,26 @@ impl Config {
         // without that step edits would land on the real target while startup
         // silently loaded all defaults. A missing config or a non-regular
         // target is an error, handled below as defaults.
+        match Self::read_or_log(path, trust) {
+            Some(loaded) => (loaded.config, loaded.unknown_keys, loaded.malformed_values),
+            None => (Config::default(), Vec::new(), Vec::new()),
+        }
+    }
+
+    fn read_or_log(path: &Path, trust: ConfigTrust) -> Option<LoadedConfig> {
         match Self::read_from_with_trust(path, trust) {
-            Ok(loaded) => (loaded.config, loaded.unknown_keys, loaded.malformed_values),
+            Ok(loaded) => Some(loaded),
             // `read_config_bytes` folds the size + cap into the error
             // message itself (`InvalidData`), so surface it as-is rather
             // than re-deriving the byte count from a second `metadata()`
             // call.
             Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
                 log::warn!("{e}; using defaults");
-                (Config::default(), Vec::new(), Vec::new())
+                None
             }
             Err(e) => {
                 log::warn!("could not read config {}: {e}", path.display());
-                (Config::default(), Vec::new(), Vec::new())
+                None
             }
         }
     }
@@ -4174,6 +4254,19 @@ impl Config {
                 bad.push(format!("missing `=` separator: {line:?}"));
             }
         }
+        bad.extend(
+            Self::malformed_entries(text)
+                .into_iter()
+                .map(|(_, entry)| entry),
+        );
+        bad
+    }
+
+    /// The `key = value` entries of `text` whose value the key rejects, each
+    /// with its line number. The same spelling of a key can be valid in one
+    /// section and not in another, so the line is what identifies an entry.
+    fn malformed_entries(text: &str) -> Vec<(usize, String)> {
+        let mut bad = Vec::new();
         for e in parse::parse(text) {
             let v = &e.value;
             // Empty values mean "reset to default" (parse.rs), which the apply
@@ -4732,7 +4825,7 @@ impl Config {
                 // Echo the user's own spelling. The parser folds `_`→`-`
                 // internally, but a diagnostic that renames their key sends
                 // them looking for a line their file does not contain.
-                bad.push(format!("{} = {:?}", e.raw_key, v));
+                bad.push((e.line, format!("{} = {:?}", e.raw_key, v)));
             }
         }
         bad
@@ -14446,6 +14539,109 @@ mod chrome_state_tests {
         assert_eq!(suggested_config_key("font-size"), None);
         assert_eq!(suggested_config_key(&"x".repeat(10000)), None);
         assert_eq!(suggested_config_key("é"), None);
+    }
+
+    #[test]
+    fn loading_a_config_logs_where_settings_were_ignored_never_what_they_hold() {
+        let secret = "FAKE_SECRET_do_not_log";
+        let dir = kettle_test_support::private_tempdir("kettle-cfg-ignored-log-");
+        let path = dir.path().join("config");
+        std::fs::write(
+            &path,
+            format!(
+                "font_size = {secret}\n\
+                 trigger = {secret}( :: notify-send {secret}\n\
+                 env = {secret}\n\
+                 {secret}Zm9v=\n\
+                 {secret} pasted line\n\
+                 font-sise = {secret}\n"
+            ),
+        )
+        .unwrap();
+        let (_, lines) = kettle_test_support::lines_logged(
+            |target| target == "kettle_config",
+            || Config::load_from_with_trust(&path, ConfigTrust::ExplicitPath),
+        );
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let line = &lines[0];
+        assert!(!line.contains(secret), "{line}");
+        assert!(
+            line.ends_with(
+                ": 6 config setting(s) ignored: line 1 invalid value for font-size; \
+                 line 2 invalid value for trigger; line 3 invalid value for env; \
+                 line 4 unknown key; line 5 has no `=`; \
+                 line 6 unknown key (did you mean font-size?). \
+                 `kettle --check-config`, with the same `--config` or `--profile`, \
+                 lists them."
+            ),
+            "{line}"
+        );
+
+        let many: String = (0..12).map(|_| format!("{secret} = 1\n")).collect();
+        std::fs::write(&path, many).unwrap();
+        let (_, lines) = kettle_test_support::lines_logged(
+            |target| target == "kettle_config",
+            || Config::load_from_with_trust(&path, ConfigTrust::ExplicitPath),
+        );
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(!lines[0].contains(secret), "{lines:?}");
+        assert!(
+            lines[0].contains("line 8 unknown key; and 4 more."),
+            "{lines:?}"
+        );
+        assert!(!lines[0].contains("line 9"), "{lines:?}");
+
+        std::fs::write(&path, "font-size = 12\n").unwrap();
+        let (_, lines) = kettle_test_support::lines_logged(
+            |target| target == "kettle_config",
+            || Config::load_from_with_trust(&path, ConfigTrust::ExplicitPath),
+        );
+        assert!(lines.is_empty(), "{lines:?}");
+    }
+
+    #[test]
+    fn a_value_its_section_accepts_is_not_reported_with_a_rejected_twin() {
+        // `full-screen` is a boolean at the top level and a shortcut under
+        // `[keybindings]`: line 1 is ignored, line 3 binds the key.
+        let text = "full-screen = <Control>F11\n[keybindings]\nfull-screen = <Control>F11\n";
+        let (config, unknown_keys) = Config::parse_collect(text);
+        let loaded = LoadedConfig {
+            config,
+            text: text.to_owned(),
+            unknown_keys,
+            malformed_values: Config::detect_malformed_values(text),
+        };
+        assert_eq!(loaded.malformed_values.len(), 1);
+        let diagnostics = loaded.diagnostics();
+        assert_eq!(
+            diagnostics.iter().map(|d| d.line).collect::<Vec<_>>(),
+            [1],
+            "{diagnostics:?}"
+        );
+        assert_eq!(
+            ignored_settings_summary(&diagnostics).as_deref(),
+            Some(
+                "1 config setting(s) ignored: line 1 invalid value for full-screen. \
+                 `kettle --check-config`, with the same `--config` or `--profile`, \
+                 lists them."
+            )
+        );
+        // A suggestion is printed in the registry's spelling or not at all.
+        let made_up = [ConfigDiagnostic {
+            line: 2,
+            key: String::new(),
+            kind: ConfigDiagnosticKind::UnknownKey {
+                suggestion: Some("FAKE_SECRET_do_not_log"),
+            },
+        }];
+        assert_eq!(
+            ignored_settings_summary(&made_up).as_deref(),
+            Some(
+                "1 config setting(s) ignored: line 2 unknown key. \
+                 `kettle --check-config`, with the same `--config` or `--profile`, \
+                 lists them."
+            )
+        );
     }
 
     #[test]

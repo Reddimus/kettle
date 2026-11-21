@@ -51,6 +51,30 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   Close by moving to a zbus release that reads incrementally against a cap, or
   vendoring the transport fix.
 
+- **Paths and commands in log lines.** The change for code scanning alert #46
+  (`rust/cleartext-logging`, `crates/kettle-ui/src/app/automation.rs`) keeps
+  config file content out of the config and trigger warnings; path and command
+  text elsewhere was left as it is. Checked 2026-11-20: 62 log calls outside
+  tests print a path with `.display()` (36 in `kettle-ui`, 12 in
+  `kettle-render`, 5 in `kettle-config`, 9 in four other crates; 11 of the 62
+  at `debug`), and the trusted-directory and private-file errors from
+  `kettle-state` that startup, reload and `init.lua` loading log name each
+  directory they refused. A path under the home directory carries the account
+  name. Five calls print a command: the configured `custom-url-handler` when
+  it fails to start or its child cannot be reaped (two in `app/links.rs`, one
+  in `app/system_opener.rs`), the argv of a shell tab that fails to open
+  (`app/actions.rs`), and, only at `info`, the command an agent sends through
+  `run_command` (`app/ctl.rs`; its `send_text` neighbor logs a byte count).
+  Logs go to stderr at `warn` by default, where a service manager or a pasted
+  bug report can keep them. Deferred because the repository has no path form
+  for logs (`abbreviate_home` in `kettle-ui` serves tab titles), a warning
+  that cannot say which file it refused is hard to act on, and the choice
+  between `~`, the file name alone and an opt-in full path belongs to one
+  change across every crate. Close with one shared helper, those calls and the
+  `kettle-state` error texts moved to it, the five command lines reduced to a
+  fixed reason or a byte count, and a test per crate that captures the log and
+  finds neither a home directory nor a command in it.
+
 ## Terminal and protocol
 
 - **Extractor policy hooks for the streaming control kernel.**
