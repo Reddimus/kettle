@@ -429,53 +429,72 @@ campaign and startup outlier remain inconclusive. These entries stay open.
 
 ## Platform
 
-- **Native clipboard acquisition can exceed paste bounds.** The Windows
-  wait closed on 2026-11-20: the clipboard is asked on a worker thread the
-  window stops waiting for (`crates/kettle-ui/src/clipboard.rs`), with a
-  native test against a delayed-rendering owner. Three parts stay open.
+- **Native clipboard acquisition can exceed paste bounds.** The wait closed
+  on 2026-11-20 on both platforms: macOS and Windows ask the clipboard on a
+  worker thread the window stops waiting for after two seconds
+  (`crates/kettle-ui/src/clipboard.rs`). Native tests hold a read against a
+  real late owner and queue an OSC 52 store behind it: on macOS an `osascript`
+  process that promises text lazily on a private named pasteboard, on Windows
+  CI a delayed-rendering owner. Three parts stay open.
 
-  macOS: Kettle asks the pasteboard on the window thread, and AppKit fetches
-  a whole text flavor before any size check
+  Memory on macOS: AppKit fetches a whole flavor before any size check
   (`vendor/arboard-3.6.1/src/platform/osx.rs`). Measured on 2026-11-20 on
-  macOS 27.3, with private named pasteboards and a second process as owner:
-  - No AppKit call gives a flavor's size without fetching it. Reading
-    `types` or `pasteboardItems` cost nothing, but for a 128 MiB text each of
-    `dataForType:` and `stringForType:`, on the item or the pasteboard, took
-    the reader's physical footprint from 2 MiB to 387 MiB, and 258 MiB stayed
-    after the autorelease pool drained. Checking an `NSData` length first
-    therefore bounds nothing. The pasteboard took a 255 MiB flavor and
-    refused a 256 MiB one, so the platform's own cap is the only bound.
-  - An owner that provides its text lazily (`NSPasteboardItemDataProvider`)
-    and sleeps 40 seconds kept the reader inside `stringForType:` for all 40.
+  macOS 27.3, with private named pasteboards and a second process as owner,
+  no AppKit call gives a flavor's size without fetching it. Reading `types`
+  or `pasteboardItems` cost nothing, but for a 128 MiB text each of
+  `dataForType:` and `stringForType:`, on the item or the pasteboard, took
+  the reader's physical footprint from 2 MiB to 387 MiB, and 258 MiB stayed
+  after the autorelease pool drained. Checking an `NSData` length first
+  therefore bounds nothing. The pasteboard took a 255 MiB flavor and refused
+  a 256 MiB one, so the platform's own cap is the only bound.
 
-  Windows memory: when another process owns the clipboard,
-  `GetClipboardData` gives the reader its own copy of the whole
-  `CF_UNICODETEXT` object, and the vendored reader can size it with
-  `GlobalSize` only after that call
-  (`vendor/arboard-3.6.1/src/platform/windows.rs`). A 1 GiB text therefore
-  costs Kettle about 1 GiB on the worker thread before the 4 MiB refusal.
-  This follows from how user32 hands clipboard memory across processes and
-  was not measured; the native test's owner runs in the test process, where
-  no copy is made. The same reader sizes text by its allocation, so a short
-  text in an allocation over 4 MiB is refused.
+  A pasted image is read the same way, as the whole TIFF flavor through
+  `dataForType:`, and decoded under the `image` crate's defaults rather than
+  the limits the Linux reader sets. The worker thread now holds this memory
+  instead of the window thread.
 
-  Windows wait, after the deadline: a delayed-rendering owner that never
-  answers `WM_RENDERFORMAT` keeps the worker thread inside `GetClipboardData`
-  with the clipboard open. The window stays responsive, but every clipboard
-  request returns `Timeout` until that owner answers or exits, and other
-  programs cannot open the clipboard either. A second worker would not help,
-  because the stalled thread still holds the clipboard open. A store that
-  times out at its caller after the worker has taken it may still be applied.
+  Memory on Windows: when another process owns the clipboard,
+  `GetClipboardData` gives the reader its own copy of the whole object, and
+  the vendored reader can size it only after that call
+  (`vendor/arboard-3.6.1/src/platform/windows.rs`). This holds for every
+  format a paste asks for: `CF_UNICODETEXT`, which `GlobalSize` sizes only
+  afterwards, the `PNG` and `CF_DIBV5` images, which `get_vec` copies whole
+  and arboard decodes under the `image` crate's defaults, and the `CF_HDROP`
+  file list. A 1 GiB text therefore costs Kettle about 1 GiB on the worker
+  thread before the 4 MiB refusal. This follows from how user32 hands
+  clipboard memory across processes and was not measured; the native test's
+  owner runs in the test process, where no copy is made. The text reader
+  sizes text by its allocation, so a short text in an allocation over 4 MiB
+  is refused.
+
+  An owner that never answers: the worker thread waits for it inside
+  `stringForType:` on macOS, or inside `GetClipboardData` on Windows. The
+  window stays responsive, but every clipboard request returns `Timeout`
+  until that owner answers or exits. On macOS a lazy owner that slept 40
+  seconds held the reader for all 40; Kettle holds no lock there, so other
+  programs can still use the pasteboard. On Windows the stalled thread keeps the clipboard
+  open, so other programs cannot open it either, and a second worker would
+  not help. A store that times out at its caller after the worker has taken
+  it may still be applied.
+
+  Not checked live: the read now runs on the worker thread while the window
+  thread waits for it. Whether the macOS paste-permission alert treats a
+  Command-V read made on that thread as one the user asked for was not
+  observed, because that needs the general pasteboard. If macOS asks, an
+  answer given after two seconds pastes nothing. Check on a Mac where Kettle's
+  paste permission (Privacy & Security) is set to ask: copy text in another
+  app, press Command-V in Kettle, and note whether an alert appears and
+  whether a slow answer pastes.
 
   Deferred because bounding memory on either platform needs the read made in
   a helper process with a memory cap (a footprint limit on macOS, a job
   object on Windows), which the window can also stop waiting for; a thread
   bounds the wait alone. A helper changes which process the system sees
-  reading the clipboard, and on macOS that needs a live check, paste
-  permission included. Close with native tests that use a private named
-  pasteboard on macOS, for an oversized string and for a late provider, and
-  a second-process owner of a large `CF_UNICODETEXT` on Windows CI, proving
-  bounded footprint and wait time without reordering OSC 52.
+  reading the clipboard, and on macOS that needs the same live check of
+  paste permission. Close with native tests that prove a bounded footprint
+  without reordering OSC 52: an oversized string, and an oversized image,
+  on a private named pasteboard on macOS, and a second-process owner of a
+  large `CF_UNICODETEXT` and `CF_DIBV5` on Windows CI.
 
 - **Windows MCP stdout progress.** `crates/kettle/src/mcp.rs` still uses a
   blocking writer on Windows. A slow reader can make progress without a write
