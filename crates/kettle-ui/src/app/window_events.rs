@@ -1711,13 +1711,21 @@ impl App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 // A paste still waiting for the clipboard never lands behind
-                // a key typed after it.
-                if key_drops_clipboard_wait(
-                    event.state,
-                    event.repeat,
-                    &event.logical_key,
-                    event.physical_key,
-                ) {
+                // a key typed after it. The paste shortcut joins it instead.
+                if ws.clipboard_wait.is_some()
+                    && key_drops_clipboard_wait(
+                        event.state,
+                        event.repeat,
+                        &event.logical_key,
+                        event.physical_key,
+                        self.key_pastes(
+                            ws,
+                            &event.logical_key,
+                            Some(&event.physical_key),
+                            Some(&event.key_without_modifiers()),
+                        ),
+                    )
+                {
                     ws.clipboard_wait = None;
                 }
                 if key_dismisses_link_hover(event.state, &event.logical_key, event.physical_key) {

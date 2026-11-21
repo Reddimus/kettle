@@ -587,7 +587,7 @@ fn a_late_clipboard_answer_reaches_the_modal_field_that_asked_for_it() {
     let edit = modals::edit_modal_field(&mut ws, &key, Some(&mut clipboard));
     assert!(edit.handled && edit.refused.is_none() && edit.later.is_none());
     assert!(matches!(
-        take_clipboard_answer(&mut ws, std::time::Instant::now()),
+        take_clipboard_answer(&mut ws, std::time::Instant::now(), |_| Vec::new()),
         Some(ClipboardDelivery::Waiting(_))
     ));
     assert!(ws.clipboard_wait.is_some());
@@ -595,7 +595,7 @@ fn a_late_clipboard_answer_reaches_the_modal_field_that_asked_for_it() {
     release.send(()).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let text = loop {
-        match take_clipboard_answer(&mut ws, std::time::Instant::now()) {
+        match take_clipboard_answer(&mut ws, std::time::Instant::now(), |_| Vec::new()) {
             Some(ClipboardDelivery::Field(text)) => break text,
             Some(ClipboardDelivery::Waiting(_)) if std::time::Instant::now() < deadline => {
                 std::thread::yield_now();
@@ -616,7 +616,7 @@ fn a_late_clipboard_answer_reaches_the_modal_field_that_asked_for_it() {
     ws.editing_title = None;
     sender.send(Ok("late".into())).unwrap();
     assert!(matches!(
-        take_clipboard_answer(&mut ws, std::time::Instant::now()),
+        take_clipboard_answer(&mut ws, std::time::Instant::now(), |_| Vec::new()),
         Some(ClipboardDelivery::Dropped)
     ));
 }

@@ -414,6 +414,7 @@ notify_body_path_not_typed = "Un nombre de archivo no se puede escribir tal cual
 notify_body_clipboard_limit_exceeded = "El texto del portapapeles superó el límite de seguridad; no se pegó nada."
 notify_body_clipboard_timeout = "Se agotó el tiempo de transferencia del portapapeles; no se pegó nada."
 notify_body_clipboard_waiting = "Se pegará cuando responda el portapapeles, durante un minuto como máximo. Escribir o hacer clic en la ventana lo cancela."
+notify_body_clipboard_paste_moved = "El portapapeles respondió cuando el panel o el campo de destino ya no tenía el teclado; no se pegó nada."
 notify_body_clipboard_files_unreadable = "No se pudieron leer los archivos copiados. Copia hasta 32 archivos locales e inténtalo de nuevo."
 notify_body_clipboard_image_unreadable = "No se pudo leer ni guardar la imagen del portapapeles; no se pegó nada."
 notify_body_input_oversize = "La entrada superó el límite de seguridad por mensaje de Kettle y no se entregó. Si está activo el envío de la entrada a varios paneles, comprobar los demás paneles antes de reintentar."

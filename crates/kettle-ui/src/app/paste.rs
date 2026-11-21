@@ -336,8 +336,14 @@ impl App {
         match read {
             UserRead::Now(content) => self.apply_clipboard_paste(ws, content),
             UserRead::Later(answer) => {
-                let target = paste_target(&ws.mux);
-                self.await_clipboard(ws, Wait::Pane { target, answer });
+                let destination = PasteDestination::capture(ws, self.broadcast_recipients(ws));
+                self.await_clipboard(
+                    ws,
+                    Wait::Pane {
+                        destination,
+                        answer,
+                    },
+                );
             }
         }
     }
@@ -380,7 +386,9 @@ impl App {
 
     /// Leaves a paste's answer to come later: the window stops waiting for
     /// the clipboard, and the user is told the paste is still coming and how
-    /// to stop it.
+    /// to stop it. The notice cannot be withdrawn once the paste lands or is
+    /// dropped (the desktop notification worker has no call for it), so it
+    /// states the rule rather than a state that could go stale.
     pub(super) fn await_clipboard(&self, ws: &mut WindowState, wait: Wait) {
         log::info!("paste: still waiting for the clipboard");
         ws.clipboard_wait = Some(ClipboardWait(wait));
@@ -392,6 +400,30 @@ impl App {
         );
     }
 
+    /// Whether `key` with the window's modifiers pastes where it lands: the
+    /// platform paste chord of a modal field or the find bar, or a keybind
+    /// for Paste or Paste Selection.
+    pub(super) fn key_pastes(
+        &self,
+        ws: &WindowState,
+        key: &Key,
+        physical: Option<&PhysicalKey>,
+        unshifted: Option<&Key>,
+    ) -> bool {
+        let text_key = match key {
+            Key::Character(text) => Some(text.as_str()),
+            _ => None,
+        };
+        crate::modal_input::is_paste_chord(text_key, ws.mods)
+            || resolve_keybind_action(&self.cfg.keybinds, Some(key), physical, ws.mods, unshifted)
+                .is_some_and(|(_, action)| {
+                    matches!(
+                        action,
+                        kettle_config::Action::Paste | kettle_config::Action::PastePrimary
+                    )
+                })
+    }
+
     /// Delivers the answer a waiting paste has had, to where the paste was
     /// asked for, if the keyboard is still there. Returns when to look again
     /// while the answer is still to come.
@@ -400,10 +432,12 @@ impl App {
         ws: &mut WindowState,
         now: std::time::Instant,
     ) -> Option<std::time::Instant> {
-        match take_clipboard_answer(ws, now)? {
+        match take_clipboard_answer(ws, now, |ws| self.broadcast_recipients(ws))? {
             ClipboardDelivery::Waiting(next) => return Some(next),
+            // Nothing the user did in this window moved it, or the wait
+            // would have been dropped then: say that the paste went nowhere.
             ClipboardDelivery::Dropped => {
-                log::debug!("paste: the clipboard answered after the keyboard moved");
+                self.notify_paste_refused(kettle_i18n::Text::NotifyBodyClipboardPasteMoved);
             }
             ClipboardDelivery::Pane(content) => self.apply_clipboard_paste(ws, content),
             ClipboardDelivery::Search(text) => {
@@ -1732,15 +1766,16 @@ pub(super) fn local_paste_within_limit(text: &str) -> bool {
 
 /// A paste whose clipboard answer the window stopped waiting for (macOS,
 /// `crate::clipboard::LateAnswer`). It is delivered when the answer comes,
-/// only where the keyboard was when it was asked for. A fresh key press, a
-/// click, a drop, or text an input method composes in the window drops it
-/// first, so a paste never lands behind what the user did next.
+/// only where it was asked for. A fresh key press, a click, a drop, text an
+/// input method composes, or an assistive-technology edit or focus change in
+/// the window drops it first, so a paste never lands behind what the user
+/// did next. A key that pastes joins the wait instead.
 pub(crate) struct ClipboardWait(pub(super) Wait);
 
 pub(super) enum Wait {
-    /// A terminal paste, for the pane or broadcast group `paste_target` named.
+    /// A terminal paste, for the destination it was asked for.
     Pane {
-        target: Option<u64>,
+        destination: PasteDestination,
         answer: crate::clipboard::LateAnswer<crate::clipboard::PasteContent>,
     },
     /// A paste into the text field of the modal that had the keyboard.
@@ -1750,6 +1785,33 @@ pub(super) enum Wait {
     },
 }
 
+/// Where a terminal paste goes, as a paste delivered now would decide it:
+/// the focused pane, or the broadcast scope and every pane it reaches, in
+/// any window, with whatever modal and preview lane hold the keyboard. A late
+/// answer is pasted only while all of it is unchanged; a paste confirmation
+/// holds its consent to the same rule (`text_paste_dispatch`).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct PasteDestination {
+    target: Option<u64>,
+    broadcast: crate::mux::BroadcastScope,
+    recipients: Vec<u64>,
+    modal: Option<KeyModal>,
+    preview: Option<crate::media::PreviewFocus>,
+}
+
+impl PasteDestination {
+    /// `recipients` is `App::broadcast_recipients` for `ws`.
+    pub(super) fn capture(ws: &WindowState, recipients: Vec<u64>) -> Self {
+        Self {
+            target: paste_target(&ws.mux),
+            broadcast: ws.mux.broadcast.clone(),
+            recipients,
+            modal: top_modal(ws),
+            preview: ws.preview_focus,
+        }
+    }
+}
+
 /// How often the answer to a waiting paste is looked for.
 const CLIPBOARD_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 
@@ -1757,8 +1819,10 @@ const CLIPBOARD_POLL: std::time::Duration = std::time::Duration::from_millis(50)
 pub(super) enum ClipboardDelivery {
     /// No answer yet: look again then.
     Waiting(std::time::Instant),
-    /// The answer came, but the keyboard is no longer where it was asked
-    /// for: it goes nowhere.
+    /// The answer came, but where it was for has changed without the user's
+    /// input in this window (another window's broadcast toggle, a menu-bar
+    /// tab switch, a pane that exited): it goes nowhere, and the user is
+    /// told.
     Dropped,
     Pane(crate::clipboard::PasteContent),
     Search(Result<String, arboard::Error>),
@@ -1766,22 +1830,29 @@ pub(super) enum ClipboardDelivery {
 }
 
 /// Takes the answer a waiting paste has had, with where it goes. A paste
-/// still waiting stays in `ws`. A terminal paste goes to the pane or group
-/// it was asked for while no modal holds the keyboard; a field's paste goes
-/// to its modal while that modal is on top.
+/// still waiting stays in `ws`. A terminal paste goes only to an unchanged
+/// [`PasteDestination`], whose recipients `recipients` gives for `ws` now;
+/// a field's paste goes to its modal while that modal is on top.
 pub(super) fn take_clipboard_answer(
     ws: &mut WindowState,
     now: std::time::Instant,
+    recipients: impl FnOnce(&WindowState) -> Vec<u64>,
 ) -> Option<ClipboardDelivery> {
     let ClipboardWait(wait) = ws.clipboard_wait.take()?;
     Some(match wait {
-        Wait::Pane { target, answer } => match answer.poll(now) {
+        Wait::Pane {
+            destination,
+            answer,
+        } => match answer.poll(now) {
             None => {
                 let next = clipboard_poll_after(now, answer.deadline());
-                ws.clipboard_wait = Some(ClipboardWait(Wait::Pane { target, answer }));
+                ws.clipboard_wait = Some(ClipboardWait(Wait::Pane {
+                    destination,
+                    answer,
+                }));
                 ClipboardDelivery::Waiting(next)
             }
-            Some(content) if top_modal(ws).is_none() && paste_target(&ws.mux) == target => {
+            Some(content) if PasteDestination::capture(ws, recipients(ws)) == destination => {
                 ClipboardDelivery::Pane(content)
             }
             Some(_) => ClipboardDelivery::Dropped,
@@ -1807,17 +1878,34 @@ fn clipboard_poll_after(
 }
 
 /// Whether a key event drops a paste still waiting for the clipboard: a
-/// fresh press of any key but a modifier. A held key's repeats do not, so
-/// holding the paste shortcut keeps the paste it started.
+/// fresh press of any key but a modifier. A held key's repeats do not, and
+/// neither does a key that pastes (`pastes`): pressing the paste shortcut
+/// again joins the paste that waits instead of asking the clipboard again.
 pub(super) fn key_drops_clipboard_wait(
     state: ElementState,
     repeat: bool,
     logical: &Key,
     physical: PhysicalKey,
+    pastes: bool,
 ) -> bool {
     state == ElementState::Pressed
         && !repeat
+        && !pastes
         && !crate::cursor_exit_log::is_modifier(logical, physical)
+}
+
+/// Whether an assistive-technology request drops a paste still waiting for
+/// the clipboard: one that edits text or moves focus or presses a control,
+/// as a key or a click would.
+pub(super) fn accessibility_drops_clipboard_wait(action: AccessibilityAction) -> bool {
+    matches!(
+        action,
+        AccessibilityAction::SetValue
+            | AccessibilityAction::ReplaceSelectedText
+            | AccessibilityAction::SetTextSelection
+            | AccessibilityAction::Focus
+            | AccessibilityAction::Click
+    )
 }
 
 /// The pane a single-pane paste goes to: the focused one. Broadcast names no
