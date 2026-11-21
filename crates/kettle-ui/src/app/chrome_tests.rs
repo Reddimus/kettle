@@ -843,14 +843,19 @@ fn review_narrow_titlebar_strips_park_tabs_without_panicking() {
 #[test]
 fn review_titlebar_width_preserves_configured_minimum() {
     let mut state = super::TitlebarStrip::default();
-    let lane = titlebar_lane(666.0, 600.0, true);
+    // The drag lane gives up 24 of its 48 so one 600 tab fits between the
+    // arrows' 56.
+    let lane = titlebar_lane(680.0, 600.0, true);
     let layout = super::titlebar_tab_layout(2, 1, &lane, &mut state, false);
-    // 666 - 48 leaves 618 between the arrows' 56: less than one tab, which
-    // narrows to the room rather than run under `›`.
-    assert_eq!(layout.width, 666.0 - 48.0 - 56.0);
+    assert_eq!(layout.width, 600.0);
     assert!(layout.arrow_left.is_some() && layout.arrow_right.is_some());
     assert!(layout.xs[0].is_none());
     assert!(layout.xs[1].is_some());
+    assert_eq!(680.0 - (layout.arrow_right.unwrap() + 28.0), 24.0);
+    // Only with the lane at its 16 floor does the tab narrow: 666 - 16 - 56.
+    let lane = titlebar_lane(666.0, 600.0, true);
+    let layout = super::titlebar_tab_layout(2, 1, &lane, &mut state, false);
+    assert_eq!(layout.width, 594.0);
     let lane = titlebar_lane(1400.0, 600.0, true);
     let fits = super::titlebar_tab_layout(2, 0, &lane, &mut state, false);
     assert!(fits.width >= 600.0 && fits.last_width >= 600.0);
@@ -1073,7 +1078,8 @@ fn macos_titlebar_settings_gear_leads_the_new_tab_pair() {
     let cfg = kettle_config::Config::default();
     for scale in [1.0, 2.0] {
         // 400 pt stands in for the narrow window C03 asks about; the
-        // panel harness never sized one.
+        // panel harness never sized one. There a lone tab keeps the gear,
+        // and tabs that scroll give it up for their arrows.
         for width in [400.0, 640.0, 1280.0] {
             let lane = macos_titlebar_lane(width, scale);
             for tabs in [1, 3, 20] {
@@ -1088,6 +1094,10 @@ fn macos_titlebar_settings_gear_leads_the_new_tab_pair() {
                 assert_eq!((arrow_rect, plus_rect), (menu, plus));
                 assert_eq!(plus.0 + plus.2, menu.0);
                 let case = format!("{width}px @{scale}x, {tabs} tabs");
+                if width == 400.0 && tabs > 1 {
+                    assert_eq!(settings_rect.2, 0.0, "{case}: a gear beside narrowed tabs");
+                    continue;
+                }
                 assert!(settings_rect.2 > 0.0, "{case}: no gear");
                 assert_eq!((settings_rect.2, settings_rect.3), (plus.2, plus.3), "{case}");
                 assert_eq!(settings_rect.1, menu.1, "{case}");
@@ -1124,8 +1134,9 @@ fn macos_titlebar_settings_gear_leads_the_new_tab_pair() {
 }
 
 /// The gear costs the tabs its width and gap, never a tab: it shows only
-/// while the lane keeps `tab-min-width` and the whole drag lane beside every
-/// control, whatever the tab count, and `▾ +` never hide.
+/// while the lane keeps the whole drag lane and room for the tabs at
+/// `tab-min-width` beside every control (one tab between both scroll arrows
+/// once they overflow), and `▾ +` never hide.
 #[test]
 fn macos_titlebar_settings_gear_hides_only_in_a_lane_too_narrow_for_a_tab() {
     use super::chrome::horizontal_tab_geometry;
@@ -1134,11 +1145,15 @@ fn macos_titlebar_settings_gear_hides_only_in_a_lane_too_narrow_for_a_tab() {
         let probe = macos_titlebar_lane(1280.0, scale);
         let (_, plus, reserve) = super::chrome::titlebar_new_tab_controls(probe, scale);
         let extra = plus.2 + 8.0 * scale;
-        let threshold =
-            reserve + extra + (cfg.tab_min_width + super::TITLEBAR_DRAG_LANE) * scale;
-        for (lane_width, shown) in [(threshold, true), (threshold - 1.0, false)] {
-            let lane = (probe.0, 0.0, lane_width, probe.3);
-            for tabs in [1, 20] {
+        for tabs in [1_usize, 20] {
+            // 20 tabs scroll: one between the 32-point arrows.
+            let arrows = if tabs > 1 { 2.0 * probe.3 } else { 0.0 };
+            let threshold = reserve
+                + extra
+                + arrows
+                + (cfg.tab_min_width + super::TITLEBAR_DRAG_LANE) * scale;
+            for (lane_width, shown) in [(threshold, true), (threshold - 1.0, false)] {
+                let lane = (probe.0, 0.0, lane_width, probe.3);
                 let geometry = horizontal_tab_geometry(lane, scale, (false, true), (tabs, 0), &cfg);
                 assert_eq!(geometry.settings_rect.2 > 0.0, shown, "{lane_width} @{scale}x");
                 let (menu, plus_now, _) = super::chrome::titlebar_new_tab_controls(lane, scale);
@@ -1730,14 +1745,25 @@ fn compact_header_sweep_keeps_controls_tabs_and_fullscreen_drag_space_disjoint()
                         let g = chrome::horizontal_tab_geometry(lane, scale, (false, true), (count, active), &cfg);
                         assert!(g.layout.xs[active].is_some());
                         assert_eq!(g.plus_rect.0 + g.plus_rect.2, g.arrow_rect.0);
-                        assert!(g.settings_rect.0 + g.settings_rect.2 + 8.0 * scale <= g.plus_rect.0);
+                        let gear = g.settings_rect.2 > 0.0;
+                        if gear {
+                            assert!(g.settings_rect.0 + g.settings_rect.2 + 8.0 * scale <= g.plus_rect.0);
+                        }
+                        let controls = if gear { g.settings_rect.0 } else { g.plus_rect.0 };
+                        // Without the gear a narrow strip may have taken
+                        // part of the drag lane, never past its floor.
+                        let lane_left = if gear {
+                            super::TITLEBAR_DRAG_LANE
+                        } else {
+                            super::TITLEBAR_DRAG_LANE_FLOOR
+                        } * scale;
                         let mut end = lane.0;
                         for (i, x) in g.layout.xs.iter().enumerate() {
                             let Some(x) = x else { continue };
                             let w = if i + 1 == count { g.layout.last_width } else { g.layout.width };
                             assert!(lane.0 + x + 0.01 >= end, "{width} @{scale}, {count} tabs, fullscreen={fullscreen}: {} < {end}", lane.0 + x);
                             end = lane.0 + x + w;
-                            assert!(end + super::TITLEBAR_DRAG_LANE * scale <= g.settings_rect.0 + 0.01);
+                            assert!(end + lane_left <= controls + 0.01);
                             assert!(w >= cfg.tab_min_width * scale || g.layout.arrow_left.is_some());
                         }
                         if count == 1 {

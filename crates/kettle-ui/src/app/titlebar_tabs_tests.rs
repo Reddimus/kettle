@@ -245,7 +245,14 @@ fn titlebar_strips_always_keep_a_drag_lane() {
                             let drag = TITLEBAR_DRAG_LANE * scale;
                             let floor = (TITLEBAR_DRAG_LANE_FLOOR * scale).min(g.strip);
                             assert!(gap >= floor - 0.01, "{case}: {gap} before the controls");
-                            if g.strip >= min + drag {
+                            // Whole while the tabs' least room at the minimum
+                            // (one between the arrows once they scroll) fits.
+                            let arrow = if header.0 {
+                                (LINUX_HEADER_BUTTON * scale).min(lane.3)
+                            } else {
+                                lane.3
+                            };
+                            if g.strip >= titlebar_tab_room(n, min, arrow, scroll) + drag {
                                 assert!(gap >= drag - 0.01, "{case}: {gap} before the controls");
                             }
                             // Nothing reaches under the traffic lights or `+`.
@@ -287,9 +294,16 @@ fn titlebar_tabs_keep_the_minimum_and_scroll_between_arrows() {
                         assert!(arrow > 0.0, "{case}: no arrows");
                         assert_eq!(l.arrow_left, Some(0.0), "{case}");
                         // As many whole tabs as fit beside both arrows and
-                        // the drag lane; a room narrower than the minimum
-                        // shows the active tab alone, narrowed to it.
-                        let room = g.strip - TITLEBAR_DRAG_LANE * scale - 2.0 * arrow;
+                        // the drag lane, which narrows toward its floor first
+                        // to keep one at the minimum; past that the active
+                        // tab shows alone, narrowed to the room.
+                        let drag = expected_drag(g.strip, n, min, arrow, scale);
+                        let room = g.strip - drag - 2.0 * arrow;
+                        if room >= min {
+                            assert_eq!(l.width, min, "{case}");
+                        } else {
+                            assert!((drag - TITLEBAR_DRAG_LANE_FLOOR * scale).abs() < 0.01);
+                        }
                         let min = min.min(room);
                         assert_eq!((l.width, l.last_width), (min, min), "{case}");
                         let shown: Vec<usize> = (0..n).filter(|i| l.xs[*i].is_some()).collect();
@@ -334,6 +348,72 @@ fn titlebar_tabs_keep_the_minimum_and_scroll_between_arrows() {
             assert!((g.layout.width - room / 40.0).abs() < 0.01, "{name}");
             assert!(g.layout.width < cfg.tab_min_width * scale, "{name}");
             assert!(g.layout.xs.iter().all(Option::is_some), "{name}");
+        }
+    }
+}
+
+/// The drag lane a strip `strip` wide keeps for `n` tabs: whole while the
+/// least room the tabs need at the minimum (one between both arrows once
+/// they scroll) fits beside it, then narrowing to its floor.
+fn expected_drag(strip: f32, n: usize, min: f32, arrow: f32, scale: f32) -> f32 {
+    let need = if n > 1 {
+        (n as f32 * min).min(min + 2.0 * arrow)
+    } else {
+        min
+    };
+    (strip - need)
+        .min(TITLEBAR_DRAG_LANE * scale)
+        .max(TITLEBAR_DRAG_LANE_FLOOR * scale)
+        .min(strip)
+}
+
+/// However many tabs a narrowing title bar holds, it gives up the gear
+/// first, then narrows the drag lane to its floor, and only then a tab below
+/// the minimum. With 20 tabs a 400-point macOS window once kept the gear and
+/// the whole drag lane and showed one 70-point tab between the arrows.
+#[test]
+fn a_narrowing_title_bar_gives_way_in_order_for_any_tab_count() {
+    let cfg = Config::default();
+    for scale in SCALES {
+        let (min, drag, floor) = (
+            cfg.tab_min_width * scale,
+            TITLEBAR_DRAG_LANE * scale,
+            TITLEBAR_DRAG_LANE_FLOOR * scale,
+        );
+        for n in [1_usize, 2, 3, 20] {
+            for width in (150..=900).step_by(5).map(|w| w as f32) {
+                for (name, lane, header) in lanes(width, scale) {
+                    let g = horizontal_tab_geometry(lane, scale, header, (n, n - 1), &cfg);
+                    if g.strip < 2.0 {
+                        continue;
+                    }
+                    let case = format!("{name} {width}pt @{scale}x, {n} tabs");
+                    let start = lane.0 + g.lead;
+                    let narrowest = (0..n)
+                        .filter(|i| g.layout.xs[*i].is_some())
+                        .map(|i| tab_width(&g.layout, i))
+                        .fold(f32::INFINITY, f32::min);
+                    let lane_left = start + g.strip - painted_end(lane, &g);
+                    let gear = g.settings_rect.2 > 0.0;
+                    if gear {
+                        assert!(
+                            narrowest >= min - 0.01,
+                            "{case}: a {narrowest} tab beside the gear"
+                        );
+                        assert!(
+                            lane_left >= drag - 0.01,
+                            "{case}: a {lane_left} lane beside the gear"
+                        );
+                    }
+                    if narrowest < min - 0.01 {
+                        assert!(!gear, "{case}");
+                        assert!(
+                            (lane_left - floor.min(g.strip)).abs() < 0.01,
+                            "{case}: a {narrowest} tab beside a {lane_left} lane"
+                        );
+                    }
+                }
+            }
         }
     }
 }
@@ -482,6 +562,156 @@ fn an_overflowing_titlebar_strip_keeps_the_active_tab_in_view() {
     assert!(!state.scroll(1, 3) && !state.scroll(-1, 3));
 }
 
+/// Scrolled back from the active last tab, a close with the pointer on a
+/// tab shown before it holds the strip; a new tab opened then (Cmd+T or `+`,
+/// at the end or after the current tab) must still scroll into view. The
+/// held layouts once left the strip's record of the active tab and tab count
+/// behind, so the new tab matched it and stayed scrolled away.
+#[test]
+fn a_new_tab_after_a_held_close_opens_in_view() {
+    let lane = lane_of(1000.0, 1.0);
+    let mut state = TitlebarStrip::default();
+    for n in 1..=20 {
+        titlebar_tab_layout(n, n - 1, &lane, &mut state, true);
+    }
+    // `‹` once: the active last tab scrolls out of view.
+    assert!(state.scroll(-1, 20));
+    let l = titlebar_tab_layout(20, 19, &lane, &mut state, true);
+    assert!(l.xs[19].is_none() && l.xs[14].is_some());
+    // ✕ on tab 14: the active tab is the 18th now, and the strip holds.
+    let before = state;
+    state.held = before.held_after_close(19);
+    let l = titlebar_tab_layout(19, 18, &lane, &mut state, true);
+    assert!(l.xs[18].is_some() && state.held.is_some());
+    // A new tab ends the hold and becomes active: tab 19, whether it opens
+    // at the end or after the current (last) tab.
+    state.held = None;
+    let l = titlebar_tab_layout(20, 19, &lane, &mut state, true);
+    assert!(l.xs[19].is_some(), "the new tab opened out of view");
+}
+
+/// A small deterministic generator for the event sequences below.
+struct Lcg(u64);
+
+impl Lcg {
+    fn below(&mut self, n: usize) -> usize {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((self.0 >> 33) as usize) % n.max(1)
+    }
+}
+
+/// Random sequences of what happens to a title-bar strip, with the tab list
+/// kept the way the mux keeps it: after every new tab, close (from the
+/// keyboard or with the pointer, held or not), Go to Tab, next or previous
+/// tab, click, resize or scale change, the active tab is on screen. Arrows,
+/// the wheel and the pointer entering or leaving may leave it scrolled away.
+#[test]
+fn every_event_that_moves_the_selection_keeps_the_active_tab_in_view() {
+    let mut rng = Lcg(0x5eed_7ab5);
+    let strips = [420.0_f32, 700.0, 1000.0, 1600.0];
+    for sequence in 0..4000 {
+        let mut scale = [1.0_f32, 2.0][rng.below(2)];
+        let mut strip = strips[rng.below(strips.len())] * scale;
+        let after_current = rng.below(2) == 1;
+        let mut n = 1 + rng.below(24);
+        let mut active = rng.below(n);
+        let mut hold = false;
+        let mut state = TitlebarStrip::default();
+        let mut log = Vec::new();
+        let close = |n: &mut usize, active: &mut usize, idx: usize| {
+            *n -= 1;
+            if (*active >= *n || *active > idx) && *active > 0 {
+                *active -= 1;
+            }
+        };
+        titlebar_tab_layout(n, active, &lane_of(strip, scale), &mut state, hold);
+        for _ in 0..60 {
+            let event = rng.below(11);
+            log.push(event);
+            let lane = lane_of(strip, scale);
+            let check = match event {
+                0 => {
+                    let idx = if after_current { active + 1 } else { n };
+                    n += 1;
+                    active = idx;
+                    state.held = None;
+                    true
+                }
+                1 if n > 1 => {
+                    let idx = active;
+                    close(&mut n, &mut active, idx);
+                    state.held = None;
+                    true
+                }
+                2 if n > 1 => {
+                    hold = true;
+                    let l = titlebar_tab_layout(n, active, &lane, &mut state, hold);
+                    let shown: Vec<usize> = (0..n).filter(|i| l.xs[*i].is_some()).collect();
+                    let idx = shown[rng.below(shown.len())];
+                    let before = state;
+                    close(&mut n, &mut active, idx);
+                    state.held = before.held_after_close(n);
+                    true
+                }
+                3 => {
+                    active = rng.below(n.min(9));
+                    state.seen = None;
+                    true
+                }
+                4 => {
+                    active = if rng.below(2) == 0 {
+                        (active + 1) % n
+                    } else {
+                        (active + n - 1) % n
+                    };
+                    true
+                }
+                5 => {
+                    let step = if rng.below(2) == 0 { -1 } else { 1 };
+                    state.scroll(step, n);
+                    false
+                }
+                6 => {
+                    // A resize, maybe to the same width.
+                    strip = strips[rng.below(strips.len())] * scale;
+                    state.held = None;
+                    state.seen = None;
+                    true
+                }
+                7 => {
+                    let old = scale;
+                    scale = if scale == 1.0 { 2.0 } else { 1.0 };
+                    strip = strip / old * scale;
+                    state.held = None;
+                    state.seen = None;
+                    true
+                }
+                8 => {
+                    hold = !hold;
+                    false
+                }
+                9 => {
+                    let l = titlebar_tab_layout(n, active, &lane, &mut state, hold);
+                    let shown: Vec<usize> = (0..n).filter(|i| l.xs[*i].is_some()).collect();
+                    active = shown[rng.below(shown.len())];
+                    true
+                }
+                _ => false,
+            };
+            let l = titlebar_tab_layout(n, active, &lane_of(strip, scale), &mut state, hold);
+            if check {
+                assert!(
+                    l.xs[active].is_some(),
+                    "sequence {sequence} ({after_current}): events {log:?} left tab {active} of {n} hidden"
+                );
+            }
+        }
+    }
+}
+
 /// After a close with the pointer the remaining tabs keep their width and
 /// place while the pointer stays on the strip, so the next tab's close
 /// button comes to rest where the closed one's was; leaving the strip
@@ -566,6 +796,49 @@ fn a_close_with_the_pointer_holds_the_tabs_until_the_pointer_leaves() {
     assert_ne!(released.xs[first], before.xs[first]);
 }
 
+/// Whichever caller's layout lets a hold go (moving onto the traffic
+/// lights first lays the strip out for the window's hold on AppKit), it asks
+/// for a frame, so the even split the hit tests now use is also painted.
+#[test]
+fn letting_go_of_a_hold_asks_for_a_frame() {
+    let source: String = include_str!("chrome.rs").split_whitespace().collect();
+    let body = source
+        .split_once("fntab_bar_at_height(")
+        .unwrap()
+        .1
+        .split_once("fntitle_edit_rect(")
+        .unwrap()
+        .0;
+    assert!(body.contains("letheld=strip_state.held.is_some();letHorizontalTabGeometry{"));
+    assert!(body.contains(
+        "ws.titlebar_strip.set(strip_state);ifheld&&strip_state.held.is_none()&&letSome(window)=&ws.window{window.request_redraw();}"
+    ));
+}
+
+/// A double-click counts only when both presses land on the same spot of
+/// the screen. A press on the title bar that drags the window keeps the
+/// pointer at the same spot of the window, so a window move (and the
+/// pointer leaving, as a compositor's move grab reports) forgets the press.
+#[test]
+fn moving_the_window_forgets_a_title_bar_press() {
+    let source: String = include_str!("window_events.rs")
+        .split_whitespace()
+        .collect();
+    for arm in [
+        "WindowEvent::Moved(pos)=>{",
+        "WindowEvent::CursorLeft{..}=>{",
+    ] {
+        let body = source
+            .split_once(arm)
+            .unwrap_or_else(|| panic!("no {arm}"))
+            .1
+            .split_once("WindowEvent::")
+            .unwrap()
+            .0;
+        assert!(body.contains("ws.titlebar_click=None;"), "{arm}");
+    }
+}
+
 /// A hold lasts only while the tabs and the strip are the ones it was made
 /// for: a new tab, a close from the keyboard (or by a pane exiting), a
 /// resize and a display-scale change all end it, and so does scrolling.
@@ -597,10 +870,13 @@ fn a_hold_ends_with_a_new_tab_another_close_a_resize_or_a_scroll() {
     // The events that end a hold.
     let source: String = super::production_source().split_whitespace().collect();
     for (event, expected) in [
-        ("WindowEvent::Resized(size)=>{", "ws.release_tab_hold();"),
+        (
+            "WindowEvent::Resized(size)=>{",
+            "ws.release_tab_hold();//Anyresize,aheight-onlyonetoo,bringstheactivetab//backintoascrolledtitle-barstrip.ws.reveal_active_tab();",
+        ),
         (
             "WindowEvent::ScaleFactorChanged{scale_factor,..}=>{",
-            "ws.release_tab_hold();",
+            "ws.release_tab_hold();ws.reveal_active_tab();",
         ),
         (
             "fnfire_tab_add_event(&mutself,ws:&mutWindowState){",

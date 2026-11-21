@@ -1813,16 +1813,7 @@ impl App {
         // renderer stays in sync (the renderer reads
         // `tabbar.hovered_close_idx`, which we pass through in
         // `tab_bar()`).
-        // A pointer leaving the strip ends a close's hold as the strip is
-        // laid out here; the tabs divide it evenly again on the next frame.
-        let held = ws.titlebar_strip.get().held.is_some();
         let bar = self.tab_bar(ws);
-        if held
-            && ws.titlebar_strip.get().held.is_none()
-            && let Some(window) = &ws.window
-        {
-            window.request_redraw();
-        }
         let (new_tab_hover, hover_changed) = hover_tab_bar(ws, &bar);
         let (cursor_x, cursor_y) = (ws.cursor.x as f32, ws.cursor.y as f32);
         let control_hover = window_control_at(&bar, cursor_x, cursor_y);

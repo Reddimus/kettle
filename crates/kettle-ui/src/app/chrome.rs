@@ -238,6 +238,10 @@ impl App {
         // stays on it; a lone GNOME title is no tab and is never held.
         let hold = !lone_title && rect_contains(band, ws.cursor.x as f32, ws.cursor.y as f32);
         let mut strip_state = ws.titlebar_strip.get();
+        // Whoever lays the strip out when the pointer has left it (the
+        // window's hold on AppKit, a hit test, a paint) lets the hold go, so
+        // ask for the frame that shows the tabs split evenly again.
+        let held = strip_state.held.is_some();
         let HorizontalTabGeometry {
             arrow_rect,
             plus_rect,
@@ -255,6 +259,12 @@ impl App {
             (&mut strip_state, hold),
         );
         ws.titlebar_strip.set(strip_state);
+        if held
+            && strip_state.held.is_none()
+            && let Some(window) = &ws.window
+        {
+            window.request_redraw();
+        }
         // Tab positions count from past the GNOME header's leading `+`.
         let x0 = x0 + lead;
         // Tabs scrolled out of view are parked off-screen (kept in the segment
@@ -1094,10 +1104,10 @@ pub(super) fn horizontal_new_tab_controls(
 
 /// The separate Settings gear before the joined pair. Its size follows `+`,
 /// and its 8 pt gap keeps it outside the split button. It shows while the lane
-/// still keeps `room` beside every control: a minimum-width tab and the whole
-/// drag lane, so it is the first to go in a narrowing window. The tab count
-/// never decides, as extra tabs scroll. Returns the rect and the reservation
-/// it adds, both zero when hidden.
+/// still keeps `room` beside every control: the room the tabs need at the
+/// minimum (one between both scroll arrows once they overflow) and the whole
+/// drag lane, so it is the first to go in a narrowing window. Returns the
+/// rect and the reservation it adds, both zero when hidden.
 pub(super) fn titlebar_settings_control(
     plus: kettle_render::Rect4,
     lane_width: f32,
@@ -1538,15 +1548,29 @@ pub(super) struct TitlebarLane {
 }
 
 impl TitlebarLane {
-    /// The drag lane's width in this strip: whole while a minimum-width tab
-    /// fits beside it, narrowing to its floor before a tab narrows below the
-    /// minimum, and never wider than the strip.
-    pub(super) fn drag_width(&self) -> f32 {
-        (self.strip - self.min.max(1.0))
+    /// The drag lane's width in this strip for `n` tabs: whole while the
+    /// room they need at the minimum fits beside it (see
+    /// [`titlebar_tab_room`]), narrowing to its floor before a tab narrows
+    /// below the minimum, and never wider than the strip.
+    pub(super) fn drag_width(&self, n: usize) -> f32 {
+        (self.strip - titlebar_tab_room(n, self.min, self.arrow, self.scroll))
             .min(self.drag)
             .max(self.floor)
             .min(self.strip)
             .max(0.0)
+    }
+}
+
+/// The least room `n` title-bar tabs need without one narrowing below
+/// `min`: all of them while they fit, one between both `arrow`-wide scroll
+/// arrows once they overflow, and a single tab when there is one or they
+/// cannot scroll.
+pub(super) fn titlebar_tab_room(n: usize, min: f32, arrow: f32, scroll: bool) -> f32 {
+    let min = min.max(1.0);
+    if scroll && n > 1 {
+        (n as f32 * min).min(min + 2.0 * arrow.max(0.0))
+    } else {
+        min
     }
 }
 
@@ -1574,10 +1598,11 @@ pub(super) fn titlebar_tab_layout(
     if strip.is_nan() || strip < 2.0 {
         state.held = None;
         state.slots = 0;
+        state.seen = None;
         return TabStripLayout::empty(n);
     }
     let min = lane.min.max(1.0);
-    let space = (strip - lane.drag_width()).max(0.0);
+    let space = (strip - lane.drag_width(n)).max(0.0);
     let bits = strip.to_bits();
     if let Some(held) = state.held.take()
         && hold
@@ -1587,6 +1612,7 @@ pub(super) fn titlebar_tab_layout(
     {
         state.held = Some(held);
         state.first = if held.slots > 0 { held.first } else { 0 };
+        state.seen = Some((active, n, held.slots, bits));
         return layout;
     }
     let even = space / n as f32;
@@ -1755,6 +1781,13 @@ pub(super) fn horizontal_tab_geometry_in(
     // `tab-min-width` is in logical pixels, as every other strip measure.
     let min = cfg.tab_min_width * scale;
     let drag = TITLEBAR_DRAG_LANE * scale;
+    // A title bar's overflow arrows: as wide as its height, or the GNOME
+    // header's buttons.
+    let arrow = if linux {
+        (LINUX_HEADER_BUTTON * scale).min(lane.3)
+    } else {
+        lane.3
+    };
     let (arrow_rect, plus_rect, search_rect, lead, mut button_w) = if linux {
         let controls = linux_header_tab_controls(lane, scale, new_tab_dropdown_visible());
         (
@@ -1777,18 +1810,13 @@ pub(super) fn horizontal_tab_geometry_in(
     // narrows, before the drag lane or a tab gives way.
     let mut settings_rect = (0.0, 0.0, 0.0, 0.0);
     if titlebar && !linux {
-        let (rect, extra) =
-            titlebar_settings_control(plus_rect, lane.2, button_w, scale, min + drag);
+        let room = titlebar_tab_room(n, min, arrow, cfg.scroll_tabbar) + drag;
+        let (rect, extra) = titlebar_settings_control(plus_rect, lane.2, button_w, scale, room);
         settings_rect = rect;
         button_w += extra;
     }
     let strip = tab_segment_strip_width(lane.2 - lead, button_w, 0.0);
     let layout = if titlebar {
-        let arrow = if linux {
-            (LINUX_HEADER_BUTTON * scale).min(lane.3)
-        } else {
-            lane.3
-        };
         let lane = TitlebarLane {
             strip,
             arrow,

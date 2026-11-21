@@ -64,6 +64,9 @@ impl App {
             }
             WindowEvent::Resized(size) => {
                 ws.release_tab_hold();
+                // Any resize, a height-only one too, brings the active tab
+                // back into a scrolled title-bar strip.
+                ws.reveal_active_tab();
                 self.confirm_cancel_press(ws);
                 self.confirm_scroll(ws, 0, true);
                 self.sync_output_frame_budget(ws, false);
@@ -138,6 +141,7 @@ impl App {
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 ws.release_tab_hold();
+                ws.reveal_active_tab();
                 // The patch was drawn at the old scale, and the new-scale frame
                 // may wait for the paired resize.
                 Self::hide_cursor_layer(ws);
@@ -194,6 +198,10 @@ impl App {
             // live cursor as frame origin + grab offset and drive the re-dock
             // hit-test against every sibling window's tab band.
             WindowEvent::Moved(pos) => {
+                // A press that dragged the window by its title bar keeps the
+                // pointer at the same spot of the window but not of the
+                // screen: a press after the move is no double-click.
+                ws.titlebar_click = None;
                 self.sync_output_frame_budget(ws, false);
                 if let Some(started) = ws
                     .native_caption_drag
@@ -261,6 +269,8 @@ impl App {
             }
             WindowEvent::CursorLeft { .. } => {
                 dismiss_link_hover(ws);
+                // A compositor's move grab takes the pointer away as well.
+                ws.titlebar_click = None;
                 if let Some(dialog) = ws.confirm_dialog.as_mut() {
                     dialog.armed_press = None;
                 }
