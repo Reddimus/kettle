@@ -590,6 +590,9 @@ context = "Clipboard paste rejected before delivery because its transfer deadlin
 [messages.notify_body_clipboard_waiting]
 context = "crates/kettle-ui/src/app/paste.rs: desktop notification body on macOS when the clipboard has not answered a paste within two seconds. The window no longer waits; the paste is delivered if the clipboard answers within a minute, and a key press or click in the window cancels it."
 
+[messages.notify_body_clipboard_paste_moved]
+context = "crates/kettle-ui/src/app/paste.rs: desktop notification body on macOS when a paste that waited for the clipboard got its answer after its destination changed without the user's input (another window turned broadcast on, a menu switched tabs, the pane exited). Nothing was pasted."
+
 [messages.notify_body_clipboard_files_unreadable]
 context = "crates/kettle-ui/src/app/paste.rs: desktop notification body when a paste found copied files on the clipboard but their list was damaged, too long or held more than 32 files. Nothing was pasted."
 

@@ -413,6 +413,7 @@ notify_body_path_not_typed = "A file name can't be typed into this shell exactly
 notify_body_clipboard_limit_exceeded = "Clipboard text exceeded the paste safety limit; pasted nothing."
 notify_body_clipboard_timeout = "Clipboard transfer timed out; pasted nothing."
 notify_body_clipboard_waiting = "The paste comes when the clipboard answers, for up to a minute. Typing or clicking in the window stops it."
+notify_body_clipboard_paste_moved = "The clipboard answered after the paste's pane or field lost the keyboard, so nothing was pasted."
 notify_body_clipboard_files_unreadable = "The copied files could not be read. Copy up to 32 local files and try again."
 notify_body_clipboard_image_unreadable = "The clipboard image could not be read or stored, so nothing was pasted."
 notify_body_input_oversize = "Input exceeded Kettle's per-message safety limit and was not delivered. If broadcast mode is active, verify the other panes before retrying."
