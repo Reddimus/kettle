@@ -2038,18 +2038,25 @@ drag lane (`TITLEBAR_DRAG_LANE`) evenly from its start, a lone tab included
 (the GNOME header still draws its lone tab as a window-centred title). Below
 `tab-min-width`, scaled by the display scale like every other strip measure,
 the strip overflows: whole tabs at the minimum between `‹` at its start and
-`›` right after them, then the drag lane. A narrowing window loses the Settings
-gear first, then narrows the drag lane to 16 pt, then the tab. The window's
+`›` right after them, then the drag lane. `titlebar_tab_room` is the least
+room the tabs need at the minimum (all of them while they fit, one between
+both arrows once they overflow). A narrowing window loses the Settings gear
+once that room and the whole drag lane no longer fit beside the controls,
+then narrows the drag lane to 16 pt, then a tab. The window's
 `TitlebarStrip` (a `Cell` on `WindowState`, so every `tab_bar` reads and
 updates one strip) keeps the first tab shown: the arrows, the wheel and
 horizontal swipes scroll it without touching the selection, and a change of
-active tab, tab count, slots or strip width, or `reveal_active_tab` from
-Go to Tab, scrolls just far enough to show the active tab. A close with the
-pointer records a `HeldTabs` from the strip as laid out for the press; while
-the pointer stays in the band, layouts keep that width and first tab so the
-next close button lands under the pointer. Any other tab count or strip
-width, a new tab, any other close, a resize, a scale change, scrolling or
-the pointer leaving ends the hold. Plain strips keep `tab_strip_layout`.
+active tab, tab count, slots or strip width since the last layout (a held
+one included), or `reveal_active_tab` (Go to Tab, any resize, a scale
+change), scrolls just far enough to show the active tab. A close with the pointer records a
+`HeldTabs` from the strip as laid out for the press; while the pointer stays
+in the band, layouts keep that width and first tab so the next close button
+lands under the pointer. Any other tab count or strip width, a new tab, any
+other close, a resize, a scale change, scrolling or the pointer leaving ends
+the hold, and the layout that lets it go asks for a frame. A window move or
+the pointer leaving forgets a title-bar press, so a press after dragging the
+window is never taken for a double-click. Plain strips keep
+`tab_strip_layout`.
 
 Solid tab/status chrome derives from `theme.background` (24% darker for dark
 backgrounds, 6% for light ones); wallpaper modes still resolve through

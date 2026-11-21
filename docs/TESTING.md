@@ -3881,7 +3881,13 @@ narrowing order (gear, drag lane, tab), the active tab revealed on a new tab,
 Go to Tab, next/previous, a close, a resize and a scale change while the
 wheel and arrows scroll freely, the hold after a close with the pointer and
 what ends it, and hit tests, reorder targets, dock insertion, the insert
-marker and the accessibility tree following the painted tabs. Run
+marker and the accessibility tree following the painted tabs. A seeded run
+of 4000 random event sequences (new tabs at the end or after the current
+one, closes from the keyboard and held pointer closes, Go to Tab, clicks,
+scrolling, resizes, scale changes, the pointer entering and leaving) checks
+that every event that moves the selection leaves the active tab on screen,
+and the narrowing sweep checks, for any tab count, that the gear and then
+the drag lane give way before a tab narrows below the minimum. Run
 `cargo test -p kettle-ui titlebar_tabs_tests`. The native-titlebar checker
 asserts the same rules on the live `ui_geometry` (lone tab at the strip's
 start, even split, drag lane) and `scripts/test-native-titlebar.py` pins them

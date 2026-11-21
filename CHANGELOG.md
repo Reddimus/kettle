@@ -170,11 +170,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   opens Settings, as Cmd+, does; its tooltip names whichever key opens
   Settings, and screen readers call it Settings (Configuración in Spanish).
   The gear sits apart from `+ ▾`, which do not move, and it hides only when
-  the window is too narrow to keep a tab and room to drag the window beside
-  it. On macOS the `▾` menu lists shells, New Window with Profile,
-  layouts and SSH, leaving Settings, the command palette and About to the
-  gear and the menu bar. Screen readers name each control as its tooltip
-  does and meet them in screen order. Windows and Linux keep Settings in
+  the window is too narrow to keep a tab (between its scroll buttons, once
+  the tabs overflow) and room to drag the window beside it. On macOS the
+  `▾` menu lists shells, New Window with Profile, layouts and SSH, leaving
+  Settings, the command palette and About to the gear and the menu bar.
+  Screen readers name each control as its tooltip does and meet them in
+  screen order. Windows and Linux keep Settings in
   their `▾` and `≡` menus.
 
 - Making the font larger or smaller, or resetting it, from the keyboard,
@@ -269,7 +270,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   their header bars; screen readers still find it as the selected tab, a
   second tab brings the tabs back, and `tab-bar = always` keeps the tab look.
   New Tab (+) leads the header, the main menu (≡) ends it, and a faint
-  hairline separates the header from the terminal. The Find button (a
+  hairline separates the header from the terminal. Several tabs split the
+  header, scroll and keep their place after a close as they do in the macOS
+  title bar, with an empty lane left before Find. The Find button (a
   magnifier) before the menu opens Find and closes it again, shows pressed
   while Find is open, and its tooltip names your Find shortcut. Drag empty header space or the title to move,
   double-click to maximize, right-click for the window menu, or drag an edge to
@@ -895,27 +898,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   clustering in Settings > Text / Rendering for the previous scalar layout
   in new terminals. Applications can still toggle mode 2027; terminal resets
   restore each terminal's configured startup default.
-- On macOS, top tabs share the titlebar by default, with native window
-  dragging and the system double-click action on empty strip space and on a
-  single tab, which stands for the window title.
-  `macos-titlebar-style = native` restores the separate caption; bottom,
-  side and hidden tabs and borderless windows keep their previous chrome.
-  Tab controls have at least 20 pt hit targets and 4.5:1 glyph contrast.
-- The tab strip appears only with more than one tab by default. Set
-  `tab-bar = always` to keep it in a single-tab window.
-- Tabs in the macOS title bar and in Kettle's GNOME header now split the bar
-  evenly, as the tab strip did in 5.9, instead of keeping a fixed width with a
-  single macOS tab in the middle. A single tab starts just past the window
-  buttons and fills the bar like any tab (the GNOME header still shows it as
-  the window title). An empty lane is always left before the buttons at the
-  end of the bar, so there is somewhere to drag the window or double-click.
-  Tabs never get narrower than `tab-min-width`; when more tabs are open than
+- On macOS, top tabs share the titlebar by default. They split the title
+  bar evenly from just past the window buttons, a single tab included, and
+  an empty lane is always left before the buttons at the end of the bar.
+  Empty strip space and a single tab, which stands for the window title,
+  drag the window and answer a double-click with the system action. A tab is
+  at least `tab-min-width` wide, except with `scroll-tabbar = false` and in
+  a window too narrow for even one tab; when more tabs are open than
   fit, the bar scrolls with its `‹ ›` buttons, the mouse wheel or a sideways
-  swipe without switching tabs, and it scrolls back to the current tab when
-  you open, choose or close a tab, resize the window or move it to a display
+  swipe without switching tabs, and scrolls back to the current tab when you
+  open, choose or close a tab, resize the window or move it to a display
   with another scale. After you close a tab with the pointer, the other tabs
   keep their size and place until the pointer leaves the bar, so you can
-  close several in a row without chasing the close buttons.
+  close several in a row. `macos-titlebar-style = native` restores the
+  separate caption; bottom, side and hidden tabs and borderless windows keep
+  their previous chrome. Tab controls have at least 20 pt hit targets and
+  4.5:1 glyph contrast.
+- The tab strip appears only with more than one tab by default. Set
+  `tab-bar = always` to keep it in a single-tab window.
 - Search shows the current match and total (3/122) next to the query, has a
   Regex toggle beside Case (Case cycles on click), and draws other matches
   with stronger contrast.
