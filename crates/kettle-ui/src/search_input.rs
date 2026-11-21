@@ -148,6 +148,37 @@ impl SearchState {
         self.dragging_editor || self.pressed_control.is_some()
     }
 
+    /// Puts clipboard text into the query. Text larger than the largest
+    /// paste is refused unread, and the bar then says the query is too long,
+    /// as it does when the editor cuts a paste short. Returns why nothing
+    /// came when the user is to be told some other way.
+    pub(crate) fn paste(
+        &mut self,
+        pasted: Result<String, arboard::Error>,
+        now: std::time::Instant,
+    ) -> Option<kettle_i18n::Text> {
+        match pasted {
+            Ok(paste) => {
+                let outcome = self
+                    .editor
+                    .insert(&paste, kettle_core::MAX_SEARCH_QUERY_BYTES);
+                if outcome.changed {
+                    self.note_edit(now);
+                }
+                if outcome.truncated {
+                    self.status = kettle_render::SearchStatus::TooLong;
+                }
+                None
+            }
+            Err(arboard::Error::LimitExceeded) => {
+                self.status = kettle_render::SearchStatus::TooLong;
+                None
+            }
+            Err(arboard::Error::Timeout) => Some(kettle_i18n::Text::NotifyBodyClipboardTimeout),
+            Err(_) => None,
+        }
+    }
+
     pub(crate) fn note_edit(&mut self, now: std::time::Instant) {
         self.revision = self.revision.wrapping_add(1);
         self.unlimited_retry_at = (!self.editor.text().is_empty()).then_some(now + TYPING_PAUSE);
@@ -401,6 +432,42 @@ pub(crate) use crate::text_editor::{
 #[cfg(test)]
 mod tests {
     use super::{SearchEditor, VisibleSearchKey, VisibleSearchScan};
+
+    #[test]
+    fn clipboard_text_too_large_to_read_says_the_query_is_too_long() {
+        use kettle_render::SearchStatus;
+        let now = std::time::Instant::now();
+        let mut state = super::SearchState::default();
+        assert_eq!(state.paste(Ok("abc".into()), now), None);
+        assert_eq!(state.query(), "abc");
+        assert_ne!(state.status, SearchStatus::TooLong);
+
+        // The clipboard refused the text unread: nothing is inserted, and
+        // the bar says why, as it does for a paste the editor cuts short.
+        assert_eq!(state.paste(Err(arboard::Error::LimitExceeded), now), None);
+        assert_eq!(state.query(), "abc");
+        assert_eq!(state.status, SearchStatus::TooLong);
+
+        let mut state = super::SearchState::default();
+        let long = "a".repeat(kettle_core::MAX_SEARCH_QUERY_BYTES + 1);
+        assert_eq!(state.paste(Ok(long), now), None);
+        assert!(state.query().len() <= kettle_core::MAX_SEARCH_QUERY_BYTES);
+        assert_eq!(state.status, SearchStatus::TooLong);
+
+        // A clipboard that did not answer in time is said elsewhere, and an
+        // empty one pastes nothing quietly.
+        let mut state = super::SearchState::default();
+        assert_eq!(
+            state.paste(Err(arboard::Error::Timeout), now),
+            Some(kettle_i18n::Text::NotifyBodyClipboardTimeout)
+        );
+        assert_eq!(
+            state.paste(Err(arboard::Error::ContentNotAvailable), now),
+            None
+        );
+        assert_eq!(state.query(), "");
+        assert_ne!(state.status, SearchStatus::TooLong);
+    }
 
     fn wrapped_search_term(text: &str) -> alacritty_terminal::Term<kettle_core::EventProxy> {
         use kettle_core::term::TermSize;

@@ -656,9 +656,54 @@ Where and for how long a paste reads depends on the backend:
   paste goes on to the text, because on X11 a failure does not show a list
   exists: xclip answers every request with its own type, and an owner may
   leave a request it cannot serve unanswered.
-- **macOS and Windows.** arboard reads the system pasteboard synchronously on
-  the window thread, in the same order. There is no pipe and no deadline of
-  Kettle's to enforce; the text cap is checked once the read returns.
+- **macOS and Windows.** arboard is created and asked on the clipboard
+  worker thread (`clipboard::worker`), in the same order. The formats of one
+  paste share its deadline, two seconds, and once it has passed no further
+  format is asked for. No deadline reaches into AppKit's
+  `stringForType:` or Win32's `GetClipboardData`, so an owner that never
+  answers keeps the worker, and every later request times out, until it
+  answers or exits. A request still queued when its caller stops waiting
+  is not asked of the owner. The text cap is checked once the system has
+  handed the text over, so it bounds what Kettle keeps, not what a read
+  holds (`docs/AUDIT-DEFERRED.md`).
+
+  On macOS a paste the user asked for (a terminal paste, a modal field, the
+  find bar) frees the window after those two seconds and still takes the
+  answer if it comes within a minute more (`clipboard::LateAnswer`): the
+  system may be waiting for the user to allow the paste. The minute is
+  measured on `Instant`, which does not advance while the Mac sleeps. A
+  notification says the paste is coming; the notification worker cannot
+  withdraw a notice, so its text states the rule, not a state. Each window's
+  turn looks for the answer (`App::poll_clipboard_wait`). A terminal paste
+  is delivered only to an unchanged `PasteDestination`: the same pane, or
+  the same broadcast scope reaching the same panes in every window, with the
+  same modal and preview lane on top, the rule a paste confirmation's
+  consent follows. A field's paste goes to its modal while that modal is on
+  top. An answer whose destination changed without input in the window (a
+  menu-bar tab switch, another window's broadcast, a pane that exited) is
+  dropped, and a notification says nothing was pasted. A fresh key press, a
+  click, a drop, input-method text, a control client's UI key, or an
+  assistive-technology edit, selection, focus or press in that window drops
+  the wait first, so a paste never lands behind later input. A key that
+  pastes (the paste chord in a modal field or the find bar, or a Paste or
+  Paste Selection keybind) joins the wait instead of asking the clipboard
+  again. Once nobody waits for a
+  paste, the worker asks its owner for no further format.
+
+  A program's read (OSC 52) and paste previews keep the two-second bound. A
+  preview reads the file list and the text under one deadline and stops
+  after the first timeout, and Shift+right-click reads the clipboard once
+  for both of its rows. Stores are not queued past their caller: an OSC 52
+  store, or Kettle's own copy, waits at most two seconds for the worker,
+  and a store still queued when its deadline passes is dropped, never
+  applied later over newer clipboard contents. While a read holds the
+  worker, whether a late paste or one the user stopped waiting for, a store
+  is therefore served after it only if that read ends within the store's
+  two seconds; otherwise it is dropped and logged. Order holds either way: a
+  store is never applied ahead of a read made before it. Windows keeps the
+  two-second bound for every read. On macOS and Windows the clipboard is
+  unavailable for the session if its worker has not started within two
+  seconds of launch; it is not retried.
 
 A PNG from another program is untrusted. The window thread reads only the size
 its header declares, for `reserve_png_from`, which refuses a side over 16,384

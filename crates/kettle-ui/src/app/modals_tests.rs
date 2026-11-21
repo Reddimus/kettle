@@ -1418,3 +1418,22 @@ fn a_lone_pane_running_its_own_program_is_busy() {
         terminal.write(b"\x03");
     }
 }
+
+#[test]
+fn a_modal_field_says_why_clipboard_text_did_not_come() {
+    use super::modals::field_paste;
+    use kettle_i18n::Text;
+    assert_eq!(field_paste(Ok("name".into())), Ok(Some("name".into())));
+    assert_eq!(field_paste(Ok(String::new())), Ok(None));
+    assert_eq!(field_paste(Err(arboard::Error::ContentNotAvailable)), Ok(None));
+    // Text over the largest paste is refused unread: the field gets
+    // nothing, and the user is told, as a terminal paste tells them.
+    assert_eq!(
+        field_paste(Err(arboard::Error::LimitExceeded)),
+        Err(Text::NotifyBodyClipboardLimitExceeded)
+    );
+    assert_eq!(
+        field_paste(Err(arboard::Error::Timeout)),
+        Err(Text::NotifyBodyClipboardTimeout)
+    );
+}

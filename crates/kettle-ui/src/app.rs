@@ -182,6 +182,7 @@ pub(crate) use modals::*;
 use notification_toast::*;
 pub(crate) use notifications::*;
 use output::*;
+pub(crate) use paste::ClipboardWait;
 use paste::*;
 pub(crate) use pickers::*;
 pub(crate) use pointer::*;
@@ -1180,6 +1181,10 @@ impl ApplicationHandler<UserEvent> for App {
             };
             if std::mem::take(&mut remote_poll_due) {
                 self.poll_remote_contexts(&mut ws);
+            }
+            if let Some(deadline) = self.poll_clipboard_wait(&mut ws, now) {
+                earliest_deadline =
+                    Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
             }
             for pane in ws.mux.panes.values_mut() {
                 if let Some(wait) = pane.term.poll_startup_geometry() {

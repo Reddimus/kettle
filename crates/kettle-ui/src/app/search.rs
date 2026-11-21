@@ -1415,23 +1415,38 @@ impl App {
     /// Paste the clipboard into the query.
     pub(super) fn search_paste(&mut self, ws: &mut WindowState) {
         ws.search.focused_control = kettle_render::SearchControl::Editor;
+        // A paste already waiting for the clipboard is not asked again.
+        if ws.clipboard_wait.is_some() {
+            return;
+        }
         let Some(clipboard) = self.clipboard.as_mut() else {
             return;
         };
-        match clipboard.get_text() {
-            Ok(paste) => {
-                let outcome = ws
-                    .search
-                    .editor
-                    .insert(&paste, kettle_core::MAX_SEARCH_QUERY_BYTES);
-                if outcome.changed {
-                    ws.search.note_edit(std::time::Instant::now());
-                }
-                if outcome.truncated {
-                    ws.search.status = kettle_render::SearchStatus::TooLong;
-                }
-            }
-            Err(error) => log::warn!("search paste: clipboard read failed: {error}"),
+        match clipboard.text_for_user() {
+            crate::clipboard::UserRead::Now(pasted) => self.search_paste_answer(ws, pasted),
+            crate::clipboard::UserRead::Later(answer) => self.await_clipboard(
+                ws,
+                Wait::Field {
+                    modal: KeyModal::Search,
+                    answer,
+                },
+            ),
+        }
+    }
+
+    /// Puts what the clipboard answered into the query, or says why nothing
+    /// came.
+    pub(super) fn search_paste_answer(
+        &mut self,
+        ws: &mut WindowState,
+        pasted: Result<String, arboard::Error>,
+    ) {
+        if let Err(error) = &pasted {
+            log::warn!("search paste: clipboard read failed: {error}");
+        }
+        ws.search.focused_control = kettle_render::SearchControl::Editor;
+        if let Some(reason) = ws.search.paste(pasted, std::time::Instant::now()) {
+            self.notify_paste_refused(reason);
         }
     }
 
