@@ -441,47 +441,43 @@ impl App {
         true
     }
 
+    /// The shared editor's keys for every modal text field. The paste
+    /// shortcut (`Cmd+V`, `Ctrl+V`, `Ctrl+Shift+V`) reaches the clipboard
+    /// here, before the field's own keys, and a paste that brought nothing
+    /// says why.
     fn modal_editor_key(&mut self, ws: &mut WindowState, key: &Key) -> bool {
         let Some(editor) = modal_editor(ws) else {
             return false;
         };
         let before = editor.text().to_string();
-        let clipboard = std::cell::RefCell::new(self.clipboard.as_mut());
-        let handled = edit_modal_text(
-            ws,
-            key,
-            || {
-                clipboard
-                    .borrow_mut()
-                    .as_mut()
-                    .and_then(|cb| cb.get_text().ok())
-            },
-            |text| {
-                clipboard
-                    .borrow_mut()
-                    .as_mut()
-                    .is_some_and(|cb| cb.set_text(text.to_string()).is_ok())
-            },
-        );
-        if handled {
-            let changed = modal_editor(ws).is_some_and(|editor| editor.text() != before);
-            if changed {
-                reset_modal_results(ws);
-                if let Some(nav) = ws.settings_nav.as_mut().filter(|nav| nav.search_focused) {
-                    nav.reconcile(
-                        &crate::settings::categories(&self.gpu_choices),
-                        &self.cfg,
-                        &self.ui_text,
-                    );
-                }
-            }
-            ws.accessibility_pending = true;
-            self.update_ime_cursor_area(ws);
-            if let Some(window) = &ws.window {
-                window.request_redraw();
+        let edit = edit_modal_field(ws, key, self.clipboard.as_mut());
+        if let Some(reason) = edit.refused {
+            self.notify_paste_refused(reason);
+        }
+        if edit.handled {
+            self.modal_edited(ws, &before);
+        }
+        edit.handled
+    }
+
+    /// What follows an edit of a modal field whose text was `before`.
+    fn modal_edited(&mut self, ws: &mut WindowState, before: &str) {
+        let changed = modal_editor(ws).is_some_and(|editor| editor.text() != before);
+        if changed {
+            reset_modal_results(ws);
+            if let Some(nav) = ws.settings_nav.as_mut().filter(|nav| nav.search_focused) {
+                nav.reconcile(
+                    &crate::settings::categories(&self.gpu_choices),
+                    &self.cfg,
+                    &self.ui_text,
+                );
             }
         }
-        handled
+        ws.accessibility_pending = true;
+        self.update_ime_cursor_area(ws);
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
     }
 
     pub(super) fn confirmation_layout(
@@ -1440,13 +1436,13 @@ impl App {
         }
     }
 
-    /// Clipboard text for a modal field. The shared editor bounds and normalizes it.
+    /// Clipboard text for a modal field. The shared editor bounds and
+    /// normalizes it. The field's own paste chord arm reads through here; the
+    /// chord itself reaches the shared editor first (`modal_editor_key`),
+    /// which reads the same way.
     pub(super) fn modal_clipboard_text(&mut self) -> Option<String> {
         let pasted = self.clipboard.as_mut()?.get_text();
-        if let Err(error) = &pasted {
-            log::warn!("modal paste: clipboard read failed: {error}");
-        }
-        field_paste(pasted).unwrap_or_else(|reason| {
+        field_text(pasted).unwrap_or_else(|reason| {
             self.notify_paste_refused(reason);
             None
         })
@@ -4439,5 +4435,55 @@ pub(super) fn field_paste(
         }
         Err(arboard::Error::Timeout) => Err(kettle_i18n::Text::NotifyBodyClipboardTimeout),
         Err(_) => Ok(None),
+    }
+}
+
+/// [`field_paste`] of a read, with a failed read logged. The log names the
+/// error only, never clipboard text.
+fn field_text(pasted: Result<String, arboard::Error>) -> Result<Option<String>, kettle_i18n::Text> {
+    if let Err(error) = &pasted {
+        log::warn!("modal paste: clipboard read failed: {error}");
+    }
+    field_paste(pasted)
+}
+
+/// What the shared editor did with a key in a modal field.
+pub(super) struct ModalFieldEdit {
+    pub handled: bool,
+    /// Why a paste brought nothing, for the user.
+    pub refused: Option<kettle_i18n::Text>,
+}
+
+/// Runs `key` through the open modal field's shared editor, with the
+/// clipboard for its Copy, Cut and Paste. This is where the paste shortcut
+/// reads the clipboard for every modal field: a read that failed or timed
+/// out comes back as `refused`.
+pub(super) fn edit_modal_field<F: crate::clipboard::SelectionFallback>(
+    ws: &mut WindowState,
+    key: &Key,
+    clipboard: Option<&mut crate::clipboard::Clipboard<F>>,
+) -> ModalFieldEdit {
+    let clipboard = std::cell::RefCell::new(clipboard);
+    let refused = std::cell::Cell::new(None);
+    let handled = edit_modal_text(
+        ws,
+        key,
+        || {
+            let pasted = clipboard.borrow_mut().as_mut()?.get_text();
+            field_text(pasted).unwrap_or_else(|reason| {
+                refused.set(Some(reason));
+                None
+            })
+        },
+        |text| {
+            clipboard
+                .borrow_mut()
+                .as_mut()
+                .is_some_and(|cb| cb.set_text(text.to_string()).is_ok())
+        },
+    );
+    ModalFieldEdit {
+        handled,
+        refused: refused.take(),
     }
 }
