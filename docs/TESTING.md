@@ -930,8 +930,24 @@ paste past its deadline asks for no further format. On macOS,
 `a_late_macos_pasteboard_owner_cannot_hold_the_ui_or_reorder_osc_52` runs the
 load and the queued store against a real lazy owner: an `osascript` process
 that promises text on a private, uniquely named pasteboard and provides it only
-when let go. It does not touch the system pasteboard, so it runs everywhere. On
-Windows CI,
+when let go. It does not touch the system pasteboard, so it runs everywhere.
+`a_macos_paste_takes_the_answer_a_late_pasteboard_owner_gives` makes a user
+paste against the same owner: the window waits two seconds, the owner's later
+answer is still the paste's, and an OSC 52 store queued meanwhile is served
+after it. Portable tests cover the same late answers with injected owners
+(`a_users_read_takes_an_answer_that_comes_after_the_window_stopped_waiting`,
+`a_clipboard_that_takes_late_answers_leaves_a_slow_paste_to_come_later`), and
+`a_late_read_dropped_while_queued_is_never_asked_for` shows a paste the user
+stopped waiting for is not asked of the owner. In `app`,
+`the_paste_chord_in_every_modal_field_says_why_the_clipboard_gave_nothing`
+drives `Cmd+V`, `Ctrl+V` and their Shift forms through the shared editor of
+every modal field against a clipboard that times out or holds too much text;
+`a_late_clipboard_answer_reaches_the_modal_field_that_asked_for_it` and
+`a_late_terminal_paste_goes_only_where_the_keyboard_still_is` check where a
+late answer goes, `typing_drops_a_paste_still_waiting_for_the_clipboard`
+which keys stop the wait, and
+`user_pastes_can_wait_for_the_clipboard_and_input_drops_the_wait` that every
+paste entry point and input handler is wired to them. On Windows CI,
 `a_stalled_windows_clipboard_owner_cannot_hold_the_ui_or_reorder_osc_52` runs
 the same check against a real delayed-rendering owner, a message-only window
 in the test process. It replaces the desktop clipboard, so elsewhere it runs

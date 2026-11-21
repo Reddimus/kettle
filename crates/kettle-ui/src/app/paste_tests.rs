@@ -3787,3 +3787,156 @@ fn every_paste_button_projects_its_own_flag_and_sends_its_own_text() {
         }
     }
 }
+
+/// A fresh press of any key but a modifier drops a paste still waiting for
+/// the clipboard, so the paste cannot land behind it; a held key's repeats
+/// and modifiers (the next shortcut's Command or Control) do not.
+#[test]
+fn typing_drops_a_paste_still_waiting_for_the_clipboard() {
+    use winit::event::ElementState;
+    use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
+    let v = Key::Character("v".into());
+    let code = PhysicalKey::Code(KeyCode::KeyV);
+    assert!(super::key_drops_clipboard_wait(
+        ElementState::Pressed,
+        false,
+        &v,
+        code
+    ));
+    assert!(super::key_drops_clipboard_wait(
+        ElementState::Pressed,
+        false,
+        &Key::Named(NamedKey::Escape),
+        PhysicalKey::Code(KeyCode::Escape)
+    ));
+    assert!(!super::key_drops_clipboard_wait(
+        ElementState::Pressed,
+        true,
+        &v,
+        code
+    ));
+    assert!(!super::key_drops_clipboard_wait(
+        ElementState::Released,
+        false,
+        &v,
+        code
+    ));
+    for (key, code) in [
+        (NamedKey::Super, KeyCode::SuperLeft),
+        (NamedKey::Control, KeyCode::ControlLeft),
+        (NamedKey::Shift, KeyCode::ShiftRight),
+    ] {
+        assert!(!super::key_drops_clipboard_wait(
+            ElementState::Pressed,
+            false,
+            &Key::Named(key),
+            PhysicalKey::Code(code)
+        ));
+    }
+}
+
+/// A terminal paste's late answer goes to the pane (or broadcast group) it
+/// was asked for while no modal has the keyboard; otherwise nowhere. An
+/// answer that never comes is a timeout at its deadline.
+#[test]
+fn a_late_terminal_paste_goes_only_where_the_keyboard_still_is() {
+    use crate::clipboard::{LateAnswer, PasteContent};
+    let now = std::time::Instant::now();
+    let later = now + std::time::Duration::from_secs(10);
+    let timed_out = || PasteContent::Text(Err(arboard::Error::Timeout));
+    let wait = |target| {
+        let (sender, answer) = LateAnswer::pending(later, timed_out);
+        sender
+            .send(PasteContent::Text(Ok("late".into())))
+            .unwrap();
+        Some(super::ClipboardWait(super::Wait::Pane { target, answer }))
+    };
+    let mut ws = WindowState::new(0, Mux::new());
+    // `paste_target` of a window without a focused pane is `None`.
+    ws.clipboard_wait = wait(None);
+    assert!(matches!(
+        super::take_clipboard_answer(&mut ws, now),
+        Some(super::ClipboardDelivery::Pane(PasteContent::Text(Ok(text)))) if text == "late"
+    ));
+    assert!(ws.clipboard_wait.is_none());
+    ws.clipboard_wait = wait(Some(7));
+    assert!(matches!(
+        super::take_clipboard_answer(&mut ws, now),
+        Some(super::ClipboardDelivery::Dropped)
+    ));
+    ws.clipboard_wait = wait(None);
+    ws.palette_input = Some((Default::default(), 0));
+    assert!(matches!(
+        super::take_clipboard_answer(&mut ws, now),
+        Some(super::ClipboardDelivery::Dropped)
+    ));
+    ws.palette_input = None;
+
+    // Still waiting: it stays, and the window looks again soon.
+    let (_sender, answer) = LateAnswer::pending(later, timed_out);
+    ws.clipboard_wait = Some(super::ClipboardWait(super::Wait::Pane {
+        target: None,
+        answer,
+    }));
+    assert!(matches!(
+        super::take_clipboard_answer(&mut ws, now),
+        Some(super::ClipboardDelivery::Waiting(next)) if next > now && next <= now + std::time::Duration::from_millis(50)
+    ));
+    assert!(ws.clipboard_wait.is_some());
+    // At its deadline it is a timeout, which the paste reports.
+    assert!(matches!(
+        super::take_clipboard_answer(&mut ws, later),
+        Some(super::ClipboardDelivery::Pane(PasteContent::Text(Err(arboard::Error::Timeout))))
+    ));
+    assert!(super::take_clipboard_answer(&mut ws, later).is_none());
+}
+
+/// The paste entry points ask the clipboard the way that can leave the
+/// answer to come later, and every way the user moves on drops a waiting
+/// paste before the input is handled.
+#[test]
+fn user_pastes_can_wait_for_the_clipboard_and_input_drops_the_wait() {
+    let src = production_source();
+    let body = |name: &str| {
+        src.split(&format!("fn {name}("))
+            .nth(1)
+            .and_then(|rest| rest.split("\n    }\n").next())
+            .unwrap_or_else(|| panic!("{name} body"))
+            .to_string()
+    };
+    assert!(body("paste_clipboard").contains(".paste_for_user("));
+    assert!(body("search_paste").contains(".text_for_user()"));
+    assert!(body("modal_clipboard_text").contains(".text_for_user()"));
+    assert!(body("modal_editor_key").contains("edit_modal_field(ws, key, self.clipboard.as_mut())"));
+    for name in ["paste_clipboard", "search_paste", "modal_clipboard_text"] {
+        assert!(
+            body(name).contains("if ws.clipboard_wait.is_some() {"),
+            "{name} must not ask again while a paste waits"
+        );
+    }
+    let arm = |pattern: &str| {
+        src.split(pattern)
+            .nth(1)
+            .unwrap_or_else(|| panic!("{pattern}"))
+            .chars()
+            .take(1500)
+            .collect::<String>()
+    };
+    let keyboard = arm("WindowEvent::KeyboardInput { event, .. } => {");
+    assert!(
+        keyboard.trim_start().starts_with("// A paste still waiting")
+            && keyboard.contains("key_drops_clipboard_wait(")
+            && keyboard.contains("ws.clipboard_wait = None;"),
+        "a key press must drop a waiting paste before anything handles it"
+    );
+    let press = arm("            WindowEvent::MouseInput {\n                state: ElementState::Pressed,");
+    assert!(press.contains("ws.clipboard_wait = None;"));
+    let ime = arm("WindowEvent::Ime(ime) => {");
+    assert!(ime.contains("ws.clipboard_wait = None;"));
+    let drop = arm("WindowEvent::DroppedFile(path) => {");
+    assert!(drop.contains("ws.clipboard_wait = None;"));
+    assert!(
+        src.contains("self.poll_clipboard_wait(&mut ws, now)"),
+        "every window's turn looks for a waiting paste's answer"
+    );
+}

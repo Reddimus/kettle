@@ -64,6 +64,7 @@ impl TextProvider for Provider {
 fn clipboard() -> Clipboard {
     let thread = Some(std::thread::current().id());
     Clipboard {
+        late_answers: None,
         arboard: None,
         worker: Some(
             TextWorker::start(move || {
@@ -312,6 +313,7 @@ impl SelectionFallback for Provider {
 
 fn clipboard_only_with_fallback() -> Clipboard<Provider> {
     Clipboard {
+        late_answers: None,
         arboard: Some(Provider {
             selections: ["fallback clipboard".into(), "external primary".into()],
             ..Default::default()
@@ -459,6 +461,7 @@ fn outcome(content: PasteContent) -> String {
 /// Windows, holding `text`, `pixels` and `files`.
 fn holding(text: &str, pixels: bool, files: &[&str]) -> Clipboard<Provider> {
     Clipboard {
+        late_answers: None,
         arboard: Some(Provider {
             selections: [text.into(), String::new()],
             pixels: pixels.then(|| vec![1, 2, 3, 255]),
@@ -647,6 +650,7 @@ fn native_files_and_images_are_pasted_without_arboard_and_arboard_is_not_asked()
     };
     // No arboard at all: a Wayland session without XWayland.
     let mut clipboard = Clipboard::<Provider> {
+        late_answers: None,
         arboard: None,
         worker: native(
             |want| {
@@ -665,6 +669,7 @@ fn native_files_and_images_are_pasted_without_arboard_and_arboard_is_not_asked()
     // With arboard present the bridge is still the authority: a native
     // refusal is the answer, and arboard is not asked for a second opinion.
     let mut clipboard = Clipboard {
+        late_answers: None,
         arboard: Some(Provider {
             selections: ["x11 text".into(), String::new()],
             files: vec![PathBuf::from("/x11/file")],
@@ -747,6 +752,7 @@ fn primary_is_native_while_the_protocol_is_there_and_falls_back_while_it_is_not(
     let supported = Arc::new(AtomicBool::new(false));
     let announced = supported.clone();
     let mut clipboard = Clipboard {
+        late_answers: None,
         arboard: Some(Provider {
             selections: [String::new(), "x11 primary".into()],
             ..Default::default()
@@ -1072,6 +1078,7 @@ impl SelectionFallback for Bounded {
 #[test]
 fn text_for_a_field_is_read_under_a_pastes_size_and_time_bounds() {
     let mut clipboard = Clipboard {
+        late_answers: None,
         arboard: Some(Bounded::default()),
         worker: None,
     };
@@ -1570,4 +1577,240 @@ fn a_late_macos_pasteboard_owner_cannot_hold_the_ui_or_reorder_osc_52() {
         .expect("the load after the store");
     assert_ne!(text, LATE_TEXT);
     assert_eq!(text, "next");
+}
+
+/// On macOS a paste the user asked for is still answered when a real lazy
+/// owner gives its text after the window stopped waiting, as when the user
+/// takes a while to allow the paste. The window waits only `READ_WITHIN`,
+/// an OSC 52 store made meanwhile is served after the paste's read, and the
+/// paste gets the owner's text, not the stored one.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_macos_paste_takes_the_answer_a_late_pasteboard_owner_gives() {
+    use late_macos_owner::{LATE_TEXT, Owner, STALLS_FOR};
+    let owner = Owner::start();
+    let name = owner.name.clone();
+    let mut clipboard =
+        Clipboard::open(move || Ok(arboard::Clipboard::with_macos_pasteboard_name(&name)))
+            .expect("the private pasteboard");
+    assert!(STALLS_FOR > READ_WITHIN * 2);
+
+    let started = Instant::now();
+    let read = clipboard.text_for_user();
+    let waited = started.elapsed();
+    assert!(owner.asked(Duration::from_secs(1)), "the owner was asked");
+    let UserRead::Later(answer) = read else {
+        panic!("the paste gave up on the owner after {waited:?}");
+    };
+    assert!(
+        waited < READ_WITHIN + Duration::from_secs(1),
+        "the window waited {waited:?}"
+    );
+
+    let queue = clipboard.worker.clone();
+    let writer = std::thread::spawn(move || {
+        let stored = clipboard.set_selection(false, "next".into());
+        (clipboard, stored)
+    });
+    wait_until_queued(queue.as_ref().unwrap());
+    owner.release();
+    assert_eq!(late(&answer).unwrap(), LATE_TEXT);
+    let (mut clipboard, stored) = writer.join().unwrap();
+    stored.expect("the store behind the paste's read");
+    let text = clipboard
+        .get_selection_bounded(false, 100, Instant::now() + READ_WITHIN)
+        .expect("the load after the store");
+    assert_eq!(text, "next");
+}
+
+/// Waits for a late answer, as the window's turns do.
+fn late<T>(answer: &LateAnswer<T>) -> T {
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(answer) = answer.poll(Instant::now()) {
+            return answer;
+        }
+        assert!(Instant::now() < until, "the late answer never came");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// A read the user asked for still takes an answer that comes after the
+/// window stopped waiting, up to its deadline, under the same size bound.
+/// Past the deadline it is a timeout, and an answer the owner gives after
+/// that is dropped.
+#[test]
+fn a_users_read_takes_an_answer_that_comes_after_the_window_stopped_waiting() {
+    let (entered_tx, entered) = crossbeam_channel::bounded(1);
+    let (release, released) = crossbeam_channel::bounded(1);
+    struct Owner {
+        entered: crossbeam_channel::Sender<()>,
+        released: crossbeam_channel::Receiver<()>,
+    }
+    impl TextProvider for Owner {
+        fn load(&mut self, _: bool, _: usize, _: Instant) -> Result<String, arboard::Error> {
+            self.entered.send(()).unwrap();
+            self.released
+                .recv_timeout(Duration::from_secs(10))
+                .map_err(|_| arboard::Error::Timeout)?;
+            Ok("allowed".into())
+        }
+        fn store(&mut self, _: bool, _: String, _: Instant) -> Result<(), arboard::Error> {
+            Ok(())
+        }
+    }
+    let worker = TextWorker::start(move || {
+        Ok(Owner {
+            entered: entered_tx,
+            released,
+        })
+    })
+    .unwrap();
+    let wait = |within: Duration| {
+        let now = Instant::now();
+        (now + Duration::from_millis(20), now + within)
+    };
+
+    let (until, deadline) = wait(Duration::from_secs(10));
+    let UserRead::Later(answer) = worker.load_later(100, until, deadline) else {
+        panic!("the read answered before the owner did");
+    };
+    entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(answer.poll(Instant::now()).is_none());
+    assert_eq!(answer.deadline(), deadline);
+    release.send(()).unwrap();
+    assert_eq!(late(&answer).unwrap(), "allowed");
+
+    let (until, deadline) = wait(Duration::from_secs(10));
+    let UserRead::Later(answer) = worker.load_later(3, until, deadline) else {
+        panic!("the read answered before the owner did");
+    };
+    entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    release.send(()).unwrap();
+    assert!(matches!(late(&answer), Err(arboard::Error::LimitExceeded)));
+
+    let (until, deadline) = wait(Duration::from_millis(200));
+    let UserRead::Later(answer) = worker.paste_later(ALL, 100, until, deadline) else {
+        panic!("the paste answered before the owner did");
+    };
+    entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(matches!(
+        answer.poll(deadline),
+        Some(PasteContent::Text(Err(arboard::Error::Timeout)))
+    ));
+    std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+    release.send(()).unwrap();
+    assert!(matches!(
+        late(&answer),
+        PasteContent::Text(Err(arboard::Error::Timeout))
+    ));
+}
+
+/// Where late answers are taken (macOS), a paste or a field's text the
+/// owner has not given within `READ_WITHIN` is left to come later; where
+/// they are not, the same read stops at `READ_WITHIN`.
+#[test]
+fn a_clipboard_that_takes_late_answers_leaves_a_slow_paste_to_come_later() {
+    let (release, released) = crossbeam_channel::unbounded::<()>();
+    let mut clipboard = Clipboard::answering(
+        move || {
+            released
+                .recv_timeout(Duration::from_secs(10))
+                .map_err(|_| arboard::Error::Timeout)?;
+            Ok("slow".into())
+        },
+        Some(Duration::from_secs(30)),
+    );
+    let started = Instant::now();
+    let UserRead::Later(text) = clipboard.text_for_user() else {
+        panic!("a slow field paste timed out");
+    };
+    let waited = started.elapsed();
+    assert!(
+        waited >= READ_WITHIN && waited < READ_WITHIN + Duration::from_secs(1),
+        "the window waited {waited:?}"
+    );
+    assert!(text.deadline() >= started + READ_WITHIN + Duration::from_secs(30));
+    release.send(()).unwrap();
+    assert_eq!(late(&text).unwrap(), "slow");
+
+    let UserRead::Later(paste) = clipboard.paste_for_user(ALL, 100) else {
+        panic!("a slow paste timed out");
+    };
+    release.send(()).unwrap();
+    assert!(matches!(late(&paste), PasteContent::Text(Ok(text)) if text == "slow"));
+
+    let mut quick = Clipboard::answering(|| Ok("quick".into()), Some(Duration::from_secs(30)));
+    assert!(matches!(quick.text_for_user(), UserRead::Now(Ok(text)) if text == "quick"));
+    let mut bounded = Clipboard::answering(|| Ok("quick".into()), None);
+    assert!(matches!(
+        bounded.paste_for_user(ALL, 100),
+        UserRead::Now(PasteContent::Text(Ok(text))) if text == "quick"
+    ));
+}
+
+/// A paste the user stopped waiting for (by typing) whose read is still
+/// queued is not served: the owner is not asked for it, so it cannot raise
+/// a second permission alert or hold the thread for a paste nobody wants.
+#[test]
+fn a_late_read_dropped_while_queued_is_never_asked_for() {
+    use std::sync::atomic::AtomicUsize;
+    let (release, released) = crossbeam_channel::bounded::<()>(1);
+    let asked = Arc::new(AtomicUsize::new(0));
+    struct Owner {
+        asked: Arc<AtomicUsize>,
+        released: crossbeam_channel::Receiver<()>,
+    }
+    impl TextProvider for Owner {
+        fn load(&mut self, _: bool, _: usize, _: Instant) -> Result<String, arboard::Error> {
+            if self.asked.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.released
+                    .recv_timeout(Duration::from_secs(10))
+                    .map_err(|_| arboard::Error::Timeout)?;
+            }
+            Ok("text".into())
+        }
+        fn store(&mut self, _: bool, _: String, _: Instant) -> Result<(), arboard::Error> {
+            Ok(())
+        }
+    }
+    let owner_asked = Arc::clone(&asked);
+    let worker = TextWorker::start(move || {
+        Ok(Owner {
+            asked: owner_asked,
+            released,
+        })
+    })
+    .unwrap();
+    let later = |worker: &TextWorker| {
+        let now = Instant::now();
+        match worker.load_later(
+            100,
+            now + Duration::from_millis(20),
+            now + Duration::from_secs(10),
+        ) {
+            UserRead::Later(answer) => answer,
+            UserRead::Now(_) => panic!("the stalled worker answered"),
+        }
+    };
+    let first = later(&worker);
+    let give_up = Instant::now() + Duration::from_secs(5);
+    while asked.load(Ordering::SeqCst) == 0 {
+        assert!(Instant::now() < give_up, "the owner was never asked");
+        std::thread::yield_now();
+    }
+    let second = later(&worker);
+    assert_eq!(worker.queued(), 1);
+    drop(second);
+    release.send(()).unwrap();
+    assert_eq!(late(&first).unwrap(), "text");
+    wait_until_taken(&worker);
+    // The next read is the owner's second request, not its third.
+    assert_eq!(
+        worker
+            .load(false, 100, Instant::now() + Duration::from_secs(2))
+            .unwrap(),
+        "text"
+    );
+    assert_eq!(asked.load(Ordering::SeqCst), 2);
 }
