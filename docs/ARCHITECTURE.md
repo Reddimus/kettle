@@ -670,14 +670,39 @@ Where and for how long a paste reads depends on the backend:
   On macOS a paste the user asked for (a terminal paste, a modal field, the
   find bar) frees the window after those two seconds and still takes the
   answer if it comes within a minute more (`clipboard::LateAnswer`): the
-  system may be waiting for the user to allow the paste. A notification
-  says the paste is coming. Each window's turn looks for the answer
-  (`App::poll_clipboard_wait`) and delivers it only where the keyboard was
-  when the paste was asked for; a fresh key press, a click, a drop or
-  input-method text in that window drops it first, so a paste never lands
-  behind later input. A program's read (OSC 52) and paste previews keep the
-  two-second bound, and an OSC 52 store made meanwhile waits behind the
-  paste's read. Windows keeps the two-second bound for every read.
+  system may be waiting for the user to allow the paste. The minute is
+  measured on `Instant`, which does not advance while the Mac sleeps. A
+  notification says the paste is coming; the notification worker cannot
+  withdraw a notice, so its text states the rule, not a state. Each window's
+  turn looks for the answer (`App::poll_clipboard_wait`). A terminal paste
+  is delivered only to an unchanged `PasteDestination`: the same pane, or
+  the same broadcast scope reaching the same panes in every window, with the
+  same modal and preview lane on top, the rule a paste confirmation's
+  consent follows. A field's paste goes to its modal while that modal is on
+  top. An answer whose destination changed without input in the window (a
+  menu-bar tab switch, another window's broadcast, a pane that exited) is
+  dropped, and a notification says nothing was pasted. A fresh key press, a
+  click, a drop, input-method text, a control client's UI key, or an
+  assistive-technology edit, selection, focus or press in that window drops
+  the wait first, so a paste never lands behind later input. A key that
+  pastes (the paste chord, or a Paste or Paste Selection keybind) joins the
+  wait instead of asking the clipboard again. Once nobody waits for a
+  paste, the worker asks its owner for no further format.
+
+  A program's read (OSC 52) and paste previews keep the two-second bound. A
+  preview reads the file list and the text under one deadline and stops
+  after the first timeout, and Shift+right-click reads the clipboard once
+  for both of its rows. Stores are not queued past their caller: an OSC 52
+  store, or Kettle's own copy, waits at most two seconds for the worker,
+  and a store still queued when its deadline passes is dropped, never
+  applied later over newer clipboard contents. While a read holds the
+  worker, whether a late paste or one the user stopped waiting for, a store
+  is therefore served after it only if that read ends within the store's
+  two seconds; otherwise it is dropped and logged. Order holds either way: a
+  store is never applied ahead of a read made before it. Windows keeps the
+  two-second bound for every read. On macOS and Windows the clipboard is
+  unavailable for the session if its worker has not started within two
+  seconds of launch; it is not retried.
 
 A PNG from another program is untrusted. The window thread reads only the size
 its header declares, for `reserve_png_from`, which refuses a side over 16,384
