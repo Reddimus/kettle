@@ -359,7 +359,7 @@ impl App {
 
     /// Tell the user a paste brought nothing, and why. The reason is a fixed
     /// message: nothing from the clipboard is logged or shown.
-    fn notify_paste_refused(&self, reason: kettle_i18n::Text) {
+    pub(super) fn notify_paste_refused(&self, reason: kettle_i18n::Text) {
         log::warn!(
             "terminal input rejected: {}",
             kettle_i18n::Translator::default().text(reason)

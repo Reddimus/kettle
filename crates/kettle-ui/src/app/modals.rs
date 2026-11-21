@@ -1442,14 +1442,14 @@ impl App {
 
     /// Clipboard text for a modal field. The shared editor bounds and normalizes it.
     pub(super) fn modal_clipboard_text(&mut self) -> Option<String> {
-        let clipboard = self.clipboard.as_mut()?;
-        match clipboard.get_text() {
-            Ok(text) => (!text.is_empty()).then_some(text),
-            Err(error) => {
-                log::warn!("modal paste: clipboard read failed: {error}");
-                None
-            }
+        let pasted = self.clipboard.as_mut()?.get_text();
+        if let Err(error) = &pasted {
+            log::warn!("modal paste: clipboard read failed: {error}");
         }
+        field_paste(pasted).unwrap_or_else(|reason| {
+            self.notify_paste_refused(reason);
+            None
+        })
     }
 
     /// Command-palette key handling: fuzzy-filter as you type, `Tab`/`↑↓`
@@ -4422,5 +4422,22 @@ pub(super) fn toggle_vi_visual(
             *selection = Some(started);
             true
         }
+    }
+}
+
+/// What a modal field takes from the clipboard's text: the text, nothing, or
+/// why nothing came, which the user is told. Text larger than the largest
+/// paste is refused unread, and a clipboard that did not answer in time
+/// gave none; an empty or textless clipboard pastes nothing quietly.
+pub(super) fn field_paste(
+    pasted: Result<String, arboard::Error>,
+) -> Result<Option<String>, kettle_i18n::Text> {
+    match pasted {
+        Ok(text) => Ok((!text.is_empty()).then_some(text)),
+        Err(arboard::Error::LimitExceeded) => {
+            Err(kettle_i18n::Text::NotifyBodyClipboardLimitExceeded)
+        }
+        Err(arboard::Error::Timeout) => Err(kettle_i18n::Text::NotifyBodyClipboardTimeout),
+        Err(_) => Ok(None),
     }
 }

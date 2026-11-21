@@ -1418,20 +1418,12 @@ impl App {
         let Some(clipboard) = self.clipboard.as_mut() else {
             return;
         };
-        match clipboard.get_text() {
-            Ok(paste) => {
-                let outcome = ws
-                    .search
-                    .editor
-                    .insert(&paste, kettle_core::MAX_SEARCH_QUERY_BYTES);
-                if outcome.changed {
-                    ws.search.note_edit(std::time::Instant::now());
-                }
-                if outcome.truncated {
-                    ws.search.status = kettle_render::SearchStatus::TooLong;
-                }
-            }
-            Err(error) => log::warn!("search paste: clipboard read failed: {error}"),
+        let pasted = clipboard.get_text();
+        if let Err(error) = &pasted {
+            log::warn!("search paste: clipboard read failed: {error}");
+        }
+        if let Some(reason) = ws.search.paste(pasted, std::time::Instant::now()) {
+            self.notify_paste_refused(reason);
         }
     }
 
