@@ -993,17 +993,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   session bus on a unix socket, which is the default on Linux desktops; a
   session bus reached only over TCP is no longer used for them.
 
-- On Windows the clipboard is read on its own thread. A program that holds
-  the clipboard and is slow to hand over its text could freeze the window for
-  as long as it took; now each clipboard read, for a paste, a paste preview
-  or a program's OSC 52 request, gives up after two seconds, and an OSC 52
-  write never overtakes a read made before it. A program that never hands
-  over its text still keeps the clipboard from Kettle, and every clipboard
-  action gives up, until that program answers or exits. Clipboard text read
-  for the find bar, a text field or a paste preview is refused when it is
-  larger than the largest paste, 4 MiB. On Windows and macOS the system
-  copies the whole text into Kettle before Kettle can refuse it, so this
-  limits what Kettle keeps, not what it briefly holds.
+- On macOS and Windows the clipboard is read on its own thread. A program
+  that holds the clipboard and is slow to hand over its text could freeze the
+  window for as long as it took; now each clipboard read, for a paste, a
+  paste preview or a program's OSC 52 request, gives up after two seconds,
+  and an OSC 52 write never overtakes a read made before it. A program that
+  never hands over its text still keeps the clipboard from Kettle, and every
+  clipboard action gives up, until that program answers or exits. Clipboard
+  text larger than the largest paste, 4 MiB, is no longer put into the find
+  bar, a text field or a paste preview: the find bar says the query is too
+  long, and a text field pastes nothing and says why. On macOS and Windows
+  the system copies the whole text into Kettle before Kettle can refuse it,
+  so this limits what Kettle keeps, not what it briefly holds.
 
 - A PNG pasted from the Linux clipboard is read up to 64 MiB (the X11 route
   allowed 256 MiB) and decoded with limits set before any pixel memory is
