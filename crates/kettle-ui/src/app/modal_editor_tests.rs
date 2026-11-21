@@ -473,3 +473,87 @@ fn select_all_in_find_or_a_text_field_selects_the_field() {
         }
     }
 }
+
+/// Every modal text field, the Settings search field included, as the key
+/// path finds it open.
+fn every_field() -> Vec<(String, WindowState)> {
+    let mut fields: Vec<_> = FIELDS
+        .into_iter()
+        .map(|kind| (format!("{kind:?}"), field(kind)))
+        .collect();
+    let mut search = WindowState::new(0, Mux::new());
+    search.settings_nav = Some(crate::settings::SettingsNav {
+        search_focused: true,
+        query: TextEditor::from("tab"),
+        ..Default::default()
+    });
+    fields.push(("SettingsSearch".into(), search));
+    fields
+}
+
+/// The platform's paste chords as winit reports them: `Cmd+V` and
+/// `Shift+Cmd+V` on macOS, `Ctrl+V` and `Ctrl+Shift+V` elsewhere.
+fn paste_chords() -> [(Key, ModifiersState); 2] {
+    let shortcut = if cfg!(target_os = "macos") {
+        ModifiersState::SUPER
+    } else {
+        ModifiersState::CONTROL
+    };
+    [
+        (Key::Character("v".into()), shortcut),
+        (Key::Character("V".into()), shortcut | ModifiersState::SHIFT),
+    ]
+}
+
+/// The paste chord reaches every modal field through the shared editor
+/// (`modal_editor_key`), ahead of each field's own keys. A clipboard that
+/// timed out, or held text over the largest paste, must say so there and
+/// leave the field as it was; it used to give the field nothing and say
+/// nothing.
+#[test]
+fn the_paste_chord_in_every_modal_field_says_why_the_clipboard_gave_nothing() {
+    use kettle_i18n::Text;
+    type Answer = fn() -> Result<String, arboard::Error>;
+    let answers: [(Answer, Text); 2] = [
+        (
+            || Err(arboard::Error::Timeout),
+            Text::NotifyBodyClipboardTimeout,
+        ),
+        (
+            || Ok("x".repeat((4 << 20) + 1)),
+            Text::NotifyBodyClipboardLimitExceeded,
+        ),
+    ];
+    for (answer, reason) in answers {
+        let mut clipboard = crate::clipboard::Clipboard::answering(answer);
+        for (name, mut ws) in every_field() {
+            for (key, mods) in paste_chords() {
+                ws.mods = mods;
+                let before = modal_editor(&ws).unwrap().text().to_string();
+                let edit = modals::edit_modal_field(&mut ws, &key, Some(&mut clipboard));
+                assert!(edit.handled, "{name} {key:?}");
+                assert_eq!(edit.refused, Some(reason), "{name} {key:?}");
+                assert_eq!(modal_editor(&ws).unwrap().text(), before, "{name}");
+            }
+        }
+    }
+    // Text pastes at the caret, and an empty or textless clipboard pastes
+    // nothing and says nothing.
+    let mut clipboard = crate::clipboard::Clipboard::answering(|| Ok("pasted".into()));
+    let mut empty =
+        crate::clipboard::Clipboard::answering(|| Err(arboard::Error::ContentNotAvailable));
+    for (name, mut ws) in every_field() {
+        let (key, mods) = paste_chords()[0].clone();
+        ws.mods = mods;
+        let before = modal_editor(&ws).unwrap().text().to_string();
+        let edit = modals::edit_modal_field(&mut ws, &key, Some(&mut empty));
+        assert!(edit.handled && edit.refused.is_none(), "{name}");
+        assert_eq!(modal_editor(&ws).unwrap().text(), before, "{name}");
+        let edit = modals::edit_modal_field(&mut ws, &key, Some(&mut clipboard));
+        assert!(edit.handled && edit.refused.is_none(), "{name}");
+        assert!(
+            modal_editor(&ws).unwrap().text().contains("pasted"),
+            "{name}"
+        );
+    }
+}

@@ -97,6 +97,31 @@ pub(crate) struct Clipboard<F = arboard::Clipboard> {
     worker: Option<worker::TextWorker>,
 }
 
+#[cfg(test)]
+impl Clipboard {
+    /// A clipboard whose CLIPBOARD text is what `load` answers, asked on the
+    /// worker thread, for tests of the code that pastes.
+    pub(crate) fn answering(
+        load: impl FnMut() -> Result<String, arboard::Error> + Send + 'static,
+    ) -> Self {
+        struct Answering<L>(L);
+        impl<L: FnMut() -> Result<String, arboard::Error> + Send + 'static> worker::TextProvider
+            for Answering<L>
+        {
+            fn load(&mut self, _: bool, _: usize, _: Instant) -> Result<String, arboard::Error> {
+                (self.0)()
+            }
+            fn store(&mut self, _: bool, _: String, _: Instant) -> Result<(), arboard::Error> {
+                Ok(())
+            }
+        }
+        Self {
+            arboard: None,
+            worker: Some(worker::TextWorker::start(move || Ok(Answering(load))).unwrap()),
+        }
+    }
+}
+
 impl Clipboard {
     pub(crate) fn new() -> Option<Self> {
         match Self::open(arboard::Clipboard::new) {
