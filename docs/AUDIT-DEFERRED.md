@@ -428,13 +428,18 @@ campaign and startup outlier remain inconclusive. These entries stay open.
 
 ## Platform
 
-- **Native clipboard acquisition can exceed paste bounds.** The wait closed
-  on 2026-11-20 on both platforms: macOS and Windows ask the clipboard on a
-  worker thread the window stops waiting for after two seconds
-  (`crates/kettle-ui/src/clipboard.rs`). Native tests hold a read against a
-  real late owner and queue an OSC 52 store behind it: on macOS an `osascript`
+- **Native clipboard acquisition can exceed paste bounds.** Partly closed on
+  2026-11-20 by #926, which bounds the window's wait and nothing else: macOS
+  and Windows now ask the clipboard on a worker thread that the window stops
+  waiting for after two seconds (`crates/kettle-ui/src/clipboard.rs`). On
+  macOS the answer to a paste the user asked for is still taken for a minute
+  after that, without holding the window, since the system may be waiting
+  for the user to allow the paste. Native tests hold reads against a real
+  late owner and queue an OSC 52 store behind them: on macOS an `osascript`
   process that promises text lazily on a private named pasteboard, on Windows
-  CI a delayed-rendering owner. Three parts stay open.
+  CI a delayed-rendering owner. The entry's closing criteria, a bounded
+  footprint and a native oversized-string test, are not met. Deferred on
+  2026-11-20, these parts stay open.
 
   Memory on macOS: AppKit fetches a whole flavor before any size check
   (`vendor/arboard-3.6.1/src/platform/osx.rs`). Measured on 2026-11-20 on
@@ -471,19 +476,25 @@ campaign and startup outlier remain inconclusive. These entries stay open.
   window stays responsive, but every clipboard request returns `Timeout`
   until that owner answers or exits. On macOS a lazy owner that slept 40
   seconds held the reader for all 40; Kettle holds no lock there, so other
-  programs can still use the pasteboard. On Windows the stalled thread keeps the clipboard
-  open, so other programs cannot open it either, and a second worker would
-  not help. A store that times out at its caller after the worker has taken
-  it may still be applied.
+  programs can still use the pasteboard. On Windows the stalled thread keeps
+  the clipboard open, so other programs cannot open it either, and a second
+  worker would not help. A store that times out at its caller after the
+  worker has taken it may still be applied.
 
-  Not checked live: the read now runs on the worker thread while the window
-  thread waits for it. Whether the macOS paste-permission alert treats a
-  Command-V read made on that thread as one the user asked for was not
-  observed, because that needs the general pasteboard. If macOS asks, an
-  answer given after two seconds pastes nothing. Check on a Mac where Kettle's
-  paste permission (Privacy & Security) is set to ask: copy text in another
-  app, press Command-V in Kettle, and note whether an alert appears and
-  whether a slow answer pastes.
+  Not checked live: the macOS paste-permission alert. macOS 15.4 added
+  `NSPasteboard.accessBehavior` and an opt-in preview of an alert for
+  programmatic reads of the general pasteboard; the macOS 27.2 release notes
+  remove the preview's `EnablePasteboardPrivacyDeveloperPreview` default, and
+  no source found on 2026-11-20 shows a release that raises the alert by
+  default. Whether macOS would treat a Command-V read made on the worker
+  thread as one the user asked for was not observed, because that needs the
+  general pasteboard. If it asks, the window stops waiting after two
+  seconds, the notification says the paste is coming, and an answer given
+  within the minute after that pastes. A later answer, or a key press or
+  click in the window before the answer, pastes nothing. Check on a Mac
+  where Kettle's paste permission (Privacy & Security) is set to ask: copy
+  text in another app, press Command-V in Kettle, and note whether an alert
+  appears and whether an answer given after five seconds pastes.
 
   Deferred because bounding memory on either platform needs the read made in
   a helper process with a memory cap (a footprint limit on macOS, a job
