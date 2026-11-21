@@ -26,10 +26,11 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   the three audit ignores and `scripts/check-dbus-scope.py`.
 
 - **Upstream `lru` advisory.** `Cargo.lock` still pins `lru 0.16.4` through
-  `glyphon 0.12.0`; `deny.toml` ignores RUSTSEC-2026-0253. Deferred because the
-  reviewed glyphon path does not call the affected `pop()` method, and a fork
-  adds supply-chain surface. Close #207 when upstream accepts `lru >=0.18.2`;
-  remove the audit ignores and `scripts/check-lru-scope.py` together.
+  `glyphon 0.12.0`; the `cargo audit` runs in `audit.yml` and `just audit`
+  ignore RUSTSEC-2026-0253. Deferred because the reviewed glyphon path does
+  not call the affected `pop()` method, and a fork adds supply-chain surface.
+  Close #207 when upstream accepts `lru >=0.18.2`; remove the audit ignores
+  and `scripts/check-lru-scope.py` together.
   Checked 2026-11-20: glyphon 0.12.0 is still the newest release, its `main`
   still requires `lru 0.16.2`, and the change that would move it
   (grovesNL/glyphon pull request 182, "Update `lru` to `0.18.2`", opened

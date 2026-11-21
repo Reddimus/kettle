@@ -2,10 +2,12 @@
 # doesn't (license violations, git-based deps, banned crates) — the
 # two tools complement each other.
 #
-# Local run:
+# Local run, for the product and vendor-validation lock graphs (`just deny`
+# runs both):
 #
 #   cargo install cargo-deny
-#   cargo deny check
+#   cargo deny check licenses sources bans
+#   cargo deny --manifest-path vendor/Cargo.toml check licenses sources bans
 #
 # CI runs the same on every Cargo.lock change via
 # `.github/workflows/deny.yml`.
@@ -27,22 +29,11 @@ no-default-features = false
 [output]
 feature-depth = 1
 
-# Advisories are handled by the dedicated `audit.yml` workflow
-# (`rustsec/audit-check` on every Cargo.lock change + daily cron).
-# Listing the section here with permissive defaults keeps
-# `cargo deny check` happy without double-running the advisory scan.
-[advisories]
-db-path = "~/.cargo/advisory-db"
-db-urls = ["https://github.com/rustsec/advisory-db"]
-yanked = "warn"
-ignore = [
-  # RUSTSEC-2026-0253 is an unsoundness warning in `lru 0.16.4`'s
-  # `LruCache::pop()`. The only product consumer is glyphon 0.12.0, whose
-  # Copy key cannot panic on drop and which never calls that method. The
-  # version and inverse path are pinned by scripts/check-lru-scope.py; remove
-  # this exception when glyphon accepts lru >=0.18.2, then close #207.
-  "RUSTSEC-2026-0253",
-]
+# There is no `[advisories]` section: CI and `just deny` run only the license,
+# source and ban checks. RustSec advisories are scanned by `cargo audit` in
+# `.github/workflows/audit.yml` and `just audit`, which hold the reviewed
+# advisory ignores. A bare `cargo deny check` also runs cargo-deny's own
+# advisory check, which has none of those ignores.
 
 [licenses]
 # SPDX expressions every workspace dep is allowed to carry. The
