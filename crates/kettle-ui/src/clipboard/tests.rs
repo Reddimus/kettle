@@ -1814,3 +1814,79 @@ fn a_late_read_dropped_while_queued_is_never_asked_for() {
     );
     assert_eq!(asked.load(Ordering::SeqCst), 2);
 }
+
+/// A preview reads the file list and the text under one paste's deadline,
+/// and a read that timed out leaves the rest unasked: a slow owner holds a
+/// preview for `READ_WITHIN` once, not once per read.
+#[test]
+fn a_preview_reads_the_clipboard_under_one_deadline() {
+    for stalls in ["files", "text"] {
+        let Late {
+            mut clipboard,
+            entered,
+            release,
+            asked,
+        } = late_owner("copied", stalls);
+        let started = Instant::now();
+        let peek = clipboard.peek(true);
+        let waited = started.elapsed();
+        entered.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(peek, ClipboardPeek::default(), "{stalls}");
+        assert!(
+            waited < READ_WITHIN + Duration::from_secs(1),
+            "a preview stalled on {stalls} held its caller for {waited:?}"
+        );
+        release.send(()).unwrap();
+        wait_until_taken(clipboard.worker.as_ref().unwrap());
+        let log = asked.lock().unwrap().clone();
+        assert_eq!(log[0], "files", "{stalls}: {log:?}");
+        if stalls == "files" {
+            assert!(
+                !log.contains(&"text"),
+                "the text was asked for after the list timed out"
+            );
+        }
+    }
+    // With an owner that answers, the text comes with the list, or alone.
+    let Late { mut clipboard, .. } = late_owner("copied", "image");
+    assert_eq!(
+        clipboard.peek(true),
+        ClipboardPeek {
+            files: Vec::new(),
+            text: Some("copied".into()),
+        }
+    );
+}
+
+/// Once the user stops waiting for a paste whose read the worker has taken,
+/// the paste asks the owner for no further format.
+#[test]
+fn a_paste_nobody_waits_for_asks_for_no_further_format() {
+    let Late {
+        clipboard,
+        entered,
+        release,
+        asked,
+    } = late_owner("copied", "files");
+    let worker = clipboard.worker.clone().unwrap();
+    let now = Instant::now();
+    let UserRead::Later(answer) = worker.paste_later(
+        ALL,
+        100,
+        now + Duration::from_millis(20),
+        now + Duration::from_secs(10),
+    ) else {
+        panic!("the stalled paste answered");
+    };
+    entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    drop(answer);
+    release.send(()).unwrap();
+    // The next read is served after the abandoned paste has finished.
+    assert_eq!(
+        worker
+            .load(false, 100, Instant::now() + Duration::from_secs(5))
+            .unwrap(),
+        "copied"
+    );
+    assert_eq!(*asked.lock().unwrap(), ["files", "text"]);
+}

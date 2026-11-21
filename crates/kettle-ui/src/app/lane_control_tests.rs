@@ -2084,7 +2084,7 @@ fn copied_diagrams_are_wired() {
         "action: kettle_config::Action::RenderSelectionAsDiagram,",
         "let reads = !self.ctl_driving;",
         "if reads && in_focused_pane && let Some(pane) = selection_pane && offers_diagram(&self.selected_diagram(ws, pane))",
-        "if reads && in_focused_pane && offer_copied && let Some(pane) = ws.mux.active_focus() { let file = self.copied_preview(ws, pane).is_some(); let diagram = offers_diagram(&self.copied_diagram());",
+        "if reads && in_focused_pane && offer_copied && let Some(pane) = ws.mux.active_focus() { let peek = self.clipboard_peek(true); let file = self.copied_preview_from(&peek, ws, pane).is_some(); let diagram = offers_diagram(&kettle_core::diagram_sources( peek.text.as_deref().unwrap_or_default(), None, ));",
     ] {
         assert!(flat.contains(needle), "{needle}");
     }

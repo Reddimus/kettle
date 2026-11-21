@@ -27,6 +27,18 @@ pub(super) trait TextProvider: Send + 'static {
     fn paste(&mut self, _want: PasteWant, text_max: usize, deadline: Instant) -> PasteContent {
         PasteContent::Text(self.load(false, text_max, deadline))
     }
+    /// [`Self::paste`] while `wanted` says whether anyone still waits for
+    /// it. A provider asked one format at a time stops between formats once
+    /// nobody does.
+    fn paste_while(
+        &mut self,
+        want: PasteWant,
+        text_max: usize,
+        deadline: Instant,
+        _wanted: &dyn Fn() -> bool,
+    ) -> PasteContent {
+        self.paste(want, text_max, deadline)
+    }
     /// The local files CLIPBOARD names.
     fn files(&mut self, _deadline: Instant) -> Option<Vec<PathBuf>> {
         None
@@ -102,7 +114,10 @@ impl TextWorker {
                                 .store(primary, text, deadline)
                                 .map(|()| Reply::Stored),
                             Operation::Paste { want, text_max } => {
-                                Ok(Reply::Paste(provider.paste(want, text_max, deadline)))
+                                let wanted = || request.wanted.strong_count() > 0;
+                                Ok(Reply::Paste(
+                                    provider.paste_while(want, text_max, deadline, &wanted),
+                                ))
                             }
                             Operation::Files => Ok(Reply::Files(provider.files(deadline))),
                         }

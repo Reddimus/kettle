@@ -3940,3 +3940,18 @@ fn user_pastes_can_wait_for_the_clipboard_and_input_drops_the_wait() {
         "every window's turn looks for a waiting paste's answer"
     );
 }
+
+/// Shift+right-click reads the clipboard once, under one paste's deadline,
+/// for both of its rows: the copied file and the copied diagram.
+#[test]
+fn the_copied_rows_of_a_context_menu_read_the_clipboard_once() {
+    let src = production_source();
+    let rows = src
+        .split("// Shift+right-click also offers the file the clipboard names")
+        .nth(1)
+        .and_then(|rest| rest.split("ContextMenuItem::Separator").next())
+        .expect("the copied rows");
+    assert!(rows.contains("let peek = self.clipboard_peek(true);"));
+    assert!(rows.contains("self.copied_preview_from(&peek, ws, pane)"));
+    assert!(!rows.contains("self.copied_diagram()") && !rows.contains("self.copied_preview(ws"));
+}
