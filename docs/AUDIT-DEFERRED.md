@@ -491,8 +491,9 @@ campaign and startup outlier remain inconclusive. These entries stay open.
   thread as one the user asked for was not observed, because that needs the
   general pasteboard. If it asks, the window stops waiting after two
   seconds, the notification says the paste is coming, and an answer given
-  within the minute after that pastes. A later answer, or a key press or
-  click in the window before the answer, pastes nothing. Check on a Mac
+  within the minute after that pastes. A later answer, a click or a key
+  press other than paste in the window before the answer, or a change of
+  the pane, field or broadcast it was for, pastes nothing. Check on a Mac
   where Kettle's paste permission (Privacy & Security) is set to ask: copy
   text in another app, press Command-V in Kettle, and note whether an alert
   appears and whether an answer given after five seconds pastes.

@@ -938,16 +938,26 @@ after it. Portable tests cover the same late answers with injected owners
 (`a_users_read_takes_an_answer_that_comes_after_the_window_stopped_waiting`,
 `a_clipboard_that_takes_late_answers_leaves_a_slow_paste_to_come_later`), and
 `a_late_read_dropped_while_queued_is_never_asked_for` shows a paste the user
-stopped waiting for is not asked of the owner. In `app`,
+stopped waiting for is not asked of the owner, and
+`a_paste_nobody_waits_for_asks_for_no_further_format` that one already taken
+stops between formats. `a_preview_reads_the_clipboard_under_one_deadline`
+holds a preview to one deadline across its file-list and text reads. In `app`,
 `the_paste_chord_in_every_modal_field_says_why_the_clipboard_gave_nothing`
 drives `Cmd+V`, `Ctrl+V` and their Shift forms through the shared editor of
 every modal field against a clipboard that times out or holds too much text;
 `a_late_clipboard_answer_reaches_the_modal_field_that_asked_for_it` and
 `a_late_terminal_paste_goes_only_where_the_keyboard_still_is` check where a
-late answer goes, `typing_drops_a_paste_still_waiting_for_the_clipboard`
-which keys stop the wait, and
-`user_pastes_can_wait_for_the_clipboard_and_input_drops_the_wait` that every
-paste entry point and input handler is wired to them. On Windows CI,
+late answer goes; on Unix
+`a_late_broadcast_paste_goes_only_to_the_panes_it_was_asked_for` switches the
+active tab under a Tab broadcast and widens the scope, and the answer goes
+nowhere. `typing_drops_a_paste_still_waiting_for_the_clipboard` and
+`assistive_edits_and_focus_drop_a_paste_still_waiting_for_the_clipboard` say
+which keys and assistive-technology requests stop the wait (a key that pastes
+joins it), `user_pastes_can_wait_for_the_clipboard_and_input_drops_the_wait`
+that every paste entry point and input handler, the control plane's UI keys
+included, is wired to them, and
+`the_copied_rows_of_a_context_menu_read_the_clipboard_once` that
+Shift+right-click reads the clipboard once. On Windows CI,
 `a_stalled_windows_clipboard_owner_cannot_hold_the_ui_or_reorder_osc_52` runs
 the same check against a real delayed-rendering owner, a message-only window
 in the test process. It replaces the desktop clipboard, so elsewhere it runs

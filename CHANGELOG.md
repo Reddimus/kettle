@@ -993,16 +993,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   session bus on a unix socket, which is the default on Linux desktops; a
   session bus reached only over TCP is no longer used for them.
 
-- On macOS and Windows the clipboard is read on its own thread. A program
-  that holds the clipboard and is slow to hand over its text could freeze the
-  window for as long as it took; now the window waits at most two seconds
-  for a clipboard read. A paste preview or a program's OSC 52 request then
-  gives up, and an OSC 52 write never overtakes a read made before it. On
-  Windows a paste gives up too. On macOS a paste you asked for still arrives
-  if the clipboard answers within a minute, for example once you allow the
-  paste when macOS asks; a notification says Kettle is waiting, and typing or
-  clicking in the window stops the wait. A program that never hands over its
-  text still keeps the clipboard from Kettle, and every clipboard action
+- On macOS and Windows the clipboard is read on its own thread. A program that
+  holds the clipboard and is slow to hand over its text could freeze the
+  window for as long as it took; now the window waits at most two seconds for
+  a clipboard read. A paste preview or a program's OSC 52 request then gives
+  up, and an OSC 52 write never overtakes a read made before it. On Windows a
+  paste gives up too. On macOS a paste you asked for still arrives if the
+  clipboard answers within a minute, for example once you allow the paste when
+  macOS asks. A notification says Kettle is waiting; typing or clicking in the
+  window stops the wait, and pressing paste again keeps it. The paste lands
+  only where it was asked for: if that pane, field or broadcast changed
+  meanwhile, nothing is pasted and a notification says so. A clipboard preview
+  waits two seconds in all, not two seconds per read. An OSC 52 write, or a
+  copy in Kettle, made while a slow read holds the clipboard waits two seconds
+  and is then dropped, never applied later. A program that never hands over
+  its text still keeps the clipboard from Kettle, and every clipboard action
   gives up, until that program answers or exits. Clipboard text larger than
   the largest paste, 4 MiB, is no longer put into the find bar, a text field
   or a paste preview: the find bar says the query is too long, and a text
