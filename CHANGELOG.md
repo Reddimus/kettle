@@ -170,9 +170,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   opens Settings, as Cmd+, does; its tooltip names whichever key opens
   Settings, and screen readers call it Settings (Configuración in Spanish).
   The gear sits apart from `+ ▾`, which do not move, and it hides only when
-  the window is too narrow to keep a tab beside it. A lone tab stays centred
-  on the window and is sized to its title (160 to 240 points), narrowing in a
-  narrow window. On macOS the `▾` menu lists shells, New Window with Profile,
+  the window is too narrow to keep a tab and room to drag the window beside
+  it. On macOS the `▾` menu lists shells, New Window with Profile,
   layouts and SSH, leaving Settings, the command palette and About to the
   gear and the menu bar. Screen readers name each control as its tooltip
   does and meet them in screen order. Windows and Linux keep Settings in
@@ -889,21 +888,34 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   readable cell colours and explicit highlight foregrounds.
 - Horizontal tab strips draw larger + and ▾ controls and use at least 4.5:1
   contrast for control glyphs, shortcut hints and inactive titles. A single tab hides
-  its shortcut hint and close button until hovered, including in the macOS
-  titlebar; both controls return with multiple tabs.
+  its shortcut hint and close button until hovered (in a title bar it shows
+  only the close button); both controls return with multiple tabs.
 - Joined emoji, skin tones, flags and VS16 emoji now share grapheme cells by
   default. Set `grapheme-clustering = false` in config or turn off Grapheme
   clustering in Settings > Text / Rendering for the previous scalar layout
   in new terminals. Applications can still toggle mode 2027; terminal resets
   restore each terminal's configured startup default.
-- On macOS, top tabs share the titlebar by default, with a centred title for a
-  single tab, native window dragging, and the system double-click action on
-  empty strip space. `macos-titlebar-style = native` restores the separate
-  caption; bottom, side and hidden tabs and borderless windows keep their
-  previous chrome. Tab controls have at least 20 pt hit targets and 4.5:1
-  glyph contrast.
+- On macOS, top tabs share the titlebar by default, with native window
+  dragging and the system double-click action on empty strip space and on a
+  single tab, which stands for the window title.
+  `macos-titlebar-style = native` restores the separate caption; bottom,
+  side and hidden tabs and borderless windows keep their previous chrome.
+  Tab controls have at least 20 pt hit targets and 4.5:1 glyph contrast.
 - The tab strip appears only with more than one tab by default. Set
   `tab-bar = always` to keep it in a single-tab window.
+- Tabs in the macOS title bar and in Kettle's GNOME header now split the bar
+  evenly, as the tab strip did in 5.9, instead of keeping a fixed width with a
+  single macOS tab in the middle. A single tab starts just past the window
+  buttons and fills the bar like any tab (the GNOME header still shows it as
+  the window title). An empty lane is always left before the buttons at the
+  end of the bar, so there is somewhere to drag the window or double-click.
+  Tabs never get narrower than `tab-min-width`; when more tabs are open than
+  fit, the bar scrolls with its `‹ ›` buttons, the mouse wheel or a sideways
+  swipe without switching tabs, and it scrolls back to the current tab when
+  you open, choose or close a tab, resize the window or move it to a display
+  with another scale. After you close a tab with the pointer, the other tabs
+  keep their size and place until the pointer leaves the bar, so you can
+  close several in a row without chasing the close buttons.
 - Search shows the current match and total (3/122) next to the query, has a
   Regex toggle beside Case (Case cycles on click), and draws other matches
   with stronger contrast.
@@ -990,6 +1002,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   entries against the shared removal budget as they are listed.
 
 ### Fixed
+
+- `tab-min-width` is measured in logical pixels, as documented. On a display
+  with a scale above 100% tabs could shrink to a fraction of the width set
+  (half on a Retina display) before the tab bar started to scroll.
 
 - On Linux a flag such as 🇯🇵 drew as two boxed letters, and some emoji such
   as ✅ drew in black and white, in tab titles, the GNOME header title and

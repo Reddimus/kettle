@@ -2025,10 +2025,31 @@ retains traffic lights, shadow and rounded window mask. The top strip owns the
 titlebar pixels, painting the same opaque chrome behind the controls and tabs.
 `app::titlebar` queries AppKit's titlebar height and traffic-light frames, with
 28 pt and 78 pt fallbacks, scaled to physical pixels. Fullscreen retains the
-top band without the traffic-light inset. One tab remains visible and centred
-as the title. Empty strip space starts a native window drag; a double-click
-uses `AppleActionOnDoubleClick`, defaulting to zoom. Tabs retain their separate
-reorder/tear-off/re-dock gestures.
+top band without the traffic-light inset. One tab remains visible and stands
+for the title: its body is not a title-bar control, so AppKit drags the
+window from it, and a second press within the double-click interval runs
+`AppleActionOnDoubleClick` there too. Empty strip space starts a native window
+drag; a double-click uses `AppleActionOnDoubleClick`, defaulting to zoom. Tabs
+retain their separate reorder/tear-off/re-dock gestures.
+
+`app::chrome::titlebar_tab_layout` lays out the macOS title bar and Kettle's
+GNOME header alike. Tabs split the lane left between the controls and a 48 pt
+drag lane (`TITLEBAR_DRAG_LANE`) evenly from its start, a lone tab included
+(the GNOME header still draws its lone tab as a window-centred title). Below
+`tab-min-width`, scaled by the display scale like every other strip measure,
+the strip overflows: whole tabs at the minimum between `‹` at its start and
+`›` right after them, then the drag lane. A narrowing window loses the Settings
+gear first, then narrows the drag lane to 16 pt, then the tab. The window's
+`TitlebarStrip` (a `Cell` on `WindowState`, so every `tab_bar` reads and
+updates one strip) keeps the first tab shown: the arrows, the wheel and
+horizontal swipes scroll it without touching the selection, and a change of
+active tab, tab count, slots or strip width, or `reveal_active_tab` from
+Go to Tab, scrolls just far enough to show the active tab. A close with the
+pointer records a `HeldTabs` from the strip as laid out for the press; while
+the pointer stays in the band, layouts keep that width and first tab so the
+next close button lands under the pointer. Any other tab count or strip
+width, a new tab, any other close, a resize, a scale change, scrolling or
+the pointer leaving ends the hold. Plain strips keep `tab_strip_layout`.
 
 Solid tab/status chrome derives from `theme.background` (24% darker for dark
 backgrounds, 6% for light ones); wallpaper modes still resolve through
@@ -2055,15 +2076,8 @@ unclipped; click targets do not change.
 `app::chrome::horizontal_new_tab_controls` keeps the plain strip's geometry.
 The macOS titlebar instead joins `+` and a 28 pt dropdown with an internal
 divider, shared hover fill and an 8 pt gap before the separate Settings gear.
-It keeps the old reservation for tabs, so multi-tab positions are unchanged.
-The lone tab measures the formatted literal title or directory leaf, rounds
-up to two cells, then clamps to 160-240 pt (respecting `tab-min-width`). Its
-centred title lane reserves equal space on either side for activity and close
-controls, including while the close hit target is hidden. Width is held while
-the pointer is in the strip or a tab drag is live, and released on leave,
-resize or DPI change. Narrow windows retain the centred narrowing and minimum
-width fallback. A tear-off uses that destination's content width and clamps
-its grab offset inside the tab.
+A tear-off measures its grip into the destination window's lone tab, which
+starts the strip, and clamps the grab offset inside that tab.
 The menu owns its origin through shell-discovery replacement and submenu
 navigation. Only the macOS new-tab menu omits Settings through About; its
 origin also supplies the accessible name and expanded/pressed state, and

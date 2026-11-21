@@ -222,7 +222,7 @@ history-scan bounds, and TUI behavior.
 |---|---|---|
 | Tab bar | `tab-bar` | Hidden · Automatic (multiple tabs) · Always |
 | Tab bar position | `tab-bar-position` | Top · Bottom (Left/Right vertical bars are config-only for now) |
-| Minimum tab width | `tab-min-width` | 40–600 px — tabs fill the bar evenly; below this the bar overflows and scrolls |
+| Minimum tab width | `tab-min-width` | 40–600 logical px — tabs fill the bar evenly; below this the bar overflows and scrolls |
 | Scrollable tab bar | `scroll-tabbar` | On / Off — `‹ ›` arrows + wheel scroll when tabs overflow |
 | Close button on tabs | `close-button-on-tab` | On / Off |
 | Detachable tabs | `detachable-tabs` | On / Off — drag a tab out into its own window |

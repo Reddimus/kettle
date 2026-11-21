@@ -3867,12 +3867,25 @@ self-test gives the exact boolean fields; first-map focus alone fails it. This
 validates the recorded assertions, not the provenance of captures or a real
 compositor. Keep raw captures private and record matched conditions separately.
 
-Compact macOS header regressions cover content sizing, stable centred title
-lanes, pointer width holds, destination tear-off grips, joined control hit
-boundaries and quads, menu origin through shell detection and submenus, and
-localized accessibility names, shortcuts, popup state and screen order.
-GNOME and plain-strip geometry and CPU quad guards retain their prior output;
-`tests/ui-states/linux` baselines do not change. Run the native-titlebar Python
+Compact macOS header regressions cover destination tear-off grips, joined
+control hit boundaries and quads, menu origin through shell detection and
+submenus, and localized accessibility names, shortcuts, popup state and screen
+order. Plain-strip geometry and CPU quad guards retain their prior output.
+
+`app/titlebar_tabs_tests.rs` covers title-bar tab strips on macOS (windowed
+and fullscreen) and in the GNOME header at 1x, 1.5x and 2x: the even split
+before the drag lane, a lone macOS tab filling the lane from its start and
+standing for the window title, the drag lane kept in every width, count and
+scroll state, the scaled minimum with `‹ ›` and `scroll-tabbar = false`, the
+narrowing order (gear, drag lane, tab), the active tab revealed on a new tab,
+Go to Tab, next/previous, a close, a resize and a scale change while the
+wheel and arrows scroll freely, the hold after a close with the pointer and
+what ends it, and hit tests, reorder targets, dock insertion, the insert
+marker and the accessibility tree following the painted tabs. Run
+`cargo test -p kettle-ui titlebar_tabs_tests`. The native-titlebar checker
+asserts the same rules on the live `ui_geometry` (lone tab at the strip's
+start, even split, drag lane) and `scripts/test-native-titlebar.py` pins them
+with fixtures. Run the native-titlebar Python
 self-test for the joined-control fixtures. GPU, live fullscreen reveal,
 window dragging, double-click preferences and VoiceOver require their native
 runner; CPU tests alone do not verify those interactions.
