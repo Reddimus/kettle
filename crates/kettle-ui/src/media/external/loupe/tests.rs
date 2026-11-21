@@ -1,6 +1,7 @@
 use super::*;
 use crate::test_bus::Bus;
 use std::sync::{Arc, Mutex};
+use zbus::connection::Builder;
 use zbus::zvariant::OwnedValue;
 
 #[derive(Default)]

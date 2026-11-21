@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
-use zbus::{Connection, MatchRule, Message, MessageStream, connection::Builder};
+use zbus::{Connection, MatchRule, Message, MessageStream};
 
 const DEST: &str = "org.freedesktop.portal.Desktop";
 const ROOT: &str = "/org/freedesktop/portal/desktop";
@@ -76,11 +76,14 @@ impl Watch {
                 future::block_on(worker.run(
                     || ownership(&root),
                     || async {
-                        Builder::session()?
-                            .max_queued(16)
-                            .method_timeout(TIMEOUT)
-                            .build()
-                            .await
+                        crate::dbus_bound::connect(
+                            None,
+                            crate::dbus_bound::Options {
+                                max_queued: Some(16),
+                                method_timeout: Some(TIMEOUT),
+                            },
+                        )
+                        .await
                     },
                 ));
             })
