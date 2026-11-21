@@ -1048,22 +1048,22 @@ fn wayland_tearoff_grip_uses_painted_single_tab_destination() {
     use kettle_config::{Config, TabBarPos};
     let buttons = crate::window_buttons::ButtonLayout::default();
     for scale in [1.0, 1.5, 2.0] {
-        // A narrow window's lone tab starts past the header's leading `+`
-        // (7 + 34 + 6 points); a wide one stays centred as before.
+        // The lone tab starts past the header's leading `+` (7 + 34 + 6
+        // points) at every width and minimum.
         for (width, minimum, expected_x) in [
             (400.0, 80.0, 47.0),
-            (1000.0, 80.0, 179.64286),
-            (1000.0, 700.0, 92.5),
+            (1000.0, 80.0, 47.0),
+            (1000.0, 700.0, 47.0),
         ] {
             // Padding belongs to terminal content, never the titlebar grip.
             let cfg = Config {
                 padding_x: 31.0,
                 padding_y: 19.0,
-                tab_min_width: minimum * scale,
+                tab_min_width: minimum,
                 ..Config::default()
             };
             let band = (0.0, 0.0, width * scale, 46.0 * scale);
-            let destination = tear_off_destination_tab(&cfg, band, (true, true), scale, &buttons, None);
+            let destination = tear_off_destination_tab(&cfg, band, (true, true), scale, &buttons);
             assert!((destination.0 - expected_x * scale).abs() < 0.001);
             let grip = wayland_tab_anchor_x(TabBarPos::Top, destination, f64::from(32.0 * scale));
             assert!(
@@ -1085,9 +1085,9 @@ fn wayland_tearoff_grip_uses_painted_single_tab_destination() {
             (true, true),
             scale,
             &buttons,
-            None,
         );
-        assert!((destination.0 - 198.14286 * scale).abs() < 0.001);
+        // Past the close button's 41 points and the `+`'s 47.
+        assert!((destination.0 - 88.0 * scale).abs() < 0.001);
         assert!(
             (wayland_tab_anchor_x(TabBarPos::Top, destination, 21.0)
                 - f64::from(destination.0)
@@ -1131,7 +1131,7 @@ fn wayland_tearoff_ordinary_bar_grips_keep_their_offsets() {
                     22.0 * scale,
                 );
                 let destination =
-                    tear_off_destination_tab(&cfg, band, (false, false), scale, &buttons, None);
+                    tear_off_destination_tab(&cfg, band, (false, false), scale, &buttons);
                 assert_eq!(destination, band);
                 assert_eq!(wayland_tab_anchor_x(pos, destination, 31.0), 31.0);
                 let expected_y = if pos == TabBarPos::Top {

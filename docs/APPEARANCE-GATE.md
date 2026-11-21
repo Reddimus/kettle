@@ -3,9 +3,13 @@
 The unreleased default macOS chrome uses tabs in the titlebar. Historical native
 caption captures below cover `macos-titlebar-style = native`. Acceptance for the
 new default must check both styles: light/dark and custom chrome backgrounds,
-traffic-light clearance, a centred one-tab title with `tab-bar = auto`, resize,
-fullscreen, empty-space dragging and the system double-click preference,
-then tab reorder, tear-off and re-dock. No live acceptance for the new style is
+traffic-light clearance, a one-tab window whose tab starts the strip and fills
+it up to the 48 pt drag lane with `tab-bar = auto` (dragging and
+double-clicking that tab act on the window), several tabs splitting the strip
+evenly, an overflowing strip scrolling between `‹ ›` with the drag lane kept,
+the held widths after closing tabs with the pointer, resize, fullscreen,
+empty-space dragging and the system double-click preference, then tab reorder,
+tear-off and re-dock. No live acceptance for the new style is
 recorded here yet.
 
 

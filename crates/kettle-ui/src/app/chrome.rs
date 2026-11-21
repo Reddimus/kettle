@@ -12,22 +12,6 @@ pub(super) fn tab_bar_height(cell_height: f32, pos: TabBarPos) -> f32 {
 }
 
 impl App {
-    pub(super) fn lone_titlebar_width(
-        &self,
-        ws: &WindowState,
-        label: Option<&crate::mux::TabLabel>,
-        height: f32,
-        notice: &str,
-    ) -> f32 {
-        let scale = ws
-            .window
-            .as_ref()
-            .map_or(ws.startup_scale, |w| w.scale_factor() as f32);
-        let cell = self.overlay_text_cell_width(ws)
-            * kettle_render::tab_text_scale(height, self.overlay_text_line_height(ws));
-        measured_lone_titlebar_width(ws, label, &self.cfg, notice, (cell, height, scale))
-    }
-
     /// True when the cursor is over the status bar. Used
     /// by `cursor_in_chrome_band` so the OS arrow icon overrides
     /// the terminal I-beam over the status strip too.
@@ -250,6 +234,14 @@ impl App {
             .as_ref()
             .map_or(ws.startup_scale, |w| w.scale_factor() as f32);
         let active = ws.mux.active;
+        // A close with the pointer holds a title-bar strip while the pointer
+        // stays on it; a lone GNOME title is no tab and is never held.
+        let hold = !lone_title && rect_contains(band, ws.cursor.x as f32, ws.cursor.y as f32);
+        let mut strip_state = ws.titlebar_strip.get();
+        // Whoever lays the strip out when the pointer has left it (the
+        // window's hold on AppKit, a hit test, a paint) lets the hold go, so
+        // ask for the frame that shows the tabs split evenly again.
+        let held = strip_state.held.is_some();
         let HorizontalTabGeometry {
             arrow_rect,
             plus_rect,
@@ -257,24 +249,21 @@ impl App {
             settings_rect,
             lead,
             strip,
-            mut layout,
-        } = horizontal_tab_geometry(
+            layout,
+        } = horizontal_tab_geometry_in(
             tab_lane,
             scale,
             (ws.linux_titlebar, ws.macos_titlebar_tabs),
             (n, active),
             &self.cfg,
+            (&mut strip_state, hold),
         );
-        let compact_lone = ws.macos_titlebar_tabs && !ws.linux_titlebar && n == 1;
-        if compact_lone {
-            let width = self.lone_titlebar_width(ws, labels.first(), height, &recording_notice);
-            let held = hold_lone_tab_width(ws, band, width);
-            centre_lone_titlebar_tab(
-                &mut layout,
-                (strip, tab_lane.2 - strip, tab_lane.0),
-                held,
-                self.cfg.tab_min_width,
-            );
+        ws.titlebar_strip.set(strip_state);
+        if held
+            && strip_state.held.is_none()
+            && let Some(window) = &ws.window
+        {
+            window.request_redraw();
         }
         // Tab positions count from past the GNOME header's leading `+`.
         let x0 = x0 + lead;
@@ -321,7 +310,13 @@ impl App {
                 if i == active && !recording_notice.is_empty() {
                     full_label = format!("{recording_notice} {full_label}");
                 }
-                let hint = tab_goto_hint(&self.cfg.keybinds, i);
+                // A lone title-bar tab stands for the window's title: its
+                // go-to-tab key would go nowhere.
+                let hint = if ws.macos_titlebar_tabs && n == 1 {
+                    None
+                } else {
+                    tab_goto_hint(&self.cfg.keybinds, i)
+                };
                 let cell_w = self.overlay_text_cell_width(ws);
                 let cell_w = if ws.macos_titlebar_tabs {
                     cell_w
@@ -340,16 +335,8 @@ impl App {
                     hint.as_deref(),
                     cell_w,
                 );
-                if compact_lone {
-                    content = compact_lone_tab_content(
-                        rect,
-                        hovered,
-                        self.cfg.close_button_on_tab,
-                        kettle_render::activity_lane(activity, scale),
-                        scale,
-                    );
-                }
-                if ws.macos_titlebar_tabs && n == 1 {
+                // GNOME centres a header bar's title on the window.
+                if lone_title {
                     let window_width = band.0 + band.2;
                     content.title = centered_title_lane(content.title, window_width * 0.5);
                 }
@@ -375,11 +362,7 @@ impl App {
                     .is_some_and(|p| rect_contains(s.rect, p.x as f32, p.y as f32))
             })
             .map(|s| s.idx);
-        let arrow_width = if ws.linux_titlebar {
-            height.min(strip * 0.5)
-        } else {
-            height
-        };
+        let arrow_width = layout.arrow_width;
         let to_btn =
             |ox: Option<f32>| ox.map_or((0.0, 0.0, 0.0, 0.0), |x| (x0 + x, y, arrow_width, height));
         let tooltip = self.new_tab_tooltip(ws, &window_controls);
@@ -629,6 +612,46 @@ impl App {
         }
     }
 
+    /// A press on an overflow arrow, native or ctl. A title-bar strip
+    /// scrolls one tab and leaves the active tab as it is, as a browser's tab
+    /// strip does; any other strip follows its active tab, so the selection
+    /// moves one tab.
+    pub(super) fn press_tab_scroll_arrow(
+        &mut self,
+        ws: &mut WindowState,
+        bar: &TabBar,
+        forward: bool,
+    ) {
+        if bar.in_titlebar {
+            let mut strip = ws.titlebar_strip.get();
+            strip.scroll(if forward { 1 } else { -1 }, ws.mux.tabs.len());
+            ws.titlebar_strip.set(strip);
+            return;
+        }
+        let pre = self.focus_key(ws);
+        if forward {
+            ws.mux.next_tab();
+        } else {
+            ws.mux.prev_tab();
+        }
+        self.note_focus_change(ws, pre);
+    }
+
+    /// The wheel or a horizontal swipe over the strip, `step` tabs toward
+    /// its end (negative: toward its start). An overflowing title-bar strip
+    /// scrolls, staying put at either end; says whether it took the step,
+    /// leaving any other strip to move the selection.
+    pub(super) fn scroll_titlebar_strip(&self, ws: &WindowState, step: isize) -> bool {
+        // Laid out first, so the scroll starts from what is on screen.
+        if !wheel_scrolls_strip(&self.tab_bar(ws)) {
+            return false;
+        }
+        let mut strip = ws.titlebar_strip.get();
+        strip.scroll(step, ws.mux.tabs.len());
+        ws.titlebar_strip.set(strip);
+        true
+    }
+
     /// Compose the status-bar contents (HH:MM:SS · theme ·
     /// focused-pane title). Returns `StatusBar::hidden` when the
     /// config has it off. The renderer's draw is a no-op on a
@@ -833,6 +856,8 @@ pub(super) struct TabStripLayout {
     /// Left x of the `‹` / `›` scroll buttons when the bar overflows.
     pub(super) arrow_left: Option<f32>,
     pub(super) arrow_right: Option<f32>,
+    /// The width of each scroll button, as laid out; 0 without them.
+    pub(super) arrow_width: f32,
 }
 
 impl TabStripLayout {
@@ -843,6 +868,36 @@ impl TabStripLayout {
             xs: vec![None; n.max(1)],
             arrow_left: None,
             arrow_right: None,
+            arrow_width: 0.0,
+        }
+    }
+
+    /// Every tab `width` wide from the strip's start, none scrolled away.
+    fn even(n: usize, width: f32) -> Self {
+        Self {
+            width,
+            last_width: width,
+            xs: (0..n.max(1)).map(|i| Some(i as f32 * width)).collect(),
+            arrow_left: None,
+            arrow_right: None,
+            arrow_width: 0.0,
+        }
+    }
+
+    /// `slots` tabs `width` wide from `first`, between `‹` at the strip's
+    /// start and `›` right after them, each `arrow` wide.
+    fn scrolled(n: usize, (first, slots): (usize, usize), width: f32, arrow: f32) -> Self {
+        let n = n.max(1);
+        let xs = (0..n)
+            .map(|i| (i >= first && i < first + slots).then(|| arrow + (i - first) as f32 * width))
+            .collect();
+        Self {
+            width,
+            last_width: width,
+            xs,
+            arrow_left: Some(0.0),
+            arrow_right: Some(arrow + slots as f32 * width),
+            arrow_width: arrow,
         }
     }
 }
@@ -882,6 +937,7 @@ pub(super) fn tab_strip_layout(
             xs,
             arrow_left: None,
             arrow_right: None,
+            arrow_width: 0.0,
         };
     }
     let even = strip / n as f32;
@@ -898,6 +954,7 @@ pub(super) fn tab_strip_layout(
             xs,
             arrow_left: None,
             arrow_right: None,
+            arrow_width: 0.0,
         };
     }
     // Overflow: tabs at `min_w`, arrows reserve both ends, whole tabs only. A
@@ -928,6 +985,7 @@ pub(super) fn tab_strip_layout(
         xs,
         arrow_left: Some(0.0),
         arrow_right: Some(strip - arrow_w),
+        arrow_width: arrow_w,
     }
 }
 
@@ -942,6 +1000,25 @@ fn first_shown_tab(n: usize, active: usize, count: usize) -> usize {
     } else {
         (active + 1 - count).min(n.max(1) - count)
     }
+}
+
+/// Whether the wheel over `bar` scrolls it rather than moving the selection:
+/// a title-bar strip that overflows, so it shows its arrows.
+pub(super) fn wheel_scrolls_strip(bar: &TabBar) -> bool {
+    bar.in_titlebar && bar.scroll_left.2 > 0.0 && bar.scroll_left.3 > 0.0
+}
+
+/// After a close with the pointer on a title-bar strip, hold the remaining
+/// tabs' width and place while the pointer stays on the strip, as browsers
+/// do, so the next tab's close button comes to rest under it. `before` is
+/// the strip as laid out for the press; a plain strip is never held.
+pub(super) fn hold_tabs_after_pointer_close(ws: &WindowState, bar: &TabBar, before: TitlebarStrip) {
+    if !bar.in_titlebar {
+        return;
+    }
+    let mut strip = ws.titlebar_strip.get();
+    strip.held = before.held_after_close(ws.mux.tabs.len());
+    ws.titlebar_strip.set(strip);
 }
 
 /// Where a tab bar parks the tabs it does not show: far off-screen on its
@@ -1027,20 +1104,21 @@ pub(super) fn horizontal_new_tab_controls(
 
 /// The separate Settings gear before the joined pair. Its size follows `+`,
 /// and its 8 pt gap keeps it outside the split button. It shows while the lane
-/// still keeps `min_tab` for tabs beside every control; the tab count never
-/// decides, as extra tabs scroll. Returns the rect and the reservation it
-/// adds, both zero when hidden.
+/// still keeps `room` beside every control: the room the tabs need at the
+/// minimum (one between both scroll arrows once they overflow) and the whole
+/// drag lane, so it is the first to go in a narrowing window. Returns the
+/// rect and the reservation it adds, both zero when hidden.
 pub(super) fn titlebar_settings_control(
     plus: kettle_render::Rect4,
     lane_width: f32,
     reserve: f32,
     scale: f32,
-    min_tab: f32,
+    room: f32,
 ) -> (kettle_render::Rect4, f32) {
     let gap = 8.0 * scale;
     let side = plus.2;
     let extra = side + gap;
-    if side <= 0.0 || lane_width - reserve - extra < min_tab.max(1.0) {
+    if side <= 0.0 || lane_width - reserve - extra < room.max(1.0) {
         return ((0.0, 0.0, 0.0, 0.0), 0.0);
     }
     ((plus.0 - gap - side, plus.1, side, plus.3), extra)
@@ -1439,68 +1517,163 @@ fn new_tab_dropdown_visible() -> bool {
     true
 }
 
-/// Leave a native window-drag lane at the end of the titlebar. A lone tab is
-/// centred on the window, with its controls outside the symmetric title lane.
+/// The empty title-bar space, in points, kept between the last tab (or `›`)
+/// and the trailing controls so there is always somewhere to move the window
+/// from and to double-click. 48 points is half again a 28-32 point title bar:
+/// wider than any control beside it, so a press-and-drag or a double-click
+/// (which allows 4 points of travel) lands there without aiming, and still
+/// under 4% of a 1280-point window.
+pub(super) const TITLEBAR_DRAG_LANE: f32 = 48.0;
+
+/// The least the drag lane narrows to, in points, in a window too narrow for
+/// a minimum-width tab beside the full lane: a lone tab narrows below
+/// `tab-min-width` only once the lane is down to this.
+pub(super) const TITLEBAR_DRAG_LANE_FLOOR: f32 = 16.0;
+
+/// The room a title-bar strip lays its tabs out in, all in physical pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct TitlebarLane {
+    /// Between the leading and trailing controls: the tabs, the overflow
+    /// arrows and the drag lane share it.
+    pub(super) strip: f32,
+    /// Each overflow arrow's width.
+    pub(super) arrow: f32,
+    /// `tab-min-width`, scaled.
+    pub(super) min: f32,
+    /// The drag lane, and the floor it may narrow to.
+    pub(super) drag: f32,
+    pub(super) floor: f32,
+    /// `scroll-tabbar`: overflow and scroll rather than keep shrinking.
+    pub(super) scroll: bool,
+}
+
+impl TitlebarLane {
+    /// The drag lane's width in this strip for `n` tabs: whole while the
+    /// room they need at the minimum fits beside it (see
+    /// [`titlebar_tab_room`]), narrowing to its floor before a tab narrows
+    /// below the minimum, and never wider than the strip.
+    pub(super) fn drag_width(&self, n: usize) -> f32 {
+        (self.strip - titlebar_tab_room(n, self.min, self.arrow, self.scroll))
+            .min(self.drag)
+            .max(self.floor)
+            .min(self.strip)
+            .max(0.0)
+    }
+}
+
+/// The least room `n` title-bar tabs need without one narrowing below
+/// `min`: all of them while they fit, one between both `arrow`-wide scroll
+/// arrows once they overflow, and a single tab when there is one or they
+/// cannot scroll.
+pub(super) fn titlebar_tab_room(n: usize, min: f32, arrow: f32, scroll: bool) -> f32 {
+    let min = min.max(1.0);
+    if scroll && n > 1 {
+        (n as f32 * min).min(min + 2.0 * arrow.max(0.0))
+    } else {
+        min
+    }
+}
+
+/// Lay a title-bar strip's `n` tabs out, as the macOS title bar and the GNOME
+/// header both do: they divide the room the drag lane leaves evenly, starting
+/// at the strip's start, a lone tab included. Once they would be narrower
+/// than the minimum (and `scroll-tabbar` is on) they stay at the minimum and
+/// the strip scrolls: `‹` at its start, `›` right after the tabs shown, the
+/// drag lane after that. `state` keeps where it is scrolled to: a new active
+/// tab, tab count, strip width or minimum scrolls just far enough to show the
+/// active tab, and the arrows and the wheel scroll it otherwise. While `hold`
+/// (the pointer is on the strip) a hold that a close with the pointer left
+/// keeps the remaining tabs' width and place. Pure apart from `state`, so
+/// painting, hit tests, accessibility and ctl all read one layout.
 pub(super) fn titlebar_tab_layout(
     n: usize,
     active: usize,
-    space: (f32, f32, f32),
-    height: f32,
-    min: f32,
-    scroll: bool,
+    lane: &TitlebarLane,
+    state: &mut TitlebarStrip,
+    hold: bool,
 ) -> TabStripLayout {
-    let (strip, reserve, left) = space;
-    if strip < 2.0 {
+    let n = n.max(1);
+    let active = active.min(n - 1);
+    let strip = lane.strip;
+    if strip.is_nan() || strip < 2.0 {
+        state.held = None;
+        state.slots = 0;
+        state.seen = None;
         return TabStripLayout::empty(n);
     }
-    let mut layout = tab_strip_layout(n, active, strip, reserve, height, min, scroll);
-    let preferred = titlebar_preferred_tab_width(n, height, min);
-    if strip / n.max(1) as f32 >= preferred {
-        layout.width = preferred;
-        layout.last_width = preferred;
-        let first = if n == 1 {
-            ((strip + reserve - preferred - left) * 0.5).clamp(0.0, strip - preferred)
-        } else {
-            0.0
-        };
-        layout.xs = (0..n).map(|i| Some(first + i as f32 * preferred)).collect();
-        layout.arrow_left = None;
-        layout.arrow_right = None;
+    let min = lane.min.max(1.0);
+    let space = (strip - lane.drag_width(n)).max(0.0);
+    let bits = strip.to_bits();
+    if let Some(held) = state.held.take()
+        && hold
+        && held.tabs == n
+        && held.strip == bits
+        && let Some(layout) = held_tab_layout(n, active, &held, space)
+    {
+        state.held = Some(held);
+        state.first = if held.slots > 0 { held.first } else { 0 };
+        state.seen = Some((active, n, held.slots, bits));
+        return layout;
     }
+    let even = space / n as f32;
+    let overflow = lane.scroll && n > 1 && even < min;
+    let arrow = lane.arrow.min(space * 0.5).max(0.0);
+    let room = space - 2.0 * arrow;
+    let (layout, first, slots) = if !overflow {
+        (TabStripLayout::even(n, even), 0, 0)
+    } else if room < arrow.max(1.0) {
+        // Too narrow for the arrows and a tab between them: the active tab
+        // alone across the strip.
+        let mut layout = TabStripLayout::empty(n);
+        layout.width = space;
+        layout.last_width = space;
+        layout.xs[active] = Some(0.0);
+        (layout, active, 0)
+    } else {
+        let width = min.min(room);
+        let slots = ((room / width).floor() as usize).clamp(1, n);
+        let mut first = state.first;
+        if state.seen != Some((active, n, slots, bits)) {
+            if active < first {
+                first = active;
+            } else if active >= first + slots {
+                first = active + 1 - slots;
+            }
+        }
+        let first = first.min(n - slots);
+        (
+            TabStripLayout::scrolled(n, (first, slots), width, arrow),
+            first,
+            slots,
+        )
+    };
+    *state = TitlebarStrip {
+        first,
+        slots,
+        width: layout.width,
+        arrow: layout.arrow_width,
+        strip,
+        seen: Some((active, n, slots, bits)),
+        held: None,
+    };
     layout
 }
 
-/// The width a title-bar tab takes while the strip has room for it.
-fn titlebar_preferred_tab_width(n: usize, height: f32, min: f32) -> f32 {
-    let scale = height / 28.0;
-    (if n == 1 { 320.0 } else { 240.0 } * scale).max(min.max(1.0))
-}
-
-/// Keep a macOS title bar's lone tab centred on the window. Where the
-/// controls leave less than its preferred width on one side of the centre,
-/// the tab narrows evenly about the centre, down to `min`, rather than
-/// sliding off it; only below `min` does it clamp into the strip. A strip
-/// narrower than `min` keeps `titlebar_tab_layout`'s result. `space` and
-/// `preferred` is the measured width, after display-scale bounds.
-pub(super) fn centre_lone_titlebar_tab(
-    layout: &mut TabStripLayout,
-    space: (f32, f32, f32),
-    preferred: f32,
-    min: f32,
-) {
-    let (strip, reserve, left) = space;
-    let min = min.max(1.0);
-    if layout.xs.len() != 1 || strip < min.max(2.0) {
-        return;
+/// The layout a hold keeps: the held width and first tab, the closed tab's
+/// successors moved up into its place. `None` when the active tab would not
+/// show or the tabs no longer fit, which ends the hold.
+fn held_tab_layout(
+    n: usize,
+    active: usize,
+    held: &crate::window_state::HeldTabs,
+    space: f32,
+) -> Option<TabStripLayout> {
+    if held.slots == 0 {
+        return (n as f32 * held.width <= space + 0.5).then(|| TabStripLayout::even(n, held.width));
     }
-    let centre = (strip + reserve - left) * 0.5;
-    let room = 2.0 * centre.min(strip - centre);
-    let width = preferred.min(room).max(min).min(strip);
-    layout.width = width;
-    layout.last_width = width;
-    layout.xs = vec![Some((centre - width * 0.5).clamp(0.0, strip - width))];
-    layout.arrow_left = None;
-    layout.arrow_right = None;
+    let first = held.first.min(n - 1);
+    (active >= first && active < first + held.slots)
+        .then(|| TabStripLayout::scrolled(n, (first, held.slots), held.width, held.arrow))
 }
 
 pub(super) fn centered_title_lane(lane: Rect, center: f32) -> Rect {
@@ -1573,6 +1746,8 @@ pub(super) struct HorizontalTabGeometry {
 }
 
 /// The actual painted horizontal strip, also used to anchor a torn carrier.
+/// A title-bar strip laid out here starts unscrolled and unheld; the window's
+/// own strip goes through [`horizontal_tab_geometry_in`] with its state.
 pub(super) fn horizontal_tab_geometry(
     lane: Rect,
     scale: f32,
@@ -1580,8 +1755,39 @@ pub(super) fn horizontal_tab_geometry(
     tabs: (usize, usize),
     cfg: &Config,
 ) -> HorizontalTabGeometry {
+    horizontal_tab_geometry_in(
+        lane,
+        scale,
+        header,
+        tabs,
+        cfg,
+        (&mut TitlebarStrip::default(), false),
+    )
+}
+
+/// [`horizontal_tab_geometry`] for a window's own strip: a title-bar strip
+/// scrolls and holds as `strip` says, and updates it (see
+/// [`titlebar_tab_layout`]). Plain strips ignore it.
+pub(super) fn horizontal_tab_geometry_in(
+    lane: Rect,
+    scale: f32,
+    header: (bool, bool),
+    tabs: (usize, usize),
+    cfg: &Config,
+    (state, hold): (&mut TitlebarStrip, bool),
+) -> HorizontalTabGeometry {
     let (linux, titlebar) = header;
     let (n, active) = tabs;
+    // `tab-min-width` is in logical pixels, as every other strip measure.
+    let min = cfg.tab_min_width * scale;
+    let drag = TITLEBAR_DRAG_LANE * scale;
+    // A title bar's overflow arrows: as wide as its height, or the GNOME
+    // header's buttons.
+    let arrow = if linux {
+        (LINUX_HEADER_BUTTON * scale).min(lane.3)
+    } else {
+        lane.3
+    };
     let (arrow_rect, plus_rect, search_rect, lead, mut button_w) = if linux {
         let controls = linux_header_tab_controls(lane, scale, new_tab_dropdown_visible());
         (
@@ -1600,47 +1806,28 @@ pub(super) fn horizontal_tab_geometry(
         (menu, plus, (0.0, 0.0, 0.0, 0.0), 0.0, reserve)
     };
     // Only a macOS title bar gets the gear: Linux's header and plain strips
-    // keep Settings in their `≡` / `▾` menus.
+    // keep Settings in their `≡` / `▾` menus. It goes first as the window
+    // narrows, before the drag lane or a tab gives way.
     let mut settings_rect = (0.0, 0.0, 0.0, 0.0);
     if titlebar && !linux {
-        let (rect, extra) =
-            titlebar_settings_control(plus_rect, lane.2, button_w, scale, cfg.tab_min_width);
+        let room = titlebar_tab_room(n, min, arrow, cfg.scroll_tabbar) + drag;
+        let (rect, extra) = titlebar_settings_control(plus_rect, lane.2, button_w, scale, room);
         settings_rect = rect;
         button_w += extra;
     }
     let strip = tab_segment_strip_width(lane.2 - lead, button_w, 0.0);
     let layout = if titlebar {
-        let space = (strip, button_w, lane.0 + lead);
-        let mut layout = titlebar_tab_layout(
-            n,
-            active,
-            space,
-            lane.3,
-            cfg.tab_min_width,
-            cfg.scroll_tabbar,
-        );
-        // The gear takes its room from the right of the strip only, so a
-        // macOS lone tab narrows about the centre instead. The Linux header
-        // has no gear and keeps its layout.
-        if !linux && n == 1 {
-            centre_lone_titlebar_tab(
-                &mut layout,
-                space,
-                (160.0 * scale).max(cfg.tab_min_width),
-                cfg.tab_min_width,
-            );
-        }
-        layout
-    } else {
-        tab_strip_layout(
-            n,
-            active,
+        let lane = TitlebarLane {
             strip,
-            button_w,
-            lane.3,
-            cfg.tab_min_width,
-            cfg.scroll_tabbar,
-        )
+            arrow,
+            min,
+            drag,
+            floor: TITLEBAR_DRAG_LANE_FLOOR * scale,
+            scroll: cfg.scroll_tabbar,
+        };
+        titlebar_tab_layout(n, active, &lane, state, hold)
+    } else {
+        tab_strip_layout(n, active, strip, button_w, lane.3, min, cfg.scroll_tabbar)
     };
     HorizontalTabGeometry {
         arrow_rect,
@@ -1654,14 +1841,14 @@ pub(super) fn horizontal_tab_geometry(
 }
 
 /// The lone tab a torn-off window's title bar paints, in its own `band`:
-/// the tab its pointer grip is measured into, on every platform.
+/// the tab its pointer grip is measured into, on every platform. In a title
+/// bar it starts where the strip does and fills it up to the drag lane.
 pub(super) fn tear_off_destination_tab(
     cfg: &Config,
     band: Rect,
     header: (bool, bool),
     scale: f32,
     buttons: &crate::window_buttons::ButtonLayout,
-    lone_width: Option<f32>,
 ) -> Rect {
     if cfg.tab_bar_pos.is_vertical() || !header.1 {
         return band;
@@ -1672,17 +1859,7 @@ pub(super) fn tear_off_destination_tab(
         (0.0, 0.0)
     };
     let lane = horizontal_tab_lane(band, reservations);
-    let mut geometry = horizontal_tab_geometry(lane, scale, header, (1, 0), cfg);
-    if !header.0
-        && let Some(width) = lone_width
-    {
-        centre_lone_titlebar_tab(
-            &mut geometry.layout,
-            (geometry.strip, lane.2 - geometry.strip, lane.0),
-            width,
-            cfg.tab_min_width,
-        );
-    }
+    let geometry = horizontal_tab_geometry(lane, scale, header, (1, 0), cfg);
     (
         lane.0 + geometry.lead + geometry.layout.xs[0].unwrap_or(0.0),
         band.1,
@@ -1700,14 +1877,11 @@ pub(super) fn titlebar_tear_off_grab_x(
     header: (bool, bool),
     scale: f32,
     buttons: &crate::window_buttons::ButtonLayout,
-    grip: (f32, f64),
+    in_tab: f64,
 ) -> f64 {
-    let tab = tear_off_destination_tab(cfg, band, header, scale, buttons, Some(grip.0));
+    let tab = tear_off_destination_tab(cfg, band, header, scale, buttons);
     let margin = (8.0 * scale).min(tab.2 * 0.5);
-    f64::from(tab.0)
-        + grip
-            .1
-            .clamp(f64::from(margin), f64::from((tab.2 - margin).max(margin)))
+    f64::from(tab.0) + in_tab.clamp(f64::from(margin), f64::from((tab.2 - margin).max(margin)))
 }
 
 /// The shortcut shown on tab `index`: whatever key the bindings give "go to
@@ -1722,69 +1896,6 @@ pub(super) fn tab_goto_hint(
     kettle_config::keybinds::ui_hint_label(bindings, &Action::GotoTab(index))
 }
 
-/// Unlike a left-aligned lane, a window-centred title needs equal reserves.
-pub(super) fn compact_lone_tab_width(
-    title: &str,
-    path: Option<&str>,
-    format: &str,
-    notice: &str,
-    metrics: (f32, f32, f32),
-    chrome: (f32, bool, f32),
-) -> f32 {
-    let (cell, height, scale) = metrics;
-    let (min, close, activity) = chrome;
-    let leaf = path.map(|p| p.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or(p));
-    let label =
-        kettle_config::template::fill(format, &[("n", "1"), ("title", leaf.unwrap_or(title))]);
-    let cells = kettle_render::display_width(&label)
-        + if notice.is_empty() {
-            0
-        } else {
-            kettle_render::display_width(notice) + 1
-        };
-    let reserve = (8.0 * scale + activity).max(if close { height } else { 8.0 * scale });
-    let quantum = 2.0 * cell.max(1.0);
-    let rounded = ((cells as f32 * cell + 2.0 * reserve) / quantum).ceil() * quantum;
-    let lo = (160.0 * scale).max(min);
-    rounded.clamp(lo, (240.0 * scale).max(lo))
-}
-
-pub(super) fn hold_lone_tab_width(ws: &WindowState, band: Rect, width: f32) -> f32 {
-    let hold = ws.tab_drag_active
-        || ws
-            .native_pointer
-            .is_some_and(|p| rect_contains(band, p.x as f32, p.y as f32));
-    if hold {
-        let held = ws.lone_tab_width.get().unwrap_or(width);
-        ws.lone_tab_width.set(Some(held));
-        held
-    } else {
-        ws.lone_tab_width.set(None);
-        width
-    }
-}
-
-pub(super) fn compact_lone_tab_content(
-    rect: Rect,
-    hovered: bool,
-    close: bool,
-    activity: f32,
-    scale: f32,
-) -> kettle_render::HorizontalTabContent {
-    let reserve = (8.0 * scale + activity).max(if close { rect.3 } else { 8.0 * scale });
-    let half = (rect.2 * 0.5 - reserve).max(0.0);
-    kettle_render::HorizontalTabContent {
-        title: (rect.0 + rect.2 * 0.5 - half, rect.1, half * 2.0, rect.3),
-        close: tab_close_rect(
-            rect.0 + rect.2 - rect.3,
-            rect.1,
-            rect.3,
-            hovered && close && rect.2 >= rect.3,
-        ),
-        hint: None,
-    }
-}
-
 pub(super) fn titlebar_new_tab_controls(band: Rect, scale: f32) -> (Rect, Rect, f32) {
     let (_, _, reserve) = horizontal_new_tab_controls(band, scale, true);
     let side = band.3.max(28.0 * scale);
@@ -1796,34 +1907,6 @@ pub(super) fn titlebar_new_tab_controls(band: Rect, scale: f32) -> (Rect, Rect, 
     );
     let plus = (menu.0 - side, menu.1, side, side);
     (menu, plus, reserve)
-}
-
-pub(super) fn measured_lone_titlebar_width(
-    ws: &WindowState,
-    label: Option<&crate::mux::TabLabel>,
-    cfg: &Config,
-    notice: &str,
-    metrics: (f32, f32, f32),
-) -> f32 {
-    let (cell, height, scale) = metrics;
-    let activity = tab_render_activity(
-        ws,
-        ws.mux.active,
-        std::time::Instant::now(),
-        std::time::Duration::from_millis(cfg.tab_silence_threshold_ms),
-    );
-    compact_lone_tab_width(
-        label.map_or("", |l| l.text.as_str()),
-        label.and_then(|l| l.path.as_deref()),
-        &cfg.tab_format,
-        notice,
-        (cell, height, scale),
-        (
-            cfg.tab_min_width,
-            cfg.close_button_on_tab,
-            kettle_render::activity_lane(activity, scale),
-        ),
-    )
 }
 
 pub(super) fn tab_render_activity(

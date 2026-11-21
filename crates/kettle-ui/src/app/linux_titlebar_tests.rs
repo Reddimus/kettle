@@ -108,8 +108,15 @@ fn linux_header_one_and_many_tabs_leave_controls_and_empty_drag_space() {
             assert_eq!(search.2, 34.0 * scale);
             assert_eq!(trail, controls_start - (search.0 - 6.0 * scale));
             let strip = controls_start - lead - trail;
-            let layout =
-                titlebar_tab_layout(count, 0, (strip, trail, lead), height, 80.0 * scale, true);
+            let lane = TitlebarLane {
+                strip,
+                arrow: (LINUX_HEADER_BUTTON * scale).min(height),
+                min: 80.0 * scale,
+                drag: TITLEBAR_DRAG_LANE * scale,
+                floor: TITLEBAR_DRAG_LANE_FLOOR * scale,
+                scroll: true,
+            };
+            let layout = titlebar_tab_layout(count, 0, &lane, &mut TitlebarStrip::default(), false);
             // `+` leads the header and `≡` ends it, before the window
             // buttons: 34-point buttons, 7 points from the lane's edges and
             // 6 from the tabs.
@@ -132,7 +139,8 @@ fn linux_header_one_and_many_tabs_leave_controls_and_empty_drag_space() {
                 } else {
                     layout.width
                 };
-                assert!(*x + w <= strip + 0.01);
+                // The drag lane follows the tabs, before Find.
+                assert!(*x + w + TITLEBAR_DRAG_LANE * scale <= strip + 0.01);
                 let rect = (lead + *x, 0.0, w, height);
                 assert!(rect.0 >= plus.0 + plus.2);
                 let mut content = kettle_render::horizontal_tab_content_layout(

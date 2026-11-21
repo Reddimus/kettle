@@ -72,26 +72,41 @@ def titlebar_geometry(geometry):
         assert gear["x"] + gear["width"] + 8 * scale <= plus["x"] + 0.5, (
             "settings gear must sit apart from the new-tab pair"
         )
-    for tab in bar["segments"]:
+    shown = [tab for tab in bar["segments"] if tab["rect"]["x"] >= -1000]  # parked overflow tabs
+    for tab in shown:
         rect = tab["rect"]
-        if rect["x"] < -1000:  # parked overflow tab
-            continue
         assert rect["x"] >= band["x"], "tab overlaps traffic lights"
         assert rect["height"] == band["height"], "tab escaped titlebar band"
+        title = tab["title_rect"]
+        assert rect["x"] - 1 <= title["x"] and (
+            title["x"] + title["width"] <= rect["x"] + rect["width"] + 1
+        ), "tab title escapes its tab"
         close = tab["close"]
         if close["width"]:
             assert close["width"] >= 20 * scale and close["height"] >= 20 * scale
+    # Tabs split the lane evenly from its start, and leave a window-drag lane
+    # (48 points, narrowing to 16 only in a very narrow window) before the
+    # gear or `+`, past `›` too while the strip scrolls.
+    arrows = bar.get("scroll_right") or {"width": 0}
+    if len(shown) > 1 and not arrows["width"]:
+        widths = sorted(tab["rect"]["width"] for tab in shown)
+        assert widths[-1] - widths[0] <= 1, "tabs must split the title bar evenly"
+    if shown:
+        end = max(tab["rect"]["x"] + tab["rect"]["width"] for tab in shown)
+        if arrows["width"]:
+            end = max(end, arrows["x"] + arrows["width"])
+        controls = gear["x"] if gear["width"] else min(plus["x"], menu["x"])
+        lane = 48 if band["width"] >= 400 * scale else 16
+        assert controls - end >= lane * scale - 1, "no window-drag lane before the controls"
     if len(bar["segments"]) == 1:
         tab = bar["segments"][0]
         assert tab["hint"] is None, "single tab must hide its shortcut hint"
         if not tab["hovered"]:
-            assert tab["hint"] is None, "idle single tab must hide its shortcut hint"
             assert tab["close"]["width"] == tab["close"]["height"] == 0, (
                 "idle single tab must hide its close button"
             )
-        title = tab["title_rect"]
-        assert abs(title["x"] + title["width"] / 2 - geometry["surface"]["width"] / 2) <= 1
-        assert bar["segments"][0]["label"].strip(), "single-tab title is missing"
+        assert abs(tab["rect"]["x"] - band["x"]) <= 1, "single tab must start the title bar"
+        assert tab["label"].strip(), "single-tab title is missing"
 
 
 def capture(live, out, label, hover_caption=False):

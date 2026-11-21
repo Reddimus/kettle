@@ -30,7 +30,7 @@ A single-tab window hides the tab strip by default. Creating another tab shows
 it; set `tab-bar = always` to keep it visible. Horizontal and vertical strips
 expose their tab titles, selected tab, Close buttons, New Tab, and New Tab Options
 to screen readers. The menu button beside `+` opens shell choices and shortcuts.
-On macOS, where the tabs sit in the title bar, a compact lone tab stays centred. A gear before the joined `+ ▾` button opens
+On macOS, where the tabs sit in the title bar, they split the title bar evenly, a lone tab included, and leave an empty lane before the controls for moving the window; when they no longer fit, the strip scrolls. A gear before the joined `+ ▾` button opens
 Settings, as `Cmd+,` does. The dropdown keeps shell choices, profiles, layouts
 and SSH; Settings and other app commands remain in the macOS menu bar.
 

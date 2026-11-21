@@ -42,8 +42,8 @@ use crate::mux::{
 };
 use crate::pane_partition::{LayoutStyle, PanePartition};
 use crate::window_state::{
-    DpiResizeAction, DpiResizeEvent, FrameRecoveryAction, FrameRecoveryPoll, WindowState,
-    track_consumed_key_release, track_terminal_key_press,
+    DpiResizeAction, DpiResizeEvent, FrameRecoveryAction, FrameRecoveryPoll, TitlebarStrip,
+    WindowState, track_consumed_key_release, track_terminal_key_press,
 };
 
 /// This file and the production modules in `app/`, as one text, for the
@@ -221,6 +221,8 @@ mod search;
 mod sessions;
 mod system_opener;
 mod titlebar;
+#[cfg(test)]
+mod titlebar_tabs_tests;
 mod update_toast;
 mod windowing;
 use titlebar::*;
