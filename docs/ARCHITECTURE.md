@@ -685,8 +685,9 @@ Where and for how long a paste reads depends on the backend:
   click, a drop, input-method text, a control client's UI key, or an
   assistive-technology edit, selection, focus or press in that window drops
   the wait first, so a paste never lands behind later input. A key that
-  pastes (the paste chord, or a Paste or Paste Selection keybind) joins the
-  wait instead of asking the clipboard again. Once nobody waits for a
+  pastes (the paste chord in a modal field or the find bar, or a Paste or
+  Paste Selection keybind) joins the wait instead of asking the clipboard
+  again. Once nobody waits for a
   paste, the worker asks its owner for no further format.
 
   A program's read (OSC 52) and paste previews keep the two-second bound. A

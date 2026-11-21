@@ -953,7 +953,9 @@ active tab under a Tab broadcast and widens the scope, and the answer goes
 nowhere. `typing_drops_a_paste_still_waiting_for_the_clipboard` and
 `assistive_edits_and_focus_drop_a_paste_still_waiting_for_the_clipboard` say
 which keys and assistive-technology requests stop the wait (a key that pastes
-joins it), `user_pastes_can_wait_for_the_clipboard_and_input_drops_the_wait`
+joins it, and `the_paste_chord_joins_a_wait_only_where_it_pastes` limits the
+bare chord to text fields),
+`user_pastes_can_wait_for_the_clipboard_and_input_drops_the_wait`
 that every paste entry point and input handler, the control plane's UI keys
 included, is wired to them, and
 `the_copied_rows_of_a_context_menu_read_the_clipboard_once` that
