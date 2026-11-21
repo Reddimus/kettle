@@ -799,6 +799,21 @@ the same process account, failed decode/growth rollback, shared query/staging
 ceilings, and iTerm2's bounded base64 stage. These are CPU accounting checks;
 they do not require a GPU or live UI.
 
+The `video_frames` tests in `kettle` that publish a sheet change the output's
+name between its check and its publication: the video, another file, a folder
+or a link moved onto it, or the old sheet removed; one puts another file under
+the sheet's own private name instead. Each runs once with the
+system's own steps (the Linux and macOS exchange, the Windows move aside) and
+again with the exchange, the exclusive rename and the hard link taken away in
+turn, so the move-aside fallback runs on all three CI runners and the
+hard-link fallback on Linux and macOS (Windows has none, and its link case is
+skipped). The steps are taken away inside Kettle, not by a filesystem that
+lacks them: which error numbers count as a missing step is tested on its own,
+and no test mounts such a filesystem. The ordinary-overwrite test also
+asserts which step ran, and so fails on a Linux or macOS temporary directory
+whose filesystem has no exchange. A Linux and macOS test changes the name
+again between the two exchanges.
+
 ### Placement depth, screenshot retirement, and resize capture
 
 `kettle-core`'s `anonymous_relative_depth_admission_uses_its_own_parent` and

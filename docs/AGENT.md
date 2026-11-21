@@ -1210,10 +1210,23 @@ not to retry or ask the user to turn off security.
 `kettle video-frames PATH -o OUT.jpg` does the same from a shell, inside the
 caller's sandbox, with `--start`, `--end`, `--at`, `--count` and
 `--max-edge`. It writes the JPEG whole (a private file under an
-unpredictable name, renamed into place, never over the video), refuses a
-folder other users can change unless it is sticky, removes nothing it did
-not make, and prints the index; it exits 0 once written, 1 otherwise, the
-failure and any install hint on stderr.
+unpredictable name, published at the output's name, never over the video),
+refuses a folder other users can change unless it is sticky, and prints the
+index; it exits 0 once written, 1 otherwise, the failure and any install
+hint on stderr. An existing file at the output's name is replaced, as
+before, but by steps that cannot destroy a file: on Linux and macOS the two
+names are exchanged, and what the exchange displaced is removed only when it
+is the file Kettle examined beforehand. A file that takes the name while the
+sheet is being written, the video included, is exchanged back and kept, and
+the command fails (unless something else has already moved it on, when the
+sheet stays); so it does when the name is freed or taken in that time.
+Where the filesystem has no exchange, as on some network and removable
+volumes, the old file is first moved aside to a private name and the sheet
+then takes the free name, so the name is briefly empty and a crash can leave
+the old file beside the output under a name beginning `.kettle-`. A
+filesystem with neither an exclusive rename nor hard links is refused. The
+only files removed are the command's own and the output it examined and
+replaced.
 
 What decodes what: GIF, APNG and animated WebP are Kettle's own; on macOS,
 MP4 and QuickTime go to AVFoundation first; anything else, or what
