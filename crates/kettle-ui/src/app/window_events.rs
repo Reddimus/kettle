@@ -557,6 +557,9 @@ impl App {
                 ..
             } => {
                 ws.resume_native_pointer();
+                // A paste still waiting for the clipboard never lands behind
+                // a click.
+                ws.clipboard_wait = None;
                 if button == MouseButton::Left {
                     let at = (ws.cursor.x as f32, ws.cursor.y as f32);
                     self.track_titlebar_pointer(ws, TitlebarPointer::Press(at.0, at.1));
@@ -1430,6 +1433,9 @@ impl App {
                 // A drop is the pointer's, as a press elsewhere: the keyboard
                 // goes back to the terminal first.
                 self.exit_preview_focus(ws);
+                // A paste still waiting for the clipboard never lands behind
+                // a drop.
+                ws.clipboard_wait = None;
                 // A file dropped while a modal (search /
                 // palette / settings / confirm dialog / inline title-edit / vi
                 // copy-mode / …) is open must NOT inject its path into the PTY
@@ -1639,6 +1645,9 @@ impl App {
                     _ => false,
                 };
                 if typing {
+                    // A paste still waiting for the clipboard never lands
+                    // behind text an input method composes.
+                    ws.clipboard_wait = None;
                     dismiss_link_hover(ws);
                     self.dismiss_selection_hint(ws);
                 }
@@ -1701,6 +1710,16 @@ impl App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                // A paste still waiting for the clipboard never lands behind
+                // a key typed after it.
+                if key_drops_clipboard_wait(
+                    event.state,
+                    event.repeat,
+                    &event.logical_key,
+                    event.physical_key,
+                ) {
+                    ws.clipboard_wait = None;
+                }
                 if key_dismisses_link_hover(event.state, &event.logical_key, event.physical_key) {
                     dismiss_link_hover(ws);
                     self.dismiss_selection_hint(ws);

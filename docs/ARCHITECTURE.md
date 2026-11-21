@@ -656,9 +656,28 @@ Where and for how long a paste reads depends on the backend:
   paste goes on to the text, because on X11 a failure does not show a list
   exists: xclip answers every request with its own type, and an owner may
   leave a request it cannot serve unanswered.
-- **macOS and Windows.** arboard reads the system pasteboard synchronously on
-  the window thread, in the same order. There is no pipe and no deadline of
-  Kettle's to enforce; the text cap is checked once the read returns.
+- **macOS and Windows.** arboard is created and asked on the clipboard
+  worker thread (`clipboard::worker`), in the same order. The formats of one
+  paste share its deadline, two seconds, and once it has passed no further
+  format is asked for. No deadline reaches into AppKit's
+  `stringForType:` or Win32's `GetClipboardData`, so an owner that never
+  answers keeps the worker, and every later request times out, until it
+  answers or exits. A request still queued when its caller stops waiting
+  is not asked of the owner. The text cap is checked once the system has
+  handed the text over, so it bounds what Kettle keeps, not what a read
+  holds (`docs/AUDIT-DEFERRED.md`).
+
+  On macOS a paste the user asked for (a terminal paste, a modal field, the
+  find bar) frees the window after those two seconds and still takes the
+  answer if it comes within a minute more (`clipboard::LateAnswer`): the
+  system may be waiting for the user to allow the paste. A notification
+  says the paste is coming. Each window's turn looks for the answer
+  (`App::poll_clipboard_wait`) and delivers it only where the keyboard was
+  when the paste was asked for; a fresh key press, a click, a drop or
+  input-method text in that window drops it first, so a paste never lands
+  behind later input. A program's read (OSC 52) and paste previews keep the
+  two-second bound, and an OSC 52 store made meanwhile waits behind the
+  paste's read. Windows keeps the two-second bound for every read.
 
 A PNG from another program is untrusted. The window thread reads only the size
 its header declares, for `reserve_png_from`, which refuses a side over 16,384

@@ -81,8 +81,16 @@ pub(crate) enum PasteRefusal {
     Image,
 }
 
-/// The longest a clipboard read may take.
+/// The longest the window waits for a clipboard read.
 const READ_WITHIN: Duration = Duration::from_secs(2);
+
+/// How long the answer to a read the user asked for is still taken on macOS
+/// after the window has stopped waiting for it. The user may be part of the
+/// read there: answering the system's paste-permission alert, or waiting for
+/// a transfer from another device. A program's read (OSC 52) keeps
+/// `READ_WITHIN`.
+#[cfg(target_os = "macos")]
+const LATE_ANSWER_WITHIN: Duration = Duration::from_secs(60);
 
 /// The most text a field or a preview takes from the clipboard: the size of
 /// the largest paste.
@@ -95,14 +103,90 @@ pub(crate) struct Clipboard<F = arboard::Clipboard> {
     /// and on macOS and Windows arboard itself.
     #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
     worker: Option<worker::TextWorker>,
+    /// How long after `READ_WITHIN` the worker's answer to a read the user
+    /// asked for is still taken; `None` drops it at `READ_WITHIN`.
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "macos", windows, test)),
+        allow(dead_code)
+    )]
+    late_answers: Option<Duration>,
+}
+
+/// A read the user asked for: answered within `READ_WITHIN`, or still to
+/// come.
+pub(crate) enum UserRead<T> {
+    Now(T),
+    Later(LateAnswer<T>),
+}
+
+/// The answer to a read the window stopped waiting for. It is taken when it
+/// comes, and is a timeout once its deadline has passed. Dropping it before
+/// the worker has taken the read leaves the read unasked.
+pub(crate) struct LateAnswer<T> {
+    answer: crossbeam_channel::Receiver<T>,
+    deadline: Instant,
+    timed_out: fn() -> T,
+    _interest: std::sync::Arc<()>,
+}
+
+impl<T> LateAnswer<T> {
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "macos", windows, test)),
+        allow(dead_code)
+    )]
+    fn new(
+        answer: crossbeam_channel::Receiver<T>,
+        deadline: Instant,
+        timed_out: fn() -> T,
+        interest: std::sync::Arc<()>,
+    ) -> Self {
+        Self {
+            answer,
+            deadline,
+            timed_out,
+            _interest: interest,
+        }
+    }
+
+    /// The answer once it has come or its deadline has passed; `None` while
+    /// it is still awaited.
+    pub(crate) fn poll(&self, now: Instant) -> Option<T> {
+        match self.answer.try_recv() {
+            Ok(answer) => Some(answer),
+            Err(crossbeam_channel::TryRecvError::Empty) if now < self.deadline => None,
+            Err(_) => Some((self.timed_out)()),
+        }
+    }
+
+    pub(crate) fn deadline(&self) -> Instant {
+        self.deadline
+    }
+}
+
+#[cfg(test)]
+impl<T> LateAnswer<T> {
+    /// An answer still to come by `deadline`, sent through the returned
+    /// sender.
+    pub(crate) fn pending(
+        deadline: Instant,
+        timed_out: fn() -> T,
+    ) -> (crossbeam_channel::Sender<T>, Self) {
+        let (sender, answer) = crossbeam_channel::bounded(1);
+        (
+            sender,
+            Self::new(answer, deadline, timed_out, std::sync::Arc::new(())),
+        )
+    }
 }
 
 #[cfg(test)]
 impl Clipboard {
     /// A clipboard whose CLIPBOARD text is what `load` answers, asked on the
-    /// worker thread, for tests of the code that pastes.
+    /// worker thread, for tests of the code that pastes. `late_answers` is as
+    /// on macOS when set.
     pub(crate) fn answering(
         load: impl FnMut() -> Result<String, arboard::Error> + Send + 'static,
+        late_answers: Option<Duration>,
     ) -> Self {
         struct Answering<L>(L);
         impl<L: FnMut() -> Result<String, arboard::Error> + Send + 'static> worker::TextProvider
@@ -118,6 +202,7 @@ impl Clipboard {
         Self {
             arboard: None,
             worker: Some(worker::TextWorker::start(move || Ok(Answering(load))).unwrap()),
+            late_answers,
         }
     }
 }
@@ -139,11 +224,22 @@ impl Clipboard {
     /// held open; AppKit waits inside `stringForType:` for an owner that
     /// provides its data lazily. No deadline reaches into either call, so on
     /// both the clipboard is created and asked on the worker thread.
+    ///
+    /// On macOS the answer to a read the user asked for is still taken for
+    /// `LATE_ANSWER_WITHIN` after the window stops waiting: there the system
+    /// can ask the user to allow the paste, and a read Kettle gave up on at
+    /// two seconds would lose the paste the user then allowed.
     #[cfg(any(target_os = "macos", windows))]
     fn open(
         create: impl FnOnce() -> Result<arboard::Clipboard, arboard::Error> + Send + 'static,
     ) -> Result<Self, arboard::Error> {
-        Self::serialized(create)
+        let clipboard = Self::serialized(create)?;
+        #[cfg(target_os = "macos")]
+        let clipboard = Self {
+            late_answers: Some(LATE_ANSWER_WITHIN),
+            ..clipboard
+        };
+        Ok(clipboard)
     }
 
     /// Elsewhere arboard is asked on the caller's thread: X11 reads carry
@@ -156,6 +252,7 @@ impl Clipboard {
             arboard: Some(arboard),
             #[cfg(any(target_os = "linux", test))]
             worker: None,
+            late_answers: None,
         })
     }
 
@@ -172,6 +269,7 @@ impl Clipboard {
             let clipboard = clipboard.get_or_insert_with(|| Self {
                 arboard: None,
                 worker: None,
+                late_answers: None,
             });
             clipboard.worker = Some(worker);
         }
@@ -240,6 +338,7 @@ impl<F: SelectionFallback + Send + 'static> Clipboard<F> {
         Ok(Self {
             arboard: None,
             worker: Some(worker),
+            late_answers: None,
         })
     }
 }
@@ -386,6 +485,33 @@ impl<F: SelectionFallback> Clipboard<F> {
     /// the text over (docs/AUDIT-DEFERRED.md).
     pub(crate) fn get_text(&mut self) -> Result<String, arboard::Error> {
         self.get_selection_bounded(false, FIELD_TEXT_MAX, Instant::now() + READ_WITHIN)
+    }
+
+    /// [`Self::paste_content`] for a paste the user asked for. Where late
+    /// answers are taken (macOS), an answer that has not come within
+    /// `READ_WITHIN` is left to come later instead of timing out.
+    pub(crate) fn paste_for_user(
+        &mut self,
+        want: PasteWant,
+        text_max: usize,
+    ) -> UserRead<PasteContent> {
+        #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
+        if let (Some(worker), Some(late)) = (&self.worker, self.late_answers) {
+            let now = Instant::now();
+            return worker.paste_later(want, text_max, now + READ_WITHIN, now + READ_WITHIN + late);
+        }
+        UserRead::Now(self.paste_content(want, text_max))
+    }
+
+    /// [`Self::get_text`] for a field the user pastes into, waited for as
+    /// [`Self::paste_for_user`] waits.
+    pub(crate) fn text_for_user(&mut self) -> UserRead<Result<String, arboard::Error>> {
+        #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
+        if let (Some(worker), Some(late)) = (&self.worker, self.late_answers) {
+            let now = Instant::now();
+            return worker.load_later(FIELD_TEXT_MAX, now + READ_WITHIN, now + READ_WITHIN + late);
+        }
+        UserRead::Now(self.get_text())
     }
 
     /// The local files CLIPBOARD names, for a preview of what a paste brings.
