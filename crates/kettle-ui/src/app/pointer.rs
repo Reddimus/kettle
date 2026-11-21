@@ -877,13 +877,20 @@ impl App {
         // the ACTIVE tab), so moving the selection IS how the bar scrolls.
         // Positive = "backwards" on both axes, matching winit's documented
         // convention that +Y scrolls up and +X scrolls left.
+        //
+        // A title-bar strip that overflows scrolls instead, one tab per
+        // step, as a browser's tab strip does, and leaves the selection be.
         if self.cursor_in_tab_bar(ws) && ws.mux.tabs.len() > 1 {
             let step = if steps.notches != 0 {
                 steps.notches
             } else {
                 steps.cols
             };
-            if step != 0 {
+            if step != 0 && self.scroll_titlebar_strip(ws, if step > 0 { -1 } else { 1 }) {
+                if let Some(w) = &ws.window {
+                    w.request_redraw();
+                }
+            } else if step != 0 {
                 let pre = self.focus_key(ws);
                 if step > 0 {
                     ws.mux.prev_tab();

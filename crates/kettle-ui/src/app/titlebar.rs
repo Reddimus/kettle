@@ -91,6 +91,40 @@ pub(super) fn titlebar_control_at(bar: &TabBar, x: f32, y: f32) -> bool {
         .is_none_or(|s| bar.segments.len() > 1 || rect_contains(s.close, x, y))
 }
 
+/// Whether `(x, y)` is on the body of a macOS title bar's lone tab, away
+/// from its close button. The tab stands for the window's title there:
+/// dragging it moves the window and a double-click on it runs the title
+/// bar's double-click action. The GNOME header's lone title is title space
+/// of its own (`linux_title_space`).
+pub(super) fn lone_titlebar_tab_at(bar: &TabBar, x: f32, y: f32) -> bool {
+    bar.in_titlebar
+        && !bar.linux_header
+        && bar.segments.len() == 1
+        && rect_contains(bar.band, x, y)
+        && !titlebar_button_at(bar, x, y)
+        && bar
+            .segments
+            .iter()
+            .any(|s| rect_contains(s.rect, x, y) && !rect_contains(s.close, x, y))
+}
+
+/// Whether a press at `at` at `now` is the second of a double-click on the
+/// title bar: `previous` is the primary press it follows, if any, at most
+/// `interval` before and `tolerance` away on each axis.
+pub(super) fn titlebar_double_click(
+    previous: Option<(std::time::Instant, f32, f32)>,
+    now: std::time::Instant,
+    (x, y): (f32, f32),
+    interval: std::time::Duration,
+    tolerance: f32,
+) -> bool {
+    previous.is_some_and(|(t, px, py)| {
+        now.duration_since(t) <= interval
+            && (x - px).abs() <= tolerance
+            && (y - py).abs() <= tolerance
+    })
+}
+
 /// A pointer event as the title bar's hold on the window sees it. Points
 /// are in the window, in physical pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -321,6 +355,12 @@ impl App {
         true
     }
 
+    /// A primary press on the title bar itself: empty strip space, or the
+    /// lone tab that stands for the window's title. A second press within the
+    /// system's double-click interval runs its double-click action and takes
+    /// the press. Otherwise empty space starts a window drag and takes the
+    /// press, while a press on the lone tab goes on to the tab (AppKit moves
+    /// the window when it is dragged).
     pub(super) fn press_titlebar_space(
         &self,
         ws: &mut WindowState,
@@ -328,28 +368,33 @@ impl App {
         x: f32,
         y: f32,
     ) -> bool {
-        if !ws.macos_titlebar_tabs || !empty_titlebar_space(bar, x, y) {
+        let empty = ws.macos_titlebar_tabs && empty_titlebar_space(bar, x, y);
+        let lone = ws.macos_titlebar_tabs && lone_titlebar_tab_at(bar, x, y);
+        if !empty && !lone {
             ws.titlebar_click = None;
             return false;
         }
         #[cfg(target_os = "macos")]
         if let Some(window) = &ws.window {
             let now = std::time::Instant::now();
-            let interval = native::double_click_interval();
+            let interval = std::time::Duration::try_from_secs_f64(native::double_click_interval())
+                .unwrap_or(std::time::Duration::from_millis(500));
             let scale = window.scale_factor() as f32;
-            let double = ws.titlebar_click.is_some_and(|(t, px, py)| {
-                now.duration_since(t).as_secs_f64() <= interval
-                    && (x - px).abs() <= 4.0 * scale
-                    && (y - py).abs() <= 4.0 * scale
-            });
+            let double =
+                titlebar_double_click(ws.titlebar_click, now, (x, y), interval, 4.0 * scale);
             ws.titlebar_click = if double { None } else { Some((now, x, y)) };
             if double {
                 native::double_click(window);
-            } else if let Err(error) = window.drag_window() {
+                return true;
+            }
+            if lone {
+                return false;
+            }
+            if let Err(error) = window.drag_window() {
                 log::debug!("titlebar window drag unavailable: {error}");
             }
         }
-        true
+        empty
     }
 }
 
@@ -558,34 +603,41 @@ mod tests {
     }
 
     #[test]
-    fn titlebar_single_tab_stays_visible_and_centres_title_with_hover_controls() {
+    fn titlebar_single_tab_stays_visible_with_hover_controls_and_drag_room() {
         assert!(tab_strip_visible(TabBarMode::Auto, 1, false, false, true));
         assert!(!tab_strip_visible(TabBarMode::Auto, 1, false, false, false));
         assert!(!tab_strip_visible(TabBarMode::Off, 1, false, false, false));
+        let cfg = Config::default();
         for scale in [1.0, 2.0] {
             for left in [78.0, 90.0] {
                 let width = 800.0 * scale;
                 let left = left * scale;
                 let h = 28.0 * scale;
-                let strip = width - left - 2.0 * h;
-                let layout = titlebar_tab_layout(1, 0, (strip, 2.0 * h, left), h, 80.0, true);
-                let mut layout = layout;
-                centre_lone_titlebar_tab(&mut layout, (strip, 2.0 * h, left), 160.0 * scale, 80.0);
+                let lane = (left, 0.0, width - left, h);
+                let g = horizontal_tab_geometry(lane, scale, (false, true), (1, 0), &cfg);
+                let layout = &g.layout;
                 let rect = (left + layout.xs[0].unwrap(), 0.0, layout.width, h);
+                assert_eq!(rect.0, left, "the lone tab starts the lane");
                 for hovered in [false, true] {
-                    let content = compact_lone_tab_content(rect, hovered, true, 0.0, scale);
-                    assert!((content.title.0 + content.title.2 * 0.5 - width * 0.5).abs() < 0.01);
+                    let content = kettle_render::horizontal_tab_content_layout(
+                        rect,
+                        hovered,
+                        true,
+                        0.0,
+                        "shell",
+                        None,
+                        8.0 * scale,
+                    );
                     assert!(content.title.0 >= left);
                     assert!(content.hint.is_none());
                     assert_eq!(content.close.2 > 0.0, hovered);
                     assert_eq!(content.close.3 > 0.0, hovered);
                 }
                 assert!(
-                    rect.0 + rect.2 < left + strip,
+                    rect.0 + rect.2 + TITLEBAR_DRAG_LANE * scale <= left + g.strip + 0.01,
                     "room remains for native window drag"
                 );
-                let (arrow, plus) = split_new_tab_button((left + strip, 0.0, 2.0 * h, h), h);
-                for target in [arrow, plus] {
+                for target in [g.arrow_rect, g.plus_rect] {
                     assert!(target.2 / scale >= 20.0 && target.3 / scale >= 20.0);
                 }
                 let narrow = kettle_render::horizontal_tab_content_layout(

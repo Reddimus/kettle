@@ -1391,6 +1391,9 @@ impl App {
                 if i < ws.mux.tabs.len() {
                     ws.mux.active = i;
                     ws.mux.touch_active_tab_seen();
+                    // Even the tab already active, scrolled out of a
+                    // title-bar strip, comes back into view.
+                    ws.reveal_active_tab();
                 }
             }
             // Persistent update actions for bindings and the palette.

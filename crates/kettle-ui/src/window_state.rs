@@ -927,6 +927,77 @@ impl SurfaceCaps {
     }
 }
 
+/// A title-bar tab strip between two of its layouts: where an overflowing
+/// strip is scrolled to, the hold a close with the pointer leaves on it, and
+/// what it last laid out. Every layout reads and updates it, so painting,
+/// hit tests, the wheel and the arrows see one strip.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct TitlebarStrip {
+    /// The first tab an overflowing strip shows.
+    pub(crate) first: usize,
+    /// How many tabs fit between its arrows; 0 while it does not overflow.
+    pub(crate) slots: usize,
+    /// The tab width, the arrow width and the strip width last laid out.
+    pub(crate) width: f32,
+    pub(crate) arrow: f32,
+    pub(crate) strip: f32,
+    /// The active tab, tab count, slots and strip width the last layout
+    /// saw. When one of them changes the strip scrolls the active tab
+    /// into view: a new tab, a tab chosen from the keyboard, a close, a
+    /// resize or a display-scale change.
+    pub(crate) seen: Option<(usize, usize, usize, u32)>,
+    /// The tabs held after a close with the pointer.
+    pub(crate) held: Option<HeldTabs>,
+}
+
+/// After a close with the pointer, the remaining tabs keep their width and
+/// place while the pointer stays on the strip, so the next tab's close
+/// button comes to rest under it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct HeldTabs {
+    /// The tab count and strip width the hold applies to; any other lets go.
+    pub(crate) tabs: usize,
+    pub(crate) strip: u32,
+    pub(crate) width: f32,
+    pub(crate) arrow: f32,
+    pub(crate) first: usize,
+    /// Slots between the arrows, 0 when the strip did not overflow.
+    pub(crate) slots: usize,
+}
+
+impl TitlebarStrip {
+    /// The hold that keeps this strip, as laid out before a close with the
+    /// pointer, for the `tabs` the close left. Nothing to hold before a
+    /// first layout.
+    pub(crate) fn held_after_close(&self, tabs: usize) -> Option<HeldTabs> {
+        (self.strip > 0.0 && tabs > 0).then_some(HeldTabs {
+            tabs,
+            strip: self.strip.to_bits(),
+            width: self.width,
+            arrow: self.arrow,
+            first: self.first,
+            slots: self.slots,
+        })
+    }
+
+    /// Scroll an overflowing strip `step` tabs toward its end, or toward its
+    /// start when negative, as its arrows and the wheel do, leaving the
+    /// active tab where it is. Says whether the strip moved.
+    pub(crate) fn scroll(&mut self, step: isize, tabs: usize) -> bool {
+        if self.slots == 0 {
+            return false;
+        }
+        let first = self
+            .first
+            .saturating_add_signed(step)
+            .min(tabs.saturating_sub(self.slots));
+        self.held = None;
+        let moved = first != self.first;
+        self.first = first;
+        moved
+    }
+}
+
 pub(crate) struct WindowState {
     /// Stable per-window sequence number (1-based, process-lifetime unique).
     /// Exposed to agents via the ctl API and used as the map key. Never
@@ -956,8 +1027,9 @@ pub(crate) struct WindowState {
     pub(crate) linux_titlebar: bool,
     pub(crate) pressed_window_control: Option<kettle_render::WindowControl>,
     pub(crate) hovered_window_control: Option<kettle_render::WindowControl>,
-    /// Desired lone-tab width held across title changes while the pointer is in the strip.
-    pub(crate) lone_tab_width: std::cell::Cell<Option<f32>>,
+    /// The title-bar tab strip's scroll position and hold; layouts update
+    /// it through a shared reference.
+    pub(crate) titlebar_strip: std::cell::Cell<TitlebarStrip>,
     pub(crate) titlebar_click: Option<(std::time::Instant, f32, f32)>,
     /// The primary button is down in this window, as title-bar tracking saw.
     pub(crate) titlebar_pressed: bool,
@@ -1596,12 +1668,30 @@ impl WindowState {
     /// When the pointer leaves the window, nothing in the tab bar is under
     /// it or pressed any more.
     pub(crate) fn leave_tab_bar(&mut self) {
-        self.lone_tab_width.set(None);
+        self.release_tab_hold();
         self.release_titlebar_buttons();
         self.hovered_close_idx = None;
         self.hovered_tab_idx = None;
         self.hovered_new_tab = false;
         self.hovered_new_tab_menu = false;
+    }
+
+    /// Scroll the title-bar strip to the active tab at its next layout,
+    /// even when the active tab is the one it already had, as choosing a
+    /// tab from the keyboard does.
+    pub(crate) fn reveal_active_tab(&self) {
+        let mut strip = self.titlebar_strip.get();
+        strip.seen = None;
+        self.titlebar_strip.set(strip);
+    }
+
+    /// Let go of the tabs a close with the pointer held, so the title-bar
+    /// strip divides its room evenly again. Says whether any were held.
+    pub(crate) fn release_tab_hold(&self) -> bool {
+        let mut strip = self.titlebar_strip.get();
+        let held = strip.held.take().is_some();
+        self.titlebar_strip.set(strip);
+        held
     }
 
     /// Point `cursor` back at the physical pointer before a native button or
@@ -1749,7 +1839,7 @@ impl WindowState {
             linux_titlebar: false,
             pressed_window_control: None,
             hovered_window_control: None,
-            lone_tab_width: std::cell::Cell::new(None),
+            titlebar_strip: std::cell::Cell::new(TitlebarStrip::default()),
             titlebar_click: None,
             titlebar_pressed: false,
             titlebar_window_held: false,

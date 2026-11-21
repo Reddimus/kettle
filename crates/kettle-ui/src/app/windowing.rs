@@ -775,15 +775,7 @@ impl App {
                 (ws.linux_titlebar, ws.macos_titlebar_tabs),
                 src.scale_factor() as f32,
                 &self.linux_button_layout(ws),
-                (
-                    self.lone_titlebar_width(
-                        ws,
-                        ws.mux.tab_labels(&self.ui_text).get(ws.mux.active),
-                        destination_band.3,
-                        &bar.recording_notice,
-                    ),
-                    in_seg_x,
-                ),
+                in_seg_x,
             )
         } else {
             in_seg_x
@@ -1752,7 +1744,6 @@ impl App {
                 (ws.linux_titlebar, ws.macos_titlebar_tabs),
                 window.scale_factor() as f32,
                 &self.linux_button_layout(ws),
-                None,
             );
             let along_x = wayland_tab_anchor_x(self.cfg.tab_bar_pos, destination_tab, along_x);
             match self.cfg.tab_bar_pos {
