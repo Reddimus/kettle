@@ -112,6 +112,13 @@ pub(crate) struct Clipboard<F = arboard::Clipboard> {
     late_answers: Option<Duration>,
 }
 
+/// What a preview found on CLIPBOARD (`Clipboard::peek`).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ClipboardPeek {
+    pub(crate) files: Vec<PathBuf>,
+    pub(crate) text: Option<String>,
+}
+
 /// A read the user asked for: answered within `READ_WITHIN`, or still to
 /// come.
 pub(crate) enum UserRead<T> {
@@ -314,9 +321,21 @@ impl<F: SelectionFallback + Send + 'static> worker::TextProvider for Serialized<
     }
 
     fn paste(&mut self, want: PasteWant, text_max: usize, deadline: Instant) -> PasteContent {
+        self.paste_while(want, text_max, deadline, &|| true)
+    }
+
+    fn paste_while(
+        &mut self,
+        want: PasteWant,
+        text_max: usize,
+        deadline: Instant,
+        wanted: &dyn Fn() -> bool,
+    ) -> PasteContent {
         // One deadline for the whole paste: a file list that came late leaves
-        // the text unasked, and the thread free for the next request.
-        one_request(|| fallback_paste(&mut self.0, want, text_max, Some(deadline)))
+        // the text unasked, and the thread free for the next request. A paste
+        // nobody waits for any more, one the user stopped waiting for, asks
+        // for no further format either.
+        one_request(|| fallback_paste(&mut self.0, want, text_max, Some(deadline), wanted))
     }
 
     fn files(&mut self, _deadline: Instant) -> Option<Vec<PathBuf>> {
@@ -398,11 +417,14 @@ impl SelectionFallback for arboard::Clipboard {
 
 /// What a paste takes from a clipboard that is asked one format at a time.
 /// The text is read by `text_by`, or within `READ_WITHIN` of being asked for.
+/// Once `wanted` says nobody waits for the paste, no further format is asked
+/// for.
 fn fallback_paste(
     clipboard: &mut impl SelectionFallback,
     want: PasteWant,
     text_max: usize,
     text_by: Option<Instant>,
+    wanted: &dyn Fn() -> bool,
 ) -> PasteContent {
     // The list is read with `paste-files` off as well: copied files must
     // then paste nothing, rather than the text copy of their paths. A list
@@ -420,6 +442,7 @@ fn fallback_paste(
         };
     }
     let text = match text_by {
+        _ if !wanted() => Err(arboard::Error::Timeout),
         Some(deadline) if Instant::now() >= deadline => Err(arboard::Error::Timeout),
         _ => clipboard.load(
             false,
@@ -437,7 +460,7 @@ fn fallback_paste(
     }
     // A paste past its deadline asks the owner for nothing more: nobody waits
     // for the image, and the next request waits for the thread.
-    if text_by.is_some_and(|deadline| Instant::now() >= deadline) {
+    if !wanted() || text_by.is_some_and(|deadline| Instant::now() >= deadline) {
         return PasteContent::Text(Err(arboard::Error::Timeout));
     }
     if want.images {
@@ -474,7 +497,7 @@ impl<F: SelectionFallback> Clipboard<F> {
             return worker.paste(want, text_max, Instant::now() + READ_WITHIN);
         }
         match self.arboard.as_mut() {
-            Some(clipboard) => fallback_paste(clipboard, want, text_max, None),
+            Some(clipboard) => fallback_paste(clipboard, want, text_max, None, &|| true),
             None => PasteContent::Text(Err(arboard::Error::ContentNotAvailable)),
         }
     }
@@ -514,16 +537,44 @@ impl<F: SelectionFallback> Clipboard<F> {
         UserRead::Now(self.get_text())
     }
 
-    /// The local files CLIPBOARD names, for a preview of what a paste brings.
+    /// The local files CLIPBOARD names, as a preview reads them.
+    #[cfg(test)]
     pub(crate) fn file_list(&mut self) -> Result<Vec<PathBuf>, arboard::Error> {
+        self.file_list_by(Instant::now() + READ_WITHIN)
+    }
+
+    /// The local files CLIPBOARD names, by `deadline`.
+    fn file_list_by(&mut self, deadline: Instant) -> Result<Vec<PathBuf>, arboard::Error> {
         #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
         if let Some(worker) = &self.worker {
-            return worker.files(Instant::now() + READ_WITHIN);
+            return worker.files(deadline);
         }
+        let _ = deadline;
         self.arboard
             .as_mut()
             .ok_or(arboard::Error::ContentNotAvailable)?
             .files()
+    }
+
+    /// What CLIPBOARD holds for a preview: the files it names, and its text,
+    /// read under one paste's deadline. The text is read only when no files
+    /// are named, or with `text_with_files`. A read that times out leaves the
+    /// rest unasked, so a slow owner holds a preview for `READ_WITHIN` and no
+    /// longer.
+    pub(crate) fn peek(&mut self, text_with_files: bool) -> ClipboardPeek {
+        let deadline = Instant::now() + READ_WITHIN;
+        let files = match self.file_list_by(deadline) {
+            Ok(files) => files,
+            Err(arboard::Error::Timeout) => return ClipboardPeek::default(),
+            Err(_) => Vec::new(),
+        };
+        let text = (files.is_empty() || text_with_files)
+            .then(|| {
+                self.get_selection_bounded(false, FIELD_TEXT_MAX, deadline)
+                    .ok()
+            })
+            .flatten();
+        ClipboardPeek { files, text }
     }
 
     pub(crate) fn set_text(&mut self, text: String) -> Result<(), arboard::Error> {

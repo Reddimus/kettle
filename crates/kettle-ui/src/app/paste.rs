@@ -881,16 +881,6 @@ impl App {
         }
     }
 
-    /// Read a file list from the clipboard (CF_HDROP on Windows,
-    /// `text/uri-list` elsewhere), or `None` if the clipboard holds no files.
-    pub(super) fn clipboard_file_paste_paths(&mut self) -> Option<Vec<std::path::PathBuf>> {
-        self.clipboard
-            .as_mut()?
-            .file_list()
-            .ok()
-            .filter(|paths| !paths.is_empty())
-    }
-
     /// Paste selected Linux PRIMARY text, falling back to the full clipboard pipeline
     /// when PRIMARY is empty or unavailable. Other platforms have one clipboard.
     pub(super) fn paste_primary(&mut self, ws: &mut WindowState) {
