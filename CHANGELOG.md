@@ -964,6 +964,12 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Security
 
+- A Kettle built for a Unix other than Linux or macOS, which Kettle does not
+  ship, now refuses to start a program in a pane. On those systems it could
+  not find every file it had open, so a file left open above a limit that was
+  lowered afterwards could have been passed on to the program. Linux and
+  macOS are unchanged.
+
 - A PNG pasted from the Linux clipboard is read up to 64 MiB (the X11 route
   allowed 256 MiB) and decoded with limits set before any pixel memory is
   allocated: 16,384 pixels a side and 256 MiB, where the decoder's defaults

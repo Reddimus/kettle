@@ -615,10 +615,23 @@ the `Restore` and `Disable` variants, so it does not build against an upstream
   before `fork`, independently of either process limit: lowering the hard
   limit does not close descriptors already open above it. An unreadable,
   unusable, or over-1,048,576 bound fails the spawn instead of silently missing
-  descriptors or hanging. Other Unix systems use the finite hard limit when
-  it is at most 1,048,576; otherwise they retain the capped soft-limit walk.
-  These fallbacks cover descriptors left above a later-lowered soft limit
-  (audit finding v004). The macOS list still avoids the full walk on normal
+  descriptors or hanging. These fallbacks cover descriptors left above a
+  later-lowered soft limit (audit finding v004). On any other Unix every
+  spawn fails with `ErrorKind::Unsupported` before the command is resolved or
+  any `fork`: this copy has no
+  complete descriptor list there, and a walk bounded by either
+  `RLIMIT_NOFILE` value misses a descriptor left open above a limit lowered
+  afterwards. Kettle ships for Linux, macOS and Windows only, so no shipped
+  build takes that path; a port to another Unix must first add that system's
+  own complete enumeration, tested with a descriptor above lowered hard and
+  soft limits and a failing-`exec` control. A test built on every Unix host
+  pins that the function the generic branch returns gives no limit-derived
+  bound; that the branch calls it, and that the refusal comes before the
+  command is resolved, is checked only by the test that goes through the
+  spawn entry point. That test is built only on such a Unix; it has never run
+  on a real one, only on Linux with this file's Linux `cfg` renamed so that
+  Linux took the generic path (2026-11-20), where it passed and failed
+  against the previous code. The macOS list still avoids the full walk on normal
   pane spawns. Tests isolate limit changes in a subprocess, leak fd 5000 (or
   the highest available lower number), lower the soft limit below it, and
   probe it with `fcntl` in the executed child. A test-only flag captured before
