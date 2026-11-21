@@ -71,11 +71,7 @@ pub(super) fn linux_title_double_click(
     (x, y): (f32, f32),
     tolerance: f32,
 ) -> bool {
-    previous.is_some_and(|(t, px, py)| {
-        now.duration_since(t) <= LINUX_TITLE_DOUBLE_CLICK
-            && (x - px).abs() <= tolerance
-            && (y - py).abs() <= tolerance
-    })
+    titlebar_double_click(previous, now, (x, y), LINUX_TITLE_DOUBLE_CLICK, tolerance)
 }
 
 /// Whether `(x, y)` is on what GNOME treats as the title bar itself: empty

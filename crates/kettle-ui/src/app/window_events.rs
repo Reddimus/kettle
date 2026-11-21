@@ -63,7 +63,7 @@ impl App {
                 self.close_window_now(ws, DropPanes::No);
             }
             WindowEvent::Resized(size) => {
-                ws.lone_tab_width.set(None);
+                ws.release_tab_hold();
                 self.confirm_cancel_press(ws);
                 self.confirm_scroll(ws, 0, true);
                 self.sync_output_frame_budget(ws, false);
@@ -137,7 +137,7 @@ impl App {
                 }
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                ws.lone_tab_width.set(None);
+                ws.release_tab_hold();
                 // The patch was drawn at the old scale, and the new-scale frame
                 // may wait for the paired resize.
                 Self::hide_cursor_layer(ws);
@@ -822,18 +822,13 @@ impl App {
                         && bar.scroll_left.2 > 0.0
                         && in_bar(bar.scroll_left, px, py)
                     {
-                        // `‹` overflow arrow — step to an earlier tab
-                        // (scrolls it into view via tab_strip_layout).
-                        let pre = self.focus_key(ws);
-                        ws.mux.prev_tab();
-                        self.note_focus_change(ws, pre);
+                        // `‹` overflow arrow: back one tab.
+                        self.press_tab_scroll_arrow(ws, &bar, false);
                     } else if bcode == 0
                         && bar.scroll_right.2 > 0.0
                         && in_bar(bar.scroll_right, px, py)
                     {
-                        let pre = self.focus_key(ws);
-                        ws.mux.next_tab();
-                        self.note_focus_change(ws, pre);
+                        self.press_tab_scroll_arrow(ws, &bar, true);
                     } else if let Some(seg) = bar.segments.iter().find(|s| in_bar(s.rect, px, py)) {
                         let close = bcode == 1 || in_bar(seg.close, px, py);
                         if close {
@@ -865,6 +860,7 @@ impl App {
                             // Fire TabClose so plugins see
                             // the ✕-click close the same as Action::CloseTab.
                             let closing_idx = seg.idx;
+                            let before = ws.titlebar_strip.get();
                             if ws.mux.close_tab_at(seg.idx) {
                                 // Save the (empty) session
                                 // before exit so next launch starts
@@ -880,6 +876,7 @@ impl App {
                             }
                             self.fire_tab_close_event(ws, closing_idx);
                             self.note_focus_change(ws, pre);
+                            hold_tabs_after_pointer_close(ws, &bar, before);
                         } else {
                             let pre = self.focus_key(ws);
                             ws.mux.active = seg.idx;

@@ -2568,12 +2568,12 @@ impl App {
                 && bar.scroll_left.2 > 0.0
                 && rect_contains(bar.scroll_left, px, py)
             {
-                ws.mux.prev_tab();
+                self.press_tab_scroll_arrow(ws, &bar, false);
             } else if bcode == 0
                 && bar.scroll_right.2 > 0.0
                 && rect_contains(bar.scroll_right, px, py)
             {
-                ws.mux.next_tab();
+                self.press_tab_scroll_arrow(ws, &bar, true);
             } else if let Some(seg) = bar
                 .segments
                 .iter()
@@ -2600,6 +2600,7 @@ impl App {
                     }
                     let pre = self.focus_key(ws);
                     let closing_idx = seg.idx;
+                    let before = ws.titlebar_strip.get();
                     if ws.mux.close_tab_at(seg.idx) {
                         self.fire_tab_close_event(ws, closing_idx);
                         self.save_session(ws);
@@ -2607,6 +2608,7 @@ impl App {
                     } else {
                         self.fire_tab_close_event(ws, closing_idx);
                         self.note_focus_change(ws, pre);
+                        hold_tabs_after_pointer_close(ws, &bar, before);
                     }
                 } else {
                     let pre = self.focus_key(ws);

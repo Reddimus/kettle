@@ -556,6 +556,8 @@ impl App {
     /// would leave the relocated button highlighted and the cursor as a hand
     /// while the pointer is actually over the new tab.
     pub(super) fn fire_tab_add_event(&mut self, ws: &mut WindowState) {
+        // A new tab ends any hold a close with the pointer left.
+        ws.release_tab_hold();
         if let Some(rec) = self.recorder.as_mut() {
             rec.record_marker("kettle:tab_add");
         }
@@ -568,6 +570,9 @@ impl App {
     /// listening for tab_close see every close regardless of
     /// trigger source.
     pub(super) fn fire_tab_close_event(&mut self, ws: &mut WindowState, closing_idx: usize) {
+        // Every close ends a hold; a close with the pointer sets a new one
+        // after this (`hold_tabs_after_pointer_close`).
+        ws.release_tab_hold();
         // Its panes go first: `pane_close` reaches every pane that ends.
         self.fire_closed_pane_events(ws);
         if let Some(rec) = self.recorder.as_mut() {

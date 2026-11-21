@@ -877,13 +877,20 @@ impl App {
         // the ACTIVE tab), so moving the selection IS how the bar scrolls.
         // Positive = "backwards" on both axes, matching winit's documented
         // convention that +Y scrolls up and +X scrolls left.
+        //
+        // A title-bar strip that overflows scrolls instead, one tab per
+        // step, as a browser's tab strip does, and leaves the selection be.
         if self.cursor_in_tab_bar(ws) && ws.mux.tabs.len() > 1 {
             let step = if steps.notches != 0 {
                 steps.notches
             } else {
                 steps.cols
             };
-            if step != 0 {
+            if step != 0 && self.scroll_titlebar_strip(ws, if step > 0 { -1 } else { 1 }) {
+                if let Some(w) = &ws.window {
+                    w.request_redraw();
+                }
+            } else if step != 0 {
                 let pre = self.focus_key(ws);
                 if step > 0 {
                     ws.mux.prev_tab();
@@ -1806,7 +1813,16 @@ impl App {
         // renderer stays in sync (the renderer reads
         // `tabbar.hovered_close_idx`, which we pass through in
         // `tab_bar()`).
+        // A pointer leaving the strip ends a close's hold as the strip is
+        // laid out here; the tabs divide it evenly again on the next frame.
+        let held = ws.titlebar_strip.get().held.is_some();
         let bar = self.tab_bar(ws);
+        if held
+            && ws.titlebar_strip.get().held.is_none()
+            && let Some(window) = &ws.window
+        {
+            window.request_redraw();
+        }
         let (new_tab_hover, hover_changed) = hover_tab_bar(ws, &bar);
         let (cursor_x, cursor_y) = (ws.cursor.x as f32, ws.cursor.y as f32);
         let control_hover = window_control_at(&bar, cursor_x, cursor_y);

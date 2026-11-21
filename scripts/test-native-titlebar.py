@@ -145,9 +145,9 @@ class TitlebarGeometryTests(unittest.TestCase):
                         "band": rect(78, 0, 722, 28),
                         "new_tab": rect(736, 0, 28, 28),
                         "new_tab_menu": rect(764, 0, 28, 28),
-                        "segments": [{"rect": rect(320, 0, 160, 28),
-                                      "title_rect": rect(348, 0, 104, 28),
-                                      "close": rect(480, 0, 0, 0),
+                        "segments": [{"rect": rect(78, 0, 560, 28),
+                                      "title_rect": rect(86, 0, 544, 28),
+                                      "close": rect(638, 0, 0, 0),
                                       "hint": None, "hovered": False,
                                       "fitted_title": "",
                                       "label": "Kettle caption fixture"}]},
@@ -177,15 +177,43 @@ class TitlebarGeometryTests(unittest.TestCase):
                 if count == 2:
                     def segment(x, index):
                         return dict(tab, hovered=False,
-                                    rect=dict(x=x * scale, y=0, width=320 * scale, height=28 * scale),
+                                    rect=dict(x=x * scale, y=0, width=280 * scale, height=28 * scale),
                                     title_rect=dict(x=(x + 8) * scale, y=0,
-                                                    width=228 * scale, height=28 * scale),
-                                    close=dict(x=(x + 292) * scale, y=0,
+                                                    width=188 * scale, height=28 * scale),
+                                    close=dict(x=(x + 252) * scale, y=0,
                                                width=28 * scale, height=28 * scale),
                                     hint={"text": f"Cmd+{index}", "rect": dict(
-                                        x=(x + 244) * scale, y=0, width=40 * scale, height=28 * scale)})
-                    geometry["tab_bar"]["segments"] = [segment(78, 1), segment(398, 2)]
+                                        x=(x + 204) * scale, y=0, width=40 * scale, height=28 * scale)})
+                    geometry["tab_bar"]["segments"] = [segment(78, 1), segment(358, 2)]
                 checker.titlebar_geometry(geometry)
+
+    def test_tabs_start_the_lane_split_it_evenly_and_leave_a_drag_lane(self):
+        def shift(g):
+            g["tab_bar"]["segments"][0]["rect"].update(x=320)
+            g["tab_bar"]["segments"][0]["title_rect"].update(x=328)
+        def crowd(g):
+            g["tab_bar"]["segments"][0]["rect"].update(width=680)
+            g["tab_bar"]["segments"][0]["title_rect"].update(width=600)
+        def uneven(g):
+            tab = g["tab_bar"]["segments"][0]
+            other = dict(tab, rect=dict(tab["rect"], x=338, width=300),
+                         title_rect=dict(tab["title_rect"], x=346, width=284))
+            tab["rect"].update(width=260)
+            tab["title_rect"].update(width=244)
+            g["tab_bar"]["segments"].append(other)
+        def scrolled_into_the_lane(g):
+            g["tab_bar"]["scroll_right"] = dict(x=700, y=0, width=28, height=28)
+        for mutate in (shift, crowd, uneven, scrolled_into_the_lane):
+            geometry = self.fixture()
+            mutate(geometry)
+            with self.assertRaises(AssertionError, msg=mutate.__name__):
+                checker.titlebar_geometry(geometry)
+        # `›` right after the tabs shown keeps the lane.
+        geometry = self.fixture()
+        geometry["tab_bar"]["scroll_right"] = dict(x=638, y=0, width=28, height=28)
+        geometry["tab_bar"]["segments"][0]["rect"].update(width=532)
+        geometry["tab_bar"]["segments"][0]["title_rect"].update(width=516)
+        checker.titlebar_geometry(geometry)
 
     def test_titlebar_geometry_uses_scaled_band(self):
         for scale in (1, 2):
@@ -193,6 +221,12 @@ class TitlebarGeometryTests(unittest.TestCase):
             checker.titlebar_geometry(geometry)
             geometry["fullscreen"] = True
             geometry["tab_bar"]["band"]["x"] = 0
+            # Without the traffic lights the lone tab starts at the edge.
+            with self.assertRaises(AssertionError):
+                checker.titlebar_geometry(geometry)
+            tab = geometry["tab_bar"]["segments"][0]
+            tab["rect"].update(x=0)
+            tab["title_rect"].update(x=8 * scale)
             checker.titlebar_geometry(geometry)
 
     def test_settings_gear_must_sit_apart_from_the_new_tab_pair(self):
