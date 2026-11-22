@@ -3913,12 +3913,14 @@ fn a_late_terminal_paste_goes_only_where_the_keyboard_still_is() {
         Some(super::ClipboardDelivery::Pane(PasteContent::Text(Ok(text)))) if text == "late"
     ));
     assert!(ws.clipboard_wait.is_none());
-    // A modal opened since: nowhere.
+    // A modal opened since: nowhere, with the moved-destination notice.
     ws.clipboard_wait = late_paste(here(), later);
     ws.palette_input = Some((Default::default(), 0));
     assert!(matches!(
         super::take_clipboard_answer(&mut ws, now, none),
-        Some(super::ClipboardDelivery::Dropped)
+        Some(super::ClipboardDelivery::Dropped(Some(
+            kettle_i18n::Text::NotifyBodyClipboardPasteMoved
+        )))
     ));
     // Asked for under the palette, and the palette is still up: as in time.
     ws.clipboard_wait = late_paste(super::PasteDestination::capture(&ws, Vec::new()), later);
@@ -3931,7 +3933,76 @@ fn a_late_terminal_paste_goes_only_where_the_keyboard_still_is() {
     ws.clipboard_wait = late_paste(here(), later);
     assert!(matches!(
         super::take_clipboard_answer(&mut ws, now, |_| vec![42]),
-        Some(super::ClipboardDelivery::Dropped)
+        Some(super::ClipboardDelivery::Dropped(Some(
+            kettle_i18n::Text::NotifyBodyClipboardPasteMoved
+        )))
+    ));
+
+    // Destination moved, and the clipboard timed out: report timeout, not moved.
+    let (_sender, answer) = LateAnswer::pending(later, || {
+        PasteContent::Text(Err(arboard::Error::Timeout))
+    });
+    ws.clipboard_wait = Some(super::ClipboardWait(super::Wait::Pane {
+        destination: here(),
+        answer,
+    }));
+    ws.palette_input = Some((Default::default(), 0));
+    assert!(matches!(
+        super::take_clipboard_answer(&mut ws, later, none),
+        Some(super::ClipboardDelivery::Dropped(Some(
+            kettle_i18n::Text::NotifyBodyClipboardTimeout
+        )))
+    ));
+    // Destination moved, and the clipboard was empty: quiet, not moved.
+    let (sender, answer) = LateAnswer::pending(later, || {
+        PasteContent::Text(Err(arboard::Error::Timeout))
+    });
+    sender.send(PasteContent::Text(Ok(String::new()))).unwrap();
+    ws.clipboard_wait = Some(super::ClipboardWait(super::Wait::Pane {
+        destination: here(),
+        answer,
+    }));
+    assert!(matches!(
+        super::take_clipboard_answer(&mut ws, now, none),
+        Some(super::ClipboardDelivery::Dropped(None))
+    ));
+    let (sender, answer) = LateAnswer::pending(later, || {
+        PasteContent::Text(Err(arboard::Error::Timeout))
+    });
+    sender
+        .send(PasteContent::Text(Err(arboard::Error::ContentNotAvailable)))
+        .unwrap();
+    ws.clipboard_wait = Some(super::ClipboardWait(super::Wait::Pane {
+        destination: here(),
+        answer,
+    }));
+    assert!(matches!(
+        super::take_clipboard_answer(&mut ws, now, none),
+        Some(super::ClipboardDelivery::Dropped(None))
+    ));
+    ws.palette_input = None;
+
+    // Field destination closed: timeout reports timeout, empty stays quiet.
+    let (_sender, answer) = LateAnswer::pending(later, || Err(arboard::Error::Timeout));
+    ws.clipboard_wait = Some(super::ClipboardWait(super::Wait::Field {
+        modal: super::KeyModal::Palette,
+        answer,
+    }));
+    assert!(matches!(
+        super::take_clipboard_answer(&mut ws, later, none),
+        Some(super::ClipboardDelivery::Dropped(Some(
+            kettle_i18n::Text::NotifyBodyClipboardTimeout
+        )))
+    ));
+    let (sender, answer) = LateAnswer::pending(later, || Err(arboard::Error::Timeout));
+    sender.send(Ok(String::new())).unwrap();
+    ws.clipboard_wait = Some(super::ClipboardWait(super::Wait::Field {
+        modal: super::KeyModal::Palette,
+        answer,
+    }));
+    assert!(matches!(
+        super::take_clipboard_answer(&mut ws, now, none),
+        Some(super::ClipboardDelivery::Dropped(None))
     ));
 
     // Still waiting: it stays, and the window looks again soon.
@@ -3990,7 +4061,9 @@ fn a_late_broadcast_paste_goes_only_to_the_panes_it_was_asked_for() {
     ws.mux.next_tab();
     assert!(matches!(
         super::take_clipboard_answer(&mut ws, now, recipients),
-        Some(super::ClipboardDelivery::Dropped)
+        Some(super::ClipboardDelivery::Dropped(Some(
+            kettle_i18n::Text::NotifyBodyClipboardPasteMoved
+        )))
     ));
     // Asked for in this tab and delivered in it.
     ws.clipboard_wait = late_paste(asked_in(&ws), later);
@@ -4003,14 +4076,132 @@ fn a_late_broadcast_paste_goes_only_to_the_panes_it_was_asked_for() {
     ws.mux.broadcast = crate::mux::BroadcastScope::All;
     assert!(matches!(
         super::take_clipboard_answer(&mut ws, now, recipients),
-        Some(super::ClipboardDelivery::Dropped)
+        Some(super::ClipboardDelivery::Dropped(Some(
+            kettle_i18n::Text::NotifyBodyClipboardPasteMoved
+        )))
     ));
+}
+
+/// Input in another window that holds a recipient pane of a cross-window
+/// broadcast drops the waiting paste in the originating window, while leaving
+/// unrelated windows' waiting pastes alone.
+#[cfg(unix)]
+#[test]
+fn input_in_a_broadcast_peer_window_drops_a_waiting_group_paste() {
+    let cfg = kettle_config::Config {
+        shell_integration: false,
+        login_shell: false,
+        ..kettle_config::Config::default()
+    };
+    let spawn_mux = || {
+        let mut mux = Mux::new();
+        mux.new_tab_with_geometry(
+            &cfg,
+            kettle_core::PtyGeometry::from_cell_size(80, 24, 8, 16),
+            std::sync::Arc::new(|| {}),
+            &["/bin/cat".to_owned()],
+            None,
+        )
+        .expect("PTY fixture");
+        mux
+    };
+    let mut origin = WindowState::new(1, spawn_mux());
+    let peer = WindowState::new(2, spawn_mux());
+    let mut unrelated = WindowState::new(3, spawn_mux());
+    let peer_pane = peer.mux.active_focus().unwrap();
+    let origin_pane = origin.mux.active_focus().unwrap();
+    let unrelated_pane = unrelated.mux.active_focus().unwrap();
+
+    origin.mux.broadcast = crate::mux::BroadcastScope::Group("ops".into());
+    let later = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    origin.clipboard_wait = late_paste(
+        super::PasteDestination::capture(&origin, vec![origin_pane, peer_pane]),
+        later,
+    );
+    unrelated.clipboard_wait = late_paste(
+        super::PasteDestination::capture(&unrelated, vec![unrelated_pane]),
+        later,
+    );
+
+    super::drop_peer_clipboard_waits(&peer, [&mut origin, &mut unrelated]);
+    assert!(
+        origin.clipboard_wait.is_none(),
+        "input in a broadcast peer must drop the originating window's waiting paste"
+    );
+    assert!(
+        unrelated.clipboard_wait.is_some(),
+        "an unrelated window's waiting paste must stay"
+    );
+}
+
+/// A paste chord in a modal field or find bar joins only a wait for that same
+/// modal, never a wait meant for the terminal pane; and a terminal paste
+/// keybind joins a pane wait only when no modal holds the keyboard.
+#[test]
+fn paste_chord_in_a_modal_does_not_join_a_pane_wait() {
+    use crate::clipboard::LateAnswer;
+    use winit::keyboard::{Key, ModifiersState};
+    let keybinds = kettle_config::Config::default().keybinds;
+    let shortcut = if cfg!(target_os = "macos") {
+        ModifiersState::SUPER
+    } else {
+        ModifiersState::CONTROL
+    };
+    let v = Key::Character("v".into());
+    let later = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.mods = shortcut;
+
+    // A pane wait with a modal open: Cmd+V in the modal must NOT join it.
+    ws.clipboard_wait = late_paste(super::PasteDestination::capture(&ws, Vec::new()), later);
+    ws.palette_input = Some((Default::default(), 0));
+    assert!(
+        !super::key_joins_wait(&keybinds, &ws, &v, None, None),
+        "paste chord in palette must not join a pane wait"
+    );
+    ws.palette_input = None;
+    ws.search.open = true;
+    assert!(
+        !super::key_joins_wait(&keybinds, &ws, &v, None, None),
+        "paste chord in find bar must not join a pane wait"
+    );
+
+    // A field wait for Search: Cmd+V in Search joins it, but not if another
+    // modal is on top.
+    let (_sender, answer) = LateAnswer::pending(later, || Err(arboard::Error::Timeout));
+    ws.clipboard_wait = Some(super::ClipboardWait(super::Wait::Field {
+        modal: super::KeyModal::Search,
+        answer,
+    }));
+    assert!(super::key_joins_wait(&keybinds, &ws, &v, None, None));
+    ws.palette_input = Some((Default::default(), 0));
+    assert!(
+        !super::key_joins_wait(&keybinds, &ws, &v, None, None),
+        "paste chord in palette must not join a Search wait"
+    );
+}
+
+/// Non-zero scroll wheel motion cancels a waiting paste, while a zero-delta
+/// gesture-end event does not.
+#[test]
+fn wheel_delta_nonzero_distinguishes_scrolling_from_zero_phase_end() {
+    use winit::dpi::PhysicalPosition;
+    use winit::event::MouseScrollDelta;
+    assert!(super::wheel_delta_nonzero(&MouseScrollDelta::LineDelta(0.0, 1.0)));
+    assert!(super::wheel_delta_nonzero(&MouseScrollDelta::LineDelta(-1.0, 0.0)));
+    assert!(super::wheel_delta_nonzero(&MouseScrollDelta::PixelDelta(
+        PhysicalPosition::new(0.0, -4.0)
+    )));
+    assert!(!super::wheel_delta_nonzero(&MouseScrollDelta::LineDelta(0.0, 0.0)));
+    assert!(!super::wheel_delta_nonzero(&MouseScrollDelta::PixelDelta(
+        PhysicalPosition::new(0.0, 0.0)
+    )));
 }
 
 /// The paste entry points ask the clipboard the way that can leave the
 /// answer to come later, and every way the user moves on drops a waiting
-/// paste before the input is handled, except a key that pastes, which joins
-/// it. A paste that waited and went nowhere says so.
+/// paste before the input is handled, except a key that pastes into the same
+/// target, which joins it. A paste that waited and went nowhere says why.
 #[test]
 fn user_pastes_can_wait_for_the_clipboard_and_input_drops_the_wait() {
     let src = production_source();
@@ -4034,9 +4225,7 @@ fn user_pastes_can_wait_for_the_clipboard_and_input_drops_the_wait() {
     }
     let poll = body("poll_clipboard_wait");
     assert!(poll.contains("take_clipboard_answer(ws, now, |ws| self.broadcast_recipients(ws))"));
-    assert!(poll.contains(
-        "ClipboardDelivery::Dropped => { self.notify_paste_refused(kettle_i18n::Text::NotifyBodyClipboardPasteMoved); }"
-    ) || poll.contains("self.notify_paste_refused(kettle_i18n::Text::NotifyBodyClipboardPasteMoved);"));
+    assert!(poll.contains("ClipboardDelivery::Dropped(reason) =>"));
     let arm = |pattern: &str| {
         src.split(pattern)
             .nth(1)
@@ -4049,27 +4238,36 @@ fn user_pastes_can_wait_for_the_clipboard_and_input_drops_the_wait() {
     assert!(
         keyboard.trim_start().starts_with("// A paste still waiting")
             && keyboard.contains("key_drops_clipboard_wait(")
-            && keyboard.contains("self.key_pastes(")
-            && keyboard.contains("ws.clipboard_wait = None;"),
+            && keyboard.contains("self.key_joins_clipboard_wait(")
+            && keyboard.contains("self.drop_clipboard_wait(ws);"),
         "a key press must drop a waiting paste before anything handles it"
     );
     let press = arm("            WindowEvent::MouseInput {\n                state: ElementState::Pressed,");
-    assert!(press.contains("ws.clipboard_wait = None;"));
+    assert!(press.contains("self.drop_clipboard_wait(ws);"));
+    let wheel = arm("WindowEvent::MouseWheel { delta, phase, .. } => {");
+    assert!(
+        wheel.contains("if wheel_delta_nonzero(&delta) {\n                    self.drop_clipboard_wait(ws);"),
+        "scrolling must drop a waiting paste"
+    );
+    assert!(
+        body("dispatch_wheel").contains("self.drop_clipboard_wait(ws);"),
+        "ctl wheel dispatch must drop a waiting paste"
+    );
     let ime = arm("WindowEvent::Ime(ime) => {");
-    assert!(ime.contains("ws.clipboard_wait = None;"));
+    assert!(ime.contains("self.drop_clipboard_wait(ws);"));
     let drop = arm("WindowEvent::DroppedFile(path) => {");
-    assert!(drop.contains("ws.clipboard_wait = None;"));
+    assert!(drop.contains("self.drop_clipboard_wait(ws);"));
     let accessibility = arm("event_loop: &ActiveEventLoop,\n    ) {\n        // A paste still waiting");
     assert!(
         accessibility.contains("if accessibility_drops_clipboard_wait(request.action) {")
-            && accessibility.contains("ws.clipboard_wait = None;"),
+            && accessibility.contains("self.drop_clipboard_wait(ws);"),
         "an assistive-technology edit or focus change must drop a waiting paste"
     );
     let ui_keys = arm("// A control client's keys drop a paste still waiting for the");
     assert!(
         ui_keys.contains("key_drops_clipboard_wait(")
-            && ui_keys.contains("self.key_pastes(ws, key, None, None)")
-            && ui_keys.contains("ws.clipboard_wait = None;"),
+            && ui_keys.contains("self.key_joins_clipboard_wait(ws, key, None, None)")
+            && ui_keys.contains("self.drop_clipboard_wait(ws);"),
         "a control client's keys must drop a waiting paste"
     );
     assert!(

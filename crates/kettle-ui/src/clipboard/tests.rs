@@ -1539,8 +1539,14 @@ function run(argv) {
 }
 
 #[cfg(target_os = "macos")]
+static MACOS_PASTEBOARD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(target_os = "macos")]
 #[test]
 fn a_late_macos_pasteboard_owner_cannot_hold_the_ui_or_reorder_osc_52() {
+    let _guard = MACOS_PASTEBOARD_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     use late_macos_owner::{LATE_TEXT, Owner, STALLS_FOR};
     let owner = Owner::start();
     let name = owner.name.clone();
@@ -1587,6 +1593,9 @@ fn a_late_macos_pasteboard_owner_cannot_hold_the_ui_or_reorder_osc_52() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_macos_paste_takes_the_answer_a_late_pasteboard_owner_gives() {
+    let _guard = MACOS_PASTEBOARD_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
     use late_macos_owner::{LATE_TEXT, Owner, STALLS_FOR};
     let owner = Owner::start();
     let name = owner.name.clone();
@@ -1851,6 +1860,45 @@ fn a_preview_reads_the_clipboard_under_one_deadline() {
     let Late { mut clipboard, .. } = late_owner("copied", "image");
     assert_eq!(
         clipboard.peek(true),
+        ClipboardPeek {
+            files: Vec::new(),
+            text: Some("copied".into()),
+        }
+    );
+}
+
+/// On the caller-thread path (X11, where there is no worker), a file-list
+/// request that times out is treated as no list and the preview still reads
+/// text with its own deadline, matching `fallback_paste`.
+#[test]
+fn a_caller_thread_preview_keeps_reading_text_when_the_file_list_times_out() {
+    struct FilesTimeOut;
+    impl SelectionFallback for FilesTimeOut {
+        fn load(
+            &mut self,
+            _primary: bool,
+            _max: usize,
+            _deadline: Instant,
+        ) -> Result<String, arboard::Error> {
+            Ok("copied".into())
+        }
+        fn store(&mut self, _primary: bool, _text: String) -> Result<(), arboard::Error> {
+            Ok(())
+        }
+        fn files(&mut self) -> Result<Vec<PathBuf>, arboard::Error> {
+            Err(arboard::Error::Timeout)
+        }
+        fn image(&mut self) -> Result<arboard::ImageData<'static>, arboard::Error> {
+            Err(arboard::Error::ContentNotAvailable)
+        }
+    }
+    let mut clipboard = Clipboard {
+        arboard: Some(FilesTimeOut),
+        worker: None,
+        late_answers: None,
+    };
+    assert_eq!(
+        clipboard.peek(false),
         ClipboardPeek {
             files: Vec::new(),
             text: Some("copied".into()),

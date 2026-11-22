@@ -400,25 +400,30 @@ impl App {
         );
     }
 
-    /// Whether `key` with the window's modifiers pastes where it lands: the
-    /// platform paste chord while a modal field or the find bar has the
-    /// keyboard (`chord_pastes`), or a keybind for Paste or Paste Selection.
-    /// In a pane the chord is a key like any other unless it is bound.
-    pub(super) fn key_pastes(
+    /// Drops any paste waiting in `ws`, and any peer window's waiting
+    /// broadcast paste whose recipients include a pane in `ws`.
+    pub(super) fn drop_clipboard_wait(&mut self, ws: &mut WindowState) {
+        ws.clipboard_wait = None;
+        drop_peer_clipboard_waits(ws, self.windows.values_mut());
+    }
+
+    /// Whether `key` with the window's modifiers pastes into the destination
+    /// `ws.clipboard_wait` is already waiting for, so pressing paste again
+    /// joins that wait instead of dropping it.
+    ///
+    /// A modal field's or find bar's wait is joined only by the platform paste
+    /// chord while that modal still has the keyboard. A terminal pane's wait
+    /// is joined only by a Paste or Paste Selection keybind when no modal has
+    /// the keyboard: `Cmd+V` in a dialog or field over a waiting pane paste
+    /// drops the pane wait instead of joining it.
+    pub(super) fn key_joins_clipboard_wait(
         &self,
         ws: &WindowState,
         key: &Key,
         physical: Option<&PhysicalKey>,
         unshifted: Option<&Key>,
     ) -> bool {
-        chord_pastes(ws, key)
-            || resolve_keybind_action(&self.cfg.keybinds, Some(key), physical, ws.mods, unshifted)
-                .is_some_and(|(_, action)| {
-                    matches!(
-                        action,
-                        kettle_config::Action::Paste | kettle_config::Action::PastePrimary
-                    )
-                })
+        key_joins_wait(&self.cfg.keybinds, ws, key, physical, unshifted)
     }
 
     /// Delivers the answer a waiting paste has had, to where the paste was
@@ -432,9 +437,12 @@ impl App {
         match take_clipboard_answer(ws, now, |ws| self.broadcast_recipients(ws))? {
             ClipboardDelivery::Waiting(next) => return Some(next),
             // Nothing the user did in this window moved it, or the wait
-            // would have been dropped then: say that the paste went nowhere.
-            ClipboardDelivery::Dropped => {
-                self.notify_paste_refused(kettle_i18n::Text::NotifyBodyClipboardPasteMoved);
+            // would have been dropped then: say why nothing was pasted when
+            // there was an answer to lose or an error to report.
+            ClipboardDelivery::Dropped(reason) => {
+                if let Some(reason) = reason {
+                    self.notify_paste_refused(reason);
+                }
             }
             ClipboardDelivery::Pane(content) => self.apply_clipboard_paste(ws, content),
             ClipboardDelivery::Search(text) => {
@@ -1816,14 +1824,77 @@ const CLIPBOARD_POLL: std::time::Duration = std::time::Duration::from_millis(50)
 pub(super) enum ClipboardDelivery {
     /// No answer yet: look again then.
     Waiting(std::time::Instant),
-    /// The answer came, but where it was for has changed without the user's
-    /// input in this window (another window's broadcast toggle, a menu-bar
-    /// tab switch, a pane that exited): it goes nowhere, and the user is
-    /// told.
-    Dropped,
+    /// The wait ended after its destination changed without input in this
+    /// window (another window's broadcast toggle, a menu-bar tab switch, a
+    /// pane that exited): nothing is pasted, and the user is told why when
+    /// there was an answer to lose or an error to report. An empty clipboard
+    /// stays quiet.
+    Dropped(Option<kettle_i18n::Text>),
     Pane(crate::clipboard::PasteContent),
     Search(Result<String, arboard::Error>),
     Field(Result<String, arboard::Error>),
+}
+
+/// Drops any peer window's waiting terminal paste whose broadcast recipients
+/// include a pane in `ws`, so a cross-window group paste cannot land behind
+/// input in another window of the group.
+pub(super) fn drop_peer_clipboard_waits<'a>(
+    ws: &WindowState,
+    peers: impl IntoIterator<Item = &'a mut WindowState>,
+) {
+    for other in peers {
+        let targets_here = matches!(
+            other.clipboard_wait,
+            Some(ClipboardWait(Wait::Pane { ref destination, .. }))
+                if destination
+                    .recipients
+                    .iter()
+                    .any(|id| ws.mux.panes.contains_key(id))
+        );
+        if targets_here {
+            other.clipboard_wait = None;
+        }
+    }
+}
+
+/// Whether a wheel event carries non-zero scroll motion (as opposed to a
+/// zero-delta gesture-end event).
+pub(super) fn wheel_delta_nonzero(delta: &winit::event::MouseScrollDelta) -> bool {
+    match delta {
+        winit::event::MouseScrollDelta::LineDelta(x, y) => *x != 0.0 || *y != 0.0,
+        winit::event::MouseScrollDelta::PixelDelta(pos) => pos.x != 0.0 || pos.y != 0.0,
+    }
+}
+
+fn dropped_pane_reason(content: crate::clipboard::PasteContent) -> Option<kettle_i18n::Text> {
+    use crate::clipboard::{PasteContent, PasteRefusal};
+    use kettle_i18n::Text;
+    match content {
+        PasteContent::Files(paths) if paths.is_empty() => None,
+        PasteContent::Files(_) | PasteContent::Image(_) => {
+            Some(Text::NotifyBodyClipboardPasteMoved)
+        }
+        PasteContent::FilesOff => None,
+        PasteContent::Refused(PasteRefusal::Files) => {
+            Some(Text::NotifyBodyClipboardFilesUnreadable)
+        }
+        PasteContent::Refused(PasteRefusal::Image) => {
+            Some(Text::NotifyBodyClipboardImageUnreadable)
+        }
+        PasteContent::Text(result) => match clipboard_paste_result(result) {
+            Ok(text) if text.is_empty() => None,
+            Ok(_) => Some(Text::NotifyBodyClipboardPasteMoved),
+            Err(reason) => Some(reason),
+        },
+    }
+}
+
+fn dropped_field_reason(result: Result<String, arboard::Error>) -> Option<kettle_i18n::Text> {
+    match modals::field_paste(result) {
+        Ok(Some(_)) => Some(kettle_i18n::Text::NotifyBodyClipboardPasteMoved),
+        Ok(None) => None,
+        Err(reason) => Some(reason),
+    }
 }
 
 /// Takes the answer a waiting paste has had, with where it goes. A paste
@@ -1852,7 +1923,7 @@ pub(super) fn take_clipboard_answer(
             Some(content) if PasteDestination::capture(ws, recipients(ws)) == destination => {
                 ClipboardDelivery::Pane(content)
             }
-            Some(_) => ClipboardDelivery::Dropped,
+            Some(content) => ClipboardDelivery::Dropped(dropped_pane_reason(content)),
         },
         Wait::Field { modal, answer } => match answer.poll(now) {
             None => {
@@ -1860,7 +1931,9 @@ pub(super) fn take_clipboard_answer(
                 ws.clipboard_wait = Some(ClipboardWait(Wait::Field { modal, answer }));
                 ClipboardDelivery::Waiting(next)
             }
-            Some(_) if top_modal(ws) != Some(modal) => ClipboardDelivery::Dropped,
+            Some(text) if top_modal(ws) != Some(modal) => {
+                ClipboardDelivery::Dropped(dropped_field_reason(text))
+            }
             Some(text) if modal == KeyModal::Search => ClipboardDelivery::Search(text),
             Some(text) => ClipboardDelivery::Field(text),
         },
@@ -1889,6 +1962,35 @@ pub(super) fn key_drops_clipboard_wait(
         && !repeat
         && !pastes
         && !crate::cursor_exit_log::is_modifier(logical, physical)
+}
+
+/// Whether `key` joins `ws.clipboard_wait`: a modal field's or find bar's wait
+/// is joined only by the paste chord while that modal is on top, and a pane's
+/// wait is joined only by a Paste or Paste Selection keybind when no modal has
+/// the keyboard.
+pub(super) fn key_joins_wait(
+    keybinds: &Bindings,
+    ws: &WindowState,
+    key: &Key,
+    physical: Option<&PhysicalKey>,
+    unshifted: Option<&Key>,
+) -> bool {
+    let Some(ClipboardWait(wait)) = &ws.clipboard_wait else {
+        return false;
+    };
+    match wait {
+        Wait::Field { modal, .. } => top_modal(ws) == Some(*modal) && chord_pastes(ws, key),
+        Wait::Pane { .. } => {
+            top_modal(ws).is_none()
+                && resolve_keybind_action(keybinds, Some(key), physical, ws.mods, unshifted)
+                    .is_some_and(|(_, action)| {
+                        matches!(
+                            action,
+                            kettle_config::Action::Paste | kettle_config::Action::PastePrimary
+                        )
+                    })
+        }
+    }
 }
 
 /// Whether `key` is the platform paste chord where the chord pastes: in a

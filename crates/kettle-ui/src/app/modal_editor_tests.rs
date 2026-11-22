@@ -617,6 +617,8 @@ fn a_late_clipboard_answer_reaches_the_modal_field_that_asked_for_it() {
     sender.send(Ok("late".into())).unwrap();
     assert!(matches!(
         take_clipboard_answer(&mut ws, std::time::Instant::now(), |_| Vec::new()),
-        Some(ClipboardDelivery::Dropped)
+        Some(ClipboardDelivery::Dropped(Some(
+            kettle_i18n::Text::NotifyBodyClipboardPasteMoved
+        )))
     ));
 }

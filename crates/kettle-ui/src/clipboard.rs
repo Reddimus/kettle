@@ -557,20 +557,35 @@ impl<F: SelectionFallback> Clipboard<F> {
     }
 
     /// What CLIPBOARD holds for a preview: the files it names, and its text,
-    /// read under one paste's deadline. The text is read only when no files
-    /// are named, or with `text_with_files`. A read that times out leaves the
-    /// rest unasked, so a slow owner holds a preview for `READ_WITHIN` and no
-    /// longer.
+    /// read as a paste reads them. The text is read only when no files are
+    /// named, or with `text_with_files`.
+    ///
+    /// On the worker (Wayland, macOS, Windows) both reads share one paste's
+    /// deadline, and a list that timed out leaves the text unasked, so a slow
+    /// owner holds a preview for `READ_WITHIN` and no longer. Asked on the
+    /// caller's thread (X11), a list read that fails, a timeout included, is
+    /// no list, and the text has its own `READ_WITHIN`, as `fallback_paste`
+    /// gives it: there a failure does not show a list exists, and an owner may
+    /// leave a list request unanswered and still have text to paste.
     pub(crate) fn peek(&mut self, text_with_files: bool) -> ClipboardPeek {
+        #[cfg(any(target_os = "linux", target_os = "macos", windows, test))]
+        let shared = self.worker.is_some();
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows, test)))]
+        let shared = false;
         let deadline = Instant::now() + READ_WITHIN;
         let files = match self.file_list_by(deadline) {
             Ok(files) => files,
-            Err(arboard::Error::Timeout) => return ClipboardPeek::default(),
+            Err(arboard::Error::Timeout) if shared => return ClipboardPeek::default(),
             Err(_) => Vec::new(),
+        };
+        let text_by = if shared {
+            deadline
+        } else {
+            Instant::now() + READ_WITHIN
         };
         let text = (files.is_empty() || text_with_files)
             .then(|| {
-                self.get_selection_bounded(false, FIELD_TEXT_MAX, deadline)
+                self.get_selection_bounded(false, FIELD_TEXT_MAX, text_by)
                     .ok()
             })
             .flatten();
