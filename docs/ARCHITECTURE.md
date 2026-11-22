@@ -681,19 +681,25 @@ Where and for how long a paste reads depends on the backend:
   consent follows. A field's paste goes to its modal while that modal is on
   top. An answer whose destination changed without input in the window (a
   menu-bar tab switch, another window's broadcast, a pane that exited) is
-  dropped, and a notification says nothing was pasted. A fresh key press, a
-  click, a drop, input-method text, a control client's UI key, or an
-  assistive-technology edit, selection, focus or press in that window drops
-  the wait first, so a paste never lands behind later input. A key that
-  pastes (the paste chord in a modal field or the find bar, or a Paste or
-  Paste Selection keybind) joins the wait instead of asking the clipboard
-  again. Once nobody waits for a
-  paste, the worker asks its owner for no further format.
+  dropped, and a notification says why when there was an answer to lose or an
+  error to report (an empty clipboard stays quiet, and a timeout still
+  reports timeout). A fresh key press, a click, a non-zero scroll wheel
+  event, a drop, input-method text, a control client's UI key, or an
+  assistive-technology edit, selection, focus or press in that window, or in
+  any peer window holding a recipient pane of a cross-window broadcast
+  group, drops the wait first, so a paste never lands behind later input. A
+  key that pastes into the same waiting target (the paste chord for that
+  modal field or the find bar, or a Paste or Paste Selection keybind when no
+  modal holds the keyboard for a pane wait) joins the wait instead of asking
+  the clipboard again. Once nobody waits for a paste, the worker asks its
+  owner for no further format.
 
-  A program's read (OSC 52) and paste previews keep the two-second bound. A
-  preview reads the file list and the text under one deadline and stops
-  after the first timeout, and Shift+right-click reads the clipboard once
-  for both of its rows. Stores are not queued past their caller: an OSC 52
+  A program's read (OSC 52) and paste previews keep the two-second bound. On
+  the worker (Wayland, macOS, Windows), a preview reads the file list and the
+  text under one deadline and stops after the first timeout; on the caller
+  thread (X11), a file-list timeout is treated as no list and the text keeps
+  its own two-second read, matching a normal paste. Shift+right-click reads
+  the clipboard once for both of its rows. Stores are not queued past their caller: an OSC 52
   store, or Kettle's own copy, waits at most two seconds for the worker,
   and a store still queued when its deadline passes is dropped, never
   applied later over newer clipboard contents. While a read holds the

@@ -941,23 +941,32 @@ after it. Portable tests cover the same late answers with injected owners
 stopped waiting for is not asked of the owner, and
 `a_paste_nobody_waits_for_asks_for_no_further_format` that one already taken
 stops between formats. `a_preview_reads_the_clipboard_under_one_deadline`
-holds a preview to one deadline across its file-list and text reads. In `app`,
+holds a worker preview to one deadline across its file-list and text reads,
+and `a_caller_thread_preview_keeps_reading_text_when_the_file_list_times_out`
+keeps the X11 caller-thread preview reading text when the file list times
+out. In `app`,
 `the_paste_chord_in_every_modal_field_says_why_the_clipboard_gave_nothing`
 drives `Cmd+V`, `Ctrl+V` and their Shift forms through the shared editor of
 every modal field against a clipboard that times out or holds too much text;
 `a_late_clipboard_answer_reaches_the_modal_field_that_asked_for_it` and
 `a_late_terminal_paste_goes_only_where_the_keyboard_still_is` check where a
-late answer goes; on Unix
+late answer goes and that moved-destination drops report timeout or stay
+quiet on an empty clipboard; on Unix
 `a_late_broadcast_paste_goes_only_to_the_panes_it_was_asked_for` switches the
 active tab under a Tab broadcast and widens the scope, and the answer goes
-nowhere. `typing_drops_a_paste_still_waiting_for_the_clipboard` and
-`assistive_edits_and_focus_drop_a_paste_still_waiting_for_the_clipboard` say
-which keys and assistive-technology requests stop the wait (a key that pastes
-joins it, and `the_paste_chord_joins_a_wait_only_where_it_pastes` limits the
+nowhere, and `input_in_a_broadcast_peer_window_drops_a_waiting_group_paste`
+drops a waiting group broadcast when another window in the group gets input.
+`typing_drops_a_paste_still_waiting_for_the_clipboard`,
+`assistive_edits_and_focus_drop_a_paste_still_waiting_for_the_clipboard`,
+`paste_chord_in_a_modal_does_not_join_a_pane_wait`, and
+`wheel_delta_nonzero_distinguishes_scrolling_from_zero_phase_end` say
+which keys, scroll events, and assistive-technology requests stop the wait
+(a key that pastes into the same target joins it, and
+`the_paste_chord_joins_a_wait_only_where_it_pastes` limits the
 bare chord to text fields),
 `user_pastes_can_wait_for_the_clipboard_and_input_drops_the_wait`
-that every paste entry point and input handler, the control plane's UI keys
-included, is wired to them, and
+that every paste entry point and input handler, including scroll wheel and
+the control plane's UI keys, is wired to them, and
 `the_copied_rows_of_a_context_menu_read_the_clipboard_once` that
 Shift+right-click reads the clipboard once. On Windows CI,
 `a_stalled_windows_clipboard_owner_cannot_hold_the_ui_or_reorder_osc_52` runs
