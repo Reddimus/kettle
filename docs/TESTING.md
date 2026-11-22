@@ -923,8 +923,58 @@ fallback, PRIMARY support that appears and goes while the worker runs,
 cap/deadline errors, stale-reply isolation, initialization failure, the
 files-text-image order on a format-at-a-time clipboard, `paste-files = off`,
 native files and images without arboard, and that the Wayland path adds no
-dependency. `wayland::offer::tests` drive the Wayland negotiation against a
-loopback source, a thread in the test process and no real clipboard: the type
+dependency. They also cover the worker thread macOS and Windows ask their
+clipboard on, with an injected late owner: the caller has its timeout at the
+deadline, a store queued meanwhile is served after the stalled load, and a
+paste past its deadline asks for no further format. On macOS,
+`a_late_macos_pasteboard_owner_cannot_hold_the_ui_or_reorder_osc_52` runs the
+load and the queued store against a real lazy owner: an `osascript` process
+that promises text on a private, uniquely named pasteboard and provides it only
+when let go. It does not touch the system pasteboard, so it runs everywhere.
+`a_macos_paste_takes_the_answer_a_late_pasteboard_owner_gives` makes a user
+paste against the same owner: the window waits two seconds, the owner's later
+answer is still the paste's, and an OSC 52 store queued meanwhile is served
+after it. Portable tests cover the same late answers with injected owners
+(`a_users_read_takes_an_answer_that_comes_after_the_window_stopped_waiting`,
+`a_clipboard_that_takes_late_answers_leaves_a_slow_paste_to_come_later`), and
+`a_late_read_dropped_while_queued_is_never_asked_for` shows a paste the user
+stopped waiting for is not asked of the owner, and
+`a_paste_nobody_waits_for_asks_for_no_further_format` that one already taken
+stops between formats. `a_preview_reads_the_clipboard_under_one_deadline`
+holds a worker preview to one deadline across its file-list and text reads,
+and `a_caller_thread_preview_keeps_reading_text_when_the_file_list_times_out`
+keeps the X11 caller-thread preview reading text when the file list times
+out. In `app`,
+`the_paste_chord_in_every_modal_field_says_why_the_clipboard_gave_nothing`
+drives `Cmd+V`, `Ctrl+V` and their Shift forms through the shared editor of
+every modal field against a clipboard that times out or holds too much text;
+`a_late_clipboard_answer_reaches_the_modal_field_that_asked_for_it` and
+`a_late_terminal_paste_goes_only_where_the_keyboard_still_is` check where a
+late answer goes and that moved-destination drops report timeout or stay
+quiet on an empty clipboard; on Unix
+`a_late_broadcast_paste_goes_only_to_the_panes_it_was_asked_for` switches the
+active tab under a Tab broadcast and widens the scope, and the answer goes
+nowhere, and `input_in_a_broadcast_peer_window_drops_a_waiting_group_paste`
+drops a waiting group broadcast when another window in the group gets input.
+`typing_drops_a_paste_still_waiting_for_the_clipboard`,
+`assistive_edits_and_focus_drop_a_paste_still_waiting_for_the_clipboard`,
+`paste_chord_in_a_modal_does_not_join_a_pane_wait`, and
+`wheel_delta_nonzero_distinguishes_scrolling_from_zero_phase_end` say
+which keys, scroll events, and assistive-technology requests stop the wait
+(a key that pastes into the same target joins it, and
+`the_paste_chord_joins_a_wait_only_where_it_pastes` limits the
+bare chord to text fields),
+`user_pastes_can_wait_for_the_clipboard_and_input_drops_the_wait`
+that every paste entry point and input handler, including scroll wheel and
+the control plane's UI keys, is wired to them, and
+`the_copied_rows_of_a_context_menu_read_the_clipboard_once` that
+Shift+right-click reads the clipboard once. On Windows CI,
+`a_stalled_windows_clipboard_owner_cannot_hold_the_ui_or_reorder_osc_52` runs
+the same check against a real delayed-rendering owner, a message-only window
+in the test process. It replaces the desktop clipboard, so elsewhere it runs
+only with `KETTLE_WINDOWS_CLIPBOARD_TEST=1`. `wayland::offer::tests` drive the
+Wayland negotiation against a loopback source, a thread in the test process
+and no real clipboard: the type
 table (text and image, image alone, local, remote and malformed file lists,
 `x-special/gnome-copied-files`), `paste-files = off` against the text copy of
 the paths, each read's cap against a source that never ends, a stalled source

@@ -2065,6 +2065,17 @@ impl App {
             {
                 ws.macos_raw_mods = *mods;
             }
+            // A control client's keys drop a paste still waiting for the
+            // clipboard as the keyboard's do, so it never lands behind them.
+            if key_drops_clipboard_wait(
+                ElementState::Pressed,
+                false,
+                key,
+                PhysicalKey::Unidentified(winit::keyboard::NativeKeyCode::Unidentified),
+                self.key_joins_clipboard_wait(ws, key, None, None),
+            ) {
+                self.drop_clipboard_wait(ws);
+            }
             // Mirror `winit`: `KeyEvent::text` is present for a character key
             // under every modifier except Control, Command included.
             // Suppressing Super here would let a `cmd+v` test pass against a

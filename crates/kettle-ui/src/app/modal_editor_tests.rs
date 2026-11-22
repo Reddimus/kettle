@@ -473,3 +473,152 @@ fn select_all_in_find_or_a_text_field_selects_the_field() {
         }
     }
 }
+
+/// Every modal text field, the Settings search field included, as the key
+/// path finds it open.
+fn every_field() -> Vec<(String, WindowState)> {
+    let mut fields: Vec<_> = FIELDS
+        .into_iter()
+        .map(|kind| (format!("{kind:?}"), field(kind)))
+        .collect();
+    let mut search = WindowState::new(0, Mux::new());
+    search.settings_nav = Some(crate::settings::SettingsNav {
+        search_focused: true,
+        query: TextEditor::from("tab"),
+        ..Default::default()
+    });
+    fields.push(("SettingsSearch".into(), search));
+    fields
+}
+
+/// The platform's paste chords as winit reports them: `Cmd+V` and
+/// `Shift+Cmd+V` on macOS, `Ctrl+V` and `Ctrl+Shift+V` elsewhere.
+fn paste_chords() -> [(Key, ModifiersState); 2] {
+    let shortcut = if cfg!(target_os = "macos") {
+        ModifiersState::SUPER
+    } else {
+        ModifiersState::CONTROL
+    };
+    [
+        (Key::Character("v".into()), shortcut),
+        (Key::Character("V".into()), shortcut | ModifiersState::SHIFT),
+    ]
+}
+
+/// The paste chord reaches every modal field through the shared editor
+/// (`modal_editor_key`), ahead of each field's own keys. A clipboard that
+/// timed out, or held text over the largest paste, must say so there and
+/// leave the field as it was; it used to give the field nothing and say
+/// nothing.
+#[test]
+fn the_paste_chord_in_every_modal_field_says_why_the_clipboard_gave_nothing() {
+    use kettle_i18n::Text;
+    type Answer = fn() -> Result<String, arboard::Error>;
+    let answers: [(Answer, Text); 2] = [
+        (
+            || Err(arboard::Error::Timeout),
+            Text::NotifyBodyClipboardTimeout,
+        ),
+        (
+            || Ok("x".repeat((4 << 20) + 1)),
+            Text::NotifyBodyClipboardLimitExceeded,
+        ),
+    ];
+    for (answer, reason) in answers {
+        let mut clipboard = crate::clipboard::Clipboard::answering(answer, None);
+        for (name, mut ws) in every_field() {
+            for (key, mods) in paste_chords() {
+                ws.mods = mods;
+                let before = modal_editor(&ws).unwrap().text().to_string();
+                let edit = modals::edit_modal_field(&mut ws, &key, Some(&mut clipboard));
+                assert!(edit.handled, "{name} {key:?}");
+                assert_eq!(edit.refused, Some(reason), "{name} {key:?}");
+                assert!(edit.later.is_none(), "{name}");
+                assert_eq!(modal_editor(&ws).unwrap().text(), before, "{name}");
+            }
+        }
+    }
+    // Text pastes at the caret, and an empty or textless clipboard pastes
+    // nothing and says nothing.
+    let mut clipboard = crate::clipboard::Clipboard::answering(|| Ok("pasted".into()), None);
+    let mut empty =
+        crate::clipboard::Clipboard::answering(|| Err(arboard::Error::ContentNotAvailable), None);
+    for (name, mut ws) in every_field() {
+        let (key, mods) = paste_chords()[0].clone();
+        ws.mods = mods;
+        let before = modal_editor(&ws).unwrap().text().to_string();
+        let edit = modals::edit_modal_field(&mut ws, &key, Some(&mut empty));
+        assert!(edit.handled && edit.refused.is_none(), "{name}");
+        assert_eq!(modal_editor(&ws).unwrap().text(), before, "{name}");
+        let edit = modals::edit_modal_field(&mut ws, &key, Some(&mut clipboard));
+        assert!(edit.handled && edit.refused.is_none(), "{name}");
+        assert!(
+            modal_editor(&ws).unwrap().text().contains("pasted"),
+            "{name}"
+        );
+    }
+}
+
+/// On macOS a paste the clipboard has not answered in two seconds is left
+/// to come later, so a slow answer, such as the user allowing the paste, is
+/// not lost. The answer goes into the field it was asked for while that
+/// field still has the keyboard, and nowhere once it has gone.
+#[test]
+fn a_late_clipboard_answer_reaches_the_modal_field_that_asked_for_it() {
+    let (release, released) = crossbeam_channel::bounded::<()>(1);
+    let mut clipboard = crate::clipboard::Clipboard::answering(
+        move || {
+            released.recv().map_err(|_| arboard::Error::Timeout)?;
+            Ok("allowed".into())
+        },
+        Some(std::time::Duration::from_secs(30)),
+    );
+    let mut ws = field(ModalKind::Title);
+    let (key, mods) = paste_chords()[0].clone();
+    ws.mods = mods;
+    let before = modal_editor(&ws).unwrap().text().to_string();
+    let edit = modals::edit_modal_field(&mut ws, &key, Some(&mut clipboard));
+    assert!(edit.handled && edit.refused.is_none());
+    assert_eq!(modal_editor(&ws).unwrap().text(), before);
+    let answer = edit.later.expect("the paste is left to come later");
+    let modal = top_modal(&ws).unwrap();
+    ws.clipboard_wait = Some(ClipboardWait(Wait::Field { modal, answer }));
+    // While it waits, the chord does not ask the clipboard again.
+    let edit = modals::edit_modal_field(&mut ws, &key, Some(&mut clipboard));
+    assert!(edit.handled && edit.refused.is_none() && edit.later.is_none());
+    assert!(matches!(
+        take_clipboard_answer(&mut ws, std::time::Instant::now(), |_| Vec::new()),
+        Some(ClipboardDelivery::Waiting(_))
+    ));
+    assert!(ws.clipboard_wait.is_some());
+
+    release.send(()).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let text = loop {
+        match take_clipboard_answer(&mut ws, std::time::Instant::now(), |_| Vec::new()) {
+            Some(ClipboardDelivery::Field(text)) => break text,
+            Some(ClipboardDelivery::Waiting(_)) if std::time::Instant::now() < deadline => {
+                std::thread::yield_now();
+            }
+            _ => panic!("the late answer did not reach the field"),
+        }
+    };
+    assert!(ws.clipboard_wait.is_none());
+    assert_eq!(modals::paste_into_modal_field(&mut ws, text), Ok(()));
+    assert!(modal_editor(&ws).unwrap().text().contains("allowed"));
+
+    // An answer for a field that has closed goes nowhere.
+    let (sender, answer) = crate::clipboard::LateAnswer::pending(
+        std::time::Instant::now() + std::time::Duration::from_secs(10),
+        || Err(arboard::Error::Timeout),
+    );
+    ws.clipboard_wait = Some(ClipboardWait(Wait::Field { modal, answer }));
+    ws.editing_title = None;
+    sender.send(Ok("late".into())).unwrap();
+    assert!(matches!(
+        take_clipboard_answer(&mut ws, std::time::Instant::now(), |_| Vec::new()),
+        Some(ClipboardDelivery::Dropped(Some(
+            kettle_i18n::Text::NotifyBodyClipboardPasteMoved
+        )))
+    ));
+}

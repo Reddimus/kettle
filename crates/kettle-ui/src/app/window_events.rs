@@ -557,6 +557,9 @@ impl App {
                 ..
             } => {
                 ws.resume_native_pointer();
+                // A paste still waiting for the clipboard never lands behind
+                // a click.
+                self.drop_clipboard_wait(ws);
                 if button == MouseButton::Left {
                     let at = (ws.cursor.x as f32, ws.cursor.y as f32);
                     self.track_titlebar_pointer(ws, TitlebarPointer::Press(at.0, at.1));
@@ -1382,6 +1385,11 @@ impl App {
             WindowEvent::MouseWheel { delta, phase, .. } => {
                 dismiss_link_hover(ws);
                 ws.resume_native_pointer();
+                // Scrolling cancels a paste still waiting for the clipboard,
+                // so a late paste never lands after the user scrolled away.
+                if wheel_delta_nonzero(&delta) {
+                    self.drop_clipboard_wait(ws);
+                }
                 // A gesture ending (macOS momentum scroll, and any backend that
                 // reports phases) drops leftover sub-detent residue so a partial
                 // step can't leak into the next, unrelated gesture.
@@ -1430,6 +1438,9 @@ impl App {
                 // A drop is the pointer's, as a press elsewhere: the keyboard
                 // goes back to the terminal first.
                 self.exit_preview_focus(ws);
+                // A paste still waiting for the clipboard never lands behind
+                // a drop.
+                self.drop_clipboard_wait(ws);
                 // A file dropped while a modal (search /
                 // palette / settings / confirm dialog / inline title-edit / vi
                 // copy-mode / …) is open must NOT inject its path into the PTY
@@ -1639,6 +1650,9 @@ impl App {
                     _ => false,
                 };
                 if typing {
+                    // A paste still waiting for the clipboard never lands
+                    // behind text an input method composes.
+                    self.drop_clipboard_wait(ws);
                     dismiss_link_hover(ws);
                     self.dismiss_selection_hint(ws);
                 }
@@ -1701,6 +1715,24 @@ impl App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                // A paste still waiting for the clipboard never lands behind
+                // a key typed after it (in this window or a peer window of a
+                // broadcast group). Pressing paste again for the same target
+                // joins the wait instead.
+                if key_drops_clipboard_wait(
+                    event.state,
+                    event.repeat,
+                    &event.logical_key,
+                    event.physical_key,
+                    self.key_joins_clipboard_wait(
+                        ws,
+                        &event.logical_key,
+                        Some(&event.physical_key),
+                        Some(&event.key_without_modifiers()),
+                    ),
+                ) {
+                    self.drop_clipboard_wait(ws);
+                }
                 if key_dismisses_link_hover(event.state, &event.logical_key, event.physical_key) {
                     dismiss_link_hover(ws);
                     self.dismiss_selection_hint(ws);

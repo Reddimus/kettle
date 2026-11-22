@@ -429,15 +429,84 @@ campaign and startup outlier remain inconclusive. These entries stay open.
 
 ## Platform
 
-- **Native clipboard acquisition can exceed paste bounds.** Independent review
-  of the clipboard fixes found that macOS `stringForType` materializes the
-  pasteboard string before the size check (`vendor/arboard-3.6.1/src/platform/osx.rs`),
-  and a delayed-rendering Windows owner can block synchronous `GetClipboardData`
-  beyond the deadline (`vendor/arboard-3.6.1/src/platform/windows.rs`). Deferred
-  because both require acquisition in a bounded helper process or thread that
-  lets the UI stop waiting while preserving OSC 52 store/load ordering. Close
-  with native tests for an oversized macOS string and a stalled Windows owner,
-  proving bounded resource use and UI wait time without reordering OSC 52.
+- **Native clipboard acquisition can exceed paste bounds.** Partly closed on
+  2026-11-20 by #926, which bounds the window's wait and nothing else: macOS
+  and Windows now ask the clipboard on a worker thread that the window stops
+  waiting for after two seconds (`crates/kettle-ui/src/clipboard.rs`). On
+  macOS the answer to a paste the user asked for is still taken for a minute
+  after that, without holding the window, since the system may be waiting
+  for the user to allow the paste. Native tests hold reads against a real
+  late owner and queue an OSC 52 store behind them: on macOS an `osascript`
+  process that promises text lazily on a private named pasteboard, on Windows
+  CI a delayed-rendering owner. The entry's closing criteria, a bounded
+  footprint and a native oversized-string test, are not met. Deferred on
+  2026-11-20, these parts stay open.
+
+  Memory on macOS: AppKit fetches a whole flavor before any size check
+  (`vendor/arboard-3.6.1/src/platform/osx.rs`). Measured on 2026-11-20 on
+  macOS 27.3, with private named pasteboards and a second process as owner,
+  no AppKit call gives a flavor's size without fetching it. Reading `types`
+  or `pasteboardItems` cost nothing, but for a 128 MiB text each of
+  `dataForType:` and `stringForType:`, on the item or the pasteboard, took
+  the reader's physical footprint from 2 MiB to 387 MiB, and 258 MiB stayed
+  after the autorelease pool drained. Checking an `NSData` length first
+  therefore bounds nothing. The pasteboard took a 255 MiB flavor and refused
+  a 256 MiB one, so the platform's own cap is the only bound.
+
+  A pasted image is read the same way, as the whole TIFF flavor through
+  `dataForType:`, and decoded under the `image` crate's defaults rather than
+  the limits the Linux reader sets. The worker thread now holds this memory
+  instead of the window thread.
+
+  Memory on Windows: when another process owns the clipboard,
+  `GetClipboardData` gives the reader its own copy of the whole object, and
+  the vendored reader can size it only after that call
+  (`vendor/arboard-3.6.1/src/platform/windows.rs`). This holds for every
+  format a paste asks for: `CF_UNICODETEXT`, which `GlobalSize` sizes only
+  afterwards, the `PNG` and `CF_DIBV5` images, which `get_vec` copies whole
+  and arboard decodes under the `image` crate's defaults, and the `CF_HDROP`
+  file list. A 1 GiB text therefore costs Kettle about 1 GiB on the worker
+  thread before the 4 MiB refusal. This follows from how user32 hands
+  clipboard memory across processes and was not measured; the native test's
+  owner runs in the test process, where no copy is made. The text reader
+  sizes text by its allocation, so a short text in an allocation over 4 MiB
+  is refused.
+
+  An owner that never answers: the worker thread waits for it inside
+  `stringForType:` on macOS, or inside `GetClipboardData` on Windows. The
+  window stays responsive, but every clipboard request returns `Timeout`
+  until that owner answers or exits. On macOS a lazy owner that slept 40
+  seconds held the reader for all 40; Kettle holds no lock there, so other
+  programs can still use the pasteboard. On Windows the stalled thread keeps
+  the clipboard open, so other programs cannot open it either, and a second
+  worker would not help. A store that times out at its caller after the
+  worker has taken it may still be applied.
+
+  Not checked live: the macOS paste-permission alert. macOS 15.4 added
+  `NSPasteboard.accessBehavior` and an opt-in preview of an alert for
+  programmatic reads of the general pasteboard; the macOS 27.2 release notes
+  remove the preview's `EnablePasteboardPrivacyDeveloperPreview` default, and
+  no source found on 2026-11-20 shows a release that raises the alert by
+  default. Whether macOS would treat a Command-V read made on the worker
+  thread as one the user asked for was not observed, because that needs the
+  general pasteboard. If it asks, the window stops waiting after two
+  seconds, the notification says the paste is coming, and an answer given
+  within the minute after that pastes. A later answer, a click or a key
+  press other than paste in the window before the answer, or a change of
+  the pane, field or broadcast it was for, pastes nothing. Check on a Mac
+  where Kettle's paste permission (Privacy & Security) is set to ask: copy
+  text in another app, press Command-V in Kettle, and note whether an alert
+  appears and whether an answer given after five seconds pastes.
+
+  Deferred because bounding memory on either platform needs the read made in
+  a helper process with a memory cap (a footprint limit on macOS, a job
+  object on Windows), which the window can also stop waiting for; a thread
+  bounds the wait alone. A helper changes which process the system sees
+  reading the clipboard, and on macOS that needs the same live check of
+  paste permission. Close with native tests that prove a bounded footprint
+  without reordering OSC 52: an oversized string, and an oversized image,
+  on a private named pasteboard on macOS, and a second-process owner of a
+  large `CF_UNICODETEXT` and `CF_DIBV5` on Windows CI.
 
 - **Windows MCP stdout progress.** `crates/kettle/src/mcp.rs` still uses a
   blocking writer on Windows. A slow reader can make progress without a write

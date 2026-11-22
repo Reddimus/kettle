@@ -165,13 +165,16 @@ fn shift_right_click_and_lane_actions_are_wired() {
         .find("&& offer_copied")
         .expect("the Shift+right-click check");
     let read = menu
-        .find("self.copied_preview(ws, pane)")
+        .find("self.clipboard_peek(true)")
         .expect("the clipboard read");
     assert!(
         shift < read,
         "the clipboard is read only on Shift+right-click"
     );
-    assert_eq!(src.matches("self.copied_preview(ws, pane)").count(), 2);
+    // The menu reads the clipboard once for both copied rows; the file
+    // preview action reads it on its own.
+    assert_eq!(src.matches("self.clipboard_peek(true)").count(), 1);
+    assert_eq!(src.matches("self.copied_preview(ws, pane)").count(), 1);
     assert!(src.contains("self.open_context_menu(ws, px, py, false);"));
     assert_eq!(
         src.matches("let offer_copied = ws.mods.shift_key();\n")
