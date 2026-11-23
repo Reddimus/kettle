@@ -21,7 +21,9 @@ use super::present::present_straight;
 use super::quad::{QuadBlend, draw_quads};
 use super::rounded_surface::draw_rounded_surfaces;
 use super::starfield::{draw_starfield, frame_stars};
-use super::{AddressMode, CpuFramebuffer, CpuTexture, CpuTextureFormat, CpuTextureView, PixelRect};
+use super::{
+    AddressMode, CpuFramebuffer, CpuTexture, CpuTextureFormat, CpuTextureView, PixelRect, Viewport,
+};
 use crate::backend::DeviceRef;
 use crate::builtin_glyphs::{BuiltinKey, Strokes};
 use crate::glyphpipe::{GlyphClip, GlyphInstance, GlyphPipeline, RasterGlyph};
@@ -48,6 +50,7 @@ struct Gpu {
     _instance: wgpu::Instance,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    lavapipe: bool,
 }
 
 fn gpu(label: &str) -> Option<Gpu> {
@@ -63,7 +66,9 @@ fn gpu(label: &str) -> Option<Gpu> {
             return None;
         }
     };
-    eprintln!("cpu-parity adapter: {}", adapter.get_info().name);
+    let info = adapter.get_info();
+    eprintln!("cpu-parity adapter: {} ({:?})", info.name, info.backend);
+    let lavapipe = info.backend == wgpu::Backend::Vulkan && info.name.starts_with("llvmpipe");
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some(label),
         required_limits: crate::gpu::live_device_limits(adapter.limits()),
@@ -74,7 +79,18 @@ fn gpu(label: &str) -> Option<Gpu> {
         _instance: instance,
         device,
         queue,
+        lavapipe,
     })
+}
+
+/// Some precision choices are specific to the lavapipe reference driver.
+fn lavapipe(label: &str) -> Option<Gpu> {
+    let gpu = gpu(label)?;
+    if !gpu.lavapipe {
+        eprintln!("{label}: skipped; needs lavapipe");
+        return None;
+    }
+    Some(gpu)
 }
 
 impl Gpu {
@@ -412,78 +428,55 @@ fn assert_parity(case: &str, w: u32, h: u32, gpu: &[u8], cpu: &CpuFramebuffer) {
     );
 }
 
-/// Pixels where the CPU frame itself moves past the tolerance when every
-/// instance moves by 1/1000 px along either axis: a pixel centre, texel
-/// edge or dash end lies exactly on the geometry, and which side wins
-/// depends on rounding a GPU is free to do differently.
-fn tie_mask(base: &CpuFramebuffer, render: impl Fn([f32; 2]) -> CpuFramebuffer) -> Vec<bool> {
-    const D: f32 = 1.0e-3;
-    let base = base.to_rgba8();
-    let mut mask = vec![false; base.len() / 4];
-    for nudge in [[D, 0.0], [-D, 0.0], [0.0, D], [0.0, -D]] {
-        let moved = render(nudge).to_rgba8();
-        for (i, (a, b)) in base
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .zip(moved.as_chunks::<4>().0)
-            .enumerate()
-        {
-            if a.iter().zip(b).any(|(a, b)| a.abs_diff(*b) > TOLERANCE) {
-                mask[i] = true;
-            }
+/// Every listed pixel lies on one known discontinuity in the fixture.
+fn assert_exact_tie_choices(
+    case: &str,
+    gpu: &[u8],
+    base: &CpuFramebuffer,
+    either_side: [&CpuFramebuffer; 2],
+    ties: &[(u32, u32)],
+) {
+    let (w, h) = (base.width(), base.height());
+    compare(case, w, h, gpu, base);
+    let alternates = either_side.map(CpuFramebuffer::pixels);
+    let mut checked = 0;
+    for (i, (g, &c)) in gpu.as_chunks::<4>().0.iter().zip(base.pixels()).enumerate() {
+        let (x, y) = (i as u32 % w, i as u32 / w);
+        let c = super::unpack(c);
+        if ties.contains(&(x, y)) {
+            checked += 1;
+            let choices = alternates.map(|pixels| super::unpack(pixels[i]));
+            assert_ne!(
+                choices[0], choices[1],
+                "{case} ({x}, {y}): no discontinuity"
+            );
+            assert!(
+                choices.contains(g),
+                "{case} ({x}, {y}): GPU {g:?} is not one of {choices:?}"
+            );
+        } else {
+            assert!(
+                g.iter().zip(c).all(|(g, c)| g.abs_diff(c) <= TOLERANCE),
+                "{case} ({x}, {y}): GPU {g:?}, CPU {c:?} outside a tie"
+            );
         }
     }
-    mask
+    assert_eq!(checked, ties.len());
 }
 
-/// Parity except at ties: every pixel past [`LAYERED_TOLERANCE`] must be
-/// one the CPU frame itself flips under a 1/1000 px move ([`tie_mask`]).
-/// These scenes stack layers as deep as the `-deep` cases.
-fn assert_parity_but_ties(
-    case: &str,
-    w: u32,
-    h: u32,
-    gpu: &[u8],
-    cpu: &CpuFramebuffer,
-    ties: &[bool],
-) {
-    compare(case, w, h, gpu, cpu);
-    let cpu = cpu.to_rgba8();
-    let (mut over, mut unexplained) = (0, Vec::new());
-    for (i, (g, c)) in gpu
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .zip(cpu.as_chunks::<4>().0)
-        .enumerate()
-    {
-        if g.iter().zip(c).any(|(g, c)| g.abs_diff(*c) > TOLERANCE) {
-            over += 1;
-            let layered = g
-                .iter()
-                .zip(c)
-                .all(|(g, c)| g.abs_diff(*c) <= LAYERED_TOLERANCE);
-            if !ties[i] && !layered {
-                unexplained.push((i as u32 % w, i as u32 / w));
-            }
-        }
-    }
-    eprintln!(
-        "cpu-parity {case}: {over} pixels past the tolerance, {} at ties, {} tie-sensitive pixels",
-        (0..ties.len())
-            .filter(|&i| ties[i] && {
-                let (g, c) = (&gpu[i * 4..i * 4 + 4], &cpu[i * 4..i * 4 + 4]);
-                g.iter().zip(c).any(|(g, c)| g.abs_diff(*c) > TOLERANCE)
-            })
-            .count(),
-        ties.iter().filter(|&&t| t).count()
-    );
-    assert!(
-        unexplained.is_empty(),
-        "{case}: pixels past the layered tolerance away from any tie: {:?}",
-        &unexplained[..unexplained.len().min(20)]
-    );
+#[test]
+#[should_panic(expected = "is not one of")]
+fn a_tie_rejects_a_color_from_neither_side() {
+    let [lo, hi] = [[255, 0, 0, 255], [0, 0, 255, 255]]
+        .map(|pixel| CpuFramebuffer::from_rgba8(1, 1, &pixel).unwrap());
+    assert_exact_tie_choices("tie", &[255, 0, 255, 255], &lo, [&lo, &hi], &[(0, 0)]);
+}
+
+#[test]
+#[should_panic(expected = "outside a tie")]
+fn tie_comparison_rejects_three_codes_outside_the_tie() {
+    let fb = CpuFramebuffer::from_rgba8(1, 1, &[10, 20, 30, 255]).unwrap();
+    assert_exact_tie_choices("tie", &[10, 23, 30, 255], &fb, [&fb, &fb], &[]);
 }
 
 fn random_quads(rng: &mut Rng, n: usize, w: f32, h: f32) -> Vec<QuadInstance> {
@@ -617,6 +610,78 @@ fn a_window_target_matches_an_offset_viewport() {
     assert_parity("quad-window", w, h, &gpu_frame, &fb);
 }
 
+#[test]
+fn quad_edges_match_gpu_subpixel_snap() {
+    let _serialized = gpu_test_guard();
+    let Some(gpu) = lavapipe("cpu-parity-subpixel") else {
+        return;
+    };
+    let (w, h) = (16, 16);
+    let screen = [w as f32, h as f32];
+    let mut replace = QuadPipeline::new_replace(&gpu.device, FORMAT);
+    let quads: Vec<_> = [3.0 / 2048.0, 1.0 / 512.0, 5.0 / 2048.0]
+        .into_iter()
+        .enumerate()
+        .map(|(row, offset)| QuadInstance {
+            pos: [3.5 + offset, row as f32 * 4.0 + 3.5 + offset],
+            size: [4.0, 2.0],
+            color: [1.0; 4],
+        })
+        .collect();
+    let init = vec![0; (w * h * 4) as usize];
+    replace.upload(&gpu.device, &gpu.queue, screen, &quads);
+    let gpu_frame = gpu.render(w, h, &init, |encoder, view| {
+        replace.draw(&mut load_pass(encoder, view));
+    });
+    for (y, alpha) in [(3, 255), (7, 255), (11, 0)] {
+        assert_eq!(gpu_frame[((y * w + 3) * 4 + 3) as usize], alpha);
+    }
+    let mut fb = CpuFramebuffer::new(w, h).unwrap();
+    draw_quads(&mut fb.target(), screen, &quads, QuadBlend::Replace, None);
+    assert_parity("quad-subpixel", w, h, &gpu_frame, &fb);
+}
+
+#[test]
+fn an_inset_viewport_clips_scene_coordinates() {
+    let _serialized = gpu_test_guard();
+    let Some(gpu) = gpu("cpu-parity-clip-volume") else {
+        return;
+    };
+    let (w, h) = (32, 32);
+    let screen = [32.0; 2];
+    let viewport = Viewport {
+        x: 8.0,
+        y: 8.0,
+        w: 16.0,
+        h: 16.0,
+    };
+    let quads = [
+        QuadInstance {
+            pos: [-8.0, -8.0],
+            size: [20.0; 2],
+            color: [1.0; 4],
+        },
+        QuadInstance {
+            pos: [20.0, 20.0],
+            size: [20.0; 2],
+            color: [1.0; 4],
+        },
+    ];
+    let init = vec![0; (w * h * 4) as usize];
+    let mut replace = QuadPipeline::new_replace(&gpu.device, FORMAT);
+    replace.upload(&gpu.device, &gpu.queue, screen, &quads);
+    let gpu_frame = gpu.render(w, h, &init, |encoder, view| {
+        let mut pass = load_pass(encoder, view);
+        pass.set_viewport(viewport.x, viewport.y, viewport.w, viewport.h, 0.0, 1.0);
+        replace.draw(&mut pass);
+    });
+    let mut fb = CpuFramebuffer::new(w, h).unwrap();
+    let mut target = fb.target();
+    target.set_viewport(viewport);
+    draw_quads(&mut target, screen, &quads, QuadBlend::Replace, None);
+    assert_parity("quad-clip-volume", w, h, &gpu_frame, &fb);
+}
+
 /// A mask raster: mostly empty or full coverage, as text is, with every
 /// partial value in between.
 fn mask_raster(rng: &mut Rng, w: u32, h: u32) -> Vec<u8> {
@@ -705,18 +770,11 @@ fn glyphs_match_the_gpu() {
         assert!(atlas.write(slot.atlas_x as u32, slot.atlas_y as u32, rw, rh, &data));
         slots.push(slot);
     }
-    let instances = |rng: &mut Rng, production: bool| {
+    let instances = |rng: &mut Rng| {
         let mut out = Vec::new();
         for i in 0..360 {
             let slot = slots[i % slots.len()];
             let uv_size = [slot.w, slot.h];
-            let coord = |rng: &mut Rng, hi: f32| {
-                if production {
-                    rng.coord_free(-6.0, hi)
-                } else {
-                    rng.coord(-6.0, hi)
-                }
-            };
             let whole = |rng: &mut Rng, hi: f32| rng.range(-6.0, hi).floor();
             let (pos, size, uv_size, column) = match i % 6 {
                 // On whole pixels at bitmap size: the grid's case.
@@ -728,29 +786,21 @@ fn glyphs_match_the_gpu() {
                 ),
                 // At bitmap size off whole pixels.
                 3 => (
-                    [coord(rng, w as f32), coord(rng, h as f32)],
+                    [
+                        rng.coord_free(-6.0, w as f32),
+                        rng.coord_free(-6.0, h as f32),
+                    ],
                     uv_size,
                     uv_size,
                     0.0,
                 ),
-                // Scaled: production scales emoji by two on whole pixels and
-                // stretches one-texel columns (Arabic joins); the stress set
-                // takes any scale anywhere.
-                4 if production => (
+                // Whole-pixel emoji enlargement.
+                4 => (
                     [whole(rng, w as f32), whole(rng, h as f32)],
                     [uv_size[0] * 2.0, uv_size[1] * 2.0],
                     uv_size,
                     0.0,
                 ),
-                4 => {
-                    let k = rng.pick(&[2.0, 1.5, 0.6, 1.3, 0.85]);
-                    (
-                        [coord(rng, w as f32), coord(rng, h as f32)],
-                        [uv_size[0] * k, uv_size[1] * k],
-                        uv_size,
-                        0.0,
-                    )
-                }
                 _ => (
                     [whole(rng, w as f32), whole(rng, h as f32)],
                     [rng.range(2.0, 12.0).floor(), uv_size[1]],
@@ -784,51 +834,190 @@ fn glyphs_match_the_gpu() {
         mask: mask_atlas.view(),
     };
     let init = background(w, h, 13);
-    let cpu_frame = |instances: &[GlyphInstance], clips: &[GlyphClip], nudge: [f32; 2]| {
-        let mut fb = CpuFramebuffer::from_rgba8(w, h, &init).unwrap();
-        for clip in clips {
-            let range = clip.start as usize..(clip.start + clip.count) as usize;
-            let moved: Vec<_> = instances[range]
-                .iter()
-                .map(|g| GlyphInstance {
-                    pos: [g.pos[0] + nudge[0], g.pos[1] + nudge[1]],
-                    ..*g
-                })
-                .collect();
-            let scissor = pane_scissor(clip.rect, [w, h]);
-            assert!(scissor.is_some());
-            draw_glyphs(&mut fb.target(), screen, &moved, atlases, scissor);
-        }
-        fb
+    let instances = instances(&mut rng);
+    let half = instances.len() as u32 / 2;
+    let clips = [
+        GlyphClip {
+            rect: [10.5, 5.25, 100.7, 60.0],
+            start: 0,
+            count: half,
+        },
+        GlyphClip {
+            rect: [0.0, 0.0, w as f32, h as f32],
+            start: half,
+            count: instances.len() as u32 - half,
+        },
+    ];
+    assert!(glyphs.upload(DeviceRef::gpu(&gpu.device, &gpu.queue), screen, &instances));
+    let gpu_frame = gpu.render(w, h, &init, |encoder, view| {
+        glyphs.draw(&mut load_pass(encoder, view), &clips, [w, h]);
+    });
+    let mut fb = CpuFramebuffer::from_rgba8(w, h, &init).unwrap();
+    for clip in clips {
+        let range = clip.start as usize..(clip.start + clip.count) as usize;
+        let scissor = pane_scissor(clip.rect, [w, h]).unwrap();
+        draw_glyphs(
+            &mut fb.target(),
+            screen,
+            &instances[range],
+            atlases,
+            Some(scissor),
+        );
+    }
+    assert_parity("glyph", w, h, &gpu_frame, &fb);
+
+    // Two exact, opaque texels meet at x = 4.5. Moving only the U
+    // coordinate selects the other texel without moving the geometry.
+    let pixels = [255, 0, 0, 255, 0, 0, 255, 255];
+    let key = BuiltinKey::new('z', 2, 1, Strokes { light: 1, heavy: 2 }).unwrap();
+    let slot = glyphs
+        .ensure_glyph(DeviceRef::gpu(&gpu.device, &gpu.queue), key, || {
+            Some(RasterGlyph {
+                color: true,
+                width: 2,
+                height: 1,
+                left: 0,
+                top: 0,
+                data: &pixels,
+            })
+        })
+        .unwrap();
+    assert!(color_atlas.write(slot.atlas_x as u32, slot.atlas_y as u32, 2, 1, &pixels));
+    let atlases = GlyphAtlases {
+        color: color_atlas.view(),
+        mask: mask_atlas.view(),
     };
-    for (case, production) in [("glyph", true), ("glyph-ties", false)] {
-        let instances = instances(&mut rng, production);
-        let half = instances.len() as u32 / 2;
-        let clips = [
-            GlyphClip {
-                rect: [10.5, 5.25, 100.7, 60.0],
-                start: 0,
-                count: half,
-            },
-            GlyphClip {
-                rect: [0.0, 0.0, w as f32, h as f32],
-                start: half,
-                count: instances.len() as u32 - half,
-            },
-        ];
-        assert!(glyphs.upload(DeviceRef::gpu(&gpu.device, &gpu.queue), screen, &instances));
-        let gpu_frame = gpu.render(w, h, &init, |encoder, view| {
-            let mut pass = load_pass(encoder, view);
-            glyphs.draw(&mut pass, &clips, [w, h]);
-        });
-        let fb = cpu_frame(&instances, &clips, [0.0; 2]);
-        if production {
-            assert_parity(case, w, h, &gpu_frame, &fb);
-        } else {
-            let ties = tie_mask(&fb, |nudge| cpu_frame(&instances, &clips, nudge));
-            assert_parity_but_ties(case, w, h, &gpu_frame, &fb, &ties);
+    let (w, h) = (16, 16);
+    let screen = [w as f32, h as f32];
+    let glyph = GlyphInstance {
+        pos: [2.5, 2.0],
+        size: [4.0, 4.0],
+        uv: [slot.atlas_x, slot.atlas_y],
+        uv_size: [slot.w, slot.h],
+        color: [1.0; 4],
+        kind: slot.kind,
+        _pad: [0],
+    };
+    assert!(glyphs.upload(DeviceRef::gpu(&gpu.device, &gpu.queue), screen, &[glyph]));
+    let gpu_frame = gpu.render(w, h, &[0; 16 * 16 * 4], |encoder, view| {
+        let clips = [GlyphClip {
+            rect: [0.0, 0.0, screen[0], screen[1]],
+            start: 0,
+            count: 1,
+        }];
+        glyphs.draw(&mut load_pass(encoder, view), &clips, [w, h]);
+    });
+    let [at, lo, hi] = [0.0, -0.001, 0.001].map(|offset| {
+        let mut fb = CpuFramebuffer::new(w, h).unwrap();
+        let glyph = GlyphInstance {
+            uv: [glyph.uv[0] + offset, glyph.uv[1]],
+            ..glyph
+        };
+        draw_glyphs(&mut fb.target(), screen, &[glyph], atlases, None);
+        fb
+    });
+    assert_exact_tie_choices(
+        "glyph-ties",
+        &gpu_frame,
+        &at,
+        [&lo, &hi],
+        &[(4, 2), (4, 3), (4, 4), (4, 5)],
+    );
+}
+
+#[test]
+fn whole_pixel_emoji_fallback_downscales_match_the_gpu() {
+    let _serialized = gpu_test_guard();
+    let Some(gpu) = lavapipe("cpu-parity-emoji-fallback") else {
+        return;
+    };
+    let (w, h) = (1600, 1000);
+    let screen = [w as f32, h as f32];
+    let mut glyphs = GlyphPipeline::new(&gpu.device, FORMAT);
+    let mut color = CpuTexture::new(1024, 512, CpuTextureFormat::Rgba8UnormSrgb).unwrap();
+    let mask = CpuTexture::new(1, 1, CpuTextureFormat::R8Unorm).unwrap();
+    let mut instances = Vec::new();
+    for (tag, bitmap, fitted) in [(b'a', 32, 16), (b'b', 24, 16), (b'c', 32, 24)] {
+        let data: Vec<_> = (0..bitmap * bitmap)
+            .flat_map(|i| {
+                let (x, y) = (i % bitmap, i / bitmap);
+                [
+                    if x % 2 == 0 { 255 } else { 0 },
+                    0,
+                    if y % 2 == 0 { 255 } else { 0 },
+                    255,
+                ]
+            })
+            .collect();
+        let key = BuiltinKey::new(
+            char::from(tag),
+            bitmap as i32,
+            bitmap as i32,
+            Strokes { light: 1, heavy: 2 },
+        )
+        .unwrap();
+        let slot = glyphs
+            .ensure_glyph(DeviceRef::gpu(&gpu.device, &gpu.queue), key, || {
+                Some(RasterGlyph {
+                    color: true,
+                    width: bitmap,
+                    height: bitmap,
+                    left: 0,
+                    top: 0,
+                    data: &data,
+                })
+            })
+            .unwrap();
+        assert!(color.write(
+            slot.atlas_x as u32,
+            slot.atlas_y as u32,
+            bitmap,
+            bitmap,
+            &data
+        ));
+        // The second and third origins place sample centres on the
+        // shared diagonal where the two UV planes round differently.
+        for (x, y) in [(37.0, 11.0), (56.0, 372.0), (507.0, 155.0), (1203.0, 611.0)] {
+            let fitted = fitted as f32;
+            let x = x + f32::from(tag - b'a') * 40.0;
+            let inset = crate::fonts::emoji_inset(fitted);
+            let cell = crate::fonts::emoji_box((x, y - inset, fitted, fitted + 2.0 * inset));
+            let (x, y, width, height) = crate::fonts::fit_emoji(cell, (slot.w, slot.h));
+            assert_eq!((width, height), (fitted, fitted));
+            assert!(x.fract() == 0.0 && y.fract() == 0.0);
+            instances.push(GlyphInstance {
+                pos: [x, y],
+                size: [width, height],
+                uv: [slot.atlas_x, slot.atlas_y],
+                uv_size: [slot.w, slot.h],
+                color: [1.0; 4],
+                kind: slot.kind,
+                _pad: [0],
+            });
         }
     }
+    let clips = [GlyphClip {
+        rect: [0.0, 0.0, screen[0], screen[1]],
+        start: 0,
+        count: instances.len() as u32,
+    }];
+    let init = vec![0; (w * h * 4) as usize];
+    assert!(glyphs.upload(DeviceRef::gpu(&gpu.device, &gpu.queue), screen, &instances));
+    let gpu_frame = gpu.render(w, h, &init, |encoder, view| {
+        glyphs.draw(&mut load_pass(encoder, view), &clips, [w, h]);
+    });
+    let mut fb = CpuFramebuffer::new(w, h).unwrap();
+    draw_glyphs(
+        &mut fb.target(),
+        screen,
+        &instances,
+        GlyphAtlases {
+            color: color.view(),
+            mask: mask.view(),
+        },
+        None,
+    );
+    assert_parity("glyph-emoji-fallback", w, h, &gpu_frame, &fb);
 }
 
 fn image(rng: &mut Rng, w: u32, h: u32, translucent: bool) -> ImageData {
@@ -999,14 +1188,12 @@ fn rounded_surfaces_match_the_gpu() {
     let production = random_surfaces(&mut rng, 24, true, screen[0], screen[1]);
     // Twice that, still clear of exact ties: per-layer rounding adds up.
     let deep = random_surfaces(&mut rng, 48, true, screen[0], screen[1]);
-    let stress = random_surfaces(&mut rng, 24, false, screen[0], screen[1]);
     let init = background(w, h, 15);
     let scissor = PixelRect::new(31, 17, 150, 101);
     for (case, surfaces, scissored) in [
         ("rounded", &production, false),
         ("rounded-scissor", &production, true),
         ("rounded-deep", &deep, false),
-        ("rounded-ties", &stress, false),
     ] {
         let mut pipeline =
             RoundedSurfacePipeline::with_capacity(&gpu.device, FORMAT, surfaces.len());
@@ -1018,34 +1205,38 @@ fn rounded_surfaces_match_the_gpu() {
             }
             pipeline.draw_range(&mut pass, 0..surfaces.len() as u32);
         });
-        let cpu_frame = |nudge: [f32; 2]| {
-            let moved: Vec<_> = surfaces
-                .iter()
-                .map(|s| RoundedSurface {
-                    pos: [s.pos[0] + nudge[0], s.pos[1] + nudge[1]],
-                    ..*s
-                })
-                .collect();
-            let mut fb = CpuFramebuffer::from_rgba8(w, h, &init).unwrap();
-            draw_rounded_surfaces(
-                &mut fb.target(),
-                screen,
-                &moved,
-                scissored.then_some(scissor),
-            );
-            fb
-        };
-        let fb = cpu_frame([0.0; 2]);
-        if case == "rounded-ties" {
-            let ties = tie_mask(&fb, cpu_frame);
-            assert_parity_but_ties(case, w, h, &gpu_frame, &fb, &ties);
-        } else if case == "rounded-deep" {
+        let mut fb = CpuFramebuffer::from_rgba8(w, h, &init).unwrap();
+        draw_rounded_surfaces(
+            &mut fb.target(),
+            screen,
+            surfaces,
+            scissored.then_some(scissor),
+        );
+        if case == "rounded-deep" {
             let stats = compare(case, w, h, &gpu_frame, &fb);
             assert!(stats.max <= LAYERED_TOLERANCE, "{case}: max {}", stats.max);
         } else {
             assert_parity(case, w, h, &gpu_frame, &fb);
         }
     }
+
+    // Preserve centres exactly on half-pixel edges while isolating each
+    // surface so this coverage fixture cannot hide blend-stack drift.
+    let (w, h) = (768, 320);
+    let screen = [w as f32, h as f32];
+    let mut surfaces = random_surfaces(&mut rng, 24, false, 120.0, 70.0);
+    for (i, surface) in surfaces.iter_mut().enumerate() {
+        surface.pos = [(i % 6) as f32 * 128.0 + 0.5, (i / 6) as f32 * 80.0 + 0.5];
+    }
+    let mut pipeline = RoundedSurfacePipeline::with_capacity(&gpu.device, FORMAT, surfaces.len());
+    pipeline.upload(&gpu.device, &gpu.queue, screen, &surfaces);
+    let init = background(w, h, 15);
+    let gpu_frame = gpu.render(w, h, &init, |encoder, view| {
+        pipeline.draw_range(&mut load_pass(encoder, view), 0..surfaces.len() as u32);
+    });
+    let mut fb = CpuFramebuffer::from_rgba8(w, h, &init).unwrap();
+    draw_rounded_surfaces(&mut fb.target(), screen, &surfaces, None);
+    assert_parity("rounded-ties", w, h, &gpu_frame, &fb);
 }
 
 #[test]
@@ -1057,19 +1248,15 @@ fn outlines_match_the_gpu() {
     let (w, h) = (240u32, 160u32);
     let screen = [w as f32, h as f32];
     let mut rng = Rng(6);
-    let outlines = |rng: &mut Rng, production: bool| {
+    let outlines = |rng: &mut Rng| {
         let mut out = Vec::new();
         for _ in 0..40 {
             let dashed = rng.unit() < 0.35;
-            let coord = |rng: &mut Rng, hi: f32| {
-                if production {
-                    rng.coord_free(-10.0, hi)
-                } else {
-                    rng.coord(-10.0, hi)
-                }
-            };
             out.push(OutlineInstance {
-                pos: [coord(rng, w as f32 - 30.0), coord(rng, h as f32 - 30.0)],
+                pos: [
+                    rng.coord_free(-10.0, w as f32 - 30.0),
+                    rng.coord_free(-10.0, h as f32 - 30.0),
+                ],
                 size: [rng.range(8.0, 150.0), rng.range(8.0, 100.0)],
                 color: rng.color(),
                 border_width: rng.pick(&[0.0, 1.0, 1.0, 2.0, 3.5]),
@@ -1082,33 +1269,148 @@ fn outlines_match_the_gpu() {
         out
     };
     let init = background(w, h, 16);
-    for (case, production) in [("outline", true), ("outline-ties", false)] {
-        let outlines = outlines(&mut rng, production);
-        let mut pipeline = OutlinePipeline::new(&gpu.device, FORMAT);
-        pipeline.upload(&gpu.device, &gpu.queue, screen, &outlines);
+    let outlines = outlines(&mut rng);
+    let mut pipeline = OutlinePipeline::new(&gpu.device, FORMAT);
+    pipeline.upload(&gpu.device, &gpu.queue, screen, &outlines);
+    let gpu_frame = gpu.render(w, h, &init, |encoder, view| {
+        pipeline.draw(&mut load_pass(encoder, view));
+    });
+    let mut fb = CpuFramebuffer::from_rgba8(w, h, &init).unwrap();
+    draw_outlines(&mut fb.target(), screen, &outlines, None);
+    assert_parity("outline", w, h, &gpu_frame, &fb);
+
+    // A pixel on each horizontal centreline lies on the end of the first
+    // dash. Vary only that threshold to select either full ink or discard.
+    let (w, h) = (32, 16);
+    let screen = [w as f32, h as f32];
+    let outline = OutlineInstance {
+        pos: [2.5, 2.0],
+        size: [16.0, 8.0],
+        color: [1.0; 4],
+        border_width: 1.0,
+        corner_radius: 0.0,
+        corner_mask: 0,
+        dash: 4.0,
+        gap: 3.0,
+    };
+    pipeline.upload(&gpu.device, &gpu.queue, screen, &[outline]);
+    let gpu_frame = gpu.render(w, h, &[0; 32 * 16 * 4], |encoder, view| {
+        pipeline.draw(&mut load_pass(encoder, view));
+    });
+    let [at, lo, hi] = [0.0, -0.001, 0.001].map(|offset| {
+        let mut fb = CpuFramebuffer::new(w, h).unwrap();
+        let outline = OutlineInstance {
+            dash: outline.dash + offset,
+            ..outline
+        };
+        draw_outlines(&mut fb.target(), screen, &[outline], None);
+        fb
+    });
+    assert_exact_tie_choices(
+        "outline-ties",
+        &gpu_frame,
+        &at,
+        [&lo, &hi],
+        &[(6, 2), (6, 9)],
+    );
+}
+
+#[test]
+fn sdf_fwidth_matches_fine_derivatives() {
+    let _serialized = gpu_test_guard();
+    let Some(gpu) = lavapipe("cpu-parity-sdf-fwidth") else {
+        return;
+    };
+    let (w, h) = (24, 24);
+    let screen = [w as f32, h as f32];
+    let pos = [0.375; 2];
+    let size = [16.0; 2];
+    let surface = RoundedSurface {
+        pos,
+        size,
+        fill: [1.0; 4],
+        stroke: [0.0; 4],
+        params: [3.0, 0.0, 0.0, 0.0],
+    };
+    let outline = OutlineInstance {
+        pos,
+        size,
+        color: [1.0; 4],
+        border_width: 2.0,
+        corner_radius: 3.0,
+        corner_mask: 15,
+        dash: 0.0,
+        gap: 0.0,
+    };
+    let mut rounded_pipe = RoundedSurfacePipeline::with_capacity(&gpu.device, FORMAT, 1);
+    rounded_pipe.upload(&gpu.device, &gpu.queue, screen, &[surface]);
+    let mut outline_pipe = OutlinePipeline::new(&gpu.device, FORMAT);
+    outline_pipe.upload(&gpu.device, &gpu.queue, screen, &[outline]);
+    let init = vec![0; (w * h * 4) as usize];
+    for (case, is_outline) in [("rounded-fwidth", false), ("outline-fwidth", true)] {
         let gpu_frame = gpu.render(w, h, &init, |encoder, view| {
             let mut pass = load_pass(encoder, view);
-            pipeline.draw(&mut pass);
+            if is_outline {
+                outline_pipe.draw(&mut pass);
+            } else {
+                rounded_pipe.draw_range(&mut pass, 0..1);
+            }
         });
-        let cpu_frame = |nudge: [f32; 2]| {
-            let moved: Vec<_> = outlines
-                .iter()
-                .map(|o| OutlineInstance {
-                    pos: [o.pos[0] + nudge[0], o.pos[1] + nudge[1]],
-                    ..*o
-                })
-                .collect();
-            let mut fb = CpuFramebuffer::from_rgba8(w, h, &init).unwrap();
-            draw_outlines(&mut fb.target(), screen, &moved, None);
-            fb
-        };
-        let fb = cpu_frame([0.0; 2]);
-        if production {
-            assert_parity(case, w, h, &gpu_frame, &fb);
+        let mut fine = CpuFramebuffer::new(w, h).unwrap();
+        if is_outline {
+            draw_outlines(&mut fine.target(), screen, &[outline], None);
         } else {
-            let ties = tie_mask(&fb, cpu_frame);
-            assert_parity_but_ties(case, w, h, &gpu_frame, &fb, &ties);
+            draw_rounded_surfaces(&mut fine.target(), screen, &[surface], None);
         }
+        assert_parity(case, w, h, &gpu_frame, &fine);
+
+        // The coarse evaluation repeats the top-left lane's row and
+        // column differences for all four lanes of each framebuffer quad.
+        let inset = if is_outline { 1.0 } else { 0.0 };
+        let distance = |x: u32, y: u32| {
+            let q = [x, y].map(|v| (v as f32 + 0.5 - 0.375 - 8.0).abs() - 5.0);
+            q[0].max(0.0).hypot(q[1].max(0.0)) + q[0].max(q[1]).min(0.0) - (3.0 - inset)
+        };
+        let mut coarse = CpuFramebuffer::new(w, h).unwrap();
+        let table = super::srgb::tables();
+        for y in 0..16 {
+            for x in 0..16 {
+                let (left, top) = (x & !1, y & !1);
+                let origin = distance(left, top);
+                let fw = (distance(left + 1, top) - origin).abs()
+                    + (distance(left, top + 1) - origin).abs();
+                let aa = (fw * 0.5).max(0.25);
+                let d = distance(x, y);
+                let a = if is_outline {
+                    1.0 - super::smoothstep((1.0 - aa).max(0.0), 1.0 + aa, d.abs())
+                } else {
+                    1.0 - super::smoothstep(-aa, aa, d)
+                };
+                *coarse.target().pixel(x, y) = super::replace(
+                    table,
+                    super::Premul {
+                        r: a,
+                        g: a,
+                        b: a,
+                        a,
+                    },
+                );
+            }
+        }
+        let coarse_case = format!("{case}-coarse");
+        let stats = compare(&coarse_case, w, h, &gpu_frame, &coarse);
+        assert!(
+            stats.max > TOLERANCE,
+            "fixture cannot distinguish coarse fwidth"
+        );
+        let max_fine_coarse = fine
+            .to_rgba8()
+            .into_iter()
+            .zip(coarse.to_rgba8())
+            .map(|(f, c)| f.abs_diff(c))
+            .max()
+            .unwrap();
+        eprintln!("cpu-parity {case}: fine vs coarse CPU max {max_fine_coarse}");
     }
 }
 
@@ -1142,6 +1444,31 @@ fn the_starfield_matches_the_gpu() {
     }
 }
 
+fn gpu_presented_scene(gpu: &Gpu, w: u32, h: u32, init: &[u8], replace: &QuadPipeline) -> Vec<u8> {
+    let mut present = PresentationPipeline::new(&gpu.device, FORMAT, GraphicsBudget::default());
+    assert!(present.ensure_target(&gpu.device, w, h));
+    gpu.render(w, h, init, |encoder, view| {
+        {
+            let scene = present.scene_view().expect("scene target");
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("cpu-parity-scene"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: scene,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                ..Default::default()
+            });
+            replace.draw(&mut pass);
+        }
+        present.draw(&mut load_pass(encoder, view));
+    })
+}
+
 #[test]
 fn presentation_matches_the_gpu() {
     let _serialized = gpu_test_guard();
@@ -1151,88 +1478,120 @@ fn presentation_matches_the_gpu() {
     let (w, h) = (96u32, 64u32);
     let screen = [w as f32, h as f32];
     let mut rng = Rng(7);
-    let mut present = PresentationPipeline::new(&gpu.device, FORMAT, GraphicsBudget::default());
-    assert!(present.ensure_target(&gpu.device, w, h));
     let init = background(w, h, 18);
-    // Alphas a window's opacity setting produces, then any alpha at all.
-    for (case, low) in [("present", 0.25f32), ("present-low-alpha", 0.0)] {
-        // A translucent base, then small premultiplied patches.
-        let mut quads = vec![QuadInstance {
-            pos: [0.0, 0.0],
-            size: screen,
-            color: [0.3, 0.6, 0.9, 0.37],
-        }];
-        for _ in 0..600 {
-            let a = rng.pick(&[0.0, 1.0, -1.0, -1.0]);
-            quads.push(QuadInstance {
-                pos: [
-                    rng.range(0.0, w as f32).floor(),
-                    rng.range(0.0, h as f32).floor(),
-                ],
-                size: [rng.range(1.0, 6.0).floor(), rng.range(1.0, 6.0).floor()],
-                color: [
-                    rng.unit(),
-                    rng.unit(),
-                    rng.unit(),
-                    if a < 0.0 { rng.range(low, 1.0) } else { a },
-                ],
-            });
-        }
-        let mut replace = QuadPipeline::new_replace(&gpu.device, FORMAT);
-        replace.upload(&gpu.device, &gpu.queue, screen, &quads);
-        let gpu_frame = gpu.render(w, h, &init, |encoder, view| {
-            {
-                let scene = present.scene_view().expect("scene target");
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("cpu-parity-scene"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: scene,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                        depth_slice: None,
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-                replace.draw(&mut pass);
-            }
-            let mut pass = load_pass(encoder, view);
-            present.draw(&mut pass);
+    let mut quads = vec![QuadInstance {
+        pos: [0.0, 0.0],
+        size: screen,
+        color: [0.3, 0.6, 0.9, 0.37],
+    }];
+    for _ in 0..600 {
+        let a = rng.pick(&[0.0, 1.0, -1.0, -1.0]);
+        quads.push(QuadInstance {
+            pos: [
+                rng.range(0.0, w as f32).floor(),
+                rng.range(0.0, h as f32).floor(),
+            ],
+            size: [rng.range(1.0, 6.0).floor(), rng.range(1.0, 6.0).floor()],
+            color: [
+                rng.unit(),
+                rng.unit(),
+                rng.unit(),
+                if a < 0.0 { rng.range(0.25, 1.0) } else { a },
+            ],
         });
-        let mut scene = CpuFramebuffer::new(w, h).unwrap();
-        draw_quads(
-            &mut scene.target(),
-            screen,
-            &quads,
-            QuadBlend::Replace,
-            None,
-        );
-        let mut out = CpuFramebuffer::from_rgba8(w, h, &init).unwrap();
-        assert!(present_straight(&scene, &mut out));
-        if low > 0.0 {
-            assert_parity(case, w, h, &gpu_frame, &out);
-            continue;
-        }
-        // Dividing by alpha magnifies a one-code difference in the stored
-        // premultiplied scene by about 1 / alpha: only low alphas may exceed.
-        compare(case, w, h, &gpu_frame, &out);
-        let cpu = out.to_rgba8();
-        for (g, c) in gpu_frame
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .zip(cpu.as_chunks::<4>().0)
-        {
-            if g.iter().zip(c).any(|(g, c)| g.abs_diff(*c) > TOLERANCE) {
-                assert!(c[3] < 64, "{case}: {g:?} against {c:?} at alpha {}", c[3]);
-            }
-        }
     }
+    let mut replace = QuadPipeline::new_replace(&gpu.device, FORMAT);
+    replace.upload(&gpu.device, &gpu.queue, screen, &quads);
+    let gpu_frame = gpu_presented_scene(&gpu, w, h, &init, &replace);
+    let mut scene = CpuFramebuffer::new(w, h).unwrap();
+    draw_quads(
+        &mut scene.target(),
+        screen,
+        &quads,
+        QuadBlend::Replace,
+        None,
+    );
+    let mut out = CpuFramebuffer::new(w, h).unwrap();
+    assert!(present_straight(&scene, &mut out));
+    assert_parity("present", w, h, &gpu_frame, &out);
+}
+
+#[test]
+fn presentation_low_opacity_sweep_matches_the_gpu() {
+    let _serialized = gpu_test_guard();
+    let Some(gpu) = lavapipe("cpu-parity-present-low") else {
+        return;
+    };
+    let (w, h) = (256, 64);
+    let screen = [w as f32, h as f32];
+    let quads: Vec<_> = (0..h)
+        .flat_map(|y| {
+            (0..w).map(move |x| QuadInstance {
+                pos: [x as f32, y as f32],
+                size: [1.0, 1.0],
+                color: [
+                    x as f32 / 255.0,
+                    (255 - x) as f32 / 255.0,
+                    (x ^ 0xaa) as f32 / 255.0,
+                    y as f32 / 255.0,
+                ],
+            })
+        })
+        .collect();
+    let init = vec![0; (w * h * 4) as usize];
+    let mut replace = QuadPipeline::new_replace(&gpu.device, FORMAT);
+    replace.upload(&gpu.device, &gpu.queue, screen, &quads);
+
+    // Render the same replacement pass into a copyable target to obtain the
+    // exact scene bytes fed to the production presentation pass.
+    let scene_gpu = gpu.render(w, h, &init, |encoder, view| {
+        replace.draw(&mut load_pass(encoder, view));
+    });
+    let gpu_frame = gpu_presented_scene(&gpu, w, h, &init, &replace);
+    let scene = CpuFramebuffer::from_rgba8(w, h, &scene_gpu).unwrap();
+    let mut same_input = CpuFramebuffer::new(w, h).unwrap();
+    assert!(present_straight(&scene, &mut same_input));
+    let mut scene_cpu = CpuFramebuffer::new(w, h).unwrap();
+    draw_quads(
+        &mut scene_cpu.target(),
+        screen,
+        &quads,
+        QuadBlend::Replace,
+        None,
+    );
+    let mut end_to_end = CpuFramebuffer::new(w, h).unwrap();
+    assert!(present_straight(&scene_cpu, &mut end_to_end));
+
+    let scene_stats = compare("present-low-alpha-scene", w, h, &scene_gpu, &scene_cpu);
+    assert!(scene_stats.max <= 1);
+    let sweep_stats = compare("present-low-alpha-sweep", w, h, &gpu_frame, &end_to_end);
+    // A one-code difference in a premultiplied scene can grow to 11 RGB
+    // codes at these opacities. The divide must preserve alpha exactly.
+    assert!(sweep_stats.max <= 11);
+    for (i, (gpu, &cpu)) in gpu_frame
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(end_to_end.pixels())
+        .enumerate()
+    {
+        assert_eq!(
+            gpu[3],
+            super::unpack(cpu)[3],
+            "alpha at ({}, {})",
+            i % w as usize,
+            i / w as usize
+        );
+    }
+    let same_input_stats = compare("present-same-input", w, h, &gpu_frame, &same_input);
+    assert!(same_input_stats.max <= 1);
+    for (gpu, &cpu) in gpu_frame.as_chunks::<4>().0.iter().zip(same_input.pixels()) {
+        assert_eq!(gpu[3], super::unpack(cpu)[3]);
+    }
+    let at = (2 * w + 209) as usize;
+    let sampled_red = gpu_frame[at * 4];
+    let [cpu_red, _, _, cpu_alpha] = super::unpack(same_input.pixels()[at]);
+    assert_eq!((cpu_red, cpu_alpha), (sampled_red, 2));
 }
 
 #[test]

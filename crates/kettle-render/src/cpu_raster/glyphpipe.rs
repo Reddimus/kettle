@@ -17,7 +17,8 @@
 
 use super::srgb::{SrgbTables, srgb_to_linear, tables, unorm8};
 use super::{
-    CpuTarget, CpuTextureFormat, CpuTextureView, PixelRect, Raster, pack, rasterize, unpack,
+    CpuTarget, CpuTextureFormat, CpuTextureView, PixelRect, Raster, pack, rasterize,
+    snap_to_subpixel, unpack,
 };
 use crate::glyphpipe::GlyphInstance;
 
@@ -85,14 +86,19 @@ fn expected_format(kind: u32) -> CpuTextureFormat {
 
 /// Which atlas texel each covered pixel samples.
 struct TexelMap {
-    /// The vertex shader's normalized UVs at the `c == 0` corner, and their
-    /// change per target pixel.
-    u0: f32,
-    v0: f32,
+    /// The UV planes evaluated at framebuffer pixel (0, 0). The strip's
+    /// first triangle starts at the left endpoint, the second at the
+    /// right. They share the V origin and both slopes.
+    u_at_zero: [f32; 2],
+    v_at_zero: f32,
     du: f32,
     dv: f32,
-    x0: f32,
-    y0: f32,
+    /// The shared diagonal runs between the top right and bottom left.
+    right: f64,
+    top: f64,
+    diagonal_dx: f64,
+    diagonal_dy: f64,
+    shared_edge_in_second: bool,
     dims: [f32; 2],
     max: [u32; 2],
     /// Texel of the first covered column and row when the glyph maps texel
@@ -127,12 +133,15 @@ impl TexelMap {
             // Keep the fast path only where it cannot meet the clamp.
             if tx >= 0.0 && ty >= 0.0 && tx + w as f32 <= dims[0] && ty + h as f32 <= dims[1] {
                 return Self {
-                    u0: 0.0,
-                    v0: 0.0,
+                    u_at_zero: [0.0; 2],
+                    v_at_zero: 0.0,
                     du: 0.0,
                     dv: 0.0,
-                    x0: 0.0,
-                    y0: 0.0,
+                    right: 0.0,
+                    top: 0.0,
+                    diagonal_dx: 0.0,
+                    diagonal_dy: 0.0,
+                    shared_edge_in_second: false,
                     dims,
                     max,
                     direct: Some([tx as u32, ty as u32]),
@@ -141,34 +150,54 @@ impl TexelMap {
         }
         let (u0, u1) = (g.uv[0] / dims[0], (g.uv[0] + g.uv_size[0]) / dims[0]);
         let (v0, v1) = (g.uv[1] / dims[1], (g.uv[1] + g.uv_size[1]) / dims[1]);
+        let w = r.x1 - r.x0;
+        let h = r.y1 - r.y0;
+        // llvmpipe's triangle setup multiplies the orthogonal edge by
+        // the reciprocal area before applying the UV delta. Directly
+        // dividing by the axis length can round to the other side of an
+        // exact texel edge.
+        let inv_area = 1.0 / (w * h);
+        let du = (u1 - u0) * (h * inv_area);
+        let dv = (v1 - v0) * (w * inv_area);
+        let [left, right, top, bottom] =
+            [r.x0, r.x1, r.y0, r.y1].map(|v| f64::from(snap_to_subpixel(v)));
+        let dx = right - left;
+        let dy = bottom - top;
         Self {
-            u0,
-            v0,
-            du: (u1 - u0) / (r.x1 - r.x0),
-            dv: (v1 - v0) / (r.y1 - r.y0),
-            x0: r.x0,
-            y0: r.y0,
+            u_at_zero: [u0 - (r.x0 - 0.5) * du, u1 - (r.x1 - 0.5) * du],
+            v_at_zero: v0 - (r.y0 - 0.5) * dv,
+            du,
+            dv,
+            right,
+            top,
+            diagonal_dx: dx.abs().copysign(dy),
+            diagonal_dy: dy.abs().copysign(dx),
+            shared_edge_in_second: dx > 0.0,
             dims,
             max,
             direct: None,
         }
     }
 
-    /// As [`Raster::lerp_x`] computes it, with the slope hoisted.
     #[inline(always)]
-    fn texel_x(&self, x: u32) -> u32 {
-        let u = self.u0 + (x as f32 + 0.5 - self.x0) * self.du;
+    fn texel_x(&self, x: u32, y: u32) -> u32 {
+        let row = (f64::from(y) - self.top) * self.diagonal_dx;
+        let col = (self.right - f64::from(x)) * self.diagonal_dy;
+        let second = row > col || (row == col && self.shared_edge_in_second);
+        let u = (x as f32).mul_add(self.du, self.u_at_zero[usize::from(second)]);
         nearest(u, self.dims[0], self.max[0])
     }
 
     #[inline(always)]
     fn texel_y(&self, y: u32) -> u32 {
-        let v = self.v0 + (y as f32 + 0.5 - self.y0) * self.dv;
+        let v = (y as f32).mul_add(self.dv, self.v_at_zero);
         nearest(v, self.dims[1], self.max[1])
     }
 }
 
-/// A nearest clamp-to-edge sample's texel index along one axis.
+/// Nearest selects `floor(coord * dim)`, using the interpolated f32
+/// coordinate and f32 product. An exact integer selects that texel, even
+/// if the unrounded UV was just below the boundary.
 #[inline(always)]
 fn nearest(coord: f32, dim: f32, max: u32) -> u32 {
     let i = (coord * dim).floor();
@@ -388,7 +417,7 @@ fn for_each_texel(
         for (p, x) in span.iter_mut().zip(r.cols.clone()) {
             let tx = match map.direct {
                 Some([tx, _]) => tx + (x - r.cols.start),
-                None => map.texel_x(x),
+                None => map.texel_x(x, y),
             } as usize;
             let at = row + tx * bpp;
             f(p, &data[at..at + bpp]);

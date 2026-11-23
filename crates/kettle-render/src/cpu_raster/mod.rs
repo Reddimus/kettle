@@ -18,8 +18,10 @@
 //!   alpha is linear, so every blend decodes the destination and encodes the
 //!   result (see `srgb`). Premultiplied and straight-alpha blend states are
 //!   kept per pipeline.
-//! - **Derivatives.** `fwidth` is the fine 2x2-quad difference, evaluated at
-//!   the neighbouring pixel centres a helper invocation would shade.
+//! - **Derivatives.** The CPU evaluates fine 2x2-quad differences at helper
+//!   pixel centres. Plain WGSL `fwidth` can use either fine or coarse
+//!   differences. The rounded and outline parity fixtures pin lavapipe's
+//!   fine evaluation.
 //!
 //! Only `*Srgb` scene targets are modelled. The plain-UNORM fallback that a
 //! GPU surface can take when no sRGB format is offered has no CPU
@@ -319,23 +321,25 @@ impl<'a> CpuTarget<'a> {
 }
 
 impl CpuFramebuffer {
-    /// Run `draw` on `bands` horizontal bands of the framebuffer at once,
-    /// one scoped thread each. Every band sees every instance and keeps only
-    /// its own rows; coordinates and derivative quads stay the whole
-    /// framebuffer's, so the result is the single-threaded one. Bands start
-    /// on even rows.
+    /// Draw on at most `bands` horizontal bands, bounded by available
+    /// parallelism and the number of row pairs. Each band keeps only its
+    /// own rows, using whole-frame coordinates and derivative quads.
     pub(crate) fn draw_banded(&mut self, bands: u32, draw: impl Fn(&mut CpuTarget<'_>) + Sync) {
-        let bands = bands.clamp(1, self.height.div_ceil(2).max(1));
+        let pairs = self.height.div_ceil(2);
+        let mut bands = bands.clamp(1, pairs);
+        if bands > 1 {
+            let available = std::thread::available_parallelism().map_or(1, |n| n.get());
+            bands = available.min(bands as usize) as u32;
+        }
         if bands == 1 {
             draw(&mut self.target());
             return;
         }
-        let rows = (self.height.div_ceil(bands) + 1) & !1;
         let mut rest = self.target();
         std::thread::scope(|scope| {
             let draw = &draw;
-            for _ in 1..bands {
-                let next = rest.rows().start + rows;
+            for i in 1..bands {
+                let next = (i * pairs / bands) * 2;
                 let (mut band, tail) = rest.split_at_row(next);
                 rest = tail;
                 scope.spawn(move || draw(&mut band));
@@ -543,36 +547,67 @@ const SUBPIXEL: f32 = 256.0;
 
 /// Where a vertex shader's `pos + c * size` lands in the target, axis by
 /// axis, through `px / screen * 2 - 1`, the y flip and the viewport
-/// transform, in `f32` as the GPU computes it.
+/// transform, including llvmpipe's fused viewport multiply-add.
 #[inline]
 fn vertex_x(p: f32, screen: f32, v: &Viewport) -> f32 {
     let ndc = p / screen * 2.0 - 1.0;
-    ndc * (v.w * 0.5) + (v.x + v.w * 0.5)
+    viewport_position(ndc, v.x, v.w)
 }
 
 #[inline]
 fn vertex_y(p: f32, screen: f32, v: &Viewport) -> f32 {
     let ndc = 1.0 - p / screen * 2.0;
-    -ndc * (v.h * 0.5) + (v.y + v.h * 0.5)
+    viewport_position(-ndc, v.y, v.h)
 }
 
-/// The first pixel whose centre is at or past the snapped edge `edge`.
 #[inline]
-fn first_centre_at_or_after(edge: f32) -> i64 {
-    // Snap to the subpixel grid, then cover centres at `i + 0.5`. The guard
-    // keeps absurd coordinates inside i64 and off-target.
-    let fixed = (edge.clamp(-1.0e9, 1.0e9) * SUBPIXEL).round() as i64;
-    (fixed - SUBPIXEL as i64 / 2).div_euclid(SUBPIXEL as i64)
-        + i64::from((fixed - SUBPIXEL as i64 / 2).rem_euclid(SUBPIXEL as i64) != 0)
+fn viewport_position(ndc: f32, offset: f32, size: f32) -> f32 {
+    let scale = size * 0.5;
+    if offset == 0.0 && ndc.abs() <= 2.0 {
+        // Here ndc came from subtracting 1 in f32, so 1 + ndc and its
+        // product with scale fit exactly in f64. The final f32 cast is
+        // the same rounding as FMA without a libcall on baseline x86.
+        ((1.0 + f64::from(ndc)) * f64::from(scale)) as f32
+    } else {
+        ndc.mul_add(scale, offset + scale)
+    }
 }
 
-fn covered(a: f32, b: f32, limit: std::ops::Range<u32>) -> Option<std::ops::Range<u32>> {
-    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+/// The position in sample-centre coordinates on llvmpipe's 8-bit grid.
+#[inline]
+fn snap_to_subpixel(edge: f32) -> f32 {
+    ((edge - 0.5) * SUBPIXEL).round_ties_even() / SUBPIXEL
+}
+
+/// The first framebuffer pixel on or after the snapped edge.
+#[inline]
+fn first_centre_at_or_after(edge: f32) -> u32 {
+    let centre = (edge - 0.5).clamp(0.0, MAX_SIDE as f32);
+    let pixel = centre as u32;
+    // An integral centre is even in 8-bit fixed point. The snap moves
+    // any edge up to and including the midpoint back onto that centre.
+    pixel + u32::from(centre - pixel as f32 > 0.5 / SUBPIXEL)
+}
+
+fn covered(
+    a: f32,
+    b: f32,
+    clip_lo: f32,
+    clip_hi: f32,
+    limit: std::ops::Range<u32>,
+) -> Option<std::ops::Range<u32>> {
+    // Intersect coverage with the transformed clip volume. Keep the
+    // unclipped endpoints on Raster to interpolate fragment attributes.
+    let lo = a.min(b).max(clip_lo);
+    let hi = a.max(b).min(clip_hi);
+    if lo >= hi {
+        return None;
+    }
     // Top-left rule: a centre on the left (top) edge is in, on the right
     // (bottom) edge is out.
-    let start = first_centre_at_or_after(lo).max(i64::from(limit.start));
-    let end = first_centre_at_or_after(hi).min(i64::from(limit.end));
-    (start < end).then_some(start as u32..end as u32)
+    let start = first_centre_at_or_after(lo).max(limit.start);
+    let end = first_centre_at_or_after(hi).min(limit.end);
+    (start < end).then_some(start..end)
 }
 
 /// Expand one instance at `pos` and `size` (pixels, as uploaded) on a
@@ -591,13 +626,25 @@ pub(crate) fn rasterize(
     if !(y0.is_finite() && y1.is_finite()) {
         return None;
     }
-    let rows = covered(y0, y1, clip.y..clip.y + clip.h)?;
+    let rows = covered(
+        y0,
+        y1,
+        viewport.y,
+        viewport.y + viewport.h,
+        clip.y..clip.y + clip.h,
+    )?;
     let x0 = vertex_x(pos[0], screen[0], viewport);
     let x1 = vertex_x(pos[0] + size[0], screen[0], viewport);
     if !(x0.is_finite() && x1.is_finite()) {
         return None;
     }
-    let cols = covered(x0, x1, clip.x..clip.x + clip.w)?;
+    let cols = covered(
+        x0,
+        x1,
+        viewport.x,
+        viewport.x + viewport.w,
+        clip.x..clip.x + clip.w,
+    )?;
     Some(Raster {
         x0,
         x1,
@@ -615,10 +662,10 @@ pub(crate) fn smoothstep(low: f32, high: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// `fwidth(f)` at pixel `(x, y)` as a 2x2 quad computes it: the fine
-/// differences across the pixel's row pair and column pair, `here` being
-/// `f(x, y)`. Quads sit on even framebuffer coordinates; a neighbour outside
-/// the primitive is the helper invocation that shades the same function.
+/// Fine derivatives at pixel `(x, y)`: differences across its row and
+/// column in the 2x2 quad. WGSL's plain `fwidth` leaves the fine/coarse
+/// choice to the backend. Quads sit on even framebuffer coordinates. A
+/// neighbour outside the primitive is a helper invocation of `f`.
 #[inline(always)]
 pub(crate) fn fine_fwidth(x: u32, y: u32, here: f32, f: impl Fn(u32, u32) -> f32) -> f32 {
     let ddx = if x & 1 == 0 {
@@ -812,8 +859,32 @@ mod tests {
         assert_eq!(rect_cover(5.0, -3.0), Some(2..5));
         // Within 1/512 px of a centre, the snapped edge decides.
         assert_eq!(rect_cover(2.5 + 1.0 / 1024.0, 1.0), Some(2..3));
+        assert_eq!(rect_cover(2.5 + 1.0 / 512.0, 1.0), Some(2..3));
+        assert_eq!(rect_cover(2.5 + 3.0 / 1024.0, 1.0), Some(3..4));
         assert_eq!(rect_cover(-10.0, 20.0), Some(0..10));
         assert_eq!(rect_cover(f32::NAN, 1.0), None);
+    }
+
+    #[test]
+    fn inset_clip_volume_does_not_move_interpolation_endpoints() {
+        let view = Viewport {
+            x: 8.0,
+            y: 8.0,
+            w: 16.0,
+            h: 16.0,
+        };
+        let r = rasterize(
+            &view,
+            [32.0; 2],
+            [-8.0; 2],
+            [20.0; 2],
+            PixelRect::new(0, 0, 32, 32),
+        )
+        .unwrap();
+        assert_eq!(r.cols, 8..14);
+        assert_eq!(r.rows, 8..14);
+        assert_eq!(r.lerp_x(8, 0.0, 20.0), 9.0);
+        assert_eq!(r.lerp_y(8, 0.0, 20.0), 9.0);
     }
 
     #[test]
@@ -872,6 +943,35 @@ mod tests {
             let mut many = CpuFramebuffer::new(70, 45).unwrap();
             many.draw_banded(bands, draw);
             assert_eq!(many, one, "{bands} bands");
+        }
+    }
+
+    #[test]
+    fn bands_cover_all_rows_without_empty_callbacks_or_excess_threads() {
+        let available = std::thread::available_parallelism().map_or(1, |n| n.get()) as u32;
+        for (height, requested) in [(10, 4), (9, 0), (3, u32::MAX), (MAX_SIDE, available + 1)] {
+            let mut fb = CpuFramebuffer::new(1, height).unwrap();
+            let seen = std::sync::Mutex::new(Vec::new());
+            fb.draw_banded(requested, |band| {
+                seen.lock()
+                    .unwrap()
+                    .push((band.rows(), std::thread::current().id()));
+            });
+            let mut seen = seen.into_inner().unwrap();
+            seen.sort_unstable_by_key(|(rows, _)| rows.start);
+            let expected = requested.max(1).min(height.div_ceil(2)).min(available);
+            assert_eq!(seen.len(), expected as usize);
+            let mut workers = std::collections::HashSet::new();
+            let mut next_row = 0;
+            for (rows, thread) in seen {
+                assert!(!rows.is_empty(), "{rows:?}");
+                assert_eq!(rows.start, next_row);
+                assert_eq!(rows.start % 2, 0);
+                next_row = rows.end;
+                workers.insert(thread);
+            }
+            assert_eq!(next_row, height);
+            assert!(workers.len() <= expected as usize);
         }
     }
 
