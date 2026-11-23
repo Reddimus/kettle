@@ -551,4 +551,45 @@ mod tests {
         let two = SoftRaster::with_max_bands(2);
         assert_eq!(two.bands_for(&uhd.target(), u64::MAX), 2);
     }
+
+    /// The animated starfield's CPU cost per frame, single-threaded and on
+    /// the bands a frame of that size gets. Run by hand:
+    /// `CARGO_PROFILE_DEV_OPT_LEVEL=3 cargo test -p kettle-render --lib
+    /// starfield_frame_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing; run by hand with optimizations"]
+    fn starfield_frame_cost() {
+        for (w, h) in [(1600, 933), (1600, 1000), (3840, 2160)] {
+            let mut field = crate::starfield::CpuStarfield::new();
+            let mut fb = CpuFramebuffer::new(w, h).expect("frame");
+            for bands in [1, 8] {
+                let mut raster = SoftRaster::with_max_bands(bands);
+                let mut times = Vec::new();
+                for frame in 0..40 {
+                    // 10 fps: each frame is 0.1 s later.
+                    field.upload([w as f32, h as f32], 3.0 + frame as f32 * 0.1);
+                    let started = std::time::Instant::now();
+                    raster.draw(
+                        &mut fb.target(),
+                        [w as f32, h as f32],
+                        PixelRect::new(0, 0, w, h),
+                        &CpuDraw::Starfield {
+                            uniforms: field.uniforms(),
+                        },
+                    );
+                    times.push(started.elapsed().as_secs_f64() * 1000.0);
+                }
+                times.sort_by(f64::total_cmp);
+                let used = raster.bands_for(&fb.target(), u64::MAX);
+                println!(
+                    "starfield {w}x{h} max_bands={bands} (used {used}): median {:.2} ms, p90 {:.2} ms, \
+                     {:.1}% of one core at 10 fps",
+                    times[times.len() / 2],
+                    times[times.len() * 9 / 10],
+                    // ms per frame x 10 frames per second / 1000 ms x 100 %.
+                    times[times.len() / 2],
+                );
+            }
+        }
+    }
 }
