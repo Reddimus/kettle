@@ -22,6 +22,7 @@ use super::quad::{QuadBlend, draw_quads};
 use super::rounded_surface::draw_rounded_surfaces;
 use super::starfield::{draw_starfield, frame_stars};
 use super::{AddressMode, CpuFramebuffer, CpuTexture, CpuTextureFormat, CpuTextureView, PixelRect};
+use crate::backend::DeviceRef;
 use crate::builtin_glyphs::{BuiltinKey, Strokes};
 use crate::glyphpipe::{GlyphClip, GlyphInstance, GlyphPipeline, RasterGlyph};
 use crate::gpu_tests::{gpu_test_config, gpu_test_guard};
@@ -685,7 +686,7 @@ fn glyphs_match_the_gpu() {
         )
         .unwrap();
         let slot = glyphs
-            .ensure_glyph(&gpu.device, &gpu.queue, key, || {
+            .ensure_glyph(DeviceRef::gpu(&gpu.device, &gpu.queue), key, || {
                 Some(RasterGlyph {
                     color,
                     width: rw,
@@ -815,7 +816,7 @@ fn glyphs_match_the_gpu() {
                 count: instances.len() as u32 - half,
             },
         ];
-        assert!(glyphs.upload(&gpu.device, &gpu.queue, screen, &instances));
+        assert!(glyphs.upload(DeviceRef::gpu(&gpu.device, &gpu.queue), screen, &instances));
         let gpu_frame = gpu.render(w, h, &init, |encoder, view| {
             let mut pass = load_pass(encoder, view);
             glyphs.draw(&mut pass, &clips, [w, h]);
