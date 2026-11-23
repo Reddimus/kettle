@@ -157,7 +157,26 @@ full MCP server's `kettle_video_frames` open the file in their own process,
 start their own worker through the same client and launcher the GUI uses,
 and encode the sheet as one JPEG sized to its destination (any size for the
 command's file, the 768 KiB response line for MCP) with a text index of each
-frame's time.
+frame's time. The command publishes its file from a private sibling without a
+step that can destroy another file: the output's name is examined, then
+exchanged with the sibling's (`renameat2` `RENAME_EXCHANGE` on Linux,
+`renameatx_np` `RENAME_SWAP` on macOS), and what the exchange displaced is
+removed only when it is the file examined and the output's name holds the
+sheet, and exchanged back otherwise; if something else has already moved the
+displaced file off the private name, there is nothing to put back and the
+sheet stays. Nothing is published unless, just before it moves, the private
+name still holds the sheet Kettle wrote. A free name is taken with an
+exclusive rename. Where the exchange is refused (`EINVAL`, `ENOTSUP`,
+`ENOSYS`, `EXDEV`), and on Windows, which has none, the old output moves
+aside to a private name, the sibling takes the free name by an exclusive
+rename or a hard link, and the old output is then removed; this is not
+atomic, and a filesystem with neither step is refused before anything
+moves. Once a name has been exchanged or moved, every removal first checks
+that the name still holds the expected file; the check and the removal are
+two steps, as no system removes a name only while it holds a given file, so
+a file moved onto one of the command's unpredictable private names between
+them is not protected. On Windows no worker exists, so this path runs only
+in tests.
 Mermaid goes through merman 0.9.3, pinned exactly with its layout and
 painting family, under a resource-constrained policy and a two-second
 `OperationControl` deadline that starts before its fonts load. Kettle
@@ -637,9 +656,60 @@ Where and for how long a paste reads depends on the backend:
   paste goes on to the text, because on X11 a failure does not show a list
   exists: xclip answers every request with its own type, and an owner may
   leave a request it cannot serve unanswered.
-- **macOS and Windows.** arboard reads the system pasteboard synchronously on
-  the window thread, in the same order. There is no pipe and no deadline of
-  Kettle's to enforce; the text cap is checked once the read returns.
+- **macOS and Windows.** arboard is created and asked on the clipboard
+  worker thread (`clipboard::worker`), in the same order. The formats of one
+  paste share its deadline, two seconds, and once it has passed no further
+  format is asked for. No deadline reaches into AppKit's
+  `stringForType:` or Win32's `GetClipboardData`, so an owner that never
+  answers keeps the worker, and every later request times out, until it
+  answers or exits. A request still queued when its caller stops waiting
+  is not asked of the owner. The text cap is checked once the system has
+  handed the text over, so it bounds what Kettle keeps, not what a read
+  holds (`docs/AUDIT-DEFERRED.md`).
+
+  On macOS a paste the user asked for (a terminal paste, a modal field, the
+  find bar) frees the window after those two seconds and still takes the
+  answer if it comes within a minute more (`clipboard::LateAnswer`): the
+  system may be waiting for the user to allow the paste. The minute is
+  measured on `Instant`, which does not advance while the Mac sleeps. A
+  notification says the paste is coming; the notification worker cannot
+  withdraw a notice, so its text states the rule, not a state. Each window's
+  turn looks for the answer (`App::poll_clipboard_wait`). A terminal paste
+  is delivered only to an unchanged `PasteDestination`: the same pane, or
+  the same broadcast scope reaching the same panes in every window, with the
+  same modal and preview lane on top, the rule a paste confirmation's
+  consent follows. A field's paste goes to its modal while that modal is on
+  top. An answer whose destination changed without input in the window (a
+  menu-bar tab switch, another window's broadcast, a pane that exited) is
+  dropped, and a notification says why when there was an answer to lose or an
+  error to report (an empty clipboard stays quiet, and a timeout still
+  reports timeout). A fresh key press, a click, a non-zero scroll wheel
+  event, a drop, input-method text, a control client's UI key, or an
+  assistive-technology edit, selection, focus or press in that window, or in
+  any peer window holding a recipient pane of a cross-window broadcast
+  group, drops the wait first, so a paste never lands behind later input. A
+  key that pastes into the same waiting target (the paste chord for that
+  modal field or the find bar, or a Paste or Paste Selection keybind when no
+  modal holds the keyboard for a pane wait) joins the wait instead of asking
+  the clipboard again. Once nobody waits for a paste, the worker asks its
+  owner for no further format.
+
+  A program's read (OSC 52) and paste previews keep the two-second bound. On
+  the worker (Wayland, macOS, Windows), a preview reads the file list and the
+  text under one deadline and stops after the first timeout; on the caller
+  thread (X11), a file-list timeout is treated as no list and the text keeps
+  its own two-second read, matching a normal paste. Shift+right-click reads
+  the clipboard once for both of its rows. Stores are not queued past their caller: an OSC 52
+  store, or Kettle's own copy, waits at most two seconds for the worker,
+  and a store still queued when its deadline passes is dropped, never
+  applied later over newer clipboard contents. While a read holds the
+  worker, whether a late paste or one the user stopped waiting for, a store
+  is therefore served after it only if that read ends within the store's
+  two seconds; otherwise it is dropped and logged. Order holds either way: a
+  store is never applied ahead of a read made before it. Windows keeps the
+  two-second bound for every read. On macOS and Windows the clipboard is
+  unavailable for the session if its worker has not started within two
+  seconds of launch; it is not retried.
 
 A PNG from another program is untrusted. The window thread reads only the size
 its header declares, for `reserve_png_from`, which refuses a side over 16,384
@@ -6132,6 +6202,13 @@ System appearance is observed independently of a window's rendered palette.
 Linux appearance and reduced motion share a bounded XDG Settings worker
 transport (`kettle-ui/src/portal_settings.rs`): subscriptions precede snapshots,
 owner changes invalidate state, and retries and shutdown stay off the UI thread.
+That worker and every other session-bus connection Kettle opens itself (global
+shortcuts, notifications, the image viewer and file-manager hand-offs) connect
+through `kettle-ui/src/dbus_bound.rs`, which reads each message's 16-byte
+primary header first and discards a message declaring more than 64 KiB before
+zbus sizes a buffer for it (one declaring more than the protocol's 128 MiB
+still ends the connection); the AccessKit screen-reader connections are opened
+inside that crate and are not covered (see `docs/AUDIT-DEFERRED.md`).
 macOS observes system appearance separately because forcing NSWindow appearance
 to match the palette suppresses winit's window appearance notifications.
 Both sources enter the existing theme synchronization and all-window redraw

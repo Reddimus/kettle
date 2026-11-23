@@ -977,6 +977,59 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Security
 
+- A Kettle built for a Unix other than Linux or macOS, which Kettle does not
+  ship, now refuses to start a program in a pane. On those systems it could
+  not find every file it had open, so a file left open above a limit that was
+  lowered afterwards could have been passed on to the program. Linux and
+  macOS are unchanged.
+
+- `kettle video-frames` can no longer destroy a file that takes the output's
+  name while the sheet is being written. Kettle used to check the name and
+  then rename the sheet over it, so a video moved onto that name in between
+  was lost to the JPEG. The sheet now trades names with whatever is there
+  and removes the displaced file only when it is the one that was checked;
+  anything else is put back, or, if it cannot be, kept beside the output
+  under a name beginning `.kettle-`, and the command fails.
+  Replacing the last sheet works as before. On a filesystem that cannot
+  trade names the old file is moved aside first, and one that can neither
+  rename exclusively nor hard-link is refused.
+
+- On Linux, a program on the session bus could send Kettle a D-Bus message
+  of up to 128 MiB and have Kettle set that much memory aside for it before
+  reading it. The connections Kettle opens for desktop settings (light or
+  dark, reduced motion, button layout), the global shortcut, notifications,
+  the image viewer and showing a file in its folder now look at a message's
+  declared length first and discard anything over 64 KiB without buffering
+  it; a length past the 128 MiB the protocol allows still ends the
+  connection, as before. The screen-reader connection, which a library
+  opens, is not covered. The connections Kettle opens itself now need a
+  session bus on a unix socket, which is the default on Linux desktops; a
+  session bus reached only over TCP is no longer used for them.
+
+- On macOS and Windows the clipboard is read on its own thread. A program that
+  holds the clipboard and is slow to hand over its text could freeze the
+  window for as long as it took; now the window waits at most two seconds for
+  a clipboard read. A paste preview or a program's OSC 52 request then gives
+  up, and an OSC 52 write never overtakes a read made before it. On Windows a
+  paste gives up too. On macOS a paste you asked for still arrives if the
+  clipboard answers within a minute, for example once you allow the paste when
+  macOS asks. A notification says Kettle is waiting; typing or clicking in the
+  window stops the wait, and pressing paste again keeps it. The paste lands
+  only where it was asked for: if that pane, field or broadcast changed
+  meanwhile, nothing is pasted and a notification says so. A clipboard preview
+  waits two seconds in all, not two seconds per read. An OSC 52 write, or a
+  copy in Kettle, made while a slow read holds the clipboard waits two seconds
+  and is then dropped, never applied later. A program that never hands over
+  its text still keeps the clipboard from Kettle, and every clipboard action
+  gives up, until that program answers or exits. Clipboard text larger than
+  the largest paste, 4 MiB, is no longer put into the find bar, a text field
+  or a paste preview: the find bar says the query is too long, and a text
+  field pastes nothing and says why, as it now also does when the clipboard
+  timed out. This bounds the wait, not the memory a read takes: on macOS and
+  Windows the system copies the whole text, image or file list into Kettle
+  before Kettle can refuse it, so the 4 MiB limit bounds what Kettle keeps,
+  not what a read briefly holds.
+
 - A PNG pasted from the Linux clipboard is read up to 64 MiB (the X11 route
   allowed 256 MiB) and decoded with limits set before any pixel memory is
   allocated: 16,384 pixels a side and 256 MiB, where the decoder's defaults
@@ -1013,12 +1066,29 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Leave a visible export in place when its creation check fails instead of
   unlinking a name in an untrusted parent, and charge queued directory
   entries against the shared removal budget as they are listed.
+- Warnings about the config file no longer repeat what the file says. A
+  setting Kettle ignores is reported by line number and, for a known setting,
+  its name; a `trigger` whose pattern does not compile is reported by its
+  position. Before, the warning on stderr quoted the rejected value, the
+  unknown key or the whole line, which could be an `env` value, a trigger
+  pattern and its command, or anything pasted into the file by mistake.
+  `kettle --check-config` still prints the unknown keys and the rejected
+  values.
 
 ### Fixed
 
 - `tab-min-width` is measured in logical pixels, as documented. On a display
   with a scale above 100% tabs could shrink to a fraction of the width set
   (half on a Retina display) before the tab bar started to scroll.
+
+- On Windows, Kettle could fail to open one of its own files, such as a
+  saved session or a recording, when the file's permissions gave your account
+  Modify rather than Full control. Before tightening the permissions it asked
+  Windows for the right to change the file's owner, which Modify does not
+  include, and Windows refused. It now asks for that right only when it has
+  to move a file from the Administrators group to your account, so a file
+  whose permissions Kettle may tighten opens, and its permissions are then
+  limited to your account.
 
 - On Linux a flag such as 🇯🇵 drew as two boxed letters, and some emoji such
   as ✅ drew in black and white, in tab titles, the GNOME header title and

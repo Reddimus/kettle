@@ -5,15 +5,6 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
 
 ## Security and boundaries
 
-- **A video moved onto the output name during frame publication.**
-  `crates/kettle/src/video_frames.rs` checks the destination's identity before
-  writing and then renames unconditionally, so a process that moves the input
-  video onto the output name in that window loses the video to the JPEG.
-  Deferred because a no-clobber rename changes the documented overwrite
-  behavior; the complete fix publishes with an exchange (Linux `RENAME_EXCHANGE`,
-  macOS `RENAME_SWAP`, Windows `ReplaceFile`) and swaps back when the displaced
-  file is not the one checked, with a native test per platform.
-
 - **D-Bus maintenance notices.** The product graph accepts the informational
   unmaintained notices RUSTSEC-2026-0370/0371/0372 for `zvariant 5.15.1`,
   `zvariant_derive 5.15.1` and `zbus_names 4.3.5`. The all-target exact reverse
@@ -21,14 +12,29 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   `cargo audit --deny warnings` remains enforced for every other notice and
   vulnerability. Reassess these exceptions when the guarded Linux desktop
   integration dependencies change. The vendor-validation graph has no waiver.
-  Moving to zbus 6 is blocked upstream: the newest `accesskit_unix` (0.24.1)
-  requires zbus 5.19 and `atspi` 0.29, and `atspi` 0.30 still requires zbus 5.
+  Moving to zbus 6 is blocked upstream. Checked 2026-11-20: zbus is at 6.4.0
+  and no longer depends on the three crates, but the newest `accesskit_unix`
+  (0.24.1, also AccessKit's `main`) requires zbus 5.19 and `atspi` 0.29, and
+  `atspi` 0.30 (also its `main`) still requires zbus 5; neither project has an
+  open change that moves. `notify-rust`, the third consumer in the audited
+  all-target graph (`Cargo.lock` has 4.18.2), builds on zbus 6 from 4.19.0
+  (2026-11-08). Moving Kettle's own zbus or `notify-rust` alone would add a
+  second zbus and leave all three crates in the graph through
+  `accesskit_unix`, so it closes nothing. Close when an `accesskit_unix`
+  release builds on zbus 6: move it, `notify-rust` and Kettle's own zbus
+  together, and once the three crates are gone from the audited graph remove
+  the three audit ignores and `scripts/check-dbus-scope.py`.
 
 - **Upstream `lru` advisory.** `Cargo.lock` still pins `lru 0.16.4` through
-  `glyphon 0.12.0`; `deny.toml` ignores RUSTSEC-2026-0253. Deferred because the
-  reviewed glyphon path does not call the affected `pop()` method, and a fork
-  adds supply-chain surface. Close #207 when upstream accepts `lru >=0.18.2`;
-  remove the audit ignores and `scripts/check-lru-scope.py` together.
+  `glyphon 0.12.0`; the `cargo audit` runs in `audit.yml` and `just audit`
+  ignore RUSTSEC-2026-0253. Deferred because the reviewed glyphon path does
+  not call the affected `pop()` method, and a fork adds supply-chain surface.
+  Close #207 when upstream accepts `lru >=0.18.2`; remove the audit ignores
+  and `scripts/check-lru-scope.py` together.
+  Checked 2026-11-20: glyphon 0.12.0 is still the newest release, its `main`
+  still requires `lru 0.16.2`, and the change that would move it
+  (grovesNL/glyphon pull request 182, "Update `lru` to `0.18.2`", opened
+  2026-08-12) is still open. `lru` itself is at 0.19.0.
 - **`setsid()` descendants on macOS.** macOS has no child subreaper, so
   `kettle exec` and the in-process MCP `kettle_run` path cannot adopt
   descendants that leave the PTY session, and a timeout or cancellation can
@@ -36,20 +42,275 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   `kettle exec` child, whose subreaper stops escaped descendants on timeout,
   cancellation and termination signals (`crates/kettle/src/exec_supervisor.rs`;
   native tests in `crates/kettle/tests/mcp_supervisor.rs`). On every platform a
-  normal exit deliberately leaves detached daemons running. Deferred until a
-  macOS supervisor can track descendants across session changes. Close with
-  native macOS timeout, cancellation and concurrent-command isolation tests.
-- **D-Bus messages sized before they are read.** Kettle's receiver is now in
-  `crates/kettle-ui/src/portal_settings.rs`; its body check runs after transport
-  allocation. `zbus` 5.19 resizes its
-  receive buffer to a message's declared length (up to 128 MiB) before
-  reading the body, and the settings-portal subscription keeps the default
-  64-message queue whatever `max_queued` asks, so a hostile session-bus peer
-  can make Kettle allocate up to that much per message. Deferred because the
-  fix belongs in zbus's transport; Kettle cannot bound it from outside without
-  vendoring zbus, which is also blocked on the zbus 6 migration (#633–#635).
-  Close by moving to a zbus release that reads incrementally against a cap, or
-  vendoring the transport fix.
+  normal exit deliberately leaves detached daemons running.
+
+  Investigated on 2026-11-20 on macOS 27.3 (arm64, 18 cores) and in XNU
+  releases from xnu-7195 (macOS 11) on. No supervisor was added: the tests
+  on that one machine and the reading of those sources did not find a
+  mechanism that gives an unprivileged Kettle reliable ownership of escaped
+  descendants across the macOS versions it supports without changing what
+  the command may do. Each one examined infers ancestry in a race with the
+  scheduler, rests on a mark the descendant can drop, needs a privilege or
+  entitlement Kettle does not have, or changes the context a command runs
+  in. A Seatbelt profile, the last of these, is the one that meets the
+  ownership test; it is described below with the reason it was not shipped.
+
+  A kqueue fork event names only the process that forked. `EVFILT_PROC` refuses
+  `NOTE_TRACK` with `ENOTSUP`, and a `NOTE_FORK` event carries no child pid
+  (`data` is 0), so the supervisor has to find the child itself, with
+  `proc_listchildpids` or by parent link.
+
+  Parent links outlive the parent only in part. `proc_pidinfo` flavor 17
+  (`PROC_PIDUNIQIDENTIFIERINFO`, absent from the SDK headers) answers for an
+  unreaped zombie when its `arg` is 1, and its `p_puniqueid` keeps the
+  parent's unique id when a process is reparented to launchd, but an orphan
+  that then calls `exec` reports launchd's id instead (seen on 27.3; that
+  code is in the sources from xnu-8792, macOS 13). `p_orig_ppidversion`
+  survives `exec`, but exists only from xnu-11417.101 (macOS 15.4), and
+  Kettle supports macOS 11. Either link helps only if the supervisor read
+  the matching identity of the parent before the parent was reaped.
+
+  A prototype timed an interval that contains that window and counted the
+  grandchildren it found. Each trial had its own kqueue. For every process it
+  tracked, the prototype tried to register `NOTE_FORK`, `NOTE_EXEC` and
+  `NOTE_EXIT` and listed the children at once and again on each fork event;
+  each exit event swept all listed processes by parent link, and so did the
+  end of a trial whose grandchild was still untracked. The root, spawned
+  without waiting to be registered, forked a child that forked again and
+  exited at once. The grandchild called `setsid()`, waited until the root had
+  reaped the child, reported its pid and then called `exec` on `/bin/sleep`; a
+  trial counted as found when that pid was tracked by its end. From just
+  before the root's `fork` to the return of its `waitpid` took at least 644
+  us, with medians of 913 to 1,479 us per batch of 500. At the nonzero
+  settings one sleep was requested before the child scan of each fork event
+  the kqueue delivered. With both links the prototype missed 0, 0, 66, 430 and
+  500 of 500 grandchildren at requested sleeps of 0, 0.25, 0.5, 1 and 2 ms;
+  with the unique id alone it missed 0, 0, 97, 355 and 500. Two later batches
+  of 3,000 with no sleep requested, one per setting, missed none; one and two
+  of their grandchildren were found only by the closing sweep. An earlier
+  version (unique id alone, zombies not read, a root that waited to be
+  registered and a grandchild that did not call `exec`) ran beside 54 busy
+  processes on the 18 cores with no sleep added: it missed 0 of 1,000 with no
+  QoS override and 88 of 500 when its thread requested background QoS.
+
+  Inherited marks do not replace the link. A marker in the environment could
+  not be read back through `KERN_PROCARGS2` once the descendant ran
+  `/bin/sh` or `/bin/sleep`, as XNU's default policy on a release kernel
+  with SIP on predicts: it withholds the environment of another
+  code-signing-restricted process from an ordinary caller.
+
+  An inherited descriptor is a per-command mark that the descendant can
+  drop. A probe gave the root the write end of a pipe and a PTY slave, then
+  scanned the descriptor list of every other process it could read
+  (`PROC_PIDLISTFDS` and `proc_pidfdinfo`) for either. Each scan read the
+  lists of about 700 same-user processes, and of no other user's, in 11 to
+  40 ms. It found the grandchild after the double fork, `setsid()`,
+  reparenting and `exec` of `/bin/sleep`. It found neither mark on a
+  grandchild that first closed descriptors 0 to 4,095 (its list came back
+  empty), or on one that pointed descriptors 0 to 2 at `/dev/null` and
+  closed 3 to 4,095, as daemons commonly do (its three entries held
+  neither). The scan is also a poll, and a descriptor can be
+  passed to an unrelated process. It was not shipped as a partial
+  supervisor.
+
+  Two kernel-kept ids are inherited, but by default neither is per command.
+  Spawned ordinarily, the supervisor, the root and the grandchild (after the
+  double fork, `setsid()`, reparenting and `exec`) all reported the terminal
+  app that started them as their responsible process, as any other command
+  started from that app would by inheritance. A root spawned with the private
+  disclaim attribute (`responsibility_spawnattrs_setdisclaim`) became its own
+  responsible process. While it lived, the grandchild reported the root's pid
+  after the same steps, and a scan of all processes matched those two and no
+  others. That is still not ownership. Once the root was killed, before it was
+  even reaped, the grandchild reported its own pid. When the grandchild
+  spawned `/bin/sleep` with the same attribute, the new process reported its
+  own pid at every sample, the root's at none. Members would be found by
+  polling and signalled one at a time. The call is private, and changing the
+  responsible process can change which app the system's privacy (TCC)
+  decisions are attributed to; the probe ran nothing that TCC protects.
+
+  The coalition ids (`proc_pidinfo` flavor 20) of a probe and of its
+  grandchild after the double fork, `setsid()`, reparenting and `exec` were
+  the same. Kettle cannot make a per-command coalition: creating one needs
+  membership of a privileged coalition, and naming one in `posix_spawn` needs
+  that or a private entitlement. A launchd job is the untried route to one
+  (in a snapshot, this user's 335 processes with parent pid 1, adopted
+  orphans among them, held 272 distinct resource coalition ids); the command
+  would then be started by launchd, not by `kettle exec`, with a different
+  parent and launch context. It would also not inherit Kettle's descriptors:
+  launchd opens a job's standard streams from paths in the job definition,
+  so the PTY slave would have to be reopened by name, and the command's
+  other inherited descriptors could not be passed at all, an independent
+  reason this route does not fit. Kettle could not use the
+  coalition terminate request to stop the members. That request is privileged,
+  and in the XNU sources it does not signal the members: it marks the
+  coalition and notifies when it is empty. Kettle would scan every process for
+  the id and signal pids one at a time, in a race with their forks. Whether
+  launchd stops every member when the job is removed was not tested.
+
+  Making a new audit session with `setaudit_addr` needs root. `setsid()`
+  itself takes the caller out of the session, process group and
+  controlling terminal Kettle gave it.
+
+  Endpoint Security delivers fork events from the kernel, to entitled
+  clients only. Its system-wide client (`es_new_client`) must also run as
+  root. From macOS 27.0 the SDK has `es_new_descendants_client`, whose
+  header says it covers the caller's whole descendant subtree and needs
+  neither root nor TCC approval. Both need the restricted
+  `com.apple.developer.endpoint-security.client` entitlement, which Kettle
+  does not hold: called without it here, the descendants client returned
+  `ES_NEW_CLIENT_RESULT_ERR_NOT_ENTITLED`. Only that refusal was tested.
+  Whether an entitled client still reports a descendant after `setsid()`
+  and reparenting, and whether Kettle could stop the subtree safely from
+  its events, is not known. Its header also says the caller and its
+  descendants cannot then run setuid or setgid binaries unless the caller
+  is root, and macOS 11 to 26 would stay uncovered.
+
+  `ptrace` is not a route. Darwin's request list has none that reports a
+  traced process's forks or follows its children (`sys/ptrace.h`), and
+  tracing changes how the command receives signals. Two `PT_ATTACHEXC`
+  attempts on same-user children, one started to run `/bin/sleep` and one
+  the ad hoc signed probe binary, both returned `EPERM` here.
+
+  A Seatbelt profile is the one mark examined that a descendant cannot drop.
+  A root applied `(version 1)(allow default)` plus one per-command deny rule
+  with `sandbox_init`, then forked a child that forked a grandchild, which
+  called `setsid()` at once and ran `exec` on `/bin/sleep`. The profile is
+  inherited at fork, so there was no window to race: once the root was
+  reaped and the grandchild reparented to launchd, none of 1,000 such
+  grandchildren had lost it (none of 500 with the file rule below). A member
+  cannot remove its profile or apply another: `sandbox_init` inside one
+  failed with `EPERM`. Applying a profile identical to the one in force
+  succeeded (`sandbox-exec` of the same mark inside the mark exited 0);
+  any different profile, including a plain `(allow default)`, failed. An
+  unsandboxed, unprivileged supervisor can ask which processes carry the
+  rule with `sandbox_check`, which is private API. Only macOS 27.3 was
+  tested.
+
+  The rule has to be chosen with care. A rule that denies reads of one
+  existing per-command file fails twice. Other processes' own sandboxes and
+  root daemons were denied that path as well (386 of 872 processes beside
+  the member, for a file under `/private/tmp`, among them system XPC
+  services and browser renderers), so the answer alone would name
+  processes outside the command. And a member could drop the mark: it
+  deleted the file; with writes under the file's directory denied, renaming
+  that directory was refused but renaming its parent succeeded; and with
+  the path gone every process was denied it. A rule that denies
+  `mach-lookup` of a per-command global name leaves no file to remove.
+  Checked together with a control name that the profile allows, it named
+  exactly the command's grandchild among 876 processes, in 2 to 3 ms per
+  scan (460 others were denied the per-command name by their own profiles
+  and were rejected by the control name), and told two concurrent commands
+  apart. A teardown that stopped the members one scan found, scanned again
+  and killed those still found stopped one command's grandchild and left
+  the other's running. Teardown is still a scan, stop and rescan loop
+  rather than kernel-delivered events, with a pid-reuse window between a
+  check and its signal. A same-user process that applied the same rule to
+  itself would be counted as a member, and processes that launchd starts
+  on the command's behalf are outside the profile, as they are not
+  descendants.
+
+  The cost is why it is not shipped, and it has two parts. First, inside
+  the profile a nested
+  `sandbox-exec -p '(version 1)(allow default)' /usr/bin/true` exited 71
+  with `sandbox-exec: sandbox_apply: Operation not permitted`. Every command
+  that applies a Seatbelt profile of its own, which in practice always
+  differs from the per-command mark, would fail under `kettle exec`: this
+  repository's documented `sandbox-exec ... cargo test` run
+  (`docs/TESTING.md`), build and agent tools that sandbox their own
+  subprocesses, a nested `kettle exec`, whose per-command mark differs, and
+  a nested Kettle's media worker, which could not confine itself. When
+  `kettle exec` itself runs in a sandbox, it cannot apply the mark at all.
+  Second, inside the profile `exec` of a set-user-id binary fails with
+  `EPERM`, as `docs/TESTING.md` already notes for `ps`: `sandbox-exec` of
+  `/bin/ps`, `/usr/bin/sudo` and `/usr/bin/top` under the mark each printed
+  `execvp() ... failed: Operation not permitted` and exited 71, while
+  `/bin/ps` ran outside the sandbox. `su`, `login`, `at` and `crontab` are
+  also set-user-id root on macOS 27.3, so any command that uses `sudo`,
+  `ps` or `top` would break. An exception such as
+  `(allow process-exec (literal "/bin/ps") (with no-sandbox))` let `ps` run
+  under the mark, but only by running it outside the profile, which drops
+  the mark for that program and anything it starts. Nothing else such a
+  profile may change for a command was tested. A profile could also refuse
+  `setsid()` outright, as the media worker's does, but that breaks
+  legitimate daemons. This is the route to choose, perhaps as an opt-in, if
+  breaking nested sandboxes and set-user-id programs is an acceptable price
+  for macOS containment; that is the owner's call.
+
+  Deferred until Kettle can keep kernel ownership of each command's escaped
+  descendants, ownership they cannot drop and that holds after the
+  command's root is gone, and can stop them safely on timeout or
+  cancellation, without breaking commands that sandbox themselves or run
+  set-user-id programs. On macOS 27 and later the Endpoint Security
+  descendants client is the candidate if Apple grants Kettle the
+  entitlement; nothing beyond its refusal has been tested. The Seatbelt
+  mark above met the ownership test on the Mac tested but breaks nested
+  sandboxes and set-user-id programs; shipping it, even as an opt-in, needs
+  the owner to accept that. Close with native macOS timeout, cancellation
+  and concurrent-command isolation tests, including a fixture
+  that double-forks and calls `setsid()` at once. A normal exit keeps
+  leaving detached daemons running.
+- **D-Bus messages sized before they are read, on the accessibility
+  connections.** `zbus` 5.19 resizes its receive buffer to a message's declared
+  length (up to 128 MiB) before reading the body, and any peer on a bus can
+  address a message to a connection's unique name. The connections Kettle opens
+  itself (desktop settings, global shortcuts, notifications, the image viewer
+  hand-off and showing a file in the file manager) now read through
+  `crates/kettle-ui/src/dbus_bound.rs`, which checks the 16-byte header first
+  and drops a message longer than 64 KiB from a 4 KiB scratch buffer (one past
+  the specification's 128 MiB still ends the connection), so those buffer at
+  most 64 KiB of wire bytes a message and 4 MiB for a stream that queues zbus's
+  default 64 messages; what a message decodes into is bounded by the checks each
+  caller makes after it arrives. What remains is the session-bus and
+  accessibility-bus connections that `accesskit_unix` 0.24.1 opens for the
+  screen-reader tree: it builds them inside the crate with zbus's own transport,
+  so Kettle cannot put a reader in front of them without vendoring
+  `accesskit_unix` or zbus. Checked 2026-11-20: zbus 6.4.0 still allocates a
+  long message's declared length up front (`src/runtime/io/reader.rs`) and has
+  no receive limit to configure, and `accesskit_unix` exposes no way to supply
+  the connection. Close when zbus reads against a configurable limit and
+  `accesskit_unix` uses it, or when `accesskit_unix` accepts a caller's
+  connection.
+
+- **Paths and commands in log lines.** The change for code scanning alert #46
+  (`rust/cleartext-logging`, `crates/kettle-ui/src/app/automation.rs`) keeps
+  config file content out of the config and trigger warnings; path and command
+  text elsewhere was left as it is. Checked 2026-11-20: 62 log calls outside
+  tests print a path with `.display()` (36 in `kettle-ui`, 12 in
+  `kettle-render`, 5 in `kettle-config`, 9 in four other crates; 11 of the 62
+  at `debug`), and the trusted-directory and private-file errors from
+  `kettle-state` that startup, reload and `init.lua` loading log name each
+  directory they refused. A path under the home directory carries the account
+  name. Five calls print a command: the configured `custom-url-handler` when
+  it fails to start or its child cannot be reaped (two in `app/links.rs`, one
+  in `app/system_opener.rs`), the argv of a shell tab that fails to open
+  (`app/actions.rs`), and, only at `info`, the command an agent sends through
+  `run_command` (`app/ctl.rs`; its `send_text` neighbor logs a byte count).
+  Logs go to stderr at `warn` by default, where a service manager or a pasted
+  bug report can keep them. Deferred because the repository has no path form
+  for logs (`abbreviate_home` in `kettle-ui` serves tab titles), a warning
+  that cannot say which file it refused is hard to act on, and the choice
+  between `~`, the file name alone and an opt-in full path belongs to one
+  change across every crate. Close with one shared helper, those calls and the
+  `kettle-state` error texts moved to it, the five command lines reduced to a
+  fixed reason or a byte count, and a test per crate that captures the log and
+  finds neither a home directory nor a command in it.
+
+- **Windows metadata-only handles survive legacy hardening.**
+  `open_existing_private_file` in `crates/kettle-state/src/private.rs`
+  hardens a broad legacy file while holding it with no sharing, which refuses
+  the open while any handle with data or delete access survives. Windows does
+  not apply sharing to a handle holding only rights such as `READ_CONTROL`,
+  `WRITE_DAC` or `WRITE_OWNER`, so a principal the old DACL granted one of
+  those can keep such a handle across the rewrite and change the permissions
+  afterwards. Found on 2026-11-20 in review of the conditional `WRITE_OWNER`
+  request; it applies to every legacy file hardened before that change too.
+  Deferred because no user-mode call revokes another process's handle and
+  enumerating system handles needs privileged, undocumented interfaces. Close
+  with a hardening path that does not rely on the sharing check, such as
+  copying the data into a newly created private file and replacing the
+  original through a held handle, with a Windows test that keeps a
+  `WRITE_DAC`-only handle open across the call.
 
 ## Terminal and protocol
 
@@ -168,26 +429,84 @@ campaign and startup outlier remain inconclusive. These entries stay open.
 
 ## Platform
 
-- **Native clipboard acquisition can exceed paste bounds.** Independent review
-  of the clipboard fixes found that macOS `stringForType` materializes the
-  pasteboard string before the size check (`vendor/arboard-3.6.1/src/platform/osx.rs`),
-  and a delayed-rendering Windows owner can block synchronous `GetClipboardData`
-  beyond the deadline (`vendor/arboard-3.6.1/src/platform/windows.rs`). Deferred
-  because both require acquisition in a bounded helper process or thread that
-  lets the UI stop waiting while preserving OSC 52 store/load ordering. Close
-  with native tests for an oversized macOS string and a stalled Windows owner,
-  proving bounded resource use and UI wait time without reordering OSC 52.
+- **Native clipboard acquisition can exceed paste bounds.** Partly closed on
+  2026-11-20 by #926, which bounds the window's wait and nothing else: macOS
+  and Windows now ask the clipboard on a worker thread that the window stops
+  waiting for after two seconds (`crates/kettle-ui/src/clipboard.rs`). On
+  macOS the answer to a paste the user asked for is still taken for a minute
+  after that, without holding the window, since the system may be waiting
+  for the user to allow the paste. Native tests hold reads against a real
+  late owner and queue an OSC 52 store behind them: on macOS an `osascript`
+  process that promises text lazily on a private named pasteboard, on Windows
+  CI a delayed-rendering owner. The entry's closing criteria, a bounded
+  footprint and a native oversized-string test, are not met. Deferred on
+  2026-11-20, these parts stay open.
 
-- **Descriptor sweep on generic Unix.** On Unix systems other than Linux and
-  macOS, `vendor/portable-pty-0.9.0/src/unix.rs` sweeps to a finite hard
-  `RLIMIT_NOFILE` within its cap, otherwise to the capped soft limit. An open
-  descriptor above subsequently lowered limits is missed. Kettle ships for
-  Linux, macOS and Windows only. `closefrom` in `pre_exec` would also close
-  the standard library's exec-error pipe. Close with complete per-platform
-  descriptor enumeration or a close-on-exec mechanism that covers the fork
-  window, or fail spawning where completeness cannot be guaranteed. Validate
-  on the intended BSD with a descriptor above lowered hard and soft limits
-  and a failing-exec control; a parent-only snapshot can miss later opens.
+  Memory on macOS: AppKit fetches a whole flavor before any size check
+  (`vendor/arboard-3.6.1/src/platform/osx.rs`). Measured on 2026-11-20 on
+  macOS 27.3, with private named pasteboards and a second process as owner,
+  no AppKit call gives a flavor's size without fetching it. Reading `types`
+  or `pasteboardItems` cost nothing, but for a 128 MiB text each of
+  `dataForType:` and `stringForType:`, on the item or the pasteboard, took
+  the reader's physical footprint from 2 MiB to 387 MiB, and 258 MiB stayed
+  after the autorelease pool drained. Checking an `NSData` length first
+  therefore bounds nothing. The pasteboard took a 255 MiB flavor and refused
+  a 256 MiB one, so the platform's own cap is the only bound.
+
+  A pasted image is read the same way, as the whole TIFF flavor through
+  `dataForType:`, and decoded under the `image` crate's defaults rather than
+  the limits the Linux reader sets. The worker thread now holds this memory
+  instead of the window thread.
+
+  Memory on Windows: when another process owns the clipboard,
+  `GetClipboardData` gives the reader its own copy of the whole object, and
+  the vendored reader can size it only after that call
+  (`vendor/arboard-3.6.1/src/platform/windows.rs`). This holds for every
+  format a paste asks for: `CF_UNICODETEXT`, which `GlobalSize` sizes only
+  afterwards, the `PNG` and `CF_DIBV5` images, which `get_vec` copies whole
+  and arboard decodes under the `image` crate's defaults, and the `CF_HDROP`
+  file list. A 1 GiB text therefore costs Kettle about 1 GiB on the worker
+  thread before the 4 MiB refusal. This follows from how user32 hands
+  clipboard memory across processes and was not measured; the native test's
+  owner runs in the test process, where no copy is made. The text reader
+  sizes text by its allocation, so a short text in an allocation over 4 MiB
+  is refused.
+
+  An owner that never answers: the worker thread waits for it inside
+  `stringForType:` on macOS, or inside `GetClipboardData` on Windows. The
+  window stays responsive, but every clipboard request returns `Timeout`
+  until that owner answers or exits. On macOS a lazy owner that slept 40
+  seconds held the reader for all 40; Kettle holds no lock there, so other
+  programs can still use the pasteboard. On Windows the stalled thread keeps
+  the clipboard open, so other programs cannot open it either, and a second
+  worker would not help. A store that times out at its caller after the
+  worker has taken it may still be applied.
+
+  Not checked live: the macOS paste-permission alert. macOS 15.4 added
+  `NSPasteboard.accessBehavior` and an opt-in preview of an alert for
+  programmatic reads of the general pasteboard; the macOS 27.2 release notes
+  remove the preview's `EnablePasteboardPrivacyDeveloperPreview` default, and
+  no source found on 2026-11-20 shows a release that raises the alert by
+  default. Whether macOS would treat a Command-V read made on the worker
+  thread as one the user asked for was not observed, because that needs the
+  general pasteboard. If it asks, the window stops waiting after two
+  seconds, the notification says the paste is coming, and an answer given
+  within the minute after that pastes. A later answer, a click or a key
+  press other than paste in the window before the answer, or a change of
+  the pane, field or broadcast it was for, pastes nothing. Check on a Mac
+  where Kettle's paste permission (Privacy & Security) is set to ask: copy
+  text in another app, press Command-V in Kettle, and note whether an alert
+  appears and whether an answer given after five seconds pastes.
+
+  Deferred because bounding memory on either platform needs the read made in
+  a helper process with a memory cap (a footprint limit on macOS, a job
+  object on Windows), which the window can also stop waiting for; a thread
+  bounds the wait alone. A helper changes which process the system sees
+  reading the clipboard, and on macOS that needs the same live check of
+  paste permission. Close with native tests that prove a bounded footprint
+  without reordering OSC 52: an oversized string, and an oversized image,
+  on a private named pasteboard on macOS, and a second-process owner of a
+  large `CF_UNICODETEXT` and `CF_DIBV5` on Windows CI.
 
 - **Windows MCP stdout progress.** `crates/kettle/src/mcp.rs` still uses a
   blocking writer on Windows. A slow reader can make progress without a write
@@ -202,13 +521,3 @@ campaign and startup outlier remain inconclusive. These entries stay open.
   desktop evidence in `docs/TESTING.md`. Spoken search-result and caret feedback
   still needs an identified assistive-technology observation. Keep appearance
   skips in `docs/APPEARANCE-GATE.md` with their own artifact scope.
-
-- **Windows `WRITE_OWNER` request before DACL hardening.**
-  `open_existing_private_file` requests `WRITE_OWNER` before hardening the
-  DACL, which an account with only Modify permission is refused
-  (`crates/kettle-state`). Deferred because it needs a native Windows
-  reproduction to prove the fix and its regression. Close with a conditional
-  `WRITE_OWNER` request limited to the ownership-migration branch, with a
-  Windows test. (The companion lock-retirement race is fixed: a lock file is
-  now retired through its held handle.)
-

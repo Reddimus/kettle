@@ -627,10 +627,23 @@ the `Restore` and `Disable` variants, so it does not build against an upstream
   before `fork`, independently of either process limit: lowering the hard
   limit does not close descriptors already open above it. An unreadable,
   unusable, or over-1,048,576 bound fails the spawn instead of silently missing
-  descriptors or hanging. Other Unix systems use the finite hard limit when
-  it is at most 1,048,576; otherwise they retain the capped soft-limit walk.
-  These fallbacks cover descriptors left above a later-lowered soft limit
-  (audit finding v004). The macOS list still avoids the full walk on normal
+  descriptors or hanging. These fallbacks cover descriptors left above a
+  later-lowered soft limit (audit finding v004). On any other Unix every
+  spawn fails with `ErrorKind::Unsupported` before the command is resolved or
+  any `fork`: this copy has no
+  complete descriptor list there, and a walk bounded by either
+  `RLIMIT_NOFILE` value misses a descriptor left open above a limit lowered
+  afterwards. Kettle ships for Linux, macOS and Windows only, so no shipped
+  build takes that path; a port to another Unix must first add that system's
+  own complete enumeration, tested with a descriptor above lowered hard and
+  soft limits and a failing-`exec` control. A test built on every Unix host
+  pins that the function the generic branch returns gives no limit-derived
+  bound; that the branch calls it, and that the refusal comes before the
+  command is resolved, is checked only by the test that goes through the
+  spawn entry point. That test is built only on such a Unix; it has never run
+  on a real one, only on Linux with this file's Linux `cfg` renamed so that
+  Linux took the generic path (2026-11-20), where it passed and failed
+  against the previous code. The macOS list still avoids the full walk on normal
   pane spawns. Tests isolate limit changes in a subprocess, leak fd 5000 (or
   the highest available lower number), lower the soft limit below it, and
   probe it with `fcntl` in the executed child. A test-only flag captured before
@@ -745,6 +758,12 @@ them.
   set before the decoder reads the header and charged for the decoded buffer
   before it is allocated, with the RGBA8 copy held to the same 256 MiB. These
   are Kettle's policy for an untrusted clipboard image, not an upstream defect.
+- Patch (2026-11-20): `Clipboard::with_macos_pasteboard_name` opens a named
+  macOS pasteboard instead of the general one. It is hidden from the docs and
+  used only by tests: Kettle's native test of a late pasteboard owner, and the
+  vendored round-trip test, each own a uniquely named pasteboard and never
+  touch the system clipboard. Reads and writes go through the same code as the
+  general pasteboard's.
 - Upstream: backport the decoder line from
   [b4e0616](https://github.com/1Password/arboard/commit/b4e061622caa1356425f81073d9685166017c7f9).
   On 2026-10-14 the latest published version was still 3.6.1. The upstream
@@ -753,7 +772,8 @@ them.
   standalone examples and their tools. Only example target stanzas are removed
   from the normalized manifest; test dependencies and optional features remain.
 - Validation: `just vendor-clipboard-check` formats and lints on the current OS.
-  macOS round-trips native image pixels without touching the clipboard.
+  macOS round-trips native image pixels and text on a private named pasteboard
+  without touching the clipboard.
   Linux also runs the display-free CRLF/encoded-CR and pasted-PNG limit tests,
   and the INCR regression against real xclip under `xvfb-run` when both tools are installed (PR CI
   installs them). Nautilus copy/paste remains a separate native GNOME check.

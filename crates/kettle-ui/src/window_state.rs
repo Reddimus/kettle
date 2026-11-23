@@ -1062,6 +1062,9 @@ pub(crate) struct WindowState {
     /// Accepted video path awaiting trust validation and poster extraction on
     /// the bounded background pipeline. It has no visible projection.
     pub(crate) pending_video_paste_receipt: Option<PendingVideoPasteReceipt>,
+    /// A paste whose clipboard answer the window stopped waiting for, and
+    /// where that answer goes (`App::poll_clipboard_wait`).
+    pub(crate) clipboard_wait: Option<crate::app::ClipboardWait>,
     /// OS taskbar progress, driven by the focused pane's OSC 9;4
     /// state each frame (pwsh 7 / Windows Terminal parity). No-op off Windows.
     pub(crate) taskbar: crate::taskbar::Taskbar,
@@ -1852,6 +1855,7 @@ impl WindowState {
             accessibility_pending: false,
             media_paste_receipt: None,
             pending_video_paste_receipt: None,
+            clipboard_wait: None,
             taskbar: crate::taskbar::Taskbar::new(),
             attention_active: false,
             mux,

@@ -617,18 +617,42 @@ impl App {
 
     /// What the clipboard names for `pane`'s lane, read now.
     pub(super) fn copied_preview(&mut self, ws: &WindowState, pane: u64) -> Option<CopiedPreview> {
-        let files = self.clipboard_file_paste_paths().unwrap_or_default();
-        let text = files
-            .is_empty()
-            .then(|| self.clipboard.as_mut().and_then(|c| c.get_text().ok()))
-            .flatten();
+        let peek = self.clipboard_peek(false);
+        self.copied_preview_from(&peek, ws, pane)
+    }
+
+    /// The file list and text on the clipboard, read under one paste's
+    /// deadline (`Clipboard::peek`).
+    pub(super) fn clipboard_peek(
+        &mut self,
+        text_with_files: bool,
+    ) -> crate::clipboard::ClipboardPeek {
+        self.clipboard
+            .as_mut()
+            .map(|clipboard| clipboard.peek(text_with_files))
+            .unwrap_or_default()
+    }
+
+    /// What `peek` names for `pane`'s lane: its files, or else its text.
+    pub(super) fn copied_preview_from(
+        &self,
+        peek: &crate::clipboard::ClipboardPeek,
+        ws: &WindowState,
+        pane: u64,
+    ) -> Option<CopiedPreview> {
+        let files = &peek.files;
+        let text = if files.is_empty() {
+            peek.text.clone()
+        } else {
+            None
+        };
         let cwd = ws
             .mux
             .panes
             .get(&pane)
             .and_then(|state| state.term.current_dir_or_native());
         copied_preview(
-            &files,
+            files,
             text.as_deref(),
             cwd.as_deref(),
             crate::mux::home_dir_string().as_deref(),

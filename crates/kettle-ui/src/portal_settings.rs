@@ -5,7 +5,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 use std::time::Duration;
-use zbus::{Connection, Proxy, connection::Builder, zvariant::OwnedValue};
+use zbus::{Connection, Proxy, zvariant::OwnedValue};
 
 const DESTINATION: &str = "org.freedesktop.portal.Desktop";
 const PATH: &str = "/org/freedesktop/portal/desktop";
@@ -157,18 +157,21 @@ async fn watch<S: SettingState>(
 }
 
 async fn connection(address: Option<&str>) -> zbus::Result<Connection> {
-    let builder = match address {
-        Some(address) => Builder::address(address)?,
-        None => Builder::session()?,
-    }
-    .max_queued(1)
-    .method_timeout(TIMEOUT);
-    future::or(builder.build(), async {
-        async_io::Timer::after(TIMEOUT).await;
-        Err(zbus::Error::Failure(
-            "settings portal connection timed out".into(),
-        ))
-    })
+    future::or(
+        crate::dbus_bound::connect(
+            address,
+            crate::dbus_bound::Options {
+                max_queued: Some(1),
+                method_timeout: Some(TIMEOUT),
+            },
+        ),
+        async {
+            async_io::Timer::after(TIMEOUT).await;
+            Err(zbus::Error::Failure(
+                "settings portal connection timed out".into(),
+            ))
+        },
+    )
     .await
 }
 

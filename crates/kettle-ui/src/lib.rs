@@ -36,6 +36,8 @@ pub mod agy_plugin;
 mod app;
 mod clipboard;
 pub mod codex_shell;
+#[cfg(target_os = "linux")]
+mod dbus_bound;
 mod held_buttons;
 #[cfg(all(test, unix))]
 mod test_bus;

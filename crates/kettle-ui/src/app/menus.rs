@@ -692,14 +692,19 @@ impl App {
         // Shift+right-click also offers the file the clipboard names, and
         // the diagram it holds. Only then is the clipboard read, so a slow
         // clipboard owner never holds up a plain right-click or a menu
-        // opened from the keyboard.
+        // opened from the keyboard. It is read once, under one paste's
+        // deadline, for both rows.
         if reads
             && in_focused_pane
             && offer_copied
             && let Some(pane) = ws.mux.active_focus()
         {
-            let file = self.copied_preview(ws, pane).is_some();
-            let diagram = offers_diagram(&self.copied_diagram());
+            let peek = self.clipboard_peek(true);
+            let file = self.copied_preview_from(&peek, ws, pane).is_some();
+            let diagram = offers_diagram(&kettle_core::diagram_sources(
+                peek.text.as_deref().unwrap_or_default(),
+                None,
+            ));
             if file {
                 items.push(ContextMenuItem::Item {
                     label: tr.text(T::MenuPreviewCopiedFile),

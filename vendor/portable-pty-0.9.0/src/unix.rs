@@ -132,8 +132,9 @@ fn tty_name(fd: RawFd) -> Option<PathBuf> {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const FIRST_INHERITED_FD: libc::c_int = 3;
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 const MAX_FD_SWEEP: libc::rlim_t = 1_048_576;
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
@@ -162,24 +163,25 @@ fn descriptor_sweep_limit() -> io::Result<libc::c_int> {
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        let mut limits = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limits) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-
-        // Linux's default per-process fd ceiling is a practical fallback bound;
-        // larger or unlimited values must not make child setup effectively hang.
-        Ok(
-            if limits.rlim_max != libc::RLIM_INFINITY && limits.rlim_max <= MAX_FD_SWEEP {
-                limits.rlim_max
-            } else {
-                limits.rlim_cur.min(MAX_FD_SWEEP)
-            } as libc::c_int,
-        )
+        unbounded_descriptor_sweep_limit()
     }
+}
+
+/// The bound for a Unix with no way here to find every open descriptor.
+///
+/// Neither process limit bounds the descriptors already open: lowering the
+/// soft or the hard `RLIMIT_NOFILE` leaves a higher descriptor open, so a walk
+/// up to either limit can miss one and hand it to the executed program. Linux
+/// and macOS take their bound or their list from the kernel instead. Without
+/// an equivalent, the spawn is refused rather than run with a partial sweep.
+/// Compiled into tests everywhere so Linux and macOS hosts pin the refusal.
+#[cfg(any(test, not(any(target_os = "linux", target_os = "macos"))))]
+fn unbounded_descriptor_sweep_limit() -> io::Result<libc::c_int> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "spawning in a pty is not supported on this Unix: there is no complete way to keep \
+         inherited descriptors out of the child",
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -312,7 +314,7 @@ fn mark_random_fds_cloexec(max_fd: libc::c_int, scratch: FdListScratch) -> io::R
         mark_proc_fds_cloexec()
     }
 
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     {
         let mut fd = FIRST_INHERITED_FD;
         while fd < max_fd {
@@ -321,9 +323,18 @@ fn mark_random_fds_cloexec(max_fd: libc::c_int, scratch: FdListScratch) -> io::R
         }
         Ok(())
     }
+
+    // `descriptor_sweep_limit` already refused the spawn in the parent. Should
+    // a child ever get here, it must not reach `exec` with a partial sweep.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = max_fd;
+        Err(io::Error::from_raw_os_error(libc::ENOSYS))
+    }
 }
 
 // Only direct syscalls and errno-backed errors are allowed in child helpers.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn mark_fd_cloexec(fd: RawFd) -> io::Result<()> {
     loop {
         if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } == 0 {
@@ -540,6 +551,11 @@ impl PtyFd {
     }
 
     fn spawn_command(&self, builder: CommandBuilder) -> anyhow::Result<std::process::Child> {
+        // Refuse before the command is resolved, so that a program that also
+        // cannot be found still reports why nothing can be spawned here.
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        descriptor_sweep_limit()?;
+
         let configured_umask = builder.umask;
 
         let mut cmd = builder.as_command()?;
@@ -740,6 +756,14 @@ impl Write for UnixMasterWriter {
 
 #[cfg(test)]
 mod tests {
+    // Every spawn is refused on a Unix other than Linux and macOS, so the
+    // tests that spawn are not built there, and the helpers and imports only
+    // they use are allowed to go unused.
+    #![cfg_attr(
+        not(any(target_os = "linux", target_os = "macos")),
+        allow(dead_code, unused_imports)
+    )]
+
     use super::*;
     use std::fs::{File, OpenOptions};
     use std::os::unix::fs::PermissionsExt;
@@ -764,6 +788,52 @@ mod tests {
         assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EBADF));
     }
 
+    /// A walk bounded by either `RLIMIT_NOFILE` value misses a descriptor
+    /// left open above a limit that was lowered afterwards. A Unix with
+    /// nothing better must refuse the spawn instead of returning such a bound.
+    /// This pins the function the generic branch of `descriptor_sweep_limit`
+    /// returns; that the branch calls it is checked only by the spawn test
+    /// below, on such a Unix.
+    #[test]
+    fn a_unix_without_a_complete_descriptor_sweep_gets_no_bound() {
+        let error = unbounded_descriptor_sweep_limit()
+            .expect_err("a limit-bounded sweep can miss an open descriptor");
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+    }
+
+    /// Never run on Kettle's own platforms: on such a Unix it checks that the
+    /// caller gets `Unsupported` and no child. A program that cannot be found
+    /// gets it too, which holds only while the refusal comes before the
+    /// command is resolved; a child's own `ENOSYS` would also read as
+    /// `Unsupported`, so `/bin/sh` alone could not tell the two apart.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[test]
+    fn spawning_is_refused_without_a_complete_descriptor_sweep() -> anyhow::Result<()> {
+        let (_master, slave) = openpty(PtySize::default())?;
+        // A program that cannot be found is refused for the same reason.
+        for program in ["/bin/sh", "/portable-pty-test-program-does-not-exist"] {
+            let mut command = CommandBuilder::new(program);
+            command.args(["-c", "exit 0"]);
+            let error = match slave.spawn_command(command) {
+                Ok(mut child) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    anyhow::bail!("a child was spawned with a partial descriptor sweep");
+                }
+                Err(error) => error,
+            };
+            assert_eq!(
+                error.downcast_ref::<io::Error>().map(io::Error::kind),
+                Some(io::ErrorKind::Unsupported),
+                "unexpected spawn error for {}: {:#}",
+                program,
+                error
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn inherited_descriptor_is_closed_on_exec() -> anyhow::Result<()> {
         // A moderately high number avoids a false failure if process startup
@@ -874,6 +944,7 @@ mod tests {
         assert_eq!(regression_soft_limit(libc::RLIM_INFINITY, 131_072), 65_536);
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn descriptor_near_the_usable_limit_is_closed_on_exec() -> anyhow::Result<()> {
         // The macOS path lists open descriptors instead of sweeping numbers,
@@ -1015,6 +1086,7 @@ mod tests {
 
     /// A caller that checked its directory must not have the child relocated
     /// to HOME when the directory disappears before the spawn.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn a_missing_required_cwd_fails_the_spawn() -> anyhow::Result<()> {
         let missing = std::env::temp_dir().join(format!(
@@ -1102,6 +1174,7 @@ mod tests {
         assert_eq!(list_open_fds(scratch), None);
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn exec_failure_for_nonexistent_interpreter_is_reported() -> anyhow::Result<()> {
         const MISSING_INTERPRETER: &str = "/portable-pty-test-interpreter-does-not-exist";
@@ -1227,6 +1300,7 @@ mod tests {
         }
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn dropping_writer_does_not_submit_partial_line() -> anyhow::Result<()> {
         let (master, slave) = openpty(PtySize::default())?;

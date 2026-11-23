@@ -813,6 +813,7 @@ impl App {
         ws: &mut WindowState,
         steps: input::WheelSteps,
     ) -> bool {
+        self.drop_clipboard_wait(ws);
         self.sync_pane_focus_reports(ws);
         if self.confirm_wheel(ws, steps.lines) {
             return true;

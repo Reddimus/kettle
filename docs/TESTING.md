@@ -613,6 +613,19 @@ levels of a newly created directory tree through `READ_CONTROL` handles,
 verifies the current-user owner and protected full-access DACL, and creates
 child directories and files. Read-only verification must query the held
 directory rather than use the file-only `ReOpenFile` ACL-mutation path.
+`a_legacy_file_granting_only_modify_is_hardened` gives a file one protected
+Modify entry, confirms that the owner is then granted `WRITE_DAC` and refused
+`WRITE_OWNER`, and requires `open_existing_private_file` to harden and return
+it. The Administrators-owned cases of
+`the_hardening_plan_follows_owner_and_dacl` run only when the token's default
+owner is Administrators; otherwise the test says so and stops there. No test
+performs the owner migration itself: it needs a file owned by Administrators,
+with a DACL that is already exact, opened by a token whose default owner is
+not Administrators. The exclusive hardening handle is classified again, and
+`a_plan_needing_more_than_the_handle_holds_is_refused_as_busy` pins that a
+plan needing `WRITE_OWNER` on a handle opened without it is refused as
+`ResourceBusy`; the replacement between the two opens that leads there is not
+raced in a test.
 `staged_replacement_preserves_open_destination_handles` checks atomic
 replacement while an existing reader retains the old bytes. The renderer's
 `offscreen_screenshot_replaces_an_open_file_in_the_system_temp_directory`
@@ -825,6 +838,21 @@ the same process account, failed decode/growth rollback, shared query/staging
 ceilings, and iTerm2's bounded base64 stage. These are CPU accounting checks;
 they do not require a GPU or live UI.
 
+The `video_frames` tests in `kettle` that publish a sheet change the output's
+name between its check and its publication: the video, another file, a folder
+or a link moved onto it, or the old sheet removed; one puts another file under
+the sheet's own private name instead. Each runs once with the
+system's own steps (the Linux and macOS exchange, the Windows move aside) and
+again with the exchange, the exclusive rename and the hard link taken away in
+turn, so the move-aside fallback runs on all three CI runners and the
+hard-link fallback on Linux and macOS (Windows has none, and its link case is
+skipped). The steps are taken away inside Kettle, not by a filesystem that
+lacks them: which error numbers count as a missing step is tested on its own,
+and no test mounts such a filesystem. The ordinary-overwrite test also
+asserts which step ran, and so fails on a Linux or macOS temporary directory
+whose filesystem has no exchange. A Linux and macOS test changes the name
+again between the two exchanges.
+
 ### Placement depth, screenshot retirement, and resize capture
 
 `kettle-core`'s `anonymous_relative_depth_admission_uses_its_own_parent` and
@@ -934,8 +962,58 @@ fallback, PRIMARY support that appears and goes while the worker runs,
 cap/deadline errors, stale-reply isolation, initialization failure, the
 files-text-image order on a format-at-a-time clipboard, `paste-files = off`,
 native files and images without arboard, and that the Wayland path adds no
-dependency. `wayland::offer::tests` drive the Wayland negotiation against a
-loopback source, a thread in the test process and no real clipboard: the type
+dependency. They also cover the worker thread macOS and Windows ask their
+clipboard on, with an injected late owner: the caller has its timeout at the
+deadline, a store queued meanwhile is served after the stalled load, and a
+paste past its deadline asks for no further format. On macOS,
+`a_late_macos_pasteboard_owner_cannot_hold_the_ui_or_reorder_osc_52` runs the
+load and the queued store against a real lazy owner: an `osascript` process
+that promises text on a private, uniquely named pasteboard and provides it only
+when let go. It does not touch the system pasteboard, so it runs everywhere.
+`a_macos_paste_takes_the_answer_a_late_pasteboard_owner_gives` makes a user
+paste against the same owner: the window waits two seconds, the owner's later
+answer is still the paste's, and an OSC 52 store queued meanwhile is served
+after it. Portable tests cover the same late answers with injected owners
+(`a_users_read_takes_an_answer_that_comes_after_the_window_stopped_waiting`,
+`a_clipboard_that_takes_late_answers_leaves_a_slow_paste_to_come_later`), and
+`a_late_read_dropped_while_queued_is_never_asked_for` shows a paste the user
+stopped waiting for is not asked of the owner, and
+`a_paste_nobody_waits_for_asks_for_no_further_format` that one already taken
+stops between formats. `a_preview_reads_the_clipboard_under_one_deadline`
+holds a worker preview to one deadline across its file-list and text reads,
+and `a_caller_thread_preview_keeps_reading_text_when_the_file_list_times_out`
+keeps the X11 caller-thread preview reading text when the file list times
+out. In `app`,
+`the_paste_chord_in_every_modal_field_says_why_the_clipboard_gave_nothing`
+drives `Cmd+V`, `Ctrl+V` and their Shift forms through the shared editor of
+every modal field against a clipboard that times out or holds too much text;
+`a_late_clipboard_answer_reaches_the_modal_field_that_asked_for_it` and
+`a_late_terminal_paste_goes_only_where_the_keyboard_still_is` check where a
+late answer goes and that moved-destination drops report timeout or stay
+quiet on an empty clipboard; on Unix
+`a_late_broadcast_paste_goes_only_to_the_panes_it_was_asked_for` switches the
+active tab under a Tab broadcast and widens the scope, and the answer goes
+nowhere, and `input_in_a_broadcast_peer_window_drops_a_waiting_group_paste`
+drops a waiting group broadcast when another window in the group gets input.
+`typing_drops_a_paste_still_waiting_for_the_clipboard`,
+`assistive_edits_and_focus_drop_a_paste_still_waiting_for_the_clipboard`,
+`paste_chord_in_a_modal_does_not_join_a_pane_wait`, and
+`wheel_delta_nonzero_distinguishes_scrolling_from_zero_phase_end` say
+which keys, scroll events, and assistive-technology requests stop the wait
+(a key that pastes into the same target joins it, and
+`the_paste_chord_joins_a_wait_only_where_it_pastes` limits the
+bare chord to text fields),
+`user_pastes_can_wait_for_the_clipboard_and_input_drops_the_wait`
+that every paste entry point and input handler, including scroll wheel and
+the control plane's UI keys, is wired to them, and
+`the_copied_rows_of_a_context_menu_read_the_clipboard_once` that
+Shift+right-click reads the clipboard once. On Windows CI,
+`a_stalled_windows_clipboard_owner_cannot_hold_the_ui_or_reorder_osc_52` runs
+the same check against a real delayed-rendering owner, a message-only window
+in the test process. It replaces the desktop clipboard, so elsewhere it runs
+only with `KETTLE_WINDOWS_CLIPBOARD_TEST=1`. `wayland::offer::tests` drive the
+Wayland negotiation against a loopback source, a thread in the test process
+and no real clipboard: the type
 table (text and image, image alone, local, remote and malformed file lists,
 `x-special/gnome-copied-files`), `paste-files = off` against the text copy of
 the paths, each read's cap against a source that never ends, a stalled source
@@ -983,6 +1061,14 @@ enumerates `/proc/self/fd` in the child with raw `getdents64`, while macOS's
 fallback walks to the parent-read `kern.maxfilesperproc`, independently of
 lowered process limits. Synthetic directory-record tests run on every Unix
 host; the Linux enumeration itself requires the native Linux vendor gate.
+On any other Unix the spawn is refused. Linux and macOS hosts run
+`a_unix_without_a_complete_descriptor_sweep_gets_no_bound`, which pins that
+the function the generic branch returns gives no limit-derived bound; whether
+that branch calls it is checked only by
+`spawning_is_refused_without_a_complete_descriptor_sweep`, which is built only
+on such a Unix, and no gate builds or runs it. It was run on 2026-11-20 on
+Linux with the Linux `cfg` in that file renamed so that Linux took the generic
+path, where it passed, and failed with the previous code; no BSD has run it.
 
 `cosmic-text` stays outside the vendor validation workspace.
 The product build and audit cover it; renderer paragraph-separator tests cover

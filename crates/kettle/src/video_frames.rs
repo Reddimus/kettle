@@ -7,8 +7,9 @@
 //! from the instant it stands for. Showing media to the user is
 //! `kettle show`; this is reading it, a separate act.
 
+use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
-use std::io::Write as _;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use image::{DynamicImage, RgbaImage};
@@ -399,6 +400,15 @@ pub(crate) enum OutputRefusal {
     Shared,
     /// The folder could not take the file.
     Unwritable,
+    /// Something else took or left the output's name while the sheet was
+    /// being written. Nothing was replaced.
+    Changed,
+    /// The folder's filesystem has no step that places a file without
+    /// replacing whatever holds the name.
+    NoSafePlacement,
+    /// A file that was moved off the output's name could not be moved back,
+    /// and is kept under a private name beside it.
+    Stranded,
 }
 
 impl OutputRefusal {
@@ -409,6 +419,15 @@ impl OutputRefusal {
                 "Other users can change the output's folder; write the sheet somewhere only you can change."
             }
             Self::Unwritable => "The sheet could not be written there.",
+            Self::Changed => {
+                "The output's name was changed by something else while the sheet was being written; nothing was replaced. Try again."
+            }
+            Self::NoSafePlacement => {
+                "The output folder's filesystem cannot place the sheet without risking another file; write it to a folder on a local disk."
+            }
+            Self::Stranded => {
+                "The output's name changed while the sheet was being written, and a file moved off it could not be moved back; it is kept in the same folder under a name beginning with .kettle-"
+            }
         }
     }
 }
@@ -446,12 +465,6 @@ fn shared_mode(owner: u32, mode: u32, user: u32) -> bool {
     (owner != 0 && owner != user) || (mode & 0o1000 == 0 && mode & 0o022 != 0)
 }
 
-/// Windows has no media worker, so no sheet is ever written there.
-#[cfg(not(unix))]
-fn shared(_: &Path) -> Result<bool, OutputRefusal> {
-    Ok(false)
-}
-
 /// A name no one can guess ahead of time: this process's randomly keyed
 /// hash of the clock.
 fn unpredictable() -> u64 {
@@ -464,43 +477,750 @@ fn unpredictable() -> u64 {
     hasher.finish()
 }
 
-/// A new private file in `directory` under a hidden, unpredictable name
-/// made by this call and by nothing else. Created as a
-/// user-selected export, so on macOS it never inherits an ACL from the
-/// folder that would let another user read the frames.
-#[cfg(not(unix))]
-fn create_private(directory: &Path) -> Result<(PathBuf, std::fs::File), OutputRefusal> {
-    for _ in 0..16 {
-        let candidate = format!(".kettle-{:016x}.tmp", unpredictable());
-        let path = directory.join(candidate);
-        match kettle_state::create_user_selected_file_new(&path) {
-            Ok(file) => return Ok((path, file.persist())),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(_) => return Err(OutputRefusal::Unwritable),
-        }
+/// A hidden name in the output's folder that nothing else could have chosen.
+fn private_name(suffix: &str) -> OsString {
+    format!(".kettle-{:016x}.{suffix}", unpredictable()).into()
+}
+
+/// Which file a name holds, whatever it is called. The file number is wide
+/// enough for Windows' 128-bit identifiers, which ReFS needs to keep files
+/// apart; Unix numbers fit in its low half.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileId {
+    volume: u64,
+    file: u128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    /// A regular file.
+    File,
+    /// A pipe, socket or device.
+    #[cfg(unix)]
+    Other,
+    Folder,
+    Link,
+}
+
+/// What a name in the output's folder holds, never following a link.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Entry {
+    id: FileId,
+    kind: Kind,
+}
+
+/// The steps a filesystem may not have. Tests take them away to reach each
+/// fallback on a filesystem that has them all, and read back which ran.
+const EXCHANGE: u8 = 1;
+const RENAME_NEW: u8 = 2;
+const LINK_NEW: u8 = 4;
+
+#[cfg(test)]
+thread_local! {
+    static LACKING: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    static RAN: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    /// Run once, right after the sheet and the output have traded names.
+    static AFTER_EXCHANGE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Run once, when the sheet is written and about to be published.
+    static BEFORE_PUBLISH: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run one publication step, unless a test says this filesystem lacks it.
+fn step(which: u8, run: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+    #[cfg(test)]
+    if LACKING.get() & which != 0 {
+        return Err(io::ErrorKind::Unsupported.into());
     }
-    Err(OutputRefusal::Unwritable)
+    let done = run();
+    #[cfg(test)]
+    if done.is_ok() {
+        RAN.set(RAN.get() | which);
+    }
+    #[cfg(not(test))]
+    let _ = which;
+    done
+}
+
+/// Whether a step failed because the filesystem or the system does not have
+/// it, not because of what the names hold. Linux answers `EINVAL` for a
+/// rename flag the filesystem does not take, macOS `ENOTSUP`.
+fn unsupported(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::Unsupported {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        // Some of these share a value on some systems, so not a pattern.
+        let refusals = [
+            libc::EINVAL,
+            libc::ENOTSUP,
+            libc::EOPNOTSUPP,
+            libc::ENOSYS,
+            libc::EXDEV,
+        ];
+        error
+            .raw_os_error()
+            .is_some_and(|code| refusals.contains(&code))
+    }
+    #[cfg(not(unix))]
+    false
+}
+
+/// The output's folder, held open so that no later step can be led to
+/// another folder by a change to the path.
+#[cfg(unix)]
+struct Folder {
+    held: std::fs::File,
 }
 
 #[cfg(unix)]
-fn create_private(
-    directory: &std::fs::File,
-) -> Result<(std::ffi::CString, std::fs::File), OutputRefusal> {
-    for _ in 0..16 {
-        let candidate = format!(".kettle-{:016x}.tmp", unpredictable());
-        match kettle_state::create_user_selected_file_new_at(directory, candidate.as_ref()) {
-            Ok(file) => return Ok((std::ffi::CString::new(candidate).unwrap(), file)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(_) => return Err(OutputRefusal::Unwritable),
+fn leaf(name: &OsStr) -> io::Result<std::ffi::CString> {
+    use std::os::unix::ffi::OsStrExt as _;
+    std::ffi::CString::new(name.as_bytes())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
+}
+
+#[cfg(unix)]
+fn file_id(file: &std::fs::File) -> io::Result<FileId> {
+    use std::os::unix::fs::MetadataExt as _;
+    let found = file.metadata()?;
+    Ok(FileId {
+        volume: found.dev(),
+        file: u128::from(found.ino()),
+    })
+}
+
+#[cfg(unix)]
+fn kind(mode: libc::mode_t) -> Kind {
+    match mode & libc::S_IFMT {
+        libc::S_IFREG => Kind::File,
+        libc::S_IFDIR => Kind::Folder,
+        libc::S_IFLNK => Kind::Link,
+        _ => Kind::Other,
+    }
+}
+
+/// What an open file is, by its own descriptor.
+#[cfg(unix)]
+fn described(file: &std::fs::File) -> io::Result<Entry> {
+    use std::os::unix::fs::MetadataExt as _;
+    let found = file.metadata()?;
+    // The width of mode_t varies across Unix targets.
+    #[allow(clippy::unnecessary_cast)]
+    let mode = found.mode() as libc::mode_t;
+    Ok(Entry {
+        id: FileId {
+            volume: found.dev(),
+            file: u128::from(found.ino()),
+        },
+        kind: kind(mode),
+    })
+}
+
+/// The video's identity: the one attested when it was opened.
+#[cfg(unix)]
+fn input_id(_: &Path, attested: ExternalAttested) -> Option<FileId> {
+    Some(FileId {
+        volume: attested.dev,
+        file: u128::from(attested.ino),
+    })
+}
+
+#[cfg(unix)]
+impl Folder {
+    fn open(directory: &Path) -> io::Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        // Linux can pin a writable/searchable directory without read permission.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        let access = libc::O_PATH;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        let access = libc::O_RDONLY;
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(access | libc::O_DIRECTORY | libc::O_CLOEXEC)
+            .open(directory)?;
+        Ok(Self { held })
+    }
+
+    fn shared(&self) -> Result<bool, OutputRefusal> {
+        shared_directory(&self.held)
+    }
+
+    /// A new private file under a hidden, unpredictable name made by this
+    /// call and by nothing else. Created as a user-selected export, so on
+    /// macOS it never inherits an ACL from the folder that would let another
+    /// user read the frames.
+    fn create(&self) -> Result<(OsString, std::fs::File), OutputRefusal> {
+        for _ in 0..16 {
+            let candidate = private_name("tmp");
+            match kettle_state::create_user_selected_file_new_at(&self.held, &candidate) {
+                Ok(file) => return Ok((candidate, file)),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return Err(OutputRefusal::Unwritable),
+            }
+        }
+        Err(OutputRefusal::Unwritable)
+    }
+
+    fn entry(&self, name: &OsStr) -> io::Result<Option<Entry>> {
+        use std::os::fd::AsRawFd as _;
+        let name = leaf(name)?;
+        // SAFETY: stat contains only integer fields, which admit all-zero bits.
+        let mut found: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: the folder stays open and name is NUL-terminated; found is
+        // an exclusive writable stat output buffer throughout fstatat.
+        if unsafe {
+            libc::fstatat(
+                self.held.as_raw_fd(),
+                name.as_ptr(),
+                &mut found,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            let error = io::Error::last_os_error();
+            return if error.kind() == io::ErrorKind::NotFound {
+                Ok(None)
+            } else {
+                Err(error)
+            };
+        }
+        // The stat field widths vary across Unix targets.
+        #[allow(clippy::unnecessary_cast)]
+        let id = FileId {
+            volume: found.st_dev as u64,
+            file: u128::from(found.st_ino as u64),
+        };
+        Ok(Some(Entry {
+            id,
+            kind: kind(found.st_mode),
+        }))
+    }
+
+    /// What `name` holds before anything is written, held open where the
+    /// system allows. A filesystem may give a removed file's number to the
+    /// next one made, which could then pass for the file examined here; a
+    /// file held open keeps its number to itself.
+    fn examine(&self, name: &OsStr) -> io::Result<(Option<Entry>, Option<std::fs::File>)> {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        let leaf = leaf(name)?;
+        // `O_PATH` holds an entry of any kind, a link itself included,
+        // needs no permission on it and has no effect on it.
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            // SAFETY: the folder stays open and leaf is NUL-terminated.
+            let held = unsafe {
+                libc::openat(
+                    self.held.as_raw_fd(),
+                    leaf.as_ptr(),
+                    libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if held < 0 {
+                let error = io::Error::last_os_error();
+                return if error.kind() == io::ErrorKind::NotFound {
+                    Ok((None, None))
+                } else {
+                    Err(error)
+                };
+            }
+            // SAFETY: openat returned a new descriptor that nothing else owns.
+            let held = unsafe { std::fs::File::from_raw_fd(held) };
+            Ok((Some(described(&held)?), Some(held)))
+        }
+        // Elsewhere only a regular file this user may read can be held.
+        // One that cannot is still told apart by its number and kind, on
+        // filesystems (APFS among them) that do not give numbers out again.
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        {
+            let Some(entry) = self.entry(name)? else {
+                return Ok((None, None));
+            };
+            if entry.kind != Kind::File {
+                return Ok((Some(entry), None));
+            }
+            // SAFETY: the folder stays open and leaf is NUL-terminated.
+            let held = unsafe {
+                libc::openat(
+                    self.held.as_raw_fd(),
+                    leaf.as_ptr(),
+                    libc::O_RDONLY
+                        | libc::O_NONBLOCK
+                        | libc::O_NOCTTY
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC,
+                )
+            };
+            if held < 0 {
+                return Ok((Some(entry), None));
+            }
+            // SAFETY: openat returned a new descriptor that nothing else owns.
+            let held = unsafe { std::fs::File::from_raw_fd(held) };
+            // What the name held when it was opened, which may not be what
+            // it held a moment before: the file held is the one examined.
+            Ok((Some(described(&held)?), Some(held)))
         }
     }
-    Err(OutputRefusal::Unwritable)
+
+    /// Rename within the held folder: the two names trade what they hold
+    /// (`exchange`), or `from` moves to `to` only while `to` is free. Both
+    /// are one atomic step and neither can replace a file.
+    fn rename_flagged(&self, from: &OsStr, to: &OsStr, exchange: bool) -> io::Result<()> {
+        use std::os::fd::AsRawFd as _;
+        let (from, to) = (leaf(from)?, leaf(to)?);
+        let folder = self.held.as_raw_fd();
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            let flags = if exchange {
+                libc::RENAME_EXCHANGE
+            } else {
+                libc::RENAME_NOREPLACE
+            };
+            // SAFETY: the folder stays open, both names are NUL-terminated,
+            // and both flags are valid for renameat2.
+            if unsafe { libc::renameat2(folder, from.as_ptr(), folder, to.as_ptr(), flags) } == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // Not in libc: `renameatx_np` is a Darwin extension.
+            unsafe extern "C" {
+                fn renameatx_np(
+                    from_dir: libc::c_int,
+                    from: *const libc::c_char,
+                    to_dir: libc::c_int,
+                    to: *const libc::c_char,
+                    flags: libc::c_uint,
+                ) -> libc::c_int;
+            }
+            const RENAME_SWAP: libc::c_uint = 0x0000_0002;
+            const RENAME_EXCL: libc::c_uint = 0x0000_0004;
+            let flags = if exchange { RENAME_SWAP } else { RENAME_EXCL };
+            // SAFETY: the folder stays open, both names are NUL-terminated,
+            // and both flags are valid for renameatx_np.
+            if unsafe { renameatx_np(folder, from.as_ptr(), folder, to.as_ptr(), flags) } == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+        {
+            let _ = (folder, from, to, exchange);
+            Err(io::ErrorKind::Unsupported.into())
+        }
+    }
+
+    fn exchange(&self, one: &OsStr, other: &OsStr) -> io::Result<()> {
+        self.rename_flagged(one, other, true)
+    }
+
+    fn rename_new(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
+        self.rename_flagged(from, to, false)
+    }
+
+    /// A second name for `from`, made only while `to` is free.
+    fn link_new(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
+        use std::os::fd::AsRawFd as _;
+        let (from, to) = (leaf(from)?, leaf(to)?);
+        let folder = self.held.as_raw_fd();
+        // SAFETY: the folder stays open and both names are NUL-terminated.
+        if unsafe { libc::linkat(folder, from.as_ptr(), folder, to.as_ptr(), 0) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    /// A plain rename, which replaces whatever holds `to`.
+    fn rename(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
+        use std::os::fd::AsRawFd as _;
+        let (from, to) = (leaf(from)?, leaf(to)?);
+        let folder = self.held.as_raw_fd();
+        // SAFETY: the folder stays open and both names are NUL-terminated.
+        if unsafe { libc::renameat(folder, from.as_ptr(), folder, to.as_ptr()) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    fn remove(&self, name: &OsStr) -> io::Result<()> {
+        use std::os::fd::AsRawFd as _;
+        let name = leaf(name)?;
+        // SAFETY: the folder stays open and name is NUL-terminated.
+        if unsafe { libc::unlinkat(self.held.as_raw_fd(), name.as_ptr(), 0) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+}
+
+/// Windows has no media worker, so no sheet is ever written there; the same
+/// publication runs by path, since Windows cannot pin a replaced parent.
+#[cfg(not(unix))]
+struct Folder {
+    path: PathBuf,
+}
+
+#[cfg(not(unix))]
+fn information(file: &std::fs::File) -> io::Result<Entry> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_ID_INFO, FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+    };
+    let handle = file.as_raw_handle() as HANDLE;
+    let mut found = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: file owns a valid handle and found is writable for the exact
+    // structure GetFileInformationByHandle fills.
+    if unsafe { GetFileInformationByHandle(handle, &raw mut found) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut wide = FILE_ID_INFO::default();
+    // SAFETY: file owns a valid handle and wide is writable for the size
+    // passed, the exact structure FileIdInfo fills.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            (&raw mut wide).cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let kind = if found.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        Kind::Link
+    } else if found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        Kind::Folder
+    } else {
+        Kind::File
+    };
+    // Not the 64-bit index, which ReFS does not keep unique, and no stand-in
+    // for a volume without the 128-bit identifier: there nothing is published.
+    let id = FileId {
+        volume: wide.VolumeSerialNumber,
+        file: u128::from_le_bytes(wide.FileId.Identifier),
+    };
+    Ok(Entry { id, kind })
+}
+
+/// Open `path` to ask what it is, with no access to its contents.
+#[cfg(not(unix))]
+fn inspect(path: &Path, follow: bool) -> io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+    let reparse = if follow {
+        0
+    } else {
+        FILE_FLAG_OPEN_REPARSE_POINT
+    };
+    std::fs::OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | reparse)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn file_id(file: &std::fs::File) -> io::Result<FileId> {
+    information(file).map(|entry| entry.id)
+}
+
+/// The video's identity as its path gives it now: nothing attests one on
+/// Windows.
+#[cfg(not(unix))]
+fn input_id(path: &Path, _: ExternalAttested) -> Option<FileId> {
+    inspect(path, true).and_then(|file| file_id(&file)).ok()
+}
+
+#[cfg(not(unix))]
+impl Folder {
+    /// Resolved once, to the verbatim path every later step uses, so a
+    /// name near the component limit stays within `MoveFileExW`'s reach.
+    fn open(directory: &Path) -> io::Result<Self> {
+        Ok(Self {
+            path: std::fs::canonicalize(directory)?,
+        })
+    }
+
+    fn shared(&self) -> Result<bool, OutputRefusal> {
+        Ok(false)
+    }
+
+    fn create(&self) -> Result<(OsString, std::fs::File), OutputRefusal> {
+        for _ in 0..16 {
+            let candidate = private_name("tmp");
+            match kettle_state::create_user_selected_file_new(&self.path.join(&candidate)) {
+                Ok(file) => return Ok((candidate, file.persist())),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return Err(OutputRefusal::Unwritable),
+            }
+        }
+        Err(OutputRefusal::Unwritable)
+    }
+
+    fn entry(&self, name: &OsStr) -> io::Result<Option<Entry>> {
+        match inspect(&self.path.join(name), false) {
+            Ok(file) => information(&file).map(Some),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// What `name` holds before anything is written. Nothing is held open:
+    /// an NTFS file number carries a count that changes when the number is
+    /// given out again, so a later file cannot pass for this one.
+    fn examine(&self, name: &OsStr) -> io::Result<(Option<Entry>, Option<std::fs::File>)> {
+        Ok((self.entry(name)?, None))
+    }
+
+    /// Windows has no exchange of two names; the sheet is published by
+    /// moving the old output aside, which `MoveFileExW` does on any volume.
+    fn exchange(&self, _: &OsStr, _: &OsStr) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
+    /// `from` moves to `to` only while `to` is free.
+    fn rename_new(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+        let wide = |name: &OsStr| -> Vec<u16> {
+            self.path
+                .join(name)
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
+        };
+        let (from, to) = (wide(from), wide(to));
+        // SAFETY: both paths are NUL-terminated and outlive the call; with
+        // no flags MoveFileExW fails when the new name exists.
+        if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn link_new(&self, _: &OsStr, _: &OsStr) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
+    fn rename(&self, from: &OsStr, to: &OsStr) -> io::Result<()> {
+        std::fs::rename(self.path.join(from), self.path.join(to))
+    }
+
+    fn remove(&self, name: &OsStr) -> io::Result<()> {
+        std::fs::remove_file(self.path.join(name))
+    }
+}
+
+/// How a move to a name that must be free ended.
+enum Placed {
+    Done,
+    /// Something holds the name; nothing moved.
+    Taken,
+}
+
+impl Folder {
+    /// Remove `name` only while it holds `file`.
+    fn remove_only(&self, name: &OsStr, file: FileId) {
+        if matches!(self.entry(name), Ok(Some(entry)) if entry.id == file) {
+            let _ = self.remove(name);
+        }
+    }
+
+    /// Move `from`, which holds `file`, to `to` only while `to` is free: an
+    /// exclusive rename, or where the filesystem has none, a hard link
+    /// followed by removing the old name.
+    fn place_new(&self, from: &OsStr, file: FileId, to: &OsStr) -> Result<Placed, OutputRefusal> {
+        let error = match step(RENAME_NEW, || self.rename_new(from, to)) {
+            Ok(()) => return Ok(Placed::Done),
+            Err(error) => error,
+        };
+        if error.kind() == io::ErrorKind::AlreadyExists {
+            return Ok(Placed::Taken);
+        }
+        if !unsupported(&error) {
+            return Err(OutputRefusal::Unwritable);
+        }
+        match step(LINK_NEW, || self.link_new(from, to)) {
+            Ok(()) => {
+                self.remove_only(from, file);
+                Ok(Placed::Done)
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(Placed::Taken),
+            Err(error) if unsupported(&error) => Err(OutputRefusal::NoSafePlacement),
+            Err(_) => Err(OutputRefusal::Unwritable),
+        }
+    }
+
+    /// Put the finished sheet, `own` under the name `temporary`, at `name`,
+    /// replacing only `checked`: what `name` held when it was examined.
+    ///
+    /// No step here can destroy a file. A free name is taken by a move that
+    /// fails when the name is held. A held name is exchanged with the
+    /// sheet's, so whatever held it at that instant survives under the
+    /// private name; it is removed only when it is the file that was
+    /// examined, and is exchanged back otherwise. A video moved onto the
+    /// output's name after the check is therefore never lost.
+    fn publish(
+        &self,
+        name: &OsStr,
+        checked: Option<Entry>,
+        temporary: &OsStr,
+        own: FileId,
+        input: Option<FileId>,
+    ) -> Result<(), OutputRefusal> {
+        let changed = |now: Option<FileId>| {
+            if now.is_some() && now == input {
+                OutputRefusal::IsInput
+            } else {
+                OutputRefusal::Changed
+            }
+        };
+        let holds = |name: &OsStr| self.entry(name).ok().flatten().map(|entry| entry.id);
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_PUBLISH.take() {
+            hook();
+        }
+        // Something else under the private name is not published, and is
+        // left where it is.
+        if holds(temporary) != Some(own) {
+            return Err(OutputRefusal::Changed);
+        }
+        let Some(checked) = checked else {
+            return match self.place_new(temporary, own, name)? {
+                Placed::Done => Ok(()),
+                Placed::Taken => Err(changed(holds(name))),
+            };
+        };
+        match step(EXCHANGE, || self.exchange(temporary, name)) {
+            Ok(()) => {
+                #[cfg(test)]
+                if let Some(hook) = AFTER_EXCHANGE.take() {
+                    hook();
+                }
+                let displaced = self.entry(temporary).ok().flatten();
+                if displaced == Some(checked) && holds(name) == Some(own) {
+                    let _ = self.remove(temporary);
+                    return Ok(());
+                }
+                let refusal = changed(displaced.map(|entry| entry.id));
+                let back = step(EXCHANGE, || self.exchange(temporary, name));
+                match self.entry(temporary) {
+                    // The sheet is under its private name again, where the
+                    // caller removes it, or something else already has.
+                    Ok(Some(entry)) if entry.id == own => Err(refusal),
+                    Ok(None) if back.is_ok() => Err(refusal),
+                    // Nothing was exchanged back: what the sheet displaced
+                    // had already left the private name. The sheet is
+                    // published only if the output's name still holds it.
+                    Ok(None) if holds(name) == Some(own) => Ok(()),
+                    Ok(None) => Err(OutputRefusal::Changed),
+                    // The private name holds a file that is not this
+                    // call's: what was displaced and could not go back, or
+                    // what took the output's name between the two
+                    // exchanges. It is left there.
+                    _ => Err(OutputRefusal::Stranded),
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Err(OutputRefusal::Changed),
+            Err(error) if unsupported(&error) => {
+                self.publish_aside(name, checked, temporary, own, &changed)
+            }
+            Err(_) => Err(OutputRefusal::Unwritable),
+        }
+    }
+
+    /// Publication where the filesystem cannot exchange two names: the old
+    /// output moves aside to a private name, the sheet takes the free name
+    /// by a move that cannot replace, and the old output is then removed.
+    /// What moved aside is put back when it is not the file that was
+    /// examined, or when the sheet could not take the name. The name is
+    /// briefly free, and a crash can leave the old output under its private
+    /// name, but no file is destroyed unexamined. A filesystem with neither
+    /// an exclusive rename nor hard links is refused before anything moves.
+    fn publish_aside(
+        &self,
+        name: &OsStr,
+        checked: Entry,
+        temporary: &OsStr,
+        own: FileId,
+        changed: &dyn Fn(Option<FileId>) -> OutputRefusal,
+    ) -> Result<(), OutputRefusal> {
+        let aside = private_name("old");
+        match step(RENAME_NEW, || self.rename_new(name, &aside)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(OutputRefusal::Changed);
+            }
+            Err(error) if unsupported(&error) => {
+                // The sheet will need a hard link to take the name without
+                // replacing; find out that links work while nothing has moved.
+                let probe = private_name("tmp");
+                match step(LINK_NEW, || self.link_new(temporary, &probe)) {
+                    Ok(()) => {}
+                    Err(error) if unsupported(&error) => {
+                        return Err(OutputRefusal::NoSafePlacement);
+                    }
+                    Err(_) => return Err(OutputRefusal::Unwritable),
+                }
+                self.remove_only(&probe, own);
+                // A plain rename replaces only what already holds the new
+                // name, and nothing holds a name no one could have guessed.
+                match self.rename(name, &aside) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        return Err(OutputRefusal::Changed);
+                    }
+                    Err(_) => return Err(OutputRefusal::Unwritable),
+                }
+            }
+            Err(_) => return Err(OutputRefusal::Unwritable),
+        }
+        let displaced = match self.entry(&aside) {
+            Ok(Some(displaced)) => displaced,
+            // Moved on again by whoever is changing the folder; there is
+            // nothing here to put back.
+            Ok(None) => return Err(OutputRefusal::Changed),
+            // Unreadable, so not known to be the file examined: left there.
+            Err(_) => return Err(OutputRefusal::Stranded),
+        };
+        let refusal = if displaced == checked {
+            match self.place_new(temporary, own, name) {
+                Ok(Placed::Done) => {
+                    self.remove_only(&aside, checked.id);
+                    return Ok(());
+                }
+                Ok(Placed::Taken) => OutputRefusal::Changed,
+                Err(refusal) => refusal,
+            }
+        } else {
+            changed(Some(displaced.id))
+        };
+        match self.place_new(&aside, displaced.id, name) {
+            Ok(Placed::Done) => Err(refusal),
+            _ => Err(OutputRefusal::Stranded),
+        }
+    }
 }
 
 /// Write `bytes` to `out` whole or not at all: a private file of this
-/// call's own beside it, renamed over it, in a folder no one else can
-/// change, and never over the video. Only a file this call made is ever
-/// removed.
+/// call's own beside it, published over it without a step that could
+/// destroy any other file (see [`Folder::publish`]), in a folder no one else
+/// can change, and never over the video. The only files removed are this
+/// call's own and the output that was examined and replaced.
 #[cfg(test)]
 fn write_out(out: &Path, input: &Path, bytes: &[u8]) -> Result<(), OutputRefusal> {
     write_out_with(out, input, bytes, || {})
@@ -517,51 +1237,6 @@ fn write_out_with(
     write_out_attested(out, input, attestation, bytes, after_check)
 }
 
-// Windows retains path-based publication; it cannot pin parent replacements.
-#[cfg(not(unix))]
-fn write_out_attested(
-    out: &Path,
-    input: &Path,
-    _attestation: ExternalAttested,
-    bytes: &[u8],
-    after_check: impl FnOnce(),
-) -> Result<(), OutputRefusal> {
-    if let (Ok(out), Ok(input)) = (std::fs::canonicalize(out), std::fs::canonicalize(input))
-        && out == input
-    {
-        return Err(OutputRefusal::IsInput);
-    }
-    let directory = out
-        .parent()
-        .map(|parent| {
-            if parent.as_os_str().is_empty() {
-                Path::new(".")
-            } else {
-                parent
-            }
-        })
-        .ok_or(OutputRefusal::Unwritable)?;
-    out.file_name().ok_or(OutputRefusal::Unwritable)?;
-    after_check();
-    if shared(directory)? {
-        return Err(OutputRefusal::Shared);
-    }
-    let (temporary, mut file) = create_private(directory)?;
-    let written = file.write_all(bytes).and_then(|()| file.sync_all());
-    // Closed first: Windows refuses to rename a file while a handle without
-    // delete sharing is open on it, and the private create grants none.
-    drop(file);
-    let written = written.and_then(|()| std::fs::rename(&temporary, out));
-    if written.is_err() {
-        // By name, which is safe here: no one else can change an entry in a
-        // folder that is not shared.
-        let _ = std::fs::remove_file(&temporary);
-        return Err(OutputRefusal::Unwritable);
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
 fn write_out_attested(
     out: &Path,
     input_path: &Path,
@@ -569,51 +1244,25 @@ fn write_out_attested(
     bytes: &[u8],
     after_check: impl FnOnce(),
 ) -> Result<(), OutputRefusal> {
-    use std::ffi::CString;
-    use std::os::fd::AsRawFd as _;
-    use std::os::unix::ffi::OsStrExt as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-
     let directory = out
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     let name = out.file_name().ok_or(OutputRefusal::Unwritable)?;
-    let name = CString::new(name.as_bytes()).map_err(|_| OutputRefusal::Unwritable)?;
-    // Linux can pin a writable/searchable directory without read permission.
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    let access = libc::O_PATH;
-    #[cfg(not(any(target_os = "linux", target_os = "android")))]
-    let access = libc::O_RDONLY;
-    let parent = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(access | libc::O_DIRECTORY | libc::O_CLOEXEC)
-        .open(directory)
+    let input = input_id(input_path, input);
+    let folder = Folder::open(directory).map_err(|_| OutputRefusal::Unwritable)?;
+    // Held until the end, so that what publication finds can be compared
+    // with what was examined here.
+    let (checked, _held) = folder
+        .examine(name)
         .map_err(|_| OutputRefusal::Unwritable)?;
-    // SAFETY: stat contains only integer fields, which admit all-zero bits.
-    let mut found: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: parent stays open and name is NUL-terminated; found is an
-    // exclusive writable stat output buffer throughout fstatat.
-    if unsafe {
-        libc::fstatat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            &mut found,
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    } == 0
-    {
-        // The stat field widths vary across Unix targets.
-        #[allow(clippy::unnecessary_cast)]
-        let is_input = found.st_dev as u64 == input.dev && found.st_ino as u64 == input.ino;
-        if is_input {
+    if let Some(found) = checked {
+        if Some(found.id) == input {
             return Err(OutputRefusal::IsInput);
         }
-        if found.st_mode & libc::S_IFMT == libc::S_IFLNK {
+        if matches!(found.kind, Kind::Folder | Kind::Link) {
             return Err(OutputRefusal::Unwritable);
         }
-    } else if std::io::Error::last_os_error().kind() != std::io::ErrorKind::NotFound {
-        return Err(OutputRefusal::Unwritable);
     }
     // The input path may now name a replacement for the attested video.
     if let (Ok(out), Ok(input)) = (
@@ -624,33 +1273,27 @@ fn write_out_attested(
         return Err(OutputRefusal::IsInput);
     }
     after_check();
-    if shared_directory(&parent)? {
+    if folder.shared()? {
         return Err(OutputRefusal::Shared);
     }
-    let (temporary, mut file) = create_private(&parent)?;
+    let (temporary, mut file) = folder.create()?;
+    // Unidentified, it could not be told from a file put in its place, so
+    // it is left as it is: empty, under a hidden name.
+    let own = file_id(&file).map_err(|_| OutputRefusal::Unwritable)?;
     let written = file.write_all(bytes).and_then(|()| file.sync_all());
-    let written = written.and_then(|()| {
-        // SAFETY: both leaf names resolve within the same held directory.
-        if unsafe {
-            libc::renameat(
-                parent.as_raw_fd(),
-                temporary.as_ptr(),
-                parent.as_raw_fd(),
-                name.as_ptr(),
-            )
-        } == 0
-        {
-            Ok(())
-        } else {
-            Err(std::io::Error::last_os_error())
-        }
-    });
-    if written.is_err() {
-        // SAFETY: only this call created the unpredictable temporary entry.
-        let _ = unsafe { libc::unlinkat(parent.as_raw_fd(), temporary.as_ptr(), 0) };
-        return Err(OutputRefusal::Unwritable);
-    }
-    Ok(())
+    // Windows refuses to rename a file while a handle without delete sharing
+    // is open on it, and the private create grants none. Elsewhere the open
+    // file keeps its identity from being reused while names are compared.
+    #[cfg(not(unix))]
+    drop(file);
+    let published = match written {
+        Ok(()) => folder.publish(name, checked, &temporary, own, input),
+        Err(_) => Err(OutputRefusal::Unwritable),
+    };
+    // After an exchange the private name may hold someone's file, so it is
+    // removed only while it still holds this call's own.
+    folder.remove_only(&temporary, own);
+    published
 }
 
 /// Run `kettle video-frames …`; returns the exit code (0 written, 1 not).
@@ -1195,5 +1838,400 @@ mod tests {
         );
         assert_eq!(std::fs::read(output).unwrap(), b"jpeg");
         assert_eq!(std::fs::read(input).unwrap(), b"video");
+    }
+
+    /// Run `body` on a filesystem that lacks `steps`; also gives the steps
+    /// that ran.
+    fn lacking<T>(steps: u8, body: impl FnOnce() -> T) -> (T, u8) {
+        LACKING.set(steps);
+        RAN.set(0);
+        let result = body();
+        LACKING.set(0);
+        (result, RAN.get())
+    }
+
+    /// Each way to publish, as the steps taken away: the system's own best,
+    /// no exchange, no exclusive rename either, and nothing at all.
+    const TIERS: [u8; 4] = [
+        0,
+        EXCHANGE,
+        EXCHANGE | RENAME_NEW,
+        EXCHANGE | RENAME_NEW | LINK_NEW,
+    ];
+
+    /// Whether a filesystem lacking `steps` can still take a file without
+    /// replacing one. Windows never falls back to hard links.
+    fn places(steps: u8) -> bool {
+        steps & RENAME_NEW == 0 || (cfg!(unix) && steps & LINK_NEW == 0)
+    }
+
+    fn names(directory: &Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The race this publication exists for: the video is moved onto the
+    /// output's name after the name was examined. Whether the name was free
+    /// or held the last sheet, and whichever steps the filesystem has, the
+    /// video is still there afterwards and nothing is left behind.
+    #[test]
+    fn a_video_moved_onto_the_output_name_is_never_replaced() {
+        for steps in TIERS {
+            for existing in [true, false] {
+                let case = format!("steps {steps:03b}, existing {existing}");
+                let root = kettle_test_support::private_tempdir("kettle-video-moved-input-");
+                let input = root.path().join("clip.webm");
+                let out = root.path().join("frames.jpg");
+                std::fs::write(&input, b"video").unwrap();
+                if existing {
+                    std::fs::write(&out, b"old sheet").unwrap();
+                }
+                let (result, _) = lacking(steps, || {
+                    write_out_with(&out, &input, b"jpeg", || {
+                        std::fs::rename(&input, &out).unwrap();
+                    })
+                });
+                assert_eq!(std::fs::read(&out).unwrap(), b"video", "{case}");
+                assert_eq!(names(root.path()), ["frames.jpg"], "{case}");
+                let refusal = if places(steps) {
+                    OutputRefusal::IsInput
+                } else {
+                    OutputRefusal::NoSafePlacement
+                };
+                assert_eq!(result, Err(refusal), "{case}");
+            }
+        }
+    }
+
+    /// The ordinary case: the last sheet is replaced, a free name is taken,
+    /// and the sheet stays private, by whichever steps the filesystem has.
+    /// One with no step that cannot replace is refused, untouched. Run on
+    /// each system, this also proves its own exchange is what ran.
+    #[test]
+    fn the_last_sheet_is_replaced_by_steps_that_cannot_destroy_a_file() {
+        for steps in TIERS {
+            let case = format!("steps {steps:03b}");
+            let root = kettle_test_support::private_tempdir("kettle-video-replace-");
+            let input = root.path().join("clip.webm");
+            let out = root.path().join("frames.jpg");
+            std::fs::write(&input, b"video").unwrap();
+            std::fs::write(&out, b"old sheet").unwrap();
+            let (replaced, replacing) = lacking(steps, || write_out(&out, &input, b"jpeg"));
+            if !places(steps) {
+                assert_eq!(replaced, Err(OutputRefusal::NoSafePlacement), "{case}");
+                assert_eq!(std::fs::read(&out).unwrap(), b"old sheet", "{case}");
+                assert_eq!(names(root.path()), ["clip.webm", "frames.jpg"], "{case}");
+                std::fs::remove_file(&out).unwrap();
+                let (taken, _) = lacking(steps, || write_out(&out, &input, b"jpeg"));
+                assert_eq!(taken, Err(OutputRefusal::NoSafePlacement), "{case}");
+                assert_eq!(names(root.path()), ["clip.webm"], "{case}");
+                continue;
+            }
+            assert_eq!(replaced, Ok(()), "{case}");
+            assert_eq!(std::fs::read(&out).unwrap(), b"jpeg", "{case}");
+            assert_eq!(names(root.path()), ["clip.webm", "frames.jpg"], "{case}");
+            std::fs::remove_file(&out).unwrap();
+            let (taken, taking) = lacking(steps, || write_out(&out, &input, b"new"));
+            assert_eq!(taken, Ok(()), "{case}");
+            assert_eq!(std::fs::read(&out).unwrap(), b"new", "{case}");
+            assert_eq!(names(root.path()), ["clip.webm", "frames.jpg"], "{case}");
+            assert_eq!(std::fs::read(&input).unwrap(), b"video", "{case}");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                assert_eq!(
+                    std::fs::metadata(&out).unwrap().permissions().mode() & 0o777,
+                    0o600,
+                    "{case}"
+                );
+            }
+            if steps == 0 {
+                // Linux `RENAME_EXCHANGE` and macOS `RENAME_SWAP`; Windows
+                // moves the last sheet aside with `MoveFileExW`.
+                let native = if cfg!(any(target_os = "linux", target_os = "macos")) {
+                    EXCHANGE
+                } else {
+                    RENAME_NEW
+                };
+                assert_eq!(replacing, native, "the system's own step replaces");
+                assert_eq!(taking, RENAME_NEW, "an exclusive rename takes a free name");
+            }
+        }
+    }
+
+    /// Anything else that takes or leaves the output's name after it was
+    /// examined is refused and kept: another file, a folder, a link, or
+    /// nothing at all.
+    #[test]
+    fn a_name_that_changes_while_the_sheet_is_written_is_refused() {
+        for steps in TIERS {
+            let case = format!("steps {steps:03b}");
+            let changed = if places(steps) {
+                OutputRefusal::Changed
+            } else {
+                OutputRefusal::NoSafePlacement
+            };
+            let fixture = || {
+                let root = kettle_test_support::private_tempdir("kettle-video-changed-name-");
+                let input = root.path().join("clip.webm");
+                let out = root.path().join("frames.jpg");
+                std::fs::write(&input, b"video").unwrap();
+                std::fs::write(&out, b"old sheet").unwrap();
+                (root, input, out)
+            };
+
+            // Another file moved onto the last sheet.
+            let (root, input, out) = fixture();
+            let other = root.path().join("other.bin");
+            std::fs::write(&other, b"other").unwrap();
+            let (result, _) = lacking(steps, || {
+                write_out_with(&out, &input, b"jpeg", || {
+                    std::fs::rename(&other, &out).unwrap();
+                })
+            });
+            assert_eq!(std::fs::read(&out).unwrap(), b"other", "{case}");
+            assert_eq!(result, Err(changed), "{case}");
+            assert_eq!(names(root.path()), ["clip.webm", "frames.jpg"], "{case}");
+
+            // Another file written to a name that was free.
+            let (root, input, out) = fixture();
+            std::fs::remove_file(&out).unwrap();
+            let (result, _) = lacking(steps, || {
+                write_out_with(&out, &input, b"jpeg", || {
+                    std::fs::write(&out, b"other").unwrap();
+                })
+            });
+            assert_eq!(std::fs::read(&out).unwrap(), b"other", "{case}");
+            assert_eq!(result, Err(changed), "{case}");
+            assert_eq!(names(root.path()), ["clip.webm", "frames.jpg"], "{case}");
+
+            // The last sheet removed and another file made in its place,
+            // which ext4 and tmpfs give the removed file's number.
+            let (root, input, out) = fixture();
+            let (result, _) = lacking(steps, || {
+                write_out_with(&out, &input, b"jpeg", || {
+                    std::fs::remove_file(&out).unwrap();
+                    std::fs::write(&out, b"other").unwrap();
+                })
+            });
+            assert_eq!(std::fs::read(&out).unwrap(), b"other", "{case}");
+            assert_eq!(result, Err(changed), "{case}");
+            assert_eq!(names(root.path()), ["clip.webm", "frames.jpg"], "{case}");
+
+            // The last sheet removed.
+            let (root, input, out) = fixture();
+            let (result, _) = lacking(steps, || {
+                write_out_with(&out, &input, b"jpeg", || {
+                    std::fs::remove_file(&out).unwrap();
+                })
+            });
+            assert_eq!(result, Err(changed), "{case}");
+            assert_eq!(names(root.path()), ["clip.webm"], "{case}");
+
+            // A folder in its place. An exchange and an exclusive rename
+            // move a folder as readily as a file; a hard link cannot, so
+            // there the folder stays under the private name it was moved to.
+            let (root, input, out) = fixture();
+            let (result, _) = lacking(steps, || {
+                write_out_with(&out, &input, b"jpeg", || {
+                    std::fs::remove_file(&out).unwrap();
+                    std::fs::create_dir(&out).unwrap();
+                    std::fs::write(out.join("kept"), b"kept").unwrap();
+                })
+            });
+            if cfg!(unix) && steps == EXCHANGE | RENAME_NEW {
+                assert_eq!(result, Err(OutputRefusal::Stranded), "{case}");
+                let left = names(root.path());
+                assert_eq!(left.len(), 2, "{left:?}");
+                assert!(left[0].starts_with(".kettle-"), "{left:?}");
+                assert_eq!(
+                    std::fs::read(root.path().join(&left[0]).join("kept")).unwrap(),
+                    b"kept"
+                );
+            } else {
+                assert_eq!(result, Err(changed), "{case}");
+                assert_eq!(std::fs::read(out.join("kept")).unwrap(), b"kept", "{case}");
+                assert_eq!(names(root.path()), ["clip.webm", "frames.jpg"], "{case}");
+            }
+
+            // A link to the video in its place: never followed, and kept.
+            // Unix only: making a link on Windows needs a privilege.
+            #[cfg(unix)]
+            {
+                let (root, input, out) = fixture();
+                let (result, _) = lacking(steps, || {
+                    write_out_with(&out, &input, b"jpeg", || {
+                        std::fs::remove_file(&out).unwrap();
+                        std::os::unix::fs::symlink(&input, &out).unwrap();
+                    })
+                });
+                assert_eq!(result, Err(changed), "{case}");
+                assert!(std::fs::symlink_metadata(&out).unwrap().is_symlink());
+                assert_eq!(std::fs::read(&input).unwrap(), b"video", "{case}");
+                assert_eq!(names(root.path()), ["clip.webm", "frames.jpg"], "{case}");
+            }
+        }
+    }
+
+    /// The name changes again after the sheet has traded names with it,
+    /// where only the exchange itself can be raced. Whatever ends up
+    /// displaced is kept, and the command never reports a sheet that is not
+    /// at the output's name.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_name_that_changes_between_the_exchanges_loses_nothing() {
+        let fixture = || {
+            let root = kettle_test_support::private_tempdir("kettle-video-mid-exchange-");
+            let input = root.path().join("clip.webm");
+            let out = root.path().join("frames.jpg");
+            let other = root.path().join("other.bin");
+            std::fs::write(&input, b"video").unwrap();
+            std::fs::write(&out, b"old sheet").unwrap();
+            std::fs::write(&other, b"other").unwrap();
+            (root, input, out, other)
+        };
+        let private = |root: &Path| -> Vec<PathBuf> {
+            names(root)
+                .into_iter()
+                .filter(|name| name.starts_with(".kettle-"))
+                .map(|name| root.join(name))
+                .collect()
+        };
+
+        // The video takes the name before the exchange and a later file
+        // takes it from the sheet after: the video goes back, and the later
+        // file is kept under the private name and reported.
+        let (root, input, out, other) = fixture();
+        let later = root.path().join("later.bin");
+        std::fs::write(&later, b"later").unwrap();
+        AFTER_EXCHANGE.set(Some(Box::new({
+            let (later, out) = (later.clone(), out.clone());
+            move || std::fs::rename(&later, &out).unwrap()
+        })));
+        let result = write_out_with(&out, &input, b"jpeg", || {
+            std::fs::rename(&input, &out).unwrap();
+        });
+        assert_eq!(result, Err(OutputRefusal::Stranded));
+        assert_eq!(std::fs::read(&out).unwrap(), b"video");
+        let kept = private(root.path());
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(std::fs::read(&kept[0]).unwrap(), b"later");
+        assert_eq!(std::fs::read(&other).unwrap(), b"other");
+
+        // Another file takes the name before the exchange, and after it
+        // both that file and the sheet are removed by something else: there
+        // is no sheet, so the command does not say there is.
+        let (root, input, out, other) = fixture();
+        AFTER_EXCHANGE.set(Some(Box::new({
+            let (root, out) = (root.path().to_path_buf(), out.clone());
+            move || {
+                for moved in private(&root) {
+                    std::fs::remove_file(moved).unwrap();
+                }
+                std::fs::remove_file(&out).unwrap();
+            }
+        })));
+        let result = write_out_with(&out, &input, b"jpeg", || {
+            std::fs::rename(&other, &out).unwrap();
+        });
+        assert_eq!(result, Err(OutputRefusal::Changed));
+        assert_eq!(names(root.path()), ["clip.webm"]);
+
+        // Another file takes the name before the exchange and leaves the
+        // private name after it: the sheet is at the output's name, whole.
+        let (root, input, out, other) = fixture();
+        let moved_on = root.path().join("moved-on.bin");
+        AFTER_EXCHANGE.set(Some(Box::new({
+            let (root, moved_on) = (root.path().to_path_buf(), moved_on.clone());
+            move || {
+                for moved in private(&root) {
+                    std::fs::rename(moved, &moved_on).unwrap();
+                }
+            }
+        })));
+        let result = write_out_with(&out, &input, b"jpeg", || {
+            std::fs::rename(&other, &out).unwrap();
+        });
+        assert_eq!(result, Ok(()));
+        assert_eq!(std::fs::read(&out).unwrap(), b"jpeg");
+        assert_eq!(std::fs::read(&moved_on).unwrap(), b"other");
+        assert_eq!(
+            names(root.path()),
+            ["clip.webm", "frames.jpg", "moved-on.bin"]
+        );
+    }
+
+    /// Another file put under the sheet's private name while the sheet is
+    /// written is not published in its place: the last sheet stays, or the
+    /// name stays free, and that file is left where it was put.
+    #[test]
+    fn a_file_put_in_the_sheets_place_is_not_published() {
+        for steps in TIERS {
+            for existing in [true, false] {
+                let case = format!("steps {steps:03b}, existing {existing}");
+                let root = kettle_test_support::private_tempdir("kettle-video-swapped-sheet-");
+                let input = root.path().join("clip.webm");
+                let out = root.path().join("frames.jpg");
+                std::fs::write(&input, b"video").unwrap();
+                if existing {
+                    std::fs::write(&out, b"old sheet").unwrap();
+                }
+                BEFORE_PUBLISH.set(Some(Box::new({
+                    let root = root.path().to_path_buf();
+                    move || {
+                        let other = root.join("other.bin");
+                        std::fs::write(&other, b"other").unwrap();
+                        let private: Vec<_> = names(&root)
+                            .into_iter()
+                            .filter(|name| name.starts_with(".kettle-"))
+                            .collect();
+                        assert_eq!(private.len(), 1, "{private:?}");
+                        std::fs::rename(&other, root.join(&private[0])).unwrap();
+                    }
+                })));
+                let (result, _) = lacking(steps, || write_out(&out, &input, b"jpeg"));
+                assert_eq!(result, Err(OutputRefusal::Changed), "{case}");
+                if existing {
+                    assert_eq!(std::fs::read(&out).unwrap(), b"old sheet", "{case}");
+                } else {
+                    assert!(!out.exists(), "{case}");
+                }
+                let left = names(root.path());
+                let private: Vec<_> = left
+                    .iter()
+                    .filter(|name| name.starts_with(".kettle-"))
+                    .collect();
+                assert_eq!(private.len(), 1, "{case}: {left:?}");
+                assert_eq!(
+                    std::fs::read(root.path().join(private[0])).unwrap(),
+                    b"other",
+                    "{case}"
+                );
+                assert_eq!(std::fs::read(&input).unwrap(), b"video", "{case}");
+            }
+        }
+    }
+
+    /// The refusals that mean a filesystem lacks a step, by the numbers the
+    /// systems give, apart from those that say what the names hold.
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_step_is_told_from_a_held_or_missing_name() {
+        for code in [
+            libc::EINVAL,
+            libc::ENOTSUP,
+            libc::EOPNOTSUPP,
+            libc::ENOSYS,
+            libc::EXDEV,
+        ] {
+            assert!(unsupported(&io::Error::from_raw_os_error(code)), "{code}");
+        }
+        for code in [libc::EEXIST, libc::ENOENT, libc::EACCES, libc::ENOSPC] {
+            assert!(!unsupported(&io::Error::from_raw_os_error(code)), "{code}");
+        }
     }
 }

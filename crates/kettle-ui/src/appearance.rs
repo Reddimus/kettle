@@ -200,8 +200,8 @@ mod tests {
             source.find(".receive_signal_with_args(").unwrap()
                 < source.find(".call_method(").unwrap()
         );
-        assert!(source.contains(".max_queued(1)"));
-        assert!(source.contains(".method_timeout(TIMEOUT)"));
+        assert!(source.contains("max_queued: Some(1),"));
+        assert!(source.contains("method_timeout: Some(TIMEOUT),"));
     }
 
     #[test]

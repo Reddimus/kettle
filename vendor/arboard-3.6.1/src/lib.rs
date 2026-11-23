@@ -82,6 +82,15 @@ impl Clipboard {
 		Ok(Clipboard { platform: platform::Clipboard::new()? })
 	}
 
+	/// Opens the macOS pasteboard of this name instead of the general one
+	/// (Kettle patch). A test that owns a uniquely named pasteboard can read
+	/// and write it without touching the system clipboard.
+	#[cfg(target_os = "macos")]
+	#[doc(hidden)]
+	pub fn with_macos_pasteboard_name(name: &str) -> Self {
+		Clipboard { platform: platform::Clipboard::with_pasteboard_name(name) }
+	}
+
 	/// Fetches UTF-8 text from the clipboard and returns it.
 	///
 	/// # Errors

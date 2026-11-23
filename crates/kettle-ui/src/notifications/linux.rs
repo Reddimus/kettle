@@ -1,7 +1,7 @@
 use super::DesktopNotification;
 use std::collections::HashMap;
 use std::time::Duration;
-use zbus::blocking::{Connection, connection::Builder};
+use zbus::blocking::Connection;
 use zbus::zvariant::Value;
 
 const SERVICE: &str = "org.freedesktop.Notifications";
@@ -20,14 +20,17 @@ pub(super) struct Backend {
 impl Backend {
     fn connect(&self) -> zbus::Result<Connection> {
         #[cfg(test)]
-        if let Some(address) = &self.address {
-            return Builder::address(address.as_str())?
-                .method_timeout(Duration::from_secs(1))
-                .build();
-        }
-        Builder::session()?
-            .method_timeout(Duration::from_secs(1))
-            .build()
+        let address = self.address.as_deref();
+        #[cfg(not(test))]
+        let address = None;
+        futures_lite::future::block_on(crate::dbus_bound::connect(
+            address,
+            crate::dbus_bound::Options {
+                max_queued: None,
+                method_timeout: Some(Duration::from_secs(1)),
+            },
+        ))
+        .map(Connection::from)
     }
 
     /// Whether the notification server accepted it.
@@ -104,6 +107,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
+    use zbus::blocking::connection::Builder;
     use zbus::message::Header;
 
     type Received = Arc<Mutex<Vec<(String, String, String)>>>;

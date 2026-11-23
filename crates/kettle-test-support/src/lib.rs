@@ -2,9 +2,11 @@
 
 #[cfg(unix)]
 mod executable;
+mod log_capture;
 pub mod mutate;
 #[cfg(unix)]
 pub use executable::copy_executable_fixture;
+pub use log_capture::lines_logged;
 
 use std::path::Path;
 

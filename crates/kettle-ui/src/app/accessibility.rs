@@ -1331,6 +1331,11 @@ impl App {
         request: ActionRequest,
         event_loop: &ActiveEventLoop,
     ) {
+        // A paste still waiting for the clipboard never lands behind what
+        // assistive technology typed, selected, focused or pressed.
+        if accessibility_drops_clipboard_wait(request.action) {
+            self.drop_clipboard_wait(ws);
+        }
         if matches!(
             request.action,
             AccessibilityAction::Focus | AccessibilityAction::Click

@@ -13,6 +13,7 @@ publish = false
 workspace = true
 
 [dependencies]
+log.workspace = true
 tempfile = "3"
 
 [dev-dependencies]

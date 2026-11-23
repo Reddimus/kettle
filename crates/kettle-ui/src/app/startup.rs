@@ -517,21 +517,9 @@ impl App {
                 .and_then(|()| Config::read_from_with_trust(path, startup.config_trust))
             {
                 Ok(loaded) => {
-                    config_diagnostics = Some((path.to_path_buf(), loaded.diagnostics()));
-                    if !loaded.unknown_keys.is_empty() {
-                        log::warn!(
-                            "{}: unrecognized config keys: {}",
-                            path.display(),
-                            loaded.unknown_keys.join(", ")
-                        );
-                    }
-                    if !loaded.malformed_values.is_empty() {
-                        log::warn!(
-                            "{}: malformed values (ignored): {}",
-                            path.display(),
-                            loaded.malformed_values.join(", ")
-                        );
-                    }
+                    let diagnostics = loaded.diagnostics();
+                    kettle_config::log_ignored_settings(path, &diagnostics);
+                    config_diagnostics = Some((path.to_path_buf(), diagnostics));
                     loaded.config
                 }
                 Err(error) => {

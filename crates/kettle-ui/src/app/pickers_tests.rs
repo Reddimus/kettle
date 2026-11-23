@@ -1386,48 +1386,9 @@ fn ssh_remove_and_replace_confirmations_default_to_cancel() {
     }
 }
 
-/// Log lines this thread emitted from the pickers module, or `None` when
-/// another logger was installed first in this test binary (`run` still runs).
-fn picker_log_lines(run: impl FnOnce()) -> Option<Vec<String>> {
-    use std::sync::{Mutex, OnceLock};
-    struct Capture(Mutex<Vec<(std::thread::ThreadId, String)>>);
-    impl log::Log for Capture {
-        fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
-            metadata.target().ends_with("::pickers")
-        }
-        fn log(&self, record: &log::Record<'_>) {
-            if self.enabled(record.metadata()) {
-                self.0
-                    .lock()
-                    .unwrap()
-                    .push((std::thread::current().id(), record.args().to_string()));
-            }
-        }
-        fn flush(&self) {}
-    }
-    static CAPTURE: OnceLock<Option<&'static Capture>> = OnceLock::new();
-    let Some(capture) = *CAPTURE.get_or_init(|| {
-        let capture: &'static Capture = Box::leak(Box::new(Capture(Mutex::new(Vec::new()))));
-        log::set_logger(capture).ok()?;
-        log::set_max_level(log::LevelFilter::Warn);
-        Some(capture)
-    }) else {
-        run();
-        return None;
-    };
-    let me = std::thread::current().id();
-    capture.0.lock().unwrap().retain(|(thread, _)| *thread != me);
-    run();
-    Some(
-        capture
-            .0
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(thread, _)| *thread == me)
-            .map(|(_, line)| line.clone())
-            .collect(),
-    )
+/// Log lines this thread emitted from the pickers module while `run` ran.
+fn picker_log_lines(run: impl FnOnce()) -> Vec<String> {
+    kettle_test_support::lines_logged(|target| target.ends_with("::pickers"), run).1
 }
 
 /// After a save the in-memory hosts change at once, the launcher reopens with
@@ -1556,9 +1517,7 @@ fn ssh_save_and_remove_update_hosts_and_reopen_with_a_status_line() {
     });
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     assert_eq!(cfg.ssh_hosts, hosts);
-    if let Some(lines) = lines {
-        assert_eq!(lines, ["ssh host not saved: WouldBlock"]);
-    }
+    assert_eq!(lines, ["ssh host not saved: WouldBlock"]);
 
     // Remove, then reopen empty with its status.
     super::remove_ssh_host_from(Some(&path), &mut cfg.ssh_hosts, "db", "me@db").unwrap();
@@ -1569,9 +1528,7 @@ fn ssh_save_and_remove_update_hosts_and_reopen_with_a_status_line() {
             Err(std::io::ErrorKind::NotFound)
         );
     });
-    if let Some(lines) = lines {
-        assert_eq!(lines, ["ssh host not removed: NotFound"]);
-    }
+    assert_eq!(lines, ["ssh host not removed: NotFound"]);
     super::reopen_ssh_launcher(&mut ws, &cfg, || None, "", None, tr.ssh_status_removed("db"));
     assert_eq!(ws.ssh_input.as_ref().unwrap().0.text(), "");
     assert_eq!(super::ssh_status_line(&ws), Some("Removed \"db\""));
