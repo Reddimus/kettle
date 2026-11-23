@@ -319,6 +319,16 @@ impl ShmPresenter {
         self.deferred.is_some()
     }
 
+    pub(super) fn pending_deadline(&self) -> Option<Instant> {
+        self.deferred?;
+        let now = Instant::now();
+        if self.gate_open(now) {
+            // Due now, or as soon as a pending callback is dispatched.
+            return Some(now);
+        }
+        Some(self.last_commit.map_or(now, |at| at + self.frame_timeout))
+    }
+
     fn remove(&mut self, ids: Vec<u64>) -> usize {
         let mut removed = 0;
         for id in ids {

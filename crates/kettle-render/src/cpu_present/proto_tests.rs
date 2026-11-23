@@ -4,12 +4,12 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use super::PresentOutcome;
 use super::damage::Rect;
 use super::shm::ShmPresenter;
 use super::test_wl::{Config, Server, TestClient};
+use super::{FRAME_CALLBACK_TIMEOUT, PresentOutcome};
 
 const W: u32 = 64;
 const H: u32 = 32;
@@ -249,4 +249,51 @@ fn a_hidden_surface_keeps_at_most_one_frame_callback() {
     );
     client.roundtrip();
     assert_eq!(server.log().callbacks_outstanding(), 1);
+}
+
+// --- the last frame of a burst ---
+
+#[test]
+fn a_deferred_frame_has_a_deadline_until_it_is_flushed() {
+    let Some((server, mut client, mut p)) = fixture(Config::default()) else {
+        return;
+    };
+    let mut scene = Scene::new();
+    assert_eq!(p.pending_deadline(), None);
+    let before = Instant::now();
+    scene.present(&mut p, r(0, 0, W, H), 1);
+    assert_eq!(p.pending_deadline(), None, "nothing is deferred");
+    client.roundtrip();
+    assert_eq!(
+        scene.present(&mut p, r(1, 1, 2, 2), 2),
+        PresentOutcome::Deferred
+    );
+    let deadline = p.pending_deadline().expect("a deferred frame needs a wake");
+    assert!(deadline > Instant::now(), "the deadline must not spin");
+    assert!(deadline <= before + FRAME_CALLBACK_TIMEOUT + Duration::from_millis(500));
+    // The callback arrives: the frame goes out on the next flush.
+    server.fire_frames(&mut client);
+    assert_eq!(p.flush(|| {}).expect("flush"), PresentOutcome::Presented);
+    assert_eq!(p.pending_deadline(), None);
+    client.roundtrip();
+    assert_eq!(
+        server.log().commits.last().expect("commit").pixels,
+        scene.truth
+    );
+}
+
+#[test]
+fn a_frame_deferred_past_its_timeout_is_due_at_once() {
+    let Some((_server, mut client, mut p)) = fixture(Config::default()) else {
+        return;
+    };
+    p.frame_timeout = Duration::from_millis(30);
+    let mut scene = Scene::new();
+    scene.present(&mut p, r(0, 0, W, H), 1);
+    client.roundtrip();
+    scene.present(&mut p, r(1, 1, 2, 2), 2);
+    std::thread::sleep(Duration::from_millis(40));
+    let deadline = p.pending_deadline().expect("deferred");
+    assert!(deadline <= Instant::now());
+    assert_eq!(p.flush(|| {}).expect("flush"), PresentOutcome::Presented);
 }

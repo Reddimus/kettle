@@ -66,11 +66,31 @@
 //! once the callback has arrived. Callers redraw on winit's frame-paced
 //! `RedrawRequested` and pass `pre_present_notify` to
 //! [`CpuFrame::present_with`], which calls it only for a frame that is
-//! committed; a caller that may stop redrawing with a frame deferred calls
-//! `flush` when its loop wakes (`about_to_wait`): the callback's arrival
-//! wakes winit's loop, since it reads the same socket. A resize, a format change or a return from
-//! occlusion commits at once. A callback that has not come after
-//! [`FRAME_CALLBACK_TIMEOUT`] stops holding frames back.
+//! committed. A resize, a format change or a return from occlusion commits
+//! at once. A callback that has not come after [`FRAME_CALLBACK_TIMEOUT`]
+//! stops holding frames back.
+//!
+//! A caller can stop drawing with a frame deferred (the end of a burst of
+//! output), and must then flush that frame itself:
+//!
+//! ```ignore
+//! // about_to_wait
+//! if presenter.has_deferred() {
+//!     presenter.flush_with(|| window.pre_present_notify())?;
+//! }
+//! if let Some(at) = presenter.pending_deadline() {
+//!     event_loop.set_control_flow(ControlFlow::WaitUntil(at)); // or earlier
+//! }
+//! ```
+//!
+//! The deadline is what makes this work. The frame callback reaches the
+//! process on winit's socket, but it is an event for the presenter's own
+//! queue, so winit's queue gets nothing from it. Under `ControlFlow::Wait`,
+//! winit 0.30's Wayland loop then goes back to sleep without running
+//! `about_to_wait`, and the frame would stay off screen until some unrelated
+//! event. With any `WaitUntil` armed, every wake runs a loop iteration, so
+//! the callback's arrival is seen at once; the deadline itself bounds the
+//! wait when no callback comes.
 
 mod book;
 mod damage;
@@ -366,6 +386,17 @@ impl CpuPresenter {
         match &self.inner {
             Inner::Shm(p) => p.has_deferred(),
             Inner::Soft(_) => false,
+        }
+    }
+
+    /// While a frame is deferred, the latest time to call [`Self::flush`]
+    /// for it: the frame callback's timeout. Arm `ControlFlow::WaitUntil`
+    /// with it (or an earlier time) and flush in `about_to_wait`, as the
+    /// module docs show. `None` when nothing is deferred.
+    pub fn pending_deadline(&self) -> Option<Instant> {
+        match &self.inner {
+            Inner::Shm(p) => p.pending_deadline(),
+            Inner::Soft(_) => None,
         }
     }
 
