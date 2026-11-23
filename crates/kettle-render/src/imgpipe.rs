@@ -16,14 +16,14 @@ use crate::upload::{
 
 pub(crate) struct ImageItem {
     rect: [f32; 4],
-    image: ImageData,
+    pub(crate) image: ImageData,
     source_rect: Option<ImageSourceRect>,
     source_crop: Option<ImageSourceCrop>,
     /// Optional destination clip in physical surface pixels. Inline terminal
     /// images use the owning pane's grid viewport; wallpapers stay unclipped.
     clip_rect: Option<[f32; 4]>,
     uv_override: Option<([f32; 2], [f32; 2])>,
-    repeat: bool,
+    pub(crate) repeat: bool,
 }
 
 #[cfg(test)]
@@ -558,7 +558,7 @@ impl ImageItem {
         self.rect
     }
 
-    fn instance(&self) -> Option<Inst> {
+    pub(crate) fn instance(&self) -> Option<Inst> {
         let (origin, size) = self
             .uv_override
             .or_else(|| source_uv(&self.image, self.source_rect, self.source_crop))?;
@@ -636,13 +636,13 @@ impl ImageItem {
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct Inst {
-    pos: [f32; 2],
-    size: [f32; 2],
-    uv_origin: [f32; 2],
-    uv_size: [f32; 2],
+pub(crate) struct Inst {
+    pub(crate) pos: [f32; 2],
+    pub(crate) size: [f32; 2],
+    pub(crate) uv_origin: [f32; 2],
+    pub(crate) uv_size: [f32; 2],
     // Crop pixel centers; a negative minimum leaves repeat sampling unclamped.
-    uv_clamp: [f32; 4],
+    pub(crate) uv_clamp: [f32; 4],
 }
 
 #[repr(C)]

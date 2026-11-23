@@ -14,7 +14,7 @@ use crate::upload::{RetainedBytes, UploadCounters, UploadCounts, write_buffer_if
 /// so this lives here, not in `Config`. It is also the uniform array's
 /// compile-time bound, substituted into the WGSL for the broadest
 /// naga-backend support (no override-constant required).
-const NSTARS: usize = 55;
+pub(crate) const NSTARS: usize = 55;
 
 /// `>1`: slow near the centre, faster near the edge.
 const EASE: f32 = 1.7;
@@ -36,14 +36,14 @@ const MIN_VISIBLE_BRIGHTNESS: f32 = 0.002;
 /// hand-written WGSL.
 #[repr(C)]
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
-struct Star {
+pub(crate) struct Star {
     /// `xy` = position in pixels from the surface centre; `z` = core radius
     /// squared; `w` = halo radius squared. Both radii arrive squared because
     /// the shader only ever needs them that way.
-    geom: [f32; 4],
+    pub(crate) geom: [f32; 4],
     /// `rgb` = linear colour already scaled by the star's brightness, so the
     /// shader multiplies once instead of once per falloff term; `a` unused.
-    tint: [f32; 4],
+    pub(crate) tint: [f32; 4],
 }
 
 #[repr(C)]
@@ -65,7 +65,7 @@ struct Uniforms {
 /// is stored already decoded to linear, because nothing downstream wants
 /// either in its original form.
 #[derive(Clone, Copy, Debug)]
-struct StarSeed {
+pub(crate) struct StarSeed {
     direction: [f32; 2],
     phase: f32,
     linear_color: [f32; 3],
@@ -73,7 +73,7 @@ struct StarSeed {
 
 impl StarSeed {
     /// Evaluate every star's fixed properties once.
-    fn all() -> [Self; NSTARS] {
+    pub(crate) fn all() -> [Self; NSTARS] {
         std::array::from_fn(|index| {
             let i = index as f32;
             let theta = rnd(i + 1.0) * std::f32::consts::TAU;
@@ -153,7 +153,7 @@ fn star_brightness(prog: f32) -> f32 {
 ///
 /// This is the whole of the model. It runs once per frame, and the field
 /// repaints at a low fps cap, so its cost is not on any hot path.
-fn build_frame_stars(
+pub(crate) fn build_frame_stars(
     seeds: &[StarSeed; NSTARS],
     resolution: [f32; 2],
     time_secs: f32,

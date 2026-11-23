@@ -153,7 +153,7 @@ pub struct GlyphClip {
 /// The scissor `[x, y, w, h]` that clips a pane `rect` on a `target_size`
 /// surface, or `None` when nothing of it is on the surface. `set_scissor_rect`
 /// requires x+w ≤ width and y+h ≤ height, in u32 physical pixels.
-fn pane_scissor(rect: [f32; 4], target_size: [u32; 2]) -> Option<[u32; 4]> {
+pub(crate) fn pane_scissor(rect: [f32; 4], target_size: [u32; 2]) -> Option<[u32; 4]> {
     let (sw, sh) = (target_size[0].max(1) as f32, target_size[1].max(1) as f32);
     let x0 = rect[0].clamp(0.0, sw);
     let y0 = rect[1].clamp(0.0, sh);
