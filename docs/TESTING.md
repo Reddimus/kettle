@@ -545,6 +545,17 @@ agent CLI probes, and the comparator, standing, and A/V-sync self-tests.
 Other-OS legs are reported as not applicable.
 A current-OS pass still needs the other native CI legs before release.
 
+### Renderer backends
+
+`backend::cpu_tests` drives the CPU backend through the real frame path, with
+no GPU: draw order and scissors, the rasterizer and presenter seams, the
+translucent presentation pass, resize, screenshots, the glyph atlas's CPU
+copy and the CPU text layout. On Linux,
+`no_gpu_driver_is_loaded_by_a_cpu_renderer` renders in a fresh test process and
+fails when any Vulkan loader, Mesa, LLVM or NVIDIA library, or a `/dev/dri`
+node, is mapped. It runs the same check on a GPU child to prove the check sees
+a driver. Run them with `cargo test -p kettle-render --lib backend::`.
+
 ### Host requirements and skipped tests
 
 Use a non-root account. Root can bypass the permission checks under test.
