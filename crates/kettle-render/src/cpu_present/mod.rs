@@ -45,6 +45,16 @@
 //! [`CpuPresenter::set_format`], and its own frame callback
 //! (`pre_present_notify`), which throttles `RedrawRequested`.
 //!
+//! # Threads
+//!
+//! A presenter can be built on any thread, but frames must be presented
+//! (and flushed) on winit's event-loop thread. winit commits the same
+//! `wl_surface` from that thread (decorations, the opaque region, a scale
+//! change), and a Wayland commit applies everything staged on the surface:
+//! presenting on another thread could let winit's commit carry a buffer
+//! the presenter has attached but not yet committed, or apply a new buffer
+//! scale to a buffer sized for the old one.
+//!
 //! # Frame pacing
 //!
 //! A commit asks for a `wl_surface.frame` callback. A frame presented before
@@ -489,7 +499,9 @@ impl CpuFrame<'_> {
     }
 
     /// [`Self::present`], running `pre_commit` just before the commit, and
-    /// not at all when the frame is deferred or unchanged. Pass winit's
+    /// not at all when the frame is deferred or unchanged. It runs before
+    /// the presenter stages anything on the surface: if it unwinds, nothing
+    /// is attached and the frame stays deferred. Pass winit's
     /// `pre_present_notify` here, not before the call: winit asks for its
     /// frame callback at once, so calling it for a frame that is then
     /// deferred leaves winit waiting on a callback no commit will bring,

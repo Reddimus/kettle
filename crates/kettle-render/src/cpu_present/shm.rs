@@ -463,11 +463,23 @@ impl ShmPresenter {
         } else {
             self.uncommitted.clone()
         };
-        let slot = self
+        let buffer = self
             .book
             .get(id)
+            .map(|slot| slot.backing.buffer.clone())
             .ok_or_else(|| anyhow!("CPU present buffer {id} vanished"))?;
-        self.surface.attach(Some(&slot.backing.buffer), 0, 0);
+        // Caller code runs first, before anything is staged on the surface.
+        // If it unwinds, the surface owner's next commit carries nothing of
+        // ours, and the frame stays deferred. It runs only when this commit
+        // is certain: winit's `pre_present_notify` asks for its own frame
+        // callback at once, and would wait for a commit that never comes.
+        pre_commit();
+        // From here to the commit nothing fails and no caller code runs, so
+        // on the surface owner's thread (see the module docs) the attach
+        // and the commit are one step. The buffer is the compositor's from
+        // the attach on.
+        self.book.committed(id);
+        self.surface.attach(Some(&buffer), 0, 0);
         if self.surface.version() >= 4 {
             for rect in &damage {
                 self.surface.damage_buffer(
@@ -485,12 +497,7 @@ impl ShmPresenter {
         let serial = self.next_serial;
         self.next_serial += 1;
         self.surface.frame(&self.qh, serial);
-        // winit's `pre_present_notify` adds its own frame callback to the
-        // next commit; it runs only when that commit is certain, or winit
-        // would wait on a callback for a commit that never comes.
-        pre_commit();
         self.surface.commit();
-        self.book.committed(id);
         self.deferred = None;
         self.uncommitted.clear();
         self.frame = Some((serial, now));

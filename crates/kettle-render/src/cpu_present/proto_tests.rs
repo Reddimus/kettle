@@ -2,6 +2,7 @@
 //! `test_wl` for Wayland, and an X server named by
 //! `KETTLE_TEST_X11_DISPLAY` for X11 (skipped when unset).
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 use super::PresentOutcome;
@@ -151,5 +152,51 @@ fn an_abandoned_draw_over_a_deferred_frame_never_reaches_the_screen() {
         covers(&last.damage, r(0, 0, 10, 10)),
         "B's damage was not carried: {:?}",
         last.damage
+    );
+}
+
+// --- the pre-commit hook unwinds ---
+
+#[test]
+fn a_hook_that_unwinds_leaves_nothing_staged_on_the_surface() {
+    let cfg = Config {
+        release_on_commit: false,
+        ..Config::default()
+    };
+    let Some((server, mut client, mut p)) = fixture(cfg) else {
+        return;
+    };
+    let mut scene = Scene::new();
+    scene.present(&mut p, r(0, 0, W, H), 1);
+    server.fire_frames(&mut client);
+    server.release_all(&mut client);
+    scene.paint(r(0, 0, 4, 4), 2);
+    let unwound = catch_unwind(AssertUnwindSafe(|| {
+        let mut frame = p.buffer_mut().expect("buffer");
+        for rr in frame.repaint_region(&[r(0, 0, 4, 4)]) {
+            copy(frame.pixels_mut(), &scene.truth, rr);
+        }
+        let _ = frame.present(&[r(0, 0, 4, 4)], || panic!("hook failed"));
+    }));
+    assert!(unwound.is_err(), "the hook did not run");
+    // winit commits the surface for its own reasons (CSD, opaque region).
+    client.surface.commit();
+    client.roundtrip();
+    {
+        let log = server.log();
+        let last = log.commits.last().expect("commit");
+        assert!(
+            !last.attached,
+            "the surface owner's commit carried the presenter's buffer"
+        );
+        assert_eq!(log.held, 0, "the compositor holds a buffer");
+    }
+    // The frame stayed deferred and goes out with the next flush.
+    assert!(p.has_deferred());
+    assert_eq!(p.flush(|| {}).expect("flush"), PresentOutcome::Presented);
+    client.roundtrip();
+    assert_eq!(
+        server.log().commits.last().expect("commit").pixels,
+        scene.truth
     );
 }
