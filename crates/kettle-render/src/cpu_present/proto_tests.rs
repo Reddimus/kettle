@@ -8,8 +8,9 @@ use std::time::{Duration, Instant};
 
 use super::damage::Rect;
 use super::shm::ShmPresenter;
+use super::soft::SoftPresenter;
 use super::test_wl::{Config, Server, TestClient};
-use super::{FRAME_CALLBACK_TIMEOUT, PresentOutcome};
+use super::{FRAME_CALLBACK_TIMEOUT, FrameError, PresentOutcome};
 
 const W: u32 = 64;
 const H: u32 = 32;
@@ -414,4 +415,54 @@ fn recreating_the_presenter_releases_its_globals() {
     assert_eq!(log.shm_releases, 3, "a wl_shm was left bound");
     assert_eq!(log.registries_destroyed, 3, "a registry was left");
     assert_eq!(log.fixes_destroyed, 3, "a wl_fixes was left");
+}
+
+// --- softbuffer on Wayland ---
+
+fn soft_fixture() -> Option<(Server, TestClient, SoftPresenter)> {
+    let (server, mut streams) = Server::start(Config::default(), 1);
+    let mut client = TestClient::connect(streams.remove(0))?;
+    let p = SoftPresenter::new(client.window(), Arc::new(client.display())).expect("softbuffer");
+    client.roundtrip();
+    Some((server, client, p))
+}
+
+#[test]
+fn softbuffer_refuses_an_oversized_resize() {
+    let Some((_server, _client, mut p)) = soft_fixture() else {
+        return;
+    };
+    p.resize(W, H, 1.0);
+    p.buffer_mut()
+        .expect("buffer")
+        .present(&[], || {})
+        .expect("present");
+    p.resize(16_385, 100, 1.0);
+    match p.buffer_mut() {
+        Err(FrameError::TooLarge { width, height }) => assert_eq!((width, height), (16_385, 100)),
+        Err(err) => panic!("{err}"),
+        Ok(frame) => panic!(
+            "an oversized resize kept presenting at {}x{}",
+            frame.width(),
+            frame.height()
+        ),
+    }
+    // A size that fits again presents again.
+    p.resize(W + 1, H, 1.0);
+    let frame = p.buffer_mut().expect("buffer");
+    assert_eq!((frame.width(), frame.height()), (W + 1, H));
+}
+
+#[test]
+fn softbuffer_reports_an_empty_damage_wayland_commit_as_presented() {
+    let Some((server, mut client, mut p)) = soft_fixture() else {
+        return;
+    };
+    p.resize(W, H, 1.0);
+    let first = p.buffer_mut().expect("buffer").present(&[], || {});
+    assert_eq!(first.expect("present"), PresentOutcome::Presented);
+    let second = p.buffer_mut().expect("buffer").present(&[], || {});
+    client.roundtrip();
+    assert_eq!(server.log().commits.len(), 2, "both presents committed");
+    assert_eq!(second.expect("present"), PresentOutcome::Presented);
 }

@@ -21,8 +21,12 @@ pub(super) struct SoftPresenter {
     /// X11 only: the window has a depth-32 visual, so the alpha byte reaches
     /// the compositing manager.
     alpha: bool,
+    /// The size frames get, as asked; the surface is sized to it at the
+    /// next `buffer_mut`, which refuses a size past the limits.
     width: u32,
     height: u32,
+    /// The size the softbuffer surface has.
+    surface_size: (u32, u32),
     format: PixelFormat,
     ages: SoftAges,
     commits: u64,
@@ -99,6 +103,7 @@ impl SoftPresenter {
             alpha,
             width: 0,
             height: 0,
+            surface_size: (0, 0),
             format: PixelFormat::Opaque,
             ages: SoftAges::default(),
             commits: 0,
@@ -125,21 +130,34 @@ impl SoftPresenter {
 
     pub(super) fn resize(&mut self, width: u32, height: u32, scale: f64) {
         let (w, h) = buffer_extent(width, height, scale);
-        if (w, h) == (self.width, self.height) || check_extent(w, h).is_err() {
-            return;
+        if (w, h) != (self.width, self.height) {
+            self.width = w;
+            self.height = h;
+            self.history.clear();
+            self.ages.reset();
+        }
+    }
+
+    /// Size the surface to the asked size, or refuse it as the wl_shm
+    /// presenter does: a frame of the old size would be drawn for a window
+    /// of the new one.
+    fn apply_size(&mut self) -> Result<(), FrameError> {
+        let (w, h) = (self.width, self.height);
+        check_extent(w, h)?;
+        if self.surface_size == (w, h) {
+            return Ok(());
         }
         let (Some(nw), Some(nh)) = (NonZeroU32::new(w), NonZeroU32::new(h)) else {
-            return;
+            return Err(FrameError::TooLarge {
+                width: w,
+                height: h,
+            });
         };
-        match self.surface.resize(nw, nh) {
-            Ok(()) => {
-                self.width = w;
-                self.height = h;
-                self.history.clear();
-                self.ages.reset();
-            }
-            Err(err) => log::warn!("CPU present: softbuffer resize to {w}x{h} failed: {err}"),
-        }
+        self.surface
+            .resize(nw, nh)
+            .map_err(|e| FrameError::Backend(anyhow!("softbuffer resize to {w}x{h}: {e}")))?;
+        self.surface_size = (w, h);
+        Ok(())
     }
 
     pub(super) fn set_format(&mut self, format: PixelFormat) -> PixelFormat {
@@ -161,6 +179,7 @@ impl SoftPresenter {
     }
 
     pub(super) fn buffer_mut(&mut self) -> Result<SoftFrame<'_>, FrameError> {
+        self.apply_size()?;
         let (width, height) = (self.width, self.height);
         let buffer = self
             .surface
@@ -176,6 +195,7 @@ impl SoftPresenter {
             height,
             age,
             format: self.format,
+            wayland: self.kind == PresenterKind::SoftbufferWayland,
         })
     }
 
@@ -190,7 +210,7 @@ impl SoftPresenter {
             kind: self.kind,
             buffers,
             busy_buffers: 0,
-            buffer_bytes: buffers * self.width as usize * self.height as usize * 4,
+            buffer_bytes: buffers * self.surface_size.0 as usize * self.surface_size.1 as usize * 4,
             commits: self.commits,
             timed_out_commits: 0,
             deferred: 0,
@@ -210,6 +230,8 @@ pub(super) struct SoftFrame<'a> {
     height: u32,
     age: u8,
     format: PixelFormat,
+    /// On Wayland every present commits, even with no damage.
+    wayland: bool,
 }
 
 impl SoftFrame<'_> {
@@ -279,10 +301,12 @@ impl SoftFrame<'_> {
             .present_with_damage(&rects)
             .map_err(|e| anyhow!("softbuffer present: {e}"))?;
         *self.commits += 1;
-        Ok(if out.is_empty() {
-            PresentOutcome::Unchanged
-        } else {
+        // softbuffer's Wayland backend attaches and commits whatever the
+        // damage; its X11 backend sends nothing for none.
+        Ok(if self.wayland || !out.is_empty() {
             PresentOutcome::Presented
+        } else {
+            PresentOutcome::Unchanged
         })
     }
 }
