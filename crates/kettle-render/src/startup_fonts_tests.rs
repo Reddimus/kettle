@@ -9,19 +9,31 @@ use kettle_config::Config;
 #[test]
 fn the_renderer_takes_over_matching_startup_fonts() {
     let src = production_source();
-    // Every constructor, windowed or headless, ends in `with_gpu`.
-    let body = src
-        .split_once("fn with_gpu(")
-        .expect("with_gpu")
-        .1
-        .split_once("\n    }\n")
-        .expect("end of with_gpu")
-        .0;
-    assert!(body.contains("Some(fonts) if fonts.matches(cfg, scale) => fonts,"));
-    assert!(body.contains("Some(fonts) => fonts.remeasure(cfg, scale),"));
-    assert!(body.contains("None => StartupFonts::load(cfg, scale),"));
-    assert_eq!(body.matches("StartupFonts::load(").count(), 1);
-    assert!(!body.contains("FontSystem::new()"));
+    let body = |start: &str, end: &str| {
+        src.split_once(start)
+            .unwrap_or_else(|| panic!("{start}"))
+            .1
+            .split_once(end)
+            .unwrap_or_else(|| panic!("end of {start}"))
+            .0
+            .to_owned()
+    };
+    // Every constructor, windowed or headless, ends in `with_gpu`, which
+    // takes its fonts over through `take_over_fonts`.
+    let constructor = body("fn with_gpu(", "\n    }\n");
+    assert_eq!(
+        constructor
+            .matches("let fonts = take_over_fonts(fonts, cfg, scale);")
+            .count(),
+        1
+    );
+    assert!(!constructor.contains("StartupFonts::load("));
+    assert!(!constructor.contains("FontSystem::new()"));
+    let take_over = body("fn take_over_fonts(", "\n}\n");
+    assert!(take_over.contains("Some(fonts) if fonts.matches(cfg, scale) => fonts,"));
+    assert!(take_over.contains("Some(fonts) => fonts.remeasure(cfg, scale),"));
+    assert!(take_over.contains("None => StartupFonts::load(cfg, scale),"));
+    assert_eq!(src.matches("StartupFonts::load(cfg, scale)").count(), 1);
 }
 
 /// Fonts prepared before the scale is known measure the cell a direct

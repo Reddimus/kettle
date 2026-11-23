@@ -349,6 +349,55 @@ pub(crate) fn finish_glyph_pipeline(
     }
 }
 
+/// The fonts a new renderer starts with. Fonts loaded before the window
+/// reach here already measured. Ones measured for another scale or font are
+/// measured again, without enumerating the system fonts a second time.
+fn take_over_fonts(fonts: Option<StartupFonts>, cfg: &Config, scale: f32) -> StartupFonts {
+    match fonts {
+        Some(fonts) if fonts.matches(cfg, scale) => fonts,
+        Some(fonts) => fonts.remeasure(cfg, scale),
+        None => StartupFonts::load(cfg, scale),
+    }
+}
+
+/// The parts of a renderer that its backend builds: glyphon's objects and
+/// every scene layer. The rest of the renderer is the same on both.
+struct RendererLayers {
+    glyphon_cache: Cache,
+    atlas: TextAtlas,
+    viewport: Viewport,
+    text_renderer: TextRenderer,
+    ime_text_renderer: TextRenderer,
+    menu_text_renderer: TextRenderer,
+    confirmation_text_renderer: TextRenderer,
+    cursor_glyph_renderer: TextRenderer,
+    card_text_renderer: TextRenderer,
+    lane_text_renderer: TextRenderer,
+    pane_bases: crate::quad::QuadPipeline,
+    quads: crate::quad::QuadPipeline,
+    pane_dimming: crate::quad::QuadPipeline,
+    text_decorations: crate::quad::QuadPipeline,
+    overlay_quads: crate::quad::QuadPipeline,
+    menu_quads: crate::quad::QuadPipeline,
+    ime_quads: crate::quad::QuadPipeline,
+    card_base: crate::quad::QuadPipeline,
+    lane_quads: crate::quad::QuadPipeline,
+    card_cursors: crate::quad::QuadPipeline,
+    card_decoration: crate::quad::QuadPipeline,
+    pane_outlines: OutlinePipeline,
+    rounded_surfaces: rounded_surface::RoundedSurfacePipeline,
+    menu_surfaces: rounded_surface::RoundedSurfacePipeline,
+    menu_swatch_surfaces: rounded_surface::RoundedSurfacePipeline,
+    toast_surfaces: rounded_surface::RoundedSurfacePipeline,
+    presentation: present::PresentationPipeline,
+    imgs: crate::imgpipe::ImagePipeline,
+    media_receipt_img: crate::imgpipe::ImagePipeline,
+    bg_imgs: crate::imgpipe::ImagePipeline,
+    card_image_shared: crate::imgpipe::ImageShared,
+    starfield: starfield::StarfieldPipeline,
+    glyph_pipeline: GlyphPipeline,
+}
+
 /// Whether a renderer constructor may compile pipelines on worker threads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PipelineThreads {
@@ -787,30 +836,191 @@ impl Renderer {
         });
         let glyph_build = start_glyph_build(on_threads, &device, format);
 
-        // Fonts loaded before the window reach here already measured. Ones
-        // measured for another scale or font are measured again, without
-        // enumerating the system fonts a second time.
-        let StartupFonts {
-            mut font_system,
-            text_symbol_family,
-            emoji_family,
-            cell: (cell_w, cell_h),
-            ..
-        } = match fonts {
-            Some(fonts) if fonts.matches(cfg, scale) => fonts,
-            Some(fonts) => fonts.remeasure(cfg, scale),
-            None => StartupFonts::load(cfg, scale),
-        };
-        let cell_scale_w = cfg.cell_width.max(0.01);
-        let cell_scale_h = cfg.cell_height.max(0.01);
-
-        let swash = SwashCache::new();
+        let fonts = take_over_fonts(fonts, cfg, scale);
         let cache = Cache::new(&device);
         let mut atlas = TextAtlas::new(&device, &queue, &cache, format);
         let viewport = Viewport::new(&device, &cache);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
 
+        let shared = SharedPipelines::new(&device, format);
+        let pane_bases = shared.quads.replace(&device);
+        let quads = shared.quads.blend(&device);
+        let pane_outlines = outline_build.join();
+        let pane_dimming = shared.quads.blend(&device);
+        let text_decorations = shared.quads.blend(&device);
+        let overlay_quads = shared.quads.blend(&device);
+        let menu_quads = shared.quads.blend(&device);
+        let ime_quads = shared.quads.blend(&device);
+        let ime_text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let menu_text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        // Joined before the three copies below: once the first has compiled,
+        // the copies together took about 1.6 ms on NVIDIA.
+        let rounded_surfaces = rounded_surface_build.join();
+        let menu_surfaces = rounded_surface::RoundedSurfacePipeline::with_capacity(
+            &device,
+            format,
+            crate::overlays::MENU_SURFACES,
+        );
+        let menu_swatch_surfaces = rounded_surface::RoundedSurfacePipeline::with_capacity(
+            &device,
+            format,
+            crate::overlays::MENU_SWATCH_SURFACES,
+        );
+        let toast_surfaces = rounded_surface::RoundedSurfacePipeline::new(&device, format);
+        let confirmation_text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let cursor_glyph_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let card_text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let card_base = shared.quads.blend(&device);
+        let lane_quads = shared.quads.blend(&device);
+        let lane_text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let card_cursors = shared.quads.blend(&device);
+        let card_decoration = shared.quads.blend(&device);
+        let presentation = presentation_build.join();
+        let imgs = shared
+            .images
+            .layer(&device, graphics_budget.clone())
+            .ok_or_else(|| {
+                anyhow!("GPU graphics budget exhausted while creating image pipeline")
+            })?;
+        let media_receipt_img = shared
+            .images
+            .layer_with_instance_limit(&device, graphics_budget.clone(), 1)
+            .ok_or_else(|| {
+                anyhow!("GPU graphics budget exhausted while creating image-receipt pipeline")
+            })?;
+        // Separate image layer so the wallpaper draws behind cell/chrome quads
+        // (see the `bg_imgs` field docs).
+        let bg_imgs = shared
+            .images
+            .layer_with_instance_limit(&device, graphics_budget.clone(), 1)
+            .ok_or_else(|| {
+                anyhow!("GPU graphics budget exhausted while creating background image pipeline")
+            })?;
+        // Procedural starfield wallpaper, same back-most slot.
+        let starfield = starfield_build.join();
+        // Cell-locked pane-text pipeline (the `text-renderer=grid` default).
+        // Always constructed; only emitted/drawn in grid mode.
+        let glyph_pipeline =
+            finish_glyph_pipeline(glyph_build, &device, format, graphics_budget.clone())
+                .ok_or_else(|| {
+                    anyhow!("GPU graphics budget exhausted while creating glyph pipeline")
+                })?;
+
+        let layers = RendererLayers {
+            glyphon_cache: cache,
+            atlas,
+            viewport,
+            text_renderer,
+            ime_text_renderer,
+            menu_text_renderer,
+            confirmation_text_renderer,
+            cursor_glyph_renderer,
+            card_text_renderer,
+            lane_text_renderer,
+            pane_bases,
+            quads,
+            pane_dimming,
+            text_decorations,
+            overlay_quads,
+            menu_quads,
+            ime_quads,
+            card_base,
+            lane_quads,
+            card_cursors,
+            card_decoration,
+            pane_outlines,
+            rounded_surfaces,
+            menu_surfaces,
+            menu_swatch_surfaces,
+            toast_surfaces,
+            presentation,
+            imgs,
+            media_receipt_img,
+            bg_imgs,
+            card_image_shared: shared.images,
+            starfield,
+            glyph_pipeline,
+        };
+        Ok(Self::with_layers(
+            gpu,
+            surface,
+            config,
+            supported_alpha_modes,
+            graphics_budget,
+            fonts,
+            layers,
+            cfg,
+            scale,
+        ))
+    }
+
+    /// Every constructor's tail, once its backend's layers exist: the text
+    /// buffers, metrics and the renderer itself.
+    #[allow(clippy::too_many_arguments)]
+    fn with_layers(
+        gpu: GpuContext,
+        surface: Option<wgpu::Surface<'static>>,
+        config: wgpu::SurfaceConfiguration,
+        supported_alpha_modes: Vec<wgpu::CompositeAlphaMode>,
+        graphics_budget: kettle_core::GraphicsBudget,
+        fonts: StartupFonts,
+        layers: RendererLayers,
+        cfg: &Config,
+        scale: f32,
+    ) -> Renderer {
+        let StartupFonts {
+            mut font_system,
+            text_symbol_family,
+            emoji_family,
+            cell: (cell_w, cell_h),
+            ..
+        } = fonts;
+        let RendererLayers {
+            glyphon_cache,
+            atlas,
+            viewport,
+            text_renderer,
+            ime_text_renderer,
+            menu_text_renderer,
+            confirmation_text_renderer,
+            cursor_glyph_renderer,
+            card_text_renderer,
+            lane_text_renderer,
+            pane_bases,
+            quads,
+            pane_dimming,
+            text_decorations,
+            overlay_quads,
+            menu_quads,
+            ime_quads,
+            card_base,
+            lane_quads,
+            card_cursors,
+            card_decoration,
+            pane_outlines,
+            rounded_surfaces,
+            menu_surfaces,
+            menu_swatch_surfaces,
+            toast_surfaces,
+            presentation,
+            imgs,
+            media_receipt_img,
+            bg_imgs,
+            card_image_shared,
+            starfield,
+            glyph_pipeline,
+        } = layers;
+        let cell_scale_w = cfg.cell_width.max(0.01);
+        let cell_scale_h = cfg.cell_height.max(0.01);
+
+        let swash = SwashCache::new();
         // Clamp `cfg.font_size` to the same [5.0, 72.0] range as the runtime
         // `set_font_size` path. Without this, a user config of
         // `font-size = 200` boots the renderer with 200pt cells and hits the
@@ -870,79 +1080,9 @@ impl Renderer {
         let mut ime_buffer = TextBuffer::new(&mut font_system, metrics);
         ime_buffer.set_wrap(Wrap::None);
 
-        let shared = SharedPipelines::new(&device, format);
-        let pane_bases = shared.quads.replace(&device);
-        let quads = shared.quads.blend(&device);
-        let pane_outlines = outline_build.join();
-        let pane_dimming = shared.quads.blend(&device);
-        let text_decorations = shared.quads.blend(&device);
-        let overlay_quads = shared.quads.blend(&device);
-        let menu_quads = shared.quads.blend(&device);
-        let ime_quads = shared.quads.blend(&device);
-        let ime_text_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
-        let menu_text_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
-        // Joined before the three copies below: once the first has compiled,
-        // the copies together took about 1.6 ms on NVIDIA.
-        let rounded_surfaces = rounded_surface_build.join();
-        let menu_surfaces = rounded_surface::RoundedSurfacePipeline::with_capacity(
-            &device,
-            format,
-            crate::overlays::MENU_SURFACES,
-        );
-        let menu_swatch_surfaces = rounded_surface::RoundedSurfacePipeline::with_capacity(
-            &device,
-            format,
-            crate::overlays::MENU_SWATCH_SURFACES,
-        );
-        let toast_surfaces = rounded_surface::RoundedSurfacePipeline::new(&device, format);
-        let confirmation_text_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let confirmation_text = confirm::ConfirmText::new();
-        let cursor_glyph_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let cursor_glyph_buffer = TextBuffer::new(&mut font_system, metrics);
-        let card_text_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
-        let card_base = shared.quads.blend(&device);
-        let lane_quads = shared.quads.blend(&device);
-        let lane_text_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
-        let card_cursors = shared.quads.blend(&device);
-        let card_decoration = shared.quads.blend(&device);
-        let presentation = presentation_build.join();
-        let imgs = shared
-            .images
-            .layer(&device, graphics_budget.clone())
-            .ok_or_else(|| {
-                anyhow!("GPU graphics budget exhausted while creating image pipeline")
-            })?;
-        let media_receipt_img = shared
-            .images
-            .layer_with_instance_limit(&device, graphics_budget.clone(), 1)
-            .ok_or_else(|| {
-                anyhow!("GPU graphics budget exhausted while creating image-receipt pipeline")
-            })?;
-        // Separate image layer so the wallpaper draws behind cell/chrome quads
-        // (see the `bg_imgs` field docs).
-        let bg_imgs = shared
-            .images
-            .layer_with_instance_limit(&device, graphics_budget.clone(), 1)
-            .ok_or_else(|| {
-                anyhow!("GPU graphics budget exhausted while creating background image pipeline")
-            })?;
-        // Procedural starfield wallpaper, same back-most slot.
-        let starfield = starfield_build.join();
-        // Cell-locked pane-text pipeline (the `text-renderer=grid` default).
-        // Always constructed; only emitted/drawn in grid mode.
-        let glyph_pipeline =
-            finish_glyph_pipeline(glyph_build, &device, format, graphics_budget.clone())
-                .ok_or_else(|| {
-                    anyhow!("GPU graphics budget exhausted while creating glyph pipeline")
-                })?;
-
-        Ok(Renderer {
+        Renderer {
             surface,
             gpu,
             graphics_budget,
@@ -1003,7 +1143,7 @@ impl Renderer {
             cursor_glyph_cache: crate::terminal::CursorGlyphCache::default(),
             cursor_mark_images: Vec::new(),
             cursor_marks: None,
-            glyphon_cache: cache,
+            glyphon_cache,
             pane_titlebar_texts: Vec::new(),
             tab_texts: Vec::new(),
             hint_texts: Vec::new(),
@@ -1108,7 +1248,7 @@ impl Renderer {
             lane_text_renderer,
             lane_texts: std::collections::HashMap::new(),
             lane_labels_prepared: false,
-            card_image_shared: shared.images,
+            card_image_shared,
             card_frames: Vec::new(),
             card_scene: card_scene::CardScene::default(),
             drawn_cards: Vec::new(),
@@ -1141,7 +1281,7 @@ impl Renderer {
             pending_screenshot: None,
             screenshot_worker: None,
             screenshot_retirements: Default::default(),
-        })
+        }
     }
 
     /// The shared GPU handles, for spawning another window's Renderer via

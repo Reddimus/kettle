@@ -665,7 +665,7 @@ fn a_renderer_builds_its_quad_and_image_layers_from_shared_pipelines() {
     let src = super::production_source();
     let with_gpu = src
         .split_once("    fn with_gpu(\n")
-        .and_then(|(_, rest)| rest.split_once("        Ok(Renderer {"))
+        .and_then(|(_, rest)| rest.split_once("    fn with_layers("))
         .map(|(body, _)| body)
         .expect("with_gpu builds the renderer");
     assert!(
