@@ -172,6 +172,9 @@ pub struct PresenterStats {
     /// Shared-memory bytes mapped for those buffers.
     pub buffer_bytes: usize,
     pub commits: u64,
+    /// Of those, commits made because a frame callback did not come within
+    /// [`FRAME_CALLBACK_TIMEOUT`] (a hidden surface, usually).
+    pub timed_out_commits: u64,
     pub deferred: u64,
     /// Buffers created over the presenter's life.
     pub allocations: u64,

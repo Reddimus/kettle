@@ -25,7 +25,9 @@ use super::{
 /// A frame callback that has not come after this stops holding frames back.
 /// Compositors withhold callbacks from hidden surfaces; a window that is
 /// visible again commits at once through [`ShmPresenter::set_occluded`], and
-/// this bounds the wait when nothing reports occlusion.
+/// this bounds the wait when nothing reports occlusion. While the callback
+/// is still out, the presenter commits at most once per this interval and
+/// asks for no further callback, so a hidden surface never piles them up.
 pub const FRAME_CALLBACK_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Events the presenter's own queue receives.
@@ -158,8 +160,13 @@ pub(super) struct ShmPresenter {
     width: u32,
     height: u32,
     format: PixelFormat,
-    /// The serial and time of the last commit's frame callback, until done.
-    frame: Option<(u64, Instant)>,
+    /// The serial of the one frame callback out, until it is done. A commit
+    /// made while it is out asks for no other.
+    callback: Option<u64>,
+    /// When the last commit went out.
+    last_commit: Option<Instant>,
+    /// [`FRAME_CALLBACK_TIMEOUT`]; shorter in tests.
+    pub(super) frame_timeout: Duration,
     next_serial: u64,
     /// Commit the next frame in full, without waiting for a callback.
     force_next: bool,
@@ -172,6 +179,7 @@ pub(super) struct ShmPresenter {
     /// carries them.
     uncommitted: Vec<Rect>,
     commits: u64,
+    timed_out_commits: u64,
     deferrals: u64,
     allocations: u64,
     _window: WindowOwner,
@@ -227,13 +235,16 @@ impl ShmPresenter {
             width: 1,
             height: 1,
             format: PixelFormat::Opaque,
-            frame: None,
+            callback: None,
+            last_commit: None,
+            frame_timeout: FRAME_CALLBACK_TIMEOUT,
             next_serial: 1,
             force_next: true,
             occluded: false,
             deferred: None,
             uncommitted: Vec::new(),
             commits: 0,
+            timed_out_commits: 0,
             deferrals: 0,
             allocations: 0,
             _window: window,
@@ -285,17 +296,18 @@ impl ShmPresenter {
             self.book.released(id);
         }
         for serial in self.state.frames_done.drain(..) {
-            if self.frame.is_some_and(|(pending, _)| serial >= pending) {
-                self.frame = None;
+            if self.callback.is_some_and(|out| serial >= out) {
+                self.callback = None;
             }
         }
     }
 
     fn gate_open(&self, now: Instant) -> bool {
         self.force_next
+            || self.callback.is_none()
             || self
-                .frame
-                .is_none_or(|(_, at)| now.saturating_duration_since(at) >= FRAME_CALLBACK_TIMEOUT)
+                .last_commit
+                .is_none_or(|at| now.saturating_duration_since(at) >= self.frame_timeout)
     }
 
     pub(super) fn frame_pending(&mut self) -> bool {
@@ -348,7 +360,8 @@ impl ShmPresenter {
             let all = self.book.spares(false);
             self.remove(all);
         } else {
-            self.frame = None;
+            // The withheld callback stays the one out: the compositor sends
+            // it once it shows the surface again.
             self.force_next = true;
         }
     }
@@ -463,6 +476,7 @@ impl ShmPresenter {
         } else {
             self.uncommitted.clone()
         };
+        let timed_out = self.callback.is_some() && !self.force_next;
         let buffer = self
             .book
             .get(id)
@@ -494,15 +508,19 @@ impl ShmPresenter {
             // everything, as Mesa's WSI does.
             self.surface.damage(0, 0, i32::MAX, i32::MAX);
         }
-        let serial = self.next_serial;
-        self.next_serial += 1;
-        self.surface.frame(&self.qh, serial);
+        if self.callback.is_none() {
+            let serial = self.next_serial;
+            self.next_serial += 1;
+            self.surface.frame(&self.qh, serial);
+            self.callback = Some(serial);
+        }
         self.surface.commit();
         self.deferred = None;
         self.uncommitted.clear();
-        self.frame = Some((serial, now));
+        self.last_commit = Some(now);
         self.force_next = false;
         self.commits += 1;
+        self.timed_out_commits += u64::from(timed_out);
         // Buffers of an old size or format are no longer needed once a frame
         // of the new one is up; busy ones go when released.
         let stale = self.book.stale(self.width, self.height, self.format);
@@ -527,9 +545,10 @@ impl ShmPresenter {
             busy_buffers: self.book.busy_count(),
             buffer_bytes: self.book.iter().map(|s| s.backing.capacity).sum(),
             commits: self.commits,
+            timed_out_commits: self.timed_out_commits,
             deferred: self.deferrals,
             allocations: self.allocations,
-            frame_callback_pending: self.frame.is_some(),
+            frame_callback_pending: self.callback.is_some(),
         }
     }
 }

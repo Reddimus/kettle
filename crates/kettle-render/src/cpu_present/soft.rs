@@ -192,6 +192,7 @@ impl SoftPresenter {
             busy_buffers: 0,
             buffer_bytes: buffers * self.width as usize * self.height as usize * 4,
             commits: self.commits,
+            timed_out_commits: 0,
             deferred: 0,
             allocations: buffers as u64,
             frame_callback_pending: false,

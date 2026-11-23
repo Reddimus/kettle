@@ -4,6 +4,7 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::PresentOutcome;
 use super::damage::Rect;
@@ -199,4 +200,53 @@ fn a_hook_that_unwinds_leaves_nothing_staged_on_the_surface() {
         server.log().commits.last().expect("commit").pixels,
         scene.truth
     );
+}
+
+// --- a hidden surface whose callbacks never come ---
+
+#[test]
+fn a_hidden_surface_keeps_at_most_one_frame_callback() {
+    let Some((server, mut client, mut p)) = fixture(Config::default()) else {
+        return;
+    };
+    p.frame_timeout = Duration::from_millis(30);
+    let mut scene = Scene::new();
+    scene.present(&mut p, r(0, 0, W, H), 1);
+    client.roundtrip();
+    assert_eq!(
+        scene.present(&mut p, r(0, 0, 1, 1), 2),
+        PresentOutcome::Deferred
+    );
+    for i in 0..3 {
+        std::thread::sleep(Duration::from_millis(40));
+        let out = scene.present(&mut p, r(i, 0, 1, 1), 3 + i);
+        assert_eq!(out, PresentOutcome::Presented, "timed-out frame {i}");
+        client.roundtrip();
+    }
+    let stats = p.stats();
+    assert_eq!(stats.commits, 4);
+    assert_eq!(stats.timed_out_commits, 3);
+    assert!(stats.frame_callback_pending);
+    {
+        let log = server.log();
+        assert_eq!(log.commits.len(), 4);
+        assert_eq!(log.commits.last().expect("commit").pixels, scene.truth);
+        assert_eq!(
+            log.callbacks_outstanding(),
+            1,
+            "frame callbacks piled up on a hidden surface"
+        );
+    }
+    // Shown again: the withheld callback comes, and pacing resumes on it.
+    server.fire_frames(&mut client);
+    assert_eq!(
+        scene.present(&mut p, r(5, 5, 1, 1), 9),
+        PresentOutcome::Presented
+    );
+    assert_eq!(
+        scene.present(&mut p, r(6, 5, 1, 1), 10),
+        PresentOutcome::Deferred
+    );
+    client.roundtrip();
+    assert_eq!(server.log().callbacks_outstanding(), 1);
 }
