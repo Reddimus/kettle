@@ -242,6 +242,8 @@ mod confirm;
 
 pub use confirm::{ConfirmDetailLayout, ConfirmDialogLayout, access_key_index};
 
+mod cpu_raster;
+
 mod cursor_marks;
 
 mod cursor_patch;

@@ -16,14 +16,14 @@ use crate::upload::{
 
 pub(crate) struct ImageItem {
     rect: [f32; 4],
-    image: ImageData,
+    pub(crate) image: ImageData,
     source_rect: Option<ImageSourceRect>,
     source_crop: Option<ImageSourceCrop>,
     /// Optional destination clip in physical surface pixels. Inline terminal
     /// images use the owning pane's grid viewport; wallpapers stay unclipped.
     clip_rect: Option<[f32; 4]>,
     uv_override: Option<([f32; 2], [f32; 2])>,
-    repeat: bool,
+    pub(crate) repeat: bool,
 }
 
 #[cfg(test)]
@@ -558,7 +558,7 @@ impl ImageItem {
         self.rect
     }
 
-    fn instance(&self) -> Option<Inst> {
+    pub(crate) fn instance(&self) -> Option<Inst> {
         let (origin, size) = self
             .uv_override
             .or_else(|| source_uv(&self.image, self.source_rect, self.source_crop))?;

@@ -52,7 +52,7 @@ const MAX_PATCH_SIDE: u32 = 1024;
 /// The rasterizer's vertex snap: 8 bits of subpixel precision.
 const SNAP_STEP: f32 = 1.0 / 256.0;
 
-const COMBINE_SHADER: &str = r#"
+pub(crate) const COMBINE_SHADER: &str = r#"
 @group(0) @binding(0) var cursor_on: texture_2d<f32>;
 @group(0) @binding(1) var cursor_off: texture_2d<f32>;
 
