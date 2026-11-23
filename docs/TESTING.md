@@ -556,6 +556,17 @@ fails when any Vulkan loader, Mesa, LLVM or NVIDIA library, or a `/dev/dri`
 node, is mapped. It runs the same check on a GPU child to prove the check sees
 a driver. Run them with `cargo test -p kettle-render --lib backend::`.
 
+`backend::cpu_parity_tests` renders whole scenes (grid text with colours and
+box drawing, a selection, a translucent window, the starfield) on both
+backends through `headless_tests::capture` and fails when any channel differs
+by more than 2. It needs a GPU adapter (lavapipe in CI); set
+`KETTLE_CPU_PARITY_DUMP=<dir>` to save each pair as PNGs. The same module
+drives the window path through a fake `CpuSurface`: the frame is drawn into
+the presenter's buffer, `pre_present` runs once at the commit, and opacity,
+idle release, occlusion and resize reach the presenter.
+`backend::cpu_draw::tests` checks that banding and the wallpaper cache leave
+pixels unchanged.
+
 ### Host requirements and skipped tests
 
 Use a non-root account. Root can bypass the permission checks under test.

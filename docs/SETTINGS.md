@@ -231,12 +231,16 @@ history-scan bounds, and TUI behavior.
 
 | Option | Config key | Notes |
 |---|---|---|
+| Renderer | `renderer` | Automatic · CPU · GPU. **Default: Automatic** (the CPU on Linux, the GPU elsewhere). CPU is Linux-only. Applies on the next launch; every window follows the first one's renderer |
 | GPU preference | `gpu-power-preference` | Automatic · Low power (integrated) · High performance. **Default: Automatic** (platform/wgpu chooses). Pick `high` only when you want dedicated-GPU render headroom on hybrid hardware |
 | GPU device | `gpu-device-id` + `gpu-vendor-id` + `gpu-name` | Pin a *specific* detected GPU, or **Automatic**. The list is the GPUs found on this machine |
 | GPU backend | `gpu-backend` | Automatic · DirectX 12 · Vulkan · Metal · OpenGL |
 | Force software rendering | `gpu-force-software` | On / Off — debugging fallback (slow) |
 
-A footer line shows the **Active GPU** in use right now. GPU changes take effect
+A footer line shows the **Active GPU** in use right now, or, for windows drawn
+on the CPU, **Active renderer: CPU** with its presenter. On the CPU renderer the
+GPU device list holds only **Automatic**: listing adapters would load a GPU
+driver into the process. GPU changes take effect
 on the **next launch** (the GPU/surface graph can't hot-swap), so the panel shows
 "Restart Kettle or open a new window to apply pending changes." after an edit
 that requires a restart or new window. The pending flag does not record the

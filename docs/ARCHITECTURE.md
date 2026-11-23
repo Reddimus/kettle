@@ -3847,7 +3847,8 @@ moving existing items.
 | Module | Responsibility |
 | --- | --- |
 | `gpu` | Device/adapter selection, display-handle ownership, surface setup, constructors, resize and recovery |
-| `backend` | The seam between building a frame and drawing it: `RendererBackend`, the device handle and scene pass both backends share, each pipeline's GPU-or-CPU layer, glyphon's stand-ins, and the CPU backend's frame, draw list, rasterizer and presenter traits |
+| `backend` | The seam between building a frame and drawing it: `RendererBackend` and `preferred_backend`, the device handle and scene pass both backends share, each pipeline's GPU-or-CPU layer, glyphon's stand-ins, the CPU backend's draw list, its rasterizer (`SoftRaster`) and its window presenter seam (`CpuSurface`) |
+| `cpu_raster` | Software equivalents of the eight wgpu pipelines over the same instance structs, the packed `CpuFramebuffer`/`CpuTarget` they draw into, sRGB tables and banded threads; parity-tested against lavapipe |
 | `batching` | Shared pipelines, retained text damage keys, quad helpers, glyph emission and ordered scene encoding |
 | `arabic_join` | Reciprocal Arabic seam ownership, base placement and coloured connector fragments |
 | `terminal` | Pane projections, cell/run painting, selection/search projection, cursor glyphs, decorations and painted-card access |
@@ -3882,9 +3883,16 @@ A `Renderer` builds every frame the same way: the instance lists for its
 quad, glyph, image, rounded-surface, outline and starfield pipelines and the
 text areas for glyphon. Its `RendererBackend` decides what executes them.
 
-- **`Gpu`** is wgpu, as before, and the backend of every windowed renderer.
+- **Choice.** The `renderer` key (`auto`, `cpu`, `gpu`) picks it once, for
+  window 1, through `preferred_backend`; later windows follow. `auto` is the
+  CPU on Linux and the GPU elsewhere; on Linux `gpu-force-software` also
+  means the CPU; `cpu` on macOS or Windows is logged and ignored. A CPU
+  presenter that cannot start falls back to the GPU. On Linux a GPU that
+  cannot start, or that is only llvmpipe or lavapipe, falls back to the CPU.
+- **`Gpu`** is wgpu, as before.
 - **`Cpu`** creates no wgpu instance, adapter, device or surface, so no GPU
-  driver is loaded into the process. Each pipeline is a CPU twin
+  driver is loaded into the process. kettle-ui skips the early Vulkan
+  instance and the Settings adapter list for it, which would load one. Each pipeline is a CPU twin
   (`backend::layers`) that keeps a copy of its instances and textures. The
   glyph pipeline shares its atlas packer and slot cache with the GPU path
   and keeps its atlases in memory. glyphon's `Cache`, `TextAtlas`,
@@ -3894,18 +3902,32 @@ text areas for glyphon. Its `RendererBackend` decides what executes them.
 - **One draw list.** `encode_scene_pass` draws into a `ScenePass`, a wgpu
   render pass or a `CpuPass`, so both backends issue the same draws in the
   same order under the same scissors. `CpuPass` records each draw and hands
-  it to the CPU rasterizer (`CpuRaster`). The CPU frame is RGBA8 with
-  sRGB-encoded, linear-premultiplied pixels, which is what an `Rgba8UnormSrgb`
-  scene target holds, so the two backends' frames compare byte for byte.
-- **Frame tail.** The CPU frame clears, replays the scene pass, converts to
-  straight alpha for a translucent `PostMultiplied` surface, saves a pending
-  screenshot through the same persistence pool, and hands the frame to its
-  `CpuPresenter`. With no presenter it stays in the renderer's own buffer.
-- **Not selectable yet.** The CPU rasterizer is a placeholder that draws
-  nothing, so a CPU frame is its transparent clear. Only
-  `Renderer::new_cpu_offscreen` builds a CPU renderer, and no configuration
-  selects one. The macOS cursor patch stays GPU-only: a CPU renderer never
-  attaches a cursor layer.
+  it to the CPU rasterizer, `SoftRaster`, which calls the matching
+  `cpu_raster` function with the pipeline's blend state, textures and
+  scissor. Pixels are packed `0xAARRGGBB`, sRGB-encoded and premultiplied in
+  linear light: what an `Rgba8UnormSrgb` scene target holds, and `wl_shm`'s
+  ARGB8888 byte order. CPU and lavapipe frames agree within 2 per channel.
+- **Threads and caches.** A draw covering many pixels runs on horizontal
+  bands at once (one per 400k frame pixels, at most 8 and at most the host's
+  parallelism); the result is bit-identical. A large image drawn unchanged
+  two frames running (the wallpaper) is cached at its drawn size and copied
+  after that, since its four-tap filter costs 30–40 ms a full-screen frame.
+- **Frame tail.** A window frame is drawn straight into the presenter's
+  shared-memory buffer (`CpuSurface::present_frame`), with no scene copy, and
+  winit's `pre_present_notify` runs as the commit's pre-commit hook. A
+  translucent window gets premultiplied ARGB buffers, as the GPU's
+  `PreMultiplied` surface does. An offscreen CPU renderer draws into its own
+  `CpuFramebuffer` and converts to straight alpha for a `PostMultiplied`
+  surface. A pending screenshot is copied from either through the same
+  persistence pool.
+- **The window loop.** kettle-ui commits a frame the presenter held for the
+  compositor's frame callback when the loop wakes, releases an idle spare
+  buffer at `idle_release_deadline`, and forwards `Occluded` to
+  `set_occluded`. GPU device recovery never runs for CPU windows; a lost
+  presenter rebuilds the window's CPU renderer.
+- **GPU-only.** The macOS cursor patch: a CPU renderer never attaches a
+  cursor layer. `--gpu-info` names the renderer first and still describes the
+  adapter `renderer = gpu` would use.
 
 ### CPU presentation (Linux)
 
