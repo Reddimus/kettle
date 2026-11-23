@@ -89,6 +89,9 @@ winit = { version = "0.30.13", default-features = false, features = [
     "wayland-dlopen",
     "wayland-csd-adwaita-notitle",
 ] }
+# An in-process compositor for the wl_shm presenter's protocol tests. Its
+# dependencies are all in the graph already through wayland-client.
+wayland-server = "0.31.14"
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 # The cursor patch test hands a standalone CAMetalLayer to the renderer.

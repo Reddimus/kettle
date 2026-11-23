@@ -64,8 +64,12 @@
 
 mod book;
 mod damage;
+#[cfg(test)]
+mod proto_tests;
 mod shm;
 mod soft;
+#[cfg(test)]
+mod test_wl;
 #[cfg(test)]
 mod tests;
 

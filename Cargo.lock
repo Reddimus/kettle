@@ -2509,6 +2509,7 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width",
  "wayland-client",
+ "wayland-server",
  "wgpu",
  "winit",
  "x11rb",
@@ -5784,6 +5785,19 @@ dependencies = [
  "proc-macro2",
  "quick-xml 0.41.0",
  "quote",
+]
+
+[[package]]
+name = "wayland-server"
+version = "0.31.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0dde9c29be0f723a573977de51ee455bf3dfa03652730a74f9dd3b337e374d75"
+dependencies = [
+ "bitflags 2.13.2",
+ "downcast-rs",
+ "rustix 1.1.6",
+ "wayland-backend",
+ "wayland-scanner",
 ]
 
 [[package]]
