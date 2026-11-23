@@ -457,7 +457,7 @@ fn settings_descriptions_are_short_and_translated() {
         }
     }
     assert_eq!(
-        descriptions, 67,
+        descriptions, 68,
         "every curated field and keybind has its own description"
     );
 }
