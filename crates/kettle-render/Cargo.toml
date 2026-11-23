@@ -58,6 +58,38 @@ kettle-test-support.workspace = true
 # Same version kettle-core already pins; test-only.
 crossbeam-channel = "0.5.15"
 
+# `cpu_present`: CPU frames presented with no GPU driver in the process.
+# Every crate here except softbuffer is already in the graph through winit.
+[target.'cfg(target_os = "linux")'.dependencies]
+# Maps each wl_shm buffer's memfd.
+memmap2 = "0.9.12"
+# memfd_create, ftruncate and seals for those buffers.
+rustix = { version = "1.1.6", default-features = false, features = ["fs", "std"] }
+# X11 presentation (MIT-SHM, falling back to PutImage) and the Wayland
+# fallback. No KMS: Kettle always presents to a window.
+softbuffer = { version = "0.4.8", default-features = false, features = [
+    "wayland",
+    "wayland-dlopen",
+    "x11",
+    "x11-dlopen",
+] }
+# The wl_shm presenter binds its own queue on winit's wl_display (`system`)
+# and loads libwayland-client at run time, as winit does (`dlopen`).
+wayland-client = { version = "0.31.15", features = ["system", "dlopen"] }
+# Asks an X11 window's depth, to know whether its visual carries alpha.
+x11rb = "0.13.2"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# The live `cpu_present_live` example opens a real window. Same version and
+# features as kettle-ui, so the lockfile gains nothing.
+winit = { version = "0.30.13", default-features = false, features = [
+    "rwh_06",
+    "x11",
+    "wayland",
+    "wayland-dlopen",
+    "wayland-csd-adwaita-notitle",
+] }
+
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 # The cursor patch test hands a standalone CAMetalLayer to the renderer.
 # wgpu-hal already locks this version with exactly these features, so the

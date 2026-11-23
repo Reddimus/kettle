@@ -3870,6 +3870,7 @@ moving existing items.
 | `snapshot`, `cursor_policy`, `cursor_patch` | Lock-free terminal projections, cursor compatibility policy and native cursor patch rendering |
 | `card_marks`, `inline_cards`, `card_scene` | Complete card marks, registered-card recognition and card draw lists |
 | `bg_image`, `media_lane`, `media_transport`, `media_viewport` | Image decoding, preview lane layout/text, player chrome and zoom/pan |
+| `cpu_present` (Linux) | Presents a CPU-drawn `u32` framebuffer with damage: a Kettle-owned `wl_shm` presenter on Wayland, softbuffer on X11 and as the Wayland fallback |
 
 Existing test modules remain attached to the crate root so their test names stay
 stable. The renderer source-guard helper joins the production portions of the
@@ -3905,6 +3906,39 @@ text areas for glyphon. Its `RendererBackend` decides what executes them.
   `Renderer::new_cpu_offscreen` builds a CPU renderer, and no configuration
   selects one. The macOS cursor patch stays GPU-only: a CPU renderer never
   attaches a cursor layer.
+
+### CPU presentation (Linux)
+
+`kettle_render::cpu_present::CpuPresenter` puts a CPU-drawn frame on a winit
+window with no GPU driver in the process. It takes the window and display
+handles the wgpu surface takes and exposes no wgpu type. The renderer asks for
+a buffer, repaints the region the buffer's age requires (`repaint_region`),
+and presents the frame's own damage.
+
+- **Wayland.** The presenter binds its own `wl_shm` and event queue on
+  winit's `wl_display` and wraps winit's `wl_surface`. Each buffer is a sealed
+  memfd with its own `wl_shm_pool`, so releasing it returns the memory. Frames
+  are XRGB8888, or premultiplied ARGB8888 for a translucent window, and are
+  damaged with `wl_surface.damage_buffer`.
+  - At most three buffers exist. A buffer the compositor still holds is never
+    drawn into, and a new one is allocated instead of waiting. A spare idle
+    for a second is released, so an idle window holds one buffer, and an
+    occluded one holds none.
+  - Each commit asks for a frame callback. A frame presented before it
+    arrives is deferred, and its damage goes out with the next commit. winit's
+    `pre_present_notify` is passed to `present_with` and runs only before a
+    real commit, because winit attaches its own frame callback to the next
+    commit at once.
+  - winit keeps the surface's scale state (`set_buffer_scale` or the
+    fractional-scale viewport) and its opaque region. Buffers are always in
+    physical pixels.
+- **X11.** softbuffer presents with MIT-SHM, falling back to `PutImage`. A
+  window with a depth-32 visual keeps its alpha; other windows are opaque.
+  X11 gives no frame callbacks, so pacing is the caller's.
+- **Fallback.** If the `wl_shm` presenter cannot start, softbuffer presents on
+  Wayland: opaque only, always two buffers. Its reported age is ignored for a
+  buffer that predates the last resize, because softbuffer 0.4 keeps that age
+  across the reallocation.
 
 ### Arabic joining across cells
 
