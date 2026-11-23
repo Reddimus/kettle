@@ -38,6 +38,7 @@ pub(crate) fn present_straight(scene: &CpuFramebuffer, out: &mut CpuFramebuffer)
     true
 }
 
+#[cfg(test)]
 /// [`present_straight`] in place.
 pub(crate) fn present_straight_in_place(scene: &mut CpuFramebuffer) {
     let t = tables();

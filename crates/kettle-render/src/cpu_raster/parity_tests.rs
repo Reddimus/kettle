@@ -685,16 +685,20 @@ fn glyphs_match_the_gpu() {
         )
         .unwrap();
         let slot = glyphs
-            .ensure_glyph(&gpu.device, &gpu.queue, key, || {
-                Some(RasterGlyph {
-                    color,
-                    width: rw,
-                    height: rh,
-                    left: 0,
-                    top: 0,
-                    data: &data,
-                })
-            })
+            .ensure_glyph(
+                crate::backend::DeviceRef::gpu(&gpu.device, &gpu.queue),
+                key,
+                || {
+                    Some(RasterGlyph {
+                        color,
+                        width: rw,
+                        height: rh,
+                        left: 0,
+                        top: 0,
+                        data: &data,
+                    })
+                },
+            )
             .expect("glyph slot");
         let atlas = if color {
             &mut color_atlas
@@ -815,7 +819,11 @@ fn glyphs_match_the_gpu() {
                 count: instances.len() as u32 - half,
             },
         ];
-        assert!(glyphs.upload(&gpu.device, &gpu.queue, screen, &instances));
+        assert!(glyphs.upload(
+            crate::backend::DeviceRef::gpu(&gpu.device, &gpu.queue),
+            screen,
+            &instances
+        ));
         let gpu_frame = gpu.render(w, h, &init, |encoder, view| {
             let mut pass = load_pass(encoder, view);
             glyphs.draw(&mut pass, &clips, [w, h]);

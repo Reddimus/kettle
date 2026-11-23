@@ -11,7 +11,7 @@
 
 mod arabic_join;
 mod backend;
-pub use backend::RendererBackend;
+pub use backend::{BackendChoice, RendererBackend, preferred_backend};
 #[cfg(test)]
 mod arabic_join_tests;
 mod background;

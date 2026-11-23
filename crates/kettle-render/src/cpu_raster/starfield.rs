@@ -15,11 +15,14 @@
 
 use super::srgb::tables;
 use super::{CpuTarget, PixelRect, pack};
-use crate::starfield::{NSTARS, Star, StarSeed, build_frame_stars};
+use crate::starfield::{NSTARS, Star};
+#[cfg(test)]
+use crate::starfield::{StarSeed, build_frame_stars};
 
 /// The smallest per-star term, in linear light, still drawn.
 const TERM_FLOOR: f32 = 1.0e-6;
 
+#[cfg(test)]
 /// The stars one frame of the shader sums: what `StarfieldPipeline::upload`
 /// writes into its uniform for `resolution` and `time_secs`.
 pub(crate) fn frame_stars(
