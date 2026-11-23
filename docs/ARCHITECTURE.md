@@ -3920,25 +3920,64 @@ and presents the frame's own damage.
   memfd with its own `wl_shm_pool`, so releasing it returns the memory. Frames
   are XRGB8888, or premultiplied ARGB8888 for a translucent window, and are
   damaged with `wl_surface.damage_buffer`.
+  - The window must be on the display's connection. Its own display handle
+    must name the same `wl_display`, and where libwayland 1.23+ can say
+    (`wl_proxy_get_display`), so must its surface. A mismatch is an error
+    from the constructor; libwayland would otherwise abort the process at the
+    first frame callback.
+  - `wl_shm` is bound at v2 where offered and released with the presenter,
+    and the registry is destroyed through `wl_fixes` right after the bind, so
+    recreating the presenter leaves nothing on the connection. A compositor
+    without either keeps one registry and one `wl_shm` per presenter.
   - At most three buffers exist. A buffer the compositor still holds is never
     drawn into, and a new one is allocated instead of waiting. A spare idle
     for a second is released, so an idle window holds one buffer, and an
-    occluded one holds none.
-  - Each commit asks for a frame callback. A frame presented before it
-    arrives is deferred, and its damage goes out with the next commit. winit's
-    `pre_present_notify` is passed to `present_with` and runs only before a
-    real commit, because winit attaches its own frame callback to the next
-    commit at once.
+    occluded one holds none. The idle deadline is never in the past: a spare
+    the compositor still holds is checked again a second later, for up to
+    ten seconds. While occluded, a buffer the compositor releases late goes
+    at the next dispatch.
+  - Each commit asks for a frame callback unless one is already out, so a
+    hidden surface keeps at most one. A frame presented while it is out is
+    deferred, and its damage goes out with the next commit. A callback that
+    has not come within a second stops holding frames back.
+  - A caller that stops drawing with a frame deferred flushes it in
+    `about_to_wait` and arms `ControlFlow::WaitUntil` with
+    `pending_deadline()`. Under plain `ControlFlow::Wait`, winit 0.30 does
+    not run `about_to_wait` for a wake that brought only the presenter's
+    frame callback, and the frame stays off screen until an unrelated event.
+    With any deadline armed, every wake runs an iteration.
+  - Dropping a frame drawn into a deferred frame's buffer drops the deferred
+    frame too. Its damage is kept and goes out with the next frame, which
+    repaints that buffer in full.
+  - winit's `pre_present_notify` is passed to `present_with`. It runs only
+    before a real commit, because winit attaches its own frame callback to
+    the next commit at once. It runs before anything is staged on the
+    surface, so a hook that unwinds leaves no pending attach for winit's next
+    commit. Frames are presented on winit's event-loop thread, where winit
+    commits the same surface.
   - winit keeps the surface's scale state (`set_buffer_scale` or the
     fractional-scale viewport) and its opaque region. Buffers are always in
     physical pixels.
 - **X11.** softbuffer presents with MIT-SHM, falling back to `PutImage`. A
   window with a depth-32 visual keeps its alpha; other windows are opaque.
-  X11 gives no frame callbacks, so pacing is the caller's.
+  The depth is asked on the window's own connection, not `$DISPLAY`. On a
+  depth-32 window the alpha byte of an opaque frame is set to 0xff before it
+  is sent, since the server keeps all 32 bits and winit's
+  `set_transparent(false)` does nothing on X11. X11 gives no frame callbacks,
+  so pacing is the caller's.
 - **Fallback.** If the `wl_shm` presenter cannot start, softbuffer presents on
   Wayland: opaque only, always two buffers. Its reported age is ignored for a
   buffer that predates the last resize, because softbuffer 0.4 keeps that age
-  across the reallocation.
+  across the reallocation. A size past the limits is refused with
+  `FrameError::TooLarge`, as on the native path, and every present counts as
+  a commit, since softbuffer commits even with no damage.
+- **Tests.** `cpu_present::proto_tests` runs the presenters against an
+  in-process `wayland-server` compositor (`test_wl`), which records each
+  commit's pixels and damage and holds callbacks and buffers until a test
+  lets them go, and against an X server named by `KETTLE_TEST_X11_DISPLAY`
+  (skipped when unset). `examples/cpu_present_live.rs` covers what needs a
+  real session: the last frame of a burst, an abandoned draw and a minimized
+  window, with screenshots on Wayland.
 
 ### Arabic joining across cells
 
