@@ -385,3 +385,33 @@ fn a_window_handle_that_names_the_wrong_display_is_refused() {
         eprintln!("skipping: libwayland-client older than 1.23");
     }
 }
+
+// --- globals bound per presenter ---
+
+#[test]
+fn recreating_the_presenter_releases_its_globals() {
+    let cfg = Config {
+        shm_version: 2,
+        fixes: true,
+        ..Config::default()
+    };
+    let (server, mut streams) = Server::start(cfg, 1);
+    let Some(mut client) = TestClient::connect(streams.remove(0)) else {
+        return;
+    };
+    for value in 0..3 {
+        let mut p =
+            ShmPresenter::new(client.window(), Arc::new(client.display())).expect("presenter");
+        p.resize(W, H, 1.0);
+        let mut scene = Scene::new();
+        scene.present(&mut p, r(0, 0, W, H), value);
+        drop(p);
+    }
+    client.roundtrip();
+    let log = server.log();
+    assert_eq!(log.commits.len(), 3);
+    assert_eq!(log.shm_versions, vec![2, 2, 2], "wl_shm v2 has release");
+    assert_eq!(log.shm_releases, 3, "a wl_shm was left bound");
+    assert_eq!(log.registries_destroyed, 3, "a registry was left");
+    assert_eq!(log.fixes_destroyed, 3, "a wl_fixes was left");
+}

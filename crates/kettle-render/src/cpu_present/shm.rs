@@ -282,7 +282,25 @@ impl ShmPresenter {
         let (globals, queue) =
             registry_queue_init::<QueueState>(&conn).context("Wayland registry")?;
         let qh = queue.handle();
-        let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).context("binding wl_shm")?;
+        // Neither global outlives the presenter where the compositor allows
+        // it: wl_shm v2 has `release` (sent on drop), and the registry,
+        // which has no destructor, goes through wl_fixes (wayland 1.24),
+        // which registry_queue_init binds when it is offered. Elsewhere each
+        // presenter leaves a registry and a wl_shm on the connection.
+        let shm: wl_shm::WlShm = globals.bind(&qh, 1..=2, ()).context("binding wl_shm")?;
+        let fixes = globals
+            .contents()
+            .with_list(|list| list.iter().any(|g| g.interface == "wl_fixes"));
+        globals.destroy();
+        log::debug!(
+            "CPU present: wl_shm v{}, registry {}",
+            shm.version(),
+            if fixes {
+                "destroyed (wl_fixes)"
+            } else {
+                "kept"
+            }
+        );
         // SAFETY: the pointer is winit's live `wl_surface` proxy on this
         // display, kept alive by `window`, held until after `surface` drops.
         let surface_id = unsafe {
@@ -671,6 +689,9 @@ impl Drop for ShmPresenter {
         let all: Vec<u64> = self.book.iter().map(|s| s.id).collect();
         for id in all {
             self.book.remove(id);
+        }
+        if self.shm.version() >= 2 {
+            self.shm.release();
         }
         self.flush_connection();
     }

@@ -73,6 +73,7 @@ pub struct Log {
     pub shm_versions: Vec<u32>,
     pub shm_releases: usize,
     pub fixes_binds: usize,
+    pub fixes_destroyed: usize,
     pub registries_destroyed: usize,
     /// Buffers committed and not yet released.
     pub held: usize,
@@ -542,8 +543,10 @@ impl Dispatch<wl_fixes::WlFixes, ()> for State {
         _: &ServerHandle,
         _: &mut DataInit<'_, Self>,
     ) {
-        if let wl_fixes::Request::DestroyRegistry { .. } = request {
-            state.log().registries_destroyed += 1;
+        match request {
+            wl_fixes::Request::DestroyRegistry { .. } => state.log().registries_destroyed += 1,
+            wl_fixes::Request::Destroy => state.log().fixes_destroyed += 1,
+            _ => {}
         }
     }
 }
