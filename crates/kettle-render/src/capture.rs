@@ -1,11 +1,16 @@
+// The one-frame offscreen capture draws on the GPU only, with glyphon's own
+// objects.
+use glyphon::{Cache, TextAtlas, TextRenderer, Viewport};
+
+use super::backend::DeviceRef;
 use super::{
-    Attrs, Cache, Config, ContextMenu, ContextMenuRow, Family, FontSystem, GColor, GlyphClip,
+    Attrs, Config, ContextMenu, ContextMenuRow, Family, FontSystem, GColor, GlyphClip,
     GlyphInstance, GlyphPipeline, Metrics, OUTLINE_BOTTOM_LEFT, OUTLINE_BOTTOM_RIGHT,
     OutlinePipeline, QuadInstance, QuadPipeline, Resolution, Result, Rgb, Shaping, SwashCache,
-    Text, TextArea, TextAtlas, TextBounds, TextBuffer, TextRenderer, TextRendererMode, Translator,
-    Viewport, Wrap, anyhow, bell_flash_alpha, cap_axis_cells, chrome, clamp_font_size, color,
-    composed_bg_alpha, context_menu_panel_width, emit_cell_locked_glyphs, gc, imgpipe,
-    live_device_limits, load_bundled_font, measure_cell, menu_chrome_quads, pane_outline, rect,
+    Text, TextArea, TextBounds, TextBuffer, TextRendererMode, Translator, Wrap, anyhow,
+    bell_flash_alpha, cap_axis_cells, chrome, clamp_font_size, color, composed_bg_alpha,
+    context_menu_panel_width, emit_cell_locked_glyphs, gc, imgpipe, live_device_limits,
+    load_bundled_font, measure_cell, menu_chrome_quads, pane_outline, rect,
     resolve_headless_adapter, surface_clear_color, unpremultiply_rgba8,
 };
 
@@ -549,8 +554,7 @@ pub fn capture_png_with_annotation(
                     &mut grid_glyphs,
                     &mut swash,
                     &mut font_system,
-                    &device,
-                    &queue,
+                    DeviceRef::gpu(&device, &queue),
                     &mut char_starts,
                     &mut Vec::new(),
                 );
@@ -560,7 +564,7 @@ pub fn capture_png_with_annotation(
                     count: grid_instances.len() as u32 - start,
                 });
             }
-            grid_glyphs.upload(&device, &queue, [wf, hf], &grid_instances);
+            grid_glyphs.upload(DeviceRef::gpu(&device, &queue), [wf, hf], &grid_instances);
         }
 
         // `DebugScene::ContextMenu`: build a synthetic context menu at

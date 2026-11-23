@@ -278,7 +278,7 @@ fn builtin_masks_and_cursor_match_backgrounds_at_half_pixel_edges() {
             );
             eprintln!(
                 "PIXEL_EDGE_GPU: {mode:?}, scale={scale}, width={width}, {:?}",
-                renderer.gpu.adapter_info()
+                renderer.gpu().adapter_info()
             );
             let (cw, ch) = (renderer.cell_w, renderer.cell_h);
             for end in [false, true] {
@@ -451,7 +451,7 @@ fn builtin_cursor_excludes_neighboring_ink_at_half_pixel_edges() {
             );
             eprintln!(
                 "PIXEL_EDGE_NEIGHBOR_GPU: {mode:?}, scale={scale}, {:?}",
-                renderer.gpu.adapter_info()
+                renderer.gpu().adapter_info()
             );
             for delta in [-0.0001, 0.0, 0.0001] {
                 cfg.padding_x = 12.5 + delta - renderer.cell_w;
@@ -808,8 +808,8 @@ fn a_builtin_block_cursor_excludes_neighboring_text_overhang() {
             );
             eprintln!(
                 "OVERHANG_GPU: {mode:?}, allow_mapping={allow_mapping}, mapped={}, {:?}",
-                renderer.gpu.mapped_uploads(),
-                renderer.gpu.adapter_info()
+                renderer.gpu().mapped_uploads(),
+                renderer.gpu().adapter_info()
             );
             let mut reference = Vec::new();
             for prefix in [" ", "W"] {
@@ -1067,8 +1067,7 @@ fn a_builtin_block_cursor_preserves_inline_images_and_pane_outlines() {
             // Exercise the actual outline pipeline over the cursor cell,
             // independently of native window corner and split layout policy.
             renderer.pane_outlines.upload(
-                &renderer.gpu.device,
-                &renderer.gpu.queue,
+                renderer.device.handle(),
                 [320.0, 120.0],
                 &[pane_outline(
                     (x0 as f32, y0 as f32, (x1 - x0) as f32, (y1 - y0) as f32),

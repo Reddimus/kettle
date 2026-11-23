@@ -15,7 +15,7 @@ fn unchanged_tooltip_reshapes_in_the_reloaded_font_family() {
     };
     eprintln!(
         "TOOLTIP_FONT_RELOAD_ADAPTER: {:?}",
-        renderer.gpu.adapter.get_info()
+        renderer.gpu().adapter.get_info()
     );
     // An isolated database makes both the requested and resolved faces
     // independent of fonts installed on the host.

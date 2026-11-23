@@ -1303,8 +1303,7 @@ fn screenshot_grid_emits_cell_locked_glyphs() {
             &mut glyph_pipe,
             &mut swash,
             &mut font_system,
-            &device,
-            &queue,
+            crate::backend::DeviceRef::gpu(&device, &queue),
             &mut starts,
             &mut Vec::new(),
         );
@@ -1504,12 +1503,15 @@ fn grid_prompt_blink_frames_for(
             &mut glyph_pipe,
             &mut swash,
             &mut font_system,
-            &device,
-            &queue,
+            crate::backend::DeviceRef::gpu(&device, &queue),
             &mut starts,
             &mut Vec::new(),
         );
-        glyph_pipe.upload(&device, &queue, [w as f32, h as f32], &instances);
+        glyph_pipe.upload(
+            crate::backend::DeviceRef::gpu(&device, &queue),
+            [w as f32, h as f32],
+            &instances,
+        );
         let clips = [GlyphClip {
             rect: [0.0, 0.0, w as f32, h as f32],
             start: 0,

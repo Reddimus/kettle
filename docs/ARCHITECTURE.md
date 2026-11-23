@@ -3847,6 +3847,7 @@ moving existing items.
 | Module | Responsibility |
 | --- | --- |
 | `gpu` | Device/adapter selection, display-handle ownership, surface setup, constructors, resize and recovery |
+| `backend` | The seam between building a frame and drawing it: `RendererBackend`, the device handle and scene pass both backends share, each pipeline's GPU-or-CPU layer, glyphon's stand-ins, and the CPU backend's frame, draw list, rasterizer and presenter traits |
 | `batching` | Shared pipelines, retained text damage keys, quad helpers, glyph emission and ordered scene encoding |
 | `arabic_join` | Reciprocal Arabic seam ownership, base placement and coloured connector fragments |
 | `terminal` | Pane projections, cell/run painting, selection/search projection, cursor glyphs, decorations and painted-card access |
@@ -3863,7 +3864,7 @@ moving existing items.
 | `background` | Decoded wallpaper state, bounded decode worker and animation scheduling |
 | `screenshot` | Live capture requests, cancellation, bounded workers, readback, cropping and atomic persistence |
 | `capture` | Synthetic screenshot scenes, GPU diagnostic render fixtures and offscreen self-test |
-| `quad`, `glyphpipe`, `imgpipe`, `outline`, `rounded_surface`, `starfield`, `present`, `upload` | Existing GPU pipelines, presentation conversion and retained/mapped uploads |
+| `quad`, `glyphpipe`, `imgpipe`, `outline`, `rounded_surface`, `starfield`, `present`, `upload` | Existing GPU pipelines, presentation conversion and retained/mapped uploads; the glyph, image and starfield modules also hold their CPU twins |
 | `builtin_glyphs` | Box drawing, block elements, Powerline separators, triangles and braille rasterized from each cell's pixel rectangle; stroke widths and pixel snapping |
 | `chrome`, `color`, `confirm` | Existing contrast policy, terminal color resolution and final confirmation layout/text |
 | `snapshot`, `cursor_policy`, `cursor_patch` | Lock-free terminal projections, cursor compatibility policy and native cursor patch rendering |
@@ -3873,6 +3874,37 @@ moving existing items.
 Existing test modules remain attached to the crate root so their test names stay
 stable. The renderer source-guard helper joins the production portions of the
 root and extracted modules, excluding test-only items from each file.
+
+### Renderer backends
+
+A `Renderer` builds every frame the same way: the instance lists for its
+quad, glyph, image, rounded-surface, outline and starfield pipelines and the
+text areas for glyphon. Its `RendererBackend` decides what executes them.
+
+- **`Gpu`** is wgpu, as before, and the backend of every windowed renderer.
+- **`Cpu`** creates no wgpu instance, adapter, device or surface, so no GPU
+  driver is loaded into the process. Each pipeline is a CPU twin
+  (`backend::layers`) that keeps a copy of its instances and textures. The
+  glyph pipeline shares its atlas packer and slot cache with the GPU path
+  and keeps its atlases in memory. glyphon's `Cache`, `TextAtlas`,
+  `Viewport` and `TextRenderer` are Kettle stand-ins (`backend::text`); on the
+  CPU, `prepare` runs glyphon's layout pass and keeps the glyphs it would
+  rasterize.
+- **One draw list.** `encode_scene_pass` draws into a `ScenePass`, a wgpu
+  render pass or a `CpuPass`, so both backends issue the same draws in the
+  same order under the same scissors. `CpuPass` records each draw and hands
+  it to the CPU rasterizer (`CpuRaster`). The CPU frame is RGBA8 with
+  sRGB-encoded, linear-premultiplied pixels, which is what an `Rgba8UnormSrgb`
+  scene target holds, so the two backends' frames compare byte for byte.
+- **Frame tail.** The CPU frame clears, replays the scene pass, converts to
+  straight alpha for a translucent `PostMultiplied` surface, saves a pending
+  screenshot through the same persistence pool, and hands the frame to its
+  `CpuPresenter`. With no presenter it stays in the renderer's own buffer.
+- **Not selectable yet.** The CPU rasterizer is a placeholder that draws
+  nothing, so a CPU frame is its transparent clear. Only
+  `Renderer::new_cpu_offscreen` builds a CPU renderer, and no configuration
+  selects one. The macOS cursor patch stays GPU-only: a CPU renderer never
+  attaches a cursor layer.
 
 ### Arabic joining across cells
 

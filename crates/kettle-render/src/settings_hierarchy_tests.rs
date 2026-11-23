@@ -544,7 +544,10 @@ fn settings_cold_open_loads_bundled_bold_for_title_headings_and_labels() {
             assert_eq!(face.weight, fontdb::Weight::BOLD, "{}", item.text);
         }
     }
-    eprintln!("SETTINGS_BOLD_GPU_PASS: {:?}", renderer.gpu.adapter_info());
+    eprintln!(
+        "SETTINGS_BOLD_GPU_PASS: {:?}",
+        renderer.gpu().adapter_info()
+    );
 }
 
 #[test]

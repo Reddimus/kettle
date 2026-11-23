@@ -2097,7 +2097,7 @@ impl Renderer {
             pane_buffers,
             glyph_char_starts,
             emoji_cells,
-            gpu,
+            device,
             cell_w,
             pane_bidi,
             pane_mark_shifts,
@@ -2107,8 +2107,7 @@ impl Renderer {
             ..
         } = self;
         let cw = *cell_w;
-        let device = &gpu.device;
-        let queue = &gpu.queue;
+        let device = device.handle();
         emoji_cells.clear();
         let mut pane_emoji = Vec::new();
 
@@ -2168,7 +2167,6 @@ impl Renderer {
                     swash,
                     font_system,
                     device,
-                    queue,
                     glyph_char_starts,
                     &mut pane_emoji,
                 );
@@ -2185,7 +2183,6 @@ impl Renderer {
                     *builtin_strokes,
                     glyph_pipeline,
                     device,
-                    queue,
                     builtin_mask,
                 ) {
                     out.push(glyph);

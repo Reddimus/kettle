@@ -32,6 +32,8 @@ use bytemuck::{Pod, Zeroable};
 use glyphon::cosmic_text::{CacheKey, SwashContent, SwashImage};
 use kettle_core::{GraphicsBudget, GraphicsReservation};
 
+use crate::backend::cpu::{CpuDraw, CpuPass, CpuTexture, instance_slice};
+use crate::backend::{DeviceRef, ScenePass};
 use crate::builtin_glyphs::BuiltinKey;
 
 use crate::upload::{
@@ -484,8 +486,7 @@ fn merge_free_rects(left: FreeRect, right: FreeRect) -> Option<FreeRect> {
 /// Texture growth preserves pixel coordinates, and evicted slots return their
 /// rectangles to the allocator so capacity exhaustion can recover in place.
 struct Atlas {
-    tex: wgpu::Texture,
-    view: wgpu::TextureView,
+    store: AtlasStore,
     format: wgpu::TextureFormat,
     bpp: u32,
     width: u32,
@@ -495,30 +496,47 @@ struct Atlas {
     _gpu: GraphicsReservation,
 }
 
+/// Where an atlas keeps its pixels: a wgpu texture, or on the CPU backend
+/// the same texels in memory, rows packed.
+enum AtlasStore {
+    Gpu {
+        tex: wgpu::Texture,
+        view: wgpu::TextureView,
+    },
+    Cpu(Vec<u8>),
+}
+
 /// 1px gutter so neighboring glyphs can never sample into each other.
 const GUTTER: u32 = 1;
 
 impl Atlas {
+    /// An atlas texture on `device`, or with no device a CPU copy.
     fn new(
-        device: &wgpu::Device,
+        device: Option<&wgpu::Device>,
         label: &str,
         format: wgpu::TextureFormat,
         bpp: u32,
         budget: GraphicsBudget,
     ) -> Option<Self> {
         let (width, height) = (1024u32, 512u32);
-        if width > device.limits().max_texture_dimension_2d
-            || height > device.limits().max_texture_dimension_2d
-        {
+        let max_dim = device.map_or(crate::backend::CPU_MAX_TEXTURE_DIMENSION, |device| {
+            device.limits().max_texture_dimension_2d
+        });
+        if width > max_dim || height > max_dim {
             return None;
         }
         let bytes = texture_bytes(width, height, bpp)?;
         let gpu = budget.reserve_gpu(bytes)?;
-        let tex = Self::make_tex(device, label, format, width, height);
-        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let store = match device {
+            Some(device) => {
+                let tex = Self::make_tex(device, label, format, width, height);
+                let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+                AtlasStore::Gpu { tex, view }
+            }
+            None => AtlasStore::Cpu(vec![0; bytes]),
+        };
         Some(Self {
-            tex,
-            view,
+            store,
             format,
             bpp,
             width,
@@ -573,15 +591,31 @@ impl Atlas {
         self.allocator.coalesce_free();
     }
 
+    /// The GPU texture's view; `None` on the CPU backend.
+    fn view(&self) -> Option<&wgpu::TextureView> {
+        match &self.store {
+            AtlasStore::Gpu { view, .. } => Some(view),
+            AtlasStore::Cpu(_) => None,
+        }
+    }
+
+    /// The CPU copy of the atlas; `None` on the GPU backend.
+    fn cpu_texture(&self) -> Option<CpuTexture<'_>> {
+        match &self.store {
+            AtlasStore::Gpu { .. } => None,
+            AtlasStore::Cpu(pixels) => Some(CpuTexture {
+                width: self.width,
+                height: self.height,
+                bytes_per_pixel: self.bpp,
+                srgb: self.format.is_srgb(),
+                pixels,
+            }),
+        }
+    }
+
     /// Double the height (clamped to `max_dim`), preserving existing pixels.
     /// Returns false when already at the device limit.
-    fn grow(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        label: &str,
-        max_dim: u32,
-    ) -> bool {
+    fn grow(&mut self, device: DeviceRef<'_>, label: &str, max_dim: u32) -> bool {
         let new_h = self.height.checked_mul(2).unwrap_or(max_dim).min(max_dim);
         if new_h <= self.height {
             return false;
@@ -592,13 +626,54 @@ impl Atlas {
         let Some(gpu) = self.budget.reserve_gpu(bytes) else {
             return false;
         };
-        let new_tex = Self::make_tex(device, label, self.format, self.width, new_h);
+        match (&mut self.store, device) {
+            (AtlasStore::Gpu { tex, view }, DeviceRef::Gpu { device, queue }) => {
+                Self::grow_texture(
+                    tex,
+                    view,
+                    device,
+                    queue,
+                    label,
+                    self.format,
+                    self.width,
+                    self.height,
+                    new_h,
+                );
+            }
+            // The width is fixed, so new rows go after the old ones and every
+            // texel keeps its coordinates, as the texture copy keeps them.
+            (AtlasStore::Cpu(pixels), DeviceRef::Cpu) => pixels.resize(bytes, 0),
+            _ => {
+                debug_assert!(false, "a glyph atlas was grown on another backend");
+                return false;
+            }
+        }
+        self.height = new_h;
+        self.allocator.grow_height(new_h);
+        self._gpu = gpu;
+        true
+    }
+
+    /// Replace `tex` with a `width` x `new_h` copy holding its texels.
+    #[allow(clippy::too_many_arguments)]
+    fn grow_texture(
+        tex: &mut wgpu::Texture,
+        view: &mut wgpu::TextureView,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        label: &str,
+        format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+        new_h: u32,
+    ) {
+        let new_tex = Self::make_tex(device, label, format, width, new_h);
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("kettle-glyph-atlas-grow"),
         });
         enc.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.tex,
+                texture: tex,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -610,24 +685,20 @@ impl Atlas {
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
         );
         queue.submit(std::iter::once(enc.finish()));
-        self.view = new_tex.create_view(&wgpu::TextureViewDescriptor::default());
-        self.tex = new_tex;
-        self.height = new_h;
-        self.allocator.grow_height(new_h);
-        self._gpu = gpu;
-        true
+        *view = new_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        *tex = new_tex;
     }
 
     #[allow(clippy::too_many_arguments)]
     fn write(
-        &self,
-        queue: &wgpu::Queue,
+        &mut self,
+        device: DeviceRef<'_>,
         counters: &UploadCounters,
         x: u32,
         y: u32,
@@ -642,10 +713,31 @@ impl Atlas {
             log::warn!("skipping malformed glyph bitmap: byte length mismatch");
             return;
         }
+        let (tex, queue) = match (&mut self.store, device) {
+            (AtlasStore::Gpu { tex, .. }, DeviceRef::Gpu { queue, .. }) => (&*tex, queue),
+            (AtlasStore::Cpu(pixels), DeviceRef::Cpu) => {
+                let (bpp, atlas_w) = (self.bpp as usize, self.width as usize);
+                let row = w as usize * bpp;
+                if row == 0 {
+                    return;
+                }
+                for (line, src) in data.chunks_exact(row).enumerate() {
+                    let start = ((y as usize + line) * atlas_w + x as usize) * bpp;
+                    if let Some(dst) = pixels.get_mut(start..start + row) {
+                        dst.copy_from_slice(src);
+                    }
+                }
+                return;
+            }
+            _ => {
+                debug_assert!(false, "a glyph atlas was written on another backend");
+                return;
+            }
+        };
         write_texture_counted(
             queue,
             wgpu::TexelCopyTextureInfo {
-                texture: &self.tex,
+                texture: tex,
                 mip_level: 0,
                 origin: wgpu::Origin3d { x, y, z: 0 },
                 aspect: wgpu::TextureAspect::All,
@@ -872,13 +964,10 @@ fn glyph_instance_capacity(required: usize, max_buffer_size: u64) -> Option<(usi
 /// per-`SlotKey` slot cache, a growable instance buffer, and a one-instance
 /// buffer for a built-in glyph under the block cursor.
 pub struct GlyphPipeline {
-    pipeline: wgpu::RenderPipeline,
-    atlas_bgl: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
-    screen_buf: wgpu::Buffer,
+    /// The wgpu pipeline and buffers, or the CPU copies of the instances.
+    draws: GlyphDraws,
     color: Atlas,
     mask: Atlas,
-    bind_group: wgpu::BindGroup,
     bg_dirty: bool,
     glyphs_complete: bool,
     slots: HashMap<SlotKey, CachedSlot>,
@@ -889,25 +978,18 @@ pub struct GlyphPipeline {
     slot_limit_epoch: Option<u64>,
     exhausted_kinds: [bool; 2],
     max_dim: u32,
-    instances: wgpu::Buffer,
+    /// The instance buffer's capacity and its charge to `budget`; the CPU
+    /// copy is charged the same, so both backends admit the same text.
     capacity: usize,
     instance_gpu: GraphicsReservation,
     budget: GraphicsBudget,
     count: u32,
-    /// Only the uniform keeps a copy: the renderer uploads instances only
-    /// when the grid's text or layout changed, and already holds them.
-    screen_held: RetainedBytes,
-    /// On shared memory, the instances go through mapped buffers instead of
-    /// `instances`, each charged to `budget` (see `upload.rs`).
-    ring: Option<MappedRing>,
     counters: UploadCounters,
     /// The built-in glyph drawn over a focused block cursor, in the cursor
     /// text colour, and the pane rect that clips it. Pane text draws below
     /// the cursor block; this one instance draws above it, in the slot the
     /// glyphon cursor pass uses for font glyphs, and only in the blink's on
     /// phase. Uploaded only when it changes.
-    cursor: wgpu::Buffer,
-    cursor_held: RetainedBytes,
     cursor_count: u32,
     pub(crate) cursor_clip: Option<[f32; 4]>,
     cursor_pane_range: Option<std::ops::Range<u32>>,
@@ -916,6 +998,42 @@ pub struct GlyphPipeline {
     /// Raster placements of shaped emoji glyphs, which size their fitted
     /// images (see [`Self::placement`]). Nothing is uploaded for them.
     placements: HashMap<CacheKey, Option<GlyphSlot>>,
+}
+
+/// What a [`GlyphPipeline`] draws with on each backend.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one per renderer, built once and never moved while drawing"
+)]
+enum GlyphDraws {
+    Gpu(GlyphGpu),
+    Cpu(GlyphCpu),
+}
+
+/// The wgpu half of a [`GlyphPipeline`].
+struct GlyphGpu {
+    pipeline: wgpu::RenderPipeline,
+    atlas_bgl: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    screen_buf: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    instances: wgpu::Buffer,
+    /// Only the uniform keeps a copy: the renderer uploads instances only
+    /// when the grid's text or layout changed, and already holds them.
+    screen_held: RetainedBytes,
+    /// On shared memory, the instances go through mapped buffers instead of
+    /// `instances`, each charged to `budget` (see `upload.rs`).
+    ring: Option<MappedRing>,
+    /// The cursor's instances (see [`GlyphPipeline::set_cursor`]).
+    cursor: wgpu::Buffer,
+    cursor_held: RetainedBytes,
+}
+
+/// The CPU backend's half of a [`GlyphPipeline`]: the instances as uploaded.
+/// The atlases' CPU copies are in their [`AtlasStore`].
+struct GlyphCpu {
+    instances: Vec<GlyphInstance>,
+    cursor: Vec<GlyphInstance>,
 }
 
 /// The most instances the cursor pass draws: a built-in glyph is one, an
@@ -1000,14 +1118,14 @@ impl GlyphPipeline {
             wgpu::TextureFormat::Rgba8Unorm
         };
         let color = Atlas::new(
-            device,
+            Some(device),
             "kettle-glyph-color-atlas",
             color_format,
             4,
             budget.clone(),
         )?;
         let mask = Atlas::new(
-            device,
+            Some(device),
             "kettle-glyph-mask-atlas",
             wgpu::TextureFormat::R8Unorm,
             1,
@@ -1037,8 +1155,8 @@ impl GlyphPipeline {
             device,
             &atlas_bgl,
             &screen_buf,
-            &color.view,
-            &mask.view,
+            color.view()?,
+            mask.view()?,
             &sampler,
         );
         let pipeline = match parts {
@@ -1077,38 +1195,98 @@ impl GlyphPipeline {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        Some(Self {
-            pipeline,
-            atlas_bgl,
-            sampler,
-            screen_buf,
+        Some(Self::from_parts(
+            GlyphDraws::Gpu(GlyphGpu {
+                pipeline,
+                atlas_bgl,
+                sampler,
+                screen_buf,
+                bind_group,
+                instances,
+                screen_held: RetainedBytes::default(),
+                ring,
+                cursor,
+                cursor_held: RetainedBytes::default(),
+            }),
+            [color, mask],
+            device.limits().max_texture_dimension_2d,
+            (capacity, instance_gpu, cursor_gpu),
+            budget,
+        ))
+    }
+
+    /// The CPU backend's pipeline: the same atlases, slot cache and budget
+    /// charges as [`Self::new_with_budget`], with every texture and buffer a
+    /// CPU copy.
+    pub(crate) fn new_cpu(format: wgpu::TextureFormat, budget: GraphicsBudget) -> Option<Self> {
+        let color_format = if format.is_srgb() {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        } else {
+            wgpu::TextureFormat::Rgba8Unorm
+        };
+        let color = Atlas::new(
+            None,
+            "kettle-glyph-color-atlas",
+            color_format,
+            4,
+            budget.clone(),
+        )?;
+        let mask = Atlas::new(
+            None,
+            "kettle-glyph-mask-atlas",
+            wgpu::TextureFormat::R8Unorm,
+            1,
+            budget.clone(),
+        )?;
+        let max_buffer = crate::backend::CPU_MAX_BUFFER_SIZE;
+        let maximum = usize::try_from(max_buffer / std::mem::size_of::<GlyphInstance>() as u64)
+            .unwrap_or(usize::MAX);
+        let (capacity, instance_bytes) = glyph_instance_capacity(8192.min(maximum), max_buffer)?;
+        let instance_gpu = budget.reserve_gpu(instance_bytes)?;
+        let cursor_gpu =
+            budget.reserve_gpu(MAX_CURSOR_GLYPHS * std::mem::size_of::<GlyphInstance>())?;
+        Some(Self::from_parts(
+            GlyphDraws::Cpu(GlyphCpu {
+                instances: Vec::new(),
+                cursor: Vec::new(),
+            }),
+            [color, mask],
+            crate::backend::CPU_MAX_TEXTURE_DIMENSION,
+            (capacity, instance_gpu, cursor_gpu),
+            budget,
+        ))
+    }
+
+    fn from_parts(
+        draws: GlyphDraws,
+        [color, mask]: [Atlas; 2],
+        max_dim: u32,
+        (capacity, instance_gpu, cursor_gpu): (usize, GraphicsReservation, GraphicsReservation),
+        budget: GraphicsBudget,
+    ) -> Self {
+        Self {
+            draws,
             color,
             mask,
-            bind_group,
             bg_dirty: false,
             glyphs_complete: true,
             slots: HashMap::new(),
             epoch: 0,
-            max_dim: device.limits().max_texture_dimension_2d,
+            max_dim,
             slot_limit_epoch: None,
             exhausted_kinds: [false; 2],
-            instances,
             capacity,
             instance_gpu,
             budget,
             count: 0,
-            screen_held: RetainedBytes::default(),
-            ring,
             counters: UploadCounters::default(),
-            cursor,
-            cursor_held: RetainedBytes::default(),
             cursor_count: 0,
             cursor_clip: None,
             cursor_pane_range: None,
             cursor_bounds: None,
             _cursor_gpu: cursor_gpu,
             placements: HashMap::new(),
-        })
+        }
     }
 
     fn shader(device: &wgpu::Device, format: wgpu::TextureFormat) -> wgpu::ShaderModule {
@@ -1252,8 +1430,7 @@ impl GlyphPipeline {
     /// glyphs (nothing to draw) — cached so the miss isn't retried every frame.
     pub fn ensure_glyph<'r>(
         &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        device: DeviceRef<'_>,
         key: impl Into<SlotKey>,
         rasterize: impl FnOnce() -> Option<RasterGlyph<'r>>,
     ) -> Option<GlyphSlot> {
@@ -1292,7 +1469,7 @@ impl GlyphPipeline {
                 return None;
             }
         }
-        let outcome = self.rasterize_into_atlas(device, queue, rasterize);
+        let outcome = self.rasterize_into_atlas(device, rasterize);
         remember_glyph_outcome(
             &mut self.slots,
             key,
@@ -1327,6 +1504,12 @@ impl GlyphPipeline {
         let placement = place();
         self.placements.insert(key, placement);
         placement
+    }
+
+    /// The mask atlas's CPU copy, on the CPU backend.
+    #[cfg(test)]
+    pub(crate) fn mask_texture_for_tests(&self) -> Option<CpuTexture<'_>> {
+        self.mask.cpu_texture()
     }
 
     /// The font size of each cached placement, for tests of invalidation.
@@ -1405,8 +1588,7 @@ impl GlyphPipeline {
 
     fn rasterize_into_atlas<'r>(
         &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        device: DeviceRef<'_>,
         rasterize: impl FnOnce() -> Option<RasterGlyph<'r>>,
     ) -> CacheOutcome {
         let Some(g) = rasterize() else {
@@ -1461,9 +1643,9 @@ impl GlyphPipeline {
                 return CacheOutcome::AtlasFull;
             }
             let grew = if kind == 0 {
-                self.color.grow(device, queue, label, self.max_dim)
+                self.color.grow(device, label, self.max_dim)
             } else {
-                self.mask.grow(device, queue, label, self.max_dim)
+                self.mask.grow(device, label, self.max_dim)
             };
             if grew {
                 self.bg_dirty = true;
@@ -1485,10 +1667,10 @@ impl GlyphPipeline {
         };
         if kind == 0 {
             self.color
-                .write(queue, &self.counters, x, y, g.width, g.height, g.data);
+                .write(device, &self.counters, x, y, g.width, g.height, g.data);
         } else {
             self.mask
-                .write(queue, &self.counters, x, y, g.width, g.height, g.data);
+                .write(device, &self.counters, x, y, g.width, g.height, g.data);
         }
         CacheOutcome::Slot(GlyphSlot {
             kind,
@@ -1506,8 +1688,7 @@ impl GlyphPipeline {
     /// Returns true only when glyph resolution and instance upload both complete.
     pub fn upload(
         &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        device: DeviceRef<'_>,
         screen: [f32; 2],
         data: &[GlyphInstance],
     ) -> bool {
@@ -1519,17 +1700,47 @@ impl GlyphPipeline {
         self.exhausted_kinds = [false; 2];
         let glyphs_complete = std::mem::replace(&mut self.glyphs_complete, true);
         self.refresh_bind_group(device);
+        let (device, queue, gpu) = match (&mut self.draws, device) {
+            (GlyphDraws::Gpu(gpu), DeviceRef::Gpu { device, queue }) => (device, queue, gpu),
+            (GlyphDraws::Cpu(cpu), DeviceRef::Cpu) => {
+                // The queue path below, with a copy for a buffer.
+                if data.len() > self.capacity {
+                    let Some((capacity, bytes)) =
+                        glyph_instance_capacity(data.len(), crate::backend::CPU_MAX_BUFFER_SIZE)
+                    else {
+                        self.count = 0;
+                        return false;
+                    };
+                    let Some(reservation) = self.budget.reserve_gpu(bytes) else {
+                        log::warn!("glyph instance buffer growth exceeds the graphics budget");
+                        self.count = 0;
+                        return false;
+                    };
+                    self.capacity = capacity;
+                    self.instance_gpu = reservation;
+                }
+                cpu.instances.clear();
+                cpu.instances.extend_from_slice(data);
+                self.count = data.len() as u32;
+                return glyphs_complete;
+            }
+            _ => {
+                debug_assert!(false, "a glyph pipeline was uploaded on another backend");
+                self.count = 0;
+                return false;
+            }
+        };
         write_buffer_if_changed(
             queue,
-            &self.screen_buf,
-            &mut self.screen_held,
+            &gpu.screen_buf,
+            &mut gpu.screen_held,
             bytemuck::bytes_of(&Screen {
                 size: screen,
                 _pad: [0.0; 2],
             }),
             &self.counters,
         );
-        if let Some(ring) = &mut self.ring {
+        if let Some(ring) = &mut gpu.ring {
             let written = ring.write(
                 device,
                 queue,
@@ -1547,7 +1758,7 @@ impl GlyphPipeline {
                 self.count = 0;
                 return false;
             };
-            let Some(gpu) = self.budget.reserve_gpu(bytes) else {
+            let Some(reservation) = self.budget.reserve_gpu(bytes) else {
                 log::warn!("glyph instance buffer growth exceeds GPU graphics budget");
                 self.count = 0;
                 return false;
@@ -1558,13 +1769,13 @@ impl GlyphPipeline {
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            self.instances = instances;
+            gpu.instances = instances;
             self.capacity = capacity;
-            self.instance_gpu = gpu;
+            self.instance_gpu = reservation;
         }
         write_buffer_counted(
             queue,
-            &self.instances,
+            &gpu.instances,
             bytemuck::cast_slice(data),
             &self.counters,
         );
@@ -1573,16 +1784,20 @@ impl GlyphPipeline {
     }
 
     /// Rebuild the atlas bind group if a glyph upload grew a texture.
-    fn refresh_bind_group(&mut self, device: &wgpu::Device) {
+    fn refresh_bind_group(&mut self, device: DeviceRef<'_>) {
         if self.bg_dirty {
-            self.bind_group = Self::make_bg(
-                device,
-                &self.atlas_bgl,
-                &self.screen_buf,
-                &self.color.view,
-                &self.mask.view,
-                &self.sampler,
-            );
+            if let (GlyphDraws::Gpu(gpu), DeviceRef::Gpu { device, .. }, Some(color), Some(mask)) =
+                (&mut self.draws, device, self.color.view(), self.mask.view())
+            {
+                gpu.bind_group = Self::make_bg(
+                    device,
+                    &gpu.atlas_bgl,
+                    &gpu.screen_buf,
+                    color,
+                    mask,
+                    &gpu.sampler,
+                );
+            }
             self.bg_dirty = false;
         }
     }
@@ -1597,8 +1812,7 @@ impl GlyphPipeline {
     /// only when the instances changed.
     pub fn set_cursor(
         &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        device: DeviceRef<'_>,
         glyphs: Option<(&[GlyphInstance], [f32; 4], std::ops::Range<u32>)>,
     ) {
         let glyphs = glyphs.filter(|(instances, _, pane)| {
@@ -1625,13 +1839,20 @@ impl GlyphPipeline {
             .as_ref()
             .map_or(0, |(instances, _, _)| instances.len() as u32);
         if let Some((instances, _, _)) = glyphs {
-            write_buffer_if_changed(
-                queue,
-                &self.cursor,
-                &mut self.cursor_held,
-                bytemuck::cast_slice(instances),
-                &self.counters,
-            );
+            match (&mut self.draws, device) {
+                (GlyphDraws::Gpu(gpu), DeviceRef::Gpu { queue, .. }) => write_buffer_if_changed(
+                    queue,
+                    &gpu.cursor,
+                    &mut gpu.cursor_held,
+                    bytemuck::cast_slice(instances),
+                    &self.counters,
+                ),
+                (GlyphDraws::Cpu(cpu), DeviceRef::Cpu) => {
+                    cpu.cursor.clear();
+                    cpu.cursor.extend_from_slice(instances);
+                }
+                _ => debug_assert!(false, "a glyph cursor was set on another backend"),
+            }
         }
     }
 
@@ -1651,9 +1872,9 @@ impl GlyphPipeline {
     /// Draw the cursor's built-in glyph set by [`Self::set_cursor`], if any,
     /// into a target holding `window` (`[x, y, w, h]`) of a `target_size`
     /// scene, as [`Self::draw_in_window`] does.
-    pub fn draw_cursor(
+    pub(crate) fn draw_cursor(
         &self,
-        pass: &mut wgpu::RenderPass<'_>,
+        pass: &mut ScenePass<'_, '_>,
         target_size: [u32; 2],
         window: [u32; 4],
     ) {
@@ -1665,12 +1886,35 @@ impl GlyphPipeline {
         else {
             return;
         };
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_vertex_buffer(0, self.cursor.slice(..));
-        pass.set_scissor_rect(x, y, w, h);
-        pass.draw(0..4, 0..self.cursor_count);
-        pass.set_scissor_rect(0, 0, window[2], window[3]);
+        match (&self.draws, pass) {
+            (GlyphDraws::Gpu(gpu), ScenePass::Gpu(pass)) => {
+                pass.set_pipeline(&gpu.pipeline);
+                pass.set_bind_group(0, &gpu.bind_group, &[]);
+                pass.set_vertex_buffer(0, gpu.cursor.slice(..));
+                pass.set_scissor_rect(x, y, w, h);
+                pass.draw(0..4, 0..self.cursor_count);
+                pass.set_scissor_rect(0, 0, window[2], window[3]);
+            }
+            (GlyphDraws::Cpu(cpu), ScenePass::Cpu(pass)) => {
+                pass.set_scissor_rect(x, y, w, h);
+                self.draw_cpu(pass, instance_slice(&cpu.cursor, 0..self.cursor_count));
+                pass.set_scissor_rect(0, 0, window[2], window[3]);
+            }
+            _ => debug_assert!(false, "a glyph cursor was drawn on another backend"),
+        }
+    }
+
+    /// One CPU draw of `instances` from this pipeline's atlases.
+    fn draw_cpu(&self, pass: &mut CpuPass<'_>, instances: &[GlyphInstance]) {
+        if let (Some(color_atlas), Some(mask_atlas)) =
+            (self.color.cpu_texture(), self.mask.cpu_texture())
+        {
+            pass.draw(CpuDraw::Glyphs {
+                instances,
+                color_atlas,
+                mask_atlas,
+            });
+        }
     }
 
     /// Draw the uploaded instances, each pane's contiguous range clipped to its
@@ -1684,16 +1928,16 @@ impl GlyphPipeline {
         target_size: [u32; 2],
     ) {
         let whole = [0, 0, target_size[0].max(1), target_size[1].max(1)];
-        self.draw_in_window(pass, clips, target_size, whole, false);
+        self.draw_in_window(&mut ScenePass::Gpu(pass), clips, target_size, whole, false);
     }
 
     /// [`Self::draw`] into a target that holds only `window` (`[x, y, w, h]`
     /// in pixels) of a `target_size` scene, which the caller maps onto it
     /// with a matching viewport. Each pane scissor is the one `draw` would
     /// set, clipped to the window and moved to its origin.
-    pub fn draw_in_window(
+    pub(crate) fn draw_in_window(
         &self,
-        pass: &mut wgpu::RenderPass<'_>,
+        pass: &mut ScenePass<'_, '_>,
         clips: &[GlyphClip],
         target_size: [u32; 2],
         window: [u32; 4],
@@ -1702,33 +1946,50 @@ impl GlyphPipeline {
         if self.count == 0 {
             return;
         }
-        let instances = match &self.ring {
-            Some(ring) => match ring.current() {
-                Some(buffer) => buffer,
-                None => return,
-            },
-            None => &self.instances,
-        };
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[]);
-        pass.set_vertex_buffer(0, instances.slice(..));
+        match (&self.draws, &mut *pass) {
+            (GlyphDraws::Gpu(gpu), ScenePass::Gpu(pass)) => {
+                let instances = match &gpu.ring {
+                    Some(ring) => match ring.current() {
+                        Some(buffer) => buffer,
+                        None => return,
+                    },
+                    None => &gpu.instances,
+                };
+                pass.set_pipeline(&gpu.pipeline);
+                pass.set_bind_group(0, &gpu.bind_group, &[]);
+                pass.set_vertex_buffer(0, instances.slice(..));
+            }
+            (GlyphDraws::Cpu(_), ScenePass::Cpu(_)) => {}
+            _ => {
+                debug_assert!(false, "a glyph pipeline was drawn on another backend");
+                return;
+            }
+        }
         let hidden = self.cursor_pane_range.clone().filter(|_| hide_cursor);
         let excluded = hide_cursor
             .then(|| self.cursor_exclusion(target_size, window))
             .flatten();
-        let draw_range = |pass: &mut wgpu::RenderPass<'_>, range: std::ops::Range<u32>| {
+        let draw =
+            |pass: &mut ScenePass<'_, '_>, range: std::ops::Range<u32>| match (&self.draws, pass) {
+                (GlyphDraws::Gpu(_), ScenePass::Gpu(pass)) => pass.draw(0..4, range),
+                (GlyphDraws::Cpu(cpu), ScenePass::Cpu(pass)) => {
+                    self.draw_cpu(pass, instance_slice(&cpu.instances, range));
+                }
+                _ => {}
+            };
+        let draw_range = |pass: &mut ScenePass<'_, '_>, range: std::ops::Range<u32>| {
             if let Some(skip) = hidden
                 .clone()
                 .filter(|skip| range.start <= skip.start && skip.end <= range.end)
             {
                 if range.start < skip.start {
-                    pass.draw(0..4, range.start..skip.start);
+                    draw(pass, range.start..skip.start);
                 }
                 if skip.end < range.end {
-                    pass.draw(0..4, skip.end..range.end);
+                    draw(pass, skip.end..range.end);
                 }
             } else {
-                pass.draw(0..4, range);
+                draw(pass, range);
             }
         };
         if clips.is_empty() {
@@ -1783,7 +2044,9 @@ impl GlyphPipeline {
         self.cursor_pane_range = None;
         self.cursor_bounds = None;
         self.cursor_count = 0;
-        self.cursor_held.invalidate();
+        if let GlyphDraws::Gpu(gpu) = &mut self.draws {
+            gpu.cursor_held.invalidate();
+        }
         // Placements bake in the font size and scale as well.
         self.placements.clear();
     }
@@ -1885,8 +2148,7 @@ mod tests {
             ..base
         };
         let pipeline = &mut renderer.glyph_pipeline;
-        let device = &renderer.gpu.device;
-        let queue = &renderer.gpu.queue;
+        let handle = renderer.device.handle();
         const LIMIT: usize = 131_072;
         for index in 0..LIMIT {
             pipeline.slots.insert(
@@ -1902,7 +2164,7 @@ mod tests {
             let mut rasterized = false;
             assert!(
                 pipeline
-                    .ensure_glyph(device, queue, key(index), || {
+                    .ensure_glyph(handle, key(index), || {
                         rasterized = true;
                         None
                     })
@@ -1913,12 +2175,12 @@ mod tests {
         }
         assert!(
             pipeline
-                .ensure_glyph(device, queue, key(0), || panic!("cached hit"))
+                .ensure_glyph(handle, key(0), || panic!("cached hit"))
                 .is_none()
         );
-        assert!(pipeline.upload(device, queue, [64.0, 64.0], &[]));
+        assert!(pipeline.upload(handle, [64.0, 64.0], &[]));
         let mut rasterized = false;
-        let resolved = pipeline.ensure_glyph(device, queue, key(LIMIT), || {
+        let resolved = pipeline.ensure_glyph(handle, key(LIMIT), || {
             rasterized = true;
             None
         });
@@ -1949,7 +2211,7 @@ mod tests {
             let budget = GraphicsBudget::independent(kettle_core::GraphicsLimits::default())
                 .expect("valid graphics limits");
             let pipeline = GlyphPipeline::new_with_budget(
-                &renderer.gpu.device,
+                &renderer.gpu().device,
                 renderer.config.format,
                 budget.clone(),
             )
@@ -2301,7 +2563,7 @@ mod tests {
             let budget = GraphicsBudget::independent(kettle_core::GraphicsLimits::default())
                 .expect("valid graphics limits");
             let mut pipeline = GlyphPipeline::new_with_budget(
-                &renderer.gpu.device,
+                &renderer.gpu().device,
                 renderer.config.format,
                 budget.clone(),
             )

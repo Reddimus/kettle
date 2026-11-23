@@ -36,26 +36,69 @@ const MIN_VISIBLE_BRIGHTNESS: f32 = 0.002;
 /// hand-written WGSL.
 #[repr(C)]
 #[derive(Clone, Copy, Default, Pod, Zeroable)]
-struct Star {
+pub(crate) struct Star {
     /// `xy` = position in pixels from the surface centre; `z` = core radius
     /// squared; `w` = halo radius squared. Both radii arrive squared because
     /// the shader only ever needs them that way.
-    geom: [f32; 4],
+    pub(crate) geom: [f32; 4],
     /// `rgb` = linear colour already scaled by the star's brightness, so the
     /// shader multiplies once instead of once per falloff term; `a` unused.
-    tint: [f32; 4],
+    pub(crate) tint: [f32; 4],
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct Uniforms {
+pub(crate) struct Uniforms {
     /// Surface size in physical pixels.
-    resolution: [f32; 2],
+    pub(crate) resolution: [f32; 2],
     /// How many entries of `stars` are live. Stars too dim to see are dropped
     /// on the CPU, so the shader's loop bound shrinks with them.
-    count: u32,
+    pub(crate) count: u32,
     _pad: u32,
-    stars: [Star; NSTARS],
+    pub(crate) stars: [Star; NSTARS],
+}
+
+/// One frame's starfield, as the fragment shader reads it.
+pub(crate) type StarfieldUniforms = Uniforms;
+
+impl Uniforms {
+    /// The frame at `resolution` and `time_secs`, as
+    /// [`StarfieldPipeline::upload`] writes it.
+    fn frame(seeds: &[StarSeed; NSTARS], resolution: [f32; 2], time_secs: f32) -> Self {
+        let mut u = Uniforms {
+            resolution,
+            count: 0,
+            _pad: 0,
+            stars: [Star::default(); NSTARS],
+        };
+        u.count = build_frame_stars(seeds, resolution, time_secs, &mut u.stars);
+        u
+    }
+}
+
+/// The CPU backend's starfield: the same per-frame uniforms, kept for the
+/// software rasterizer instead of uploaded.
+pub(crate) struct CpuStarfield {
+    seeds: [StarSeed; NSTARS],
+    uniforms: Uniforms,
+}
+
+impl CpuStarfield {
+    pub(crate) fn new() -> Self {
+        let seeds = StarSeed::all();
+        Self {
+            uniforms: Uniforms::frame(&seeds, [1.0, 1.0], 0.0),
+            seeds,
+        }
+    }
+
+    pub(crate) fn upload(&mut self, resolution: [f32; 2], time_secs: f32) {
+        self.uniforms = Uniforms::frame(&self.seeds, resolution, time_secs);
+    }
+
+    pub(crate) fn uniforms(&self) -> &Uniforms {
+        &self.uniforms
+    }
 }
 
 /// The part of a star that never changes: its direction from the centre, its
@@ -344,13 +387,7 @@ impl StarfieldPipeline {
     /// An animated starfield changes every frame, so it writes every frame; a
     /// still one (no animation) writes only when the size changes.
     pub fn upload(&mut self, queue: &wgpu::Queue, resolution: [f32; 2], time_secs: f32) {
-        let mut u = Uniforms {
-            resolution,
-            count: 0,
-            _pad: 0,
-            stars: [Star::default(); NSTARS],
-        };
-        u.count = build_frame_stars(&self.seeds, resolution, time_secs, &mut u.stars);
+        let u = Uniforms::frame(&self.seeds, resolution, time_secs);
         write_buffer_if_changed(
             queue,
             &self.uniform_buf,

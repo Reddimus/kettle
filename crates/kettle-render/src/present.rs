@@ -1,6 +1,9 @@
 use kettle_core::{GraphicsBudget, GraphicsReservation};
 
-fn reserve_scene_target(budget: &GraphicsBudget, bytes: usize) -> Option<GraphicsReservation> {
+pub(crate) fn reserve_scene_target(
+    budget: &GraphicsBudget,
+    bytes: usize,
+) -> Option<GraphicsReservation> {
     const MAX_SCENE_TARGET_BYTES: usize = 256 * 1024 * 1024;
     if bytes > MAX_SCENE_TARGET_BYTES {
         return None;

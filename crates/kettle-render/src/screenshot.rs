@@ -154,6 +154,8 @@ pub(crate) struct ScreenshotCaptureTarget {
     gpu: kettle_core::GraphicsReservation,
     staging: wgpu::Buffer,
     staging_gpu: kettle_core::GraphicsReservation,
+    /// The queue that will copy into `staging`.
+    queue: wgpu::Queue,
     width: u32,
     height: u32,
     unpadded_bytes_per_row: u32,
@@ -976,7 +978,9 @@ impl Renderer {
     /// be admitted. The caller must schedule the returned delay while idle.
     pub fn poll_screenshot_retirements(&self) -> Option<std::time::Duration> {
         self.screenshot_retirements.poll_with(|| {
-            let _ = self.gpu.device.poll(wgpu::PollType::Poll);
+            if let Some(gpu) = self.device.gpu() {
+                let _ = gpu.device.poll(wgpu::PollType::Poll);
+            }
         })
     }
 
@@ -1035,7 +1039,11 @@ impl Renderer {
         let Some(prepared) = prepared else {
             return;
         };
-        let submission = self.gpu.queue.submit(std::iter::once(encoder.finish()));
+        // Only a GPU frame encodes, so only a GPU renderer gets here.
+        let Some(gpu) = self.device.gpu() else {
+            return;
+        };
+        let submission = gpu.queue.submit(std::iter::once(encoder.finish()));
         self.dispatch_prepared_screenshot(Some(prepared), submission);
     }
 
@@ -1049,10 +1057,17 @@ impl Renderer {
         };
         match prepared {
             Ok(prepared) => {
+                let Some(gpu) = self.device.gpu() else {
+                    Self::complete_screenshot_error(
+                        prepared.request,
+                        "a GPU screenshot was prepared on a CPU renderer".to_string(),
+                    );
+                    return;
+                };
                 let job = ScreenshotJob {
-                    device: self.gpu.device.clone(),
-                    gpu_lost: self.gpu.gpu_lost.clone(),
-                    gpu_fault: self.gpu.gpu_fault.clone(),
+                    device: gpu.device.clone(),
+                    gpu_lost: gpu.gpu_lost.clone(),
+                    gpu_fault: gpu.gpu_fault.clone(),
                     submission,
                     prepared,
                 };
@@ -1100,6 +1115,10 @@ impl Renderer {
         // reservation fails, `gpu` drops while no command buffer can yet refer
         // to the capture texture; accounting can therefore never end before a
         // submitted use of the resource retires.
+        let gpu_context = self
+            .device
+            .gpu()
+            .ok_or_else(|| "a CPU renderer has no GPU capture target".to_string())?;
         let staging_gpu = self
             .graphics_budget
             .reserve_transient_gpu(staging_bytes)
@@ -1108,7 +1127,7 @@ impl Renderer {
                     "GPU graphics budget exhausted while creating a {staging_bytes}-byte screenshot staging buffer"
                 )
             })?;
-        let texture = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+        let texture = gpu_context.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("kettle-screenshot-scene"),
             size: wgpu::Extent3d {
                 width: size[0],
@@ -1123,7 +1142,7 @@ impl Renderer {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let staging = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        let staging = gpu_context.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("kettle-screenshot-readback"),
             size: buffer_size,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
@@ -1135,6 +1154,7 @@ impl Renderer {
             gpu,
             staging,
             staging_gpu,
+            queue: gpu_context.queue.clone(),
             width: size[0],
             height: size[1],
             unpadded_bytes_per_row,
@@ -1175,7 +1195,7 @@ impl Renderer {
             staging: capture.staging,
             _capture_texture: capture.texture,
             gpu: {
-                let queue = self.gpu.queue.clone();
+                let queue = capture.queue;
                 ScreenshotGpuGuard::new(
                     ScreenshotReservations {
                         _capture_gpu: capture.gpu,
@@ -1194,6 +1214,66 @@ impl Renderer {
             format,
             premultiplied,
             request,
+        }
+    }
+
+    /// Save the CPU backend's `scene` for `request`: the bytes a GPU capture
+    /// target would hold after the same scene pass, read back without a GPU.
+    pub(crate) fn dispatch_cpu_screenshot(
+        &self,
+        request: ScreenshotRequest,
+        scene: &crate::backend::cpu::CpuFrame,
+    ) {
+        let (width, height) = (scene.width(), scene.height());
+        let Some(bytes) = screenshot_target_bytes(width, height) else {
+            Self::complete_screenshot_error(
+                request,
+                "screenshot target size overflow or exceeds the 256 MiB capture limit".to_string(),
+            );
+            return;
+        };
+        // The copy is the readback; its reservation ends with it, as the GPU
+        // capture's ends once its pixels reach CPU memory.
+        let Some(copy) = self.graphics_budget.reserve_transient_cpu(bytes) else {
+            Self::complete_screenshot_error(
+                request,
+                format!("graphics budget exhausted while copying a {bytes}-byte screenshot"),
+            );
+            return;
+        };
+        let rgba = scene.pixels().to_vec();
+        drop(copy);
+        let job = ScreenshotPersistenceJob {
+            request,
+            width,
+            height,
+            rgba,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            premultiplied: true,
+        };
+        let pool = match ScreenshotPersistencePool::shared() {
+            Ok(pool) => pool,
+            Err(error) => {
+                Self::complete_screenshot_error(
+                    job.request,
+                    format!("screenshot persistence workers unavailable: {error}"),
+                );
+                return;
+            }
+        };
+        match pool.try_submit(job) {
+            Ok(()) => {}
+            Err(ScreenshotPersistenceSubmitError::Busy(job)) => Self::complete_screenshot_error(
+                job.request,
+                "screenshot persistence workers are busy; retry after an earlier save finishes"
+                    .to_string(),
+            ),
+            Err(ScreenshotPersistenceSubmitError::Disconnected(job)) => {
+                Self::complete_screenshot_error(
+                    job.request,
+                    "screenshot persistence workers disconnected".to_string(),
+                );
+            }
         }
     }
 

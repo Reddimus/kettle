@@ -13,10 +13,12 @@ use std::collections::HashMap;
 
 use glyphon::cosmic_text::CacheKey;
 use glyphon::{
-    Buffer as TextBuffer, Cache, Color as GColor, ContentType, CustomGlyph, FontSystem, Metrics,
-    RasterizedCustomGlyph, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    Buffer as TextBuffer, Color as GColor, ContentType, CustomGlyph, FontSystem, Metrics,
+    RasterizedCustomGlyph, SwashCache, TextArea, TextBounds,
 };
 
+use crate::backend::text::{Cache, TextAtlas, TextRenderer, Viewport};
+use crate::backend::{DeviceRef, ScenePass};
 use crate::batching::CellImage;
 
 /// Rasters one atlas holds before a new one replaces it.
@@ -36,15 +38,13 @@ pub(crate) struct CursorMarks {
 
 impl CursorMarks {
     pub(crate) fn new(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        device: DeviceRef<'_>,
         cache: &Cache,
         format: wgpu::TextureFormat,
         fonts: &mut FontSystem,
     ) -> Self {
-        let mut atlas = TextAtlas::new(device, queue, cache, format);
-        let renderer =
-            TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
+        let mut atlas = TextAtlas::new(device, cache, format);
+        let renderer = TextRenderer::new(&mut atlas, device);
         Self {
             atlas,
             renderer,
@@ -69,8 +69,7 @@ impl CursorMarks {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare(
         &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
+        device: DeviceRef<'_>,
         fonts: &mut FontSystem,
         swash: &mut SwashCache,
         viewport: &Viewport,
@@ -122,7 +121,6 @@ impl CursorMarks {
         let masks = &self.masks;
         self.renderer.prepare_with_custom(
             device,
-            queue,
             fonts,
             &mut self.atlas,
             viewport,
@@ -149,7 +147,7 @@ impl CursorMarks {
     pub(crate) fn render(
         &self,
         viewport: &Viewport,
-        pass: &mut wgpu::RenderPass<'_>,
+        pass: &mut ScenePass<'_, '_>,
     ) -> Result<(), glyphon::RenderError> {
         if self.prepared {
             self.renderer.render(&self.atlas, viewport, pass)?;
@@ -192,8 +190,7 @@ mod tests {
             return;
         };
         let mut marks = CursorMarks::new(
-            &renderer.gpu.device,
-            &renderer.gpu.queue,
+            renderer.device.handle(),
             &renderer.glyphon_cache,
             renderer.config.format,
             &mut renderer.font_system,
@@ -211,8 +208,7 @@ mod tests {
             assert!(marks.has_room(cell));
             marks
                 .prepare(
-                    &renderer.gpu.device,
-                    &renderer.gpu.queue,
+                    renderer.device.handle(),
                     &mut renderer.font_system,
                     &mut renderer.swash,
                     &renderer.viewport,
@@ -236,8 +232,7 @@ mod tests {
             return;
         };
         let mut marks = CursorMarks::new(
-            &renderer.gpu.device,
-            &renderer.gpu.queue,
+            renderer.device.handle(),
             &renderer.glyphon_cache,
             renderer.config.format,
             &mut renderer.font_system,
