@@ -1,8 +1,10 @@
 //! The Kettle-owned Wayland presenter: one memfd, `wl_shm_pool` and
 //! `wl_buffer` per buffer, on winit's connection and surface.
 
+use std::ffi::c_void;
 use std::fs::File;
 use std::os::fd::AsFd;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
@@ -132,6 +134,49 @@ fn create_buffer(
     Ok(pool.create_buffer(0, w, h, stride, format, qh, id))
 }
 
+type GetDisplay = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+
+/// libwayland-client's `wl_proxy_get_display` (1.23 and later), if the
+/// loaded library has it.
+fn get_display_fn() -> Option<GetDisplay> {
+    static GET_DISPLAY: OnceLock<Option<GetDisplay>> = OnceLock::new();
+    *GET_DISPLAY.get_or_init(|| {
+        // SAFETY: RTLD_NOLOAD only returns the libwayland-client already
+        // loaded for winit's connection; it loads nothing and runs no
+        // initialiser. The handle is never closed, so the symbol stays
+        // valid for the life of the process.
+        let lib = unsafe {
+            libc::dlopen(
+                c"libwayland-client.so.0".as_ptr(),
+                libc::RTLD_NOW | libc::RTLD_NOLOAD,
+            )
+        };
+        if lib.is_null() {
+            return None;
+        }
+        // SAFETY: `lib` is a live handle and the name is a C string.
+        let sym = unsafe { libc::dlsym(lib, c"wl_proxy_get_display".as_ptr()) };
+        // SAFETY: when present, the symbol is
+        // `struct wl_display *wl_proxy_get_display(struct wl_proxy *)`
+        // (wayland-client-core.h), which `GetDisplay` matches.
+        (!sym.is_null()).then(|| unsafe { std::mem::transmute::<*mut c_void, GetDisplay>(sym) })
+    })
+}
+
+#[cfg(test)]
+pub(super) fn can_ask_proxy_display() -> bool {
+    get_display_fn().is_some()
+}
+
+/// The `wl_display` a proxy belongs to; `None` with a libwayland older
+/// than 1.23, which has no way to ask.
+fn proxy_display(proxy: std::ptr::NonNull<c_void>) -> Option<*mut c_void> {
+    let get = get_display_fn()?;
+    // SAFETY: `proxy` is the live `wl_surface` proxy of the window handle
+    // the caller holds; the call only reads it.
+    Some(unsafe { get(proxy.as_ptr()) })
+}
+
 fn memfd(bytes: usize) -> Result<File> {
     use rustix::fs::{MemfdFlags, SealFlags};
     let fd = rustix::fs::memfd_create(
@@ -205,6 +250,29 @@ impl ShmPresenter {
         else {
             return Err(anyhow!("not a Wayland window"));
         };
+        // The presenter's queue is on `display`. A surface of another
+        // connection would make libwayland abort at the first frame
+        // callback ("Proxy and queue point to different wl_displays").
+        let window_display = match window
+            .display_handle()
+            .map_err(|e| anyhow!("window display handle: {e}"))?
+            .as_raw()
+        {
+            RawDisplayHandle::Wayland(h) => h.display,
+            _ => return Err(anyhow!("the window is not on a Wayland display")),
+        };
+        if window_display != wl_display.display {
+            return Err(anyhow!(
+                "the window and the display are on different Wayland connections"
+            ));
+        }
+        if let Some(surface_display) = proxy_display(wl_window.surface)
+            && surface_display != wl_display.display.as_ptr()
+        {
+            return Err(anyhow!(
+                "the window's surface is on another Wayland connection"
+            ));
+        }
         // SAFETY: the pointer is the live `wl_display` of winit's
         // connection, kept alive by `display`, which this presenter holds
         // until after `conn` drops (field order). A foreign backend never

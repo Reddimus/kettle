@@ -235,7 +235,11 @@ fn check_extent(width: u32, height: u32) -> Result<(), FrameError> {
     Ok(())
 }
 
-pub(crate) type WindowOwner = Arc<dyn HasWindowHandle + Send + Sync>;
+/// A window's handles: the window itself, and the connection it is on.
+pub(crate) trait WindowHandles: HasWindowHandle + HasDisplayHandle {}
+impl<T: HasWindowHandle + HasDisplayHandle + ?Sized> WindowHandles for T {}
+
+pub(crate) type WindowOwner = Arc<dyn WindowHandles + Send + Sync>;
 pub(crate) type DisplayOwner = Arc<dyn HasDisplayHandle + Send + Sync>;
 
 /// A CPU framebuffer presenter for one window.
@@ -258,9 +262,15 @@ impl CpuPresenter {
     /// A presenter for `window`, on the connection `display` (winit's
     /// `owned_display_handle()`, or the window itself). Both handles are
     /// kept for the presenter's life. Opaque until [`Self::set_format`].
+    ///
+    /// The window must be on `display`'s connection: on Wayland its own
+    /// display handle must name the same `wl_display`, and, where
+    /// libwayland can say (1.23 and later), so must its surface. A window
+    /// from another connection is an error here; libwayland would abort
+    /// the process on the first present.
     pub fn new<W, D>(window: Arc<W>, display: D) -> Result<Self>
     where
-        W: HasWindowHandle + Send + Sync + 'static,
+        W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
         D: HasDisplayHandle + Send + Sync + 'static,
     {
         Self::with_preference(window, display, PresenterPreference::Auto)
@@ -272,7 +282,7 @@ impl CpuPresenter {
         preference: PresenterPreference,
     ) -> Result<Self>
     where
-        W: HasWindowHandle + Send + Sync + 'static,
+        W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
         D: HasDisplayHandle + Send + Sync + 'static,
     {
         let started = Instant::now();

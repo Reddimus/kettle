@@ -2495,6 +2495,7 @@ dependencies = [
  "kettle-i18n",
  "kettle-state",
  "kettle-test-support",
+ "libc",
  "log",
  "memmap2",
  "objc2-quartz-core 0.3.2",

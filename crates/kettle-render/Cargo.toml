@@ -61,6 +61,9 @@ crossbeam-channel = "0.5.15"
 # `cpu_present`: CPU frames presented with no GPU driver in the process.
 # Every crate here except softbuffer is already in the graph through winit.
 [target.'cfg(target_os = "linux")'.dependencies]
+# Looks up libwayland-client's `wl_proxy_get_display` (1.23+), to check a
+# window's surface is on the presenter's connection.
+libc = "0.2.191"
 # Maps each wl_shm buffer's memfd.
 memmap2 = "0.9.12"
 # memfd_create, ftruncate and seals for those buffers.

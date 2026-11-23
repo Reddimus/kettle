@@ -347,3 +347,41 @@ fn a_late_release_while_occluded_goes_on_dispatch() {
     let _ = p.frame_pending();
     assert_eq!(p.stats().buffers, 0);
 }
+
+// --- a window and a display from different connections ---
+
+#[test]
+fn a_window_from_another_connection_is_refused() {
+    let (_server, mut streams) = Server::start(Config::default(), 2);
+    let Some(a) = TestClient::connect(streams.remove(0)) else {
+        return;
+    };
+    let b = TestClient::connect(streams.remove(0)).expect("second client");
+    let err = ShmPresenter::new(a.window(), Arc::new(b.display()))
+        .err()
+        .expect("mismatched connections accepted");
+    assert!(
+        err.to_string().contains("different Wayland connections"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_window_handle_that_names_the_wrong_display_is_refused() {
+    let (_server, mut streams) = Server::start(Config::default(), 2);
+    let Some(a) = TestClient::connect(streams.remove(0)) else {
+        return;
+    };
+    let b = TestClient::connect(streams.remove(0)).expect("second client");
+    // The handle claims b's display, which is also the one passed: only
+    // the surface proxy itself tells the truth.
+    let result = ShmPresenter::new(a.window_claiming(&b), Arc::new(b.display()));
+    if super::shm::can_ask_proxy_display() {
+        let err = result
+            .err()
+            .expect("a surface of another connection accepted");
+        assert!(err.to_string().contains("surface is on another"), "{err}");
+    } else {
+        eprintln!("skipping: libwayland-client older than 1.23");
+    }
+}
