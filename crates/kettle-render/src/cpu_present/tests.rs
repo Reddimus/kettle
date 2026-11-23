@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use super::book::{Choice, IDLE_RELEASE, MAX_BUFFERS, SlotBook};
+use super::book::{BUSY_RECHECK, Choice, IDLE_RELEASE, MAX_BUFFERS, SlotBook};
 use super::damage::{DamageHistory, HISTORY_FRAMES, MAX_DAMAGE_RECTS, Rect, normalize};
 use super::soft::SoftAges;
 use super::{MAX_BUFFER_BYTES, MAX_BUFFER_SIDE, PixelFormat, buffer_extent, check_extent};
@@ -299,12 +299,12 @@ fn idle_release_keeps_the_newest_buffer_only() {
     book.drew(a, t0, HISTORY_FRAMES);
     book.drew(b, t0, HISTORY_FRAMES);
     assert!(book.idle_spares(t0 + Duration::from_millis(10)).is_empty());
-    assert_eq!(book.idle_deadline(), Some(t0 + IDLE_RELEASE));
+    assert_eq!(book.idle_deadline(true), Some(t0 + IDLE_RELEASE));
     assert_eq!(book.idle_spares(t0 + IDLE_RELEASE), vec![a]);
     assert_eq!(book.spares(true), vec![a]);
     book.remove(a);
     assert_eq!(book.len(), 1);
-    assert_eq!(book.idle_deadline(), None);
+    assert_eq!(book.idle_deadline(true), None);
     assert_eq!(book.newest(), Some(b));
 }
 
@@ -320,6 +320,56 @@ fn a_busy_spare_is_never_released() {
     assert!(book.idle_spares(t0 + IDLE_RELEASE * 2).is_empty());
     assert!(book.spares(false).contains(&b));
     assert!(!book.spares(false).contains(&a));
+}
+
+#[test]
+fn a_busy_spare_never_puts_the_idle_deadline_in_the_past() {
+    let mut book: SlotBook<()> = SlotBook::default();
+    let t0 = Instant::now();
+    let a = book.insert(W, H, OPAQUE, t0, ());
+    let b = book.insert(W, H, OPAQUE, t0, ());
+    book.drew(a, t0, HISTORY_FRAMES);
+    book.committed(a);
+    book.drew(b, t0, HISTORY_FRAMES);
+    // The compositor still holds the spare long after its idle time: it has
+    // no deadline (one would have passed), but it is held.
+    let now = t0 + IDLE_RELEASE * 3;
+    assert_eq!(book.idle_deadline(true), None, "a past deadline would spin");
+    assert!(book.held_spare(now, true));
+    // Released: due at once, and releasing it clears the timer.
+    book.released(a);
+    assert!(!book.held_spare(now, true));
+    assert_eq!(book.idle_deadline(true), Some(t0 + IDLE_RELEASE));
+    assert_eq!(book.spares(true), vec![a]);
+    book.remove(a);
+    assert_eq!(book.idle_deadline(true), None);
+}
+
+#[test]
+fn a_spare_held_past_the_recheck_window_stops_the_timer() {
+    let mut book: SlotBook<()> = SlotBook::default();
+    let t0 = Instant::now();
+    let a = book.insert(W, H, OPAQUE, t0, ());
+    let b = book.insert(W, H, OPAQUE, t0, ());
+    book.drew(a, t0, HISTORY_FRAMES);
+    book.committed(a);
+    book.drew(b, t0, HISTORY_FRAMES);
+    assert!(book.held_spare(t0 + BUSY_RECHECK / 2, true));
+    assert!(!book.held_spare(t0 + BUSY_RECHECK, true));
+}
+
+#[test]
+fn an_occluded_book_counts_its_newest_buffer_as_a_spare() {
+    let mut book: SlotBook<()> = SlotBook::default();
+    let t0 = Instant::now();
+    let a = book.insert(W, H, OPAQUE, t0, ());
+    book.drew(a, t0, HISTORY_FRAMES);
+    book.committed(a);
+    assert!(!book.held_spare(t0, true));
+    assert!(book.held_spare(t0, false));
+    book.released(a);
+    assert_eq!(book.idle_deadline(true), None);
+    assert_eq!(book.idle_deadline(false), Some(t0 + IDLE_RELEASE));
 }
 
 #[test]

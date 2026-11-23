@@ -297,3 +297,53 @@ fn a_frame_deferred_past_its_timeout_is_due_at_once() {
     assert!(deadline <= Instant::now());
     assert_eq!(p.flush(|| {}).expect("flush"), PresentOutcome::Presented);
 }
+
+// --- occlusion and releases that come late ---
+
+#[test]
+fn a_buffer_released_late_while_occluded_is_freed() {
+    let cfg = Config {
+        release_on_commit: false,
+        ..Config::default()
+    };
+    let Some((server, mut client, mut p)) = fixture(cfg) else {
+        return;
+    };
+    let mut scene = Scene::new();
+    scene.present(&mut p, r(0, 0, W, H), 1);
+    client.roundtrip();
+    p.set_occluded(true);
+    assert_eq!(p.stats().buffers, 1, "the compositor still holds it");
+    let deadline = p
+        .idle_release_deadline()
+        .expect("an occluded window must wake to free the held buffer");
+    assert!(deadline > Instant::now(), "a past deadline would spin");
+    // The deadline stays put, so a caller that recomputes it on waking
+    // sees it come due.
+    std::thread::sleep(Duration::from_millis(5));
+    assert_eq!(p.idle_release_deadline(), Some(deadline));
+    server.release_all(&mut client);
+    // What the caller does at that deadline.
+    p.release_idle_buffers();
+    assert_eq!(p.stats().buffers, 0, "the late release freed nothing");
+    assert_eq!(p.idle_release_deadline(), None);
+}
+
+#[test]
+fn a_late_release_while_occluded_goes_on_dispatch() {
+    let cfg = Config {
+        release_on_commit: false,
+        ..Config::default()
+    };
+    let Some((server, mut client, mut p)) = fixture(cfg) else {
+        return;
+    };
+    let mut scene = Scene::new();
+    scene.present(&mut p, r(0, 0, W, H), 1);
+    client.roundtrip();
+    p.set_occluded(true);
+    server.release_all(&mut client);
+    // Not the idle path: an unrelated call that dispatches.
+    let _ = p.frame_pending();
+    assert_eq!(p.stats().buffers, 0);
+}

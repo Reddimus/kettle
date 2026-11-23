@@ -16,6 +16,12 @@ pub const MAX_BUFFERS: usize = 3;
 /// [`SlotBook::idle_spares`], so an idle window holds one buffer.
 pub const IDLE_RELEASE: Duration = Duration::from_secs(1);
 
+/// How long after its last use a spare the compositor still holds keeps
+/// the idle timer armed. Its release wakes nobody by itself, so the
+/// presenter checks again every [`IDLE_RELEASE`] until then; a buffer held
+/// longer goes at the next frame.
+pub const BUSY_RECHECK: Duration = Duration::from_secs(10);
+
 #[derive(Debug)]
 pub struct Slot<T> {
     pub id: u64,
@@ -218,14 +224,30 @@ impl<T> SlotBook<T> {
             .collect()
     }
 
-    /// When the oldest spare becomes idle, if there is a spare.
-    pub fn idle_deadline(&self) -> Option<Instant> {
-        let keep = self.newest();
+    /// When the next free spare becomes idle: [`IDLE_RELEASE`] after its
+    /// last use, which may have passed (it can go now). A spare the
+    /// compositor holds has no deadline here, since it cannot go yet; see
+    /// [`Self::held_spare`]. With `keep_newest` the buffer holding the
+    /// newest frame is not a spare.
+    pub fn idle_deadline(&self, keep_newest: bool) -> Option<Instant> {
+        let keep = if keep_newest { self.newest() } else { None };
         self.slots
             .iter()
-            .filter(|s| Some(s.id) != keep)
+            .filter(|s| !s.busy && Some(s.id) != keep)
             .map(|s| s.last_used + IDLE_RELEASE)
             .min()
+    }
+
+    /// A spare the compositor still holds, last used within
+    /// [`BUSY_RECHECK`] of `now`. Its release wakes nobody, so the
+    /// presenter has its caller check again.
+    pub fn held_spare(&self, now: Instant, keep_newest: bool) -> bool {
+        let keep = if keep_newest { self.newest() } else { None };
+        self.slots.iter().any(|s| {
+            s.busy
+                && Some(s.id) != keep
+                && now.saturating_duration_since(s.last_used) < BUSY_RECHECK
+        })
     }
 
     /// Buffers of a size or format no frame will use again. Free ones can go

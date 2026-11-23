@@ -110,7 +110,7 @@ use std::time::Instant;
 use anyhow::{Result, anyhow};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle};
 
-pub use book::{IDLE_RELEASE, MAX_BUFFERS};
+pub use book::{BUSY_RECHECK, IDLE_RELEASE, MAX_BUFFERS};
 pub use damage::{HISTORY_FRAMES, MAX_DAMAGE_RECTS, Rect};
 pub use shm::FRAME_CALLBACK_TIMEOUT;
 
@@ -410,7 +410,7 @@ impl CpuPresenter {
     }
 
     /// Release every spare buffer now, keeping the one with the newest
-    /// frame. Returns how many went.
+    /// frame (none while occluded). Returns how many went.
     pub fn release_idle_buffers(&mut self) -> usize {
         match &mut self.inner {
             Inner::Shm(p) => p.release_idle_buffers(),
@@ -418,9 +418,14 @@ impl CpuPresenter {
         }
     }
 
-    /// When a spare buffer becomes idle enough for
-    /// [`Self::release_idle_buffers`]; `None` with no spare. A caller with
-    /// nothing to draw wakes at this time to release it.
+    /// When to call [`Self::release_idle_buffers`] next; `None` with no
+    /// spare. A caller with nothing to draw arms `ControlFlow::WaitUntil`
+    /// with it. A free spare is due [`IDLE_RELEASE`] after its last use. A
+    /// spare the compositor still holds is checked again a second later
+    /// (its release wakes nobody): that time is never in the past when
+    /// first given, so the timer cannot spin, and it stays put until
+    /// `release_idle_buffers` runs, so it comes due. After [`BUSY_RECHECK`]
+    /// such a spare is left for the next frame.
     pub fn idle_release_deadline(&self) -> Option<Instant> {
         match &self.inner {
             Inner::Shm(p) => p.idle_release_deadline(),
@@ -430,7 +435,10 @@ impl CpuPresenter {
 
     /// The window is hidden (minimised, or occluded as winit reports). While
     /// occluded every buffer the compositor has released goes, the newest
-    /// too: the compositor keeps showing what it last read. On return the
+    /// too: the compositor keeps showing what it last read. A buffer it
+    /// releases later goes when the presenter next dispatches (any call
+    /// here, or [`Self::release_idle_buffers`] at
+    /// [`Self::idle_release_deadline`], which stays armed). On return the
     /// next frame repaints in full and commits without waiting for a frame
     /// callback, which compositors withhold from hidden surfaces.
     pub fn set_occluded(&mut self, occluded: bool) {

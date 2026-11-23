@@ -171,6 +171,9 @@ pub(super) struct ShmPresenter {
     /// Commit the next frame in full, without waiting for a callback.
     force_next: bool,
     occluded: bool,
+    /// When a spare the compositor holds is checked again; see
+    /// `idle_release_deadline`.
+    recheck: std::cell::Cell<Option<Instant>>,
     /// The buffer holding a frame drawn but not committed.
     deferred: Option<u64>,
     /// Damage presented since the last commit. It outlives `deferred`: when
@@ -241,6 +244,7 @@ impl ShmPresenter {
             next_serial: 1,
             force_next: true,
             occluded: false,
+            recheck: std::cell::Cell::new(None),
             deferred: None,
             uncommitted: Vec::new(),
             commits: 0,
@@ -292,13 +296,22 @@ impl ShmPresenter {
         if let Err(err) = self.queue.dispatch_pending(&mut self.state) {
             log::warn!("CPU present: Wayland dispatch failed: {err}");
         }
+        let mut late = Vec::new();
         for id in self.state.released.drain(..) {
             self.book.released(id);
+            if self.occluded {
+                late.push(id);
+            }
         }
         for serial in self.state.frames_done.drain(..) {
             if self.callback.is_some_and(|out| serial >= out) {
                 self.callback = None;
             }
+        }
+        // A hidden window keeps no buffer the compositor has let go: the
+        // surface keeps showing what it last read.
+        if !late.is_empty() {
+            self.remove(late);
         }
     }
 
@@ -351,13 +364,34 @@ impl ShmPresenter {
     }
 
     pub(super) fn release_idle_buffers(&mut self) -> usize {
+        self.recheck.set(None);
         self.dispatch();
-        let spares = self.book.spares(true);
+        let spares = self.book.spares(!self.occluded);
         self.remove(spares)
     }
 
     pub(super) fn idle_release_deadline(&self) -> Option<Instant> {
-        self.book.idle_deadline()
+        let now = Instant::now();
+        let keep_newest = !self.occluded;
+        // A held spare is checked again a second on. The time stays put
+        // until `release_idle_buffers` runs: a caller that recomputes the
+        // deadline when it wakes and compares it with the clock must see
+        // it come due, and one never in the past cannot spin.
+        let recheck = if self.book.held_spare(now, keep_newest) {
+            let at = self
+                .recheck
+                .get()
+                .unwrap_or(now + super::book::IDLE_RELEASE);
+            self.recheck.set(Some(at));
+            Some(at)
+        } else {
+            self.recheck.set(None);
+            None
+        };
+        match (self.book.idle_deadline(keep_newest), recheck) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     pub(super) fn set_occluded(&mut self, occluded: bool) {
