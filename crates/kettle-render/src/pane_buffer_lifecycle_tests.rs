@@ -630,7 +630,7 @@ fn wallpaper_draws_behind_quads_in_its_own_pass() {
     // A dedicated pipeline exists and is constructed. It draws with the
     // image pipeline the renderer shares, but keeps its own layer.
     assert!(
-        src.contains("bg_imgs: imgpipe::ImagePipeline,") && src.contains("let bg_imgs = shared"),
+        src.contains("bg_imgs: ImageLayer,") && src.contains("let bg_imgs = shared"),
         "the wallpaper must have its own ImagePipeline field + construction"
     );
     // The wallpaper items go to bg_img_items, inline images stay in img_items.
@@ -665,7 +665,7 @@ fn a_renderer_builds_its_quad_and_image_layers_from_shared_pipelines() {
     let src = super::production_source();
     let with_gpu = src
         .split_once("    fn with_gpu(\n")
-        .and_then(|(_, rest)| rest.split_once("    fn with_layers("))
+        .and_then(|(_, rest)| rest.split_once("    pub(crate) fn with_cpu("))
         .map(|(body, _)| body)
         .expect("with_gpu builds the renderer");
     assert!(

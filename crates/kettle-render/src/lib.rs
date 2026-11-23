@@ -10,6 +10,8 @@
 //! window surface.
 
 mod arabic_join;
+mod backend;
+pub use backend::RendererBackend;
 #[cfg(test)]
 mod arabic_join_tests;
 mod background;
@@ -305,8 +307,17 @@ use glyphon::cosmic_text::{
 };
 
 use glyphon::{
-    Attrs, Buffer as TextBuffer, Cache, Color as GColor, Family, FontSystem, Metrics, Resolution,
-    Shaping, Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
+    Attrs, Buffer as TextBuffer, Color as GColor, Family, FontSystem, Metrics, Resolution, Shaping,
+    Style, SwashCache, TextArea, TextBounds, Weight,
+};
+
+// glyphon's GPU objects, behind the backend seam (see `backend::text`).
+use backend::text::{Cache, TextAtlas, TextRenderer, Viewport};
+
+use backend::RenderDevice;
+use backend::layers::{
+    ImageLayer, ImageSharedLayer, OutlineLayer, PresentLayer, QuadLayer, RoundedSurfaceLayer,
+    StarfieldLayer,
 };
 
 // `kettle_config::TextRenderer` (the grid|legacy mode enum) is aliased so it
@@ -395,7 +406,8 @@ pub struct Renderer {
     /// `None` only for the headless renderer tests build: it draws into the
     /// offscreen capture target alone.
     surface: Option<wgpu::Surface<'static>>,
-    gpu: GpuContext,
+    /// The shared GPU context, or the CPU backend's frame state.
+    device: RenderDevice,
     /// Shared CPU/GPU retained-resource scope for this renderer window.
     graphics_budget: kettle_core::GraphicsBudget,
     config: wgpu::SurfaceConfiguration,
@@ -589,7 +601,7 @@ pub struct Renderer {
     update_toast_text: Vec<String>,
     /// Input-method preedit buffer and equality gate.
     ime_buffer: TextBuffer,
-    ime_quads: QuadPipeline,
+    ime_quads: QuadLayer,
     ime_text_renderer: TextRenderer,
     ime_prepared: bool,
     ime_text: String,
@@ -736,24 +748,24 @@ pub struct Renderer {
 
     /// Pane interiors, drawn with replace blending so overlapping panes do
     /// not compound their configured transparency.
-    pane_bases: QuadPipeline,
-    quads: QuadPipeline,
+    pane_bases: QuadLayer,
+    quads: QuadLayer,
     /// Rounded pane outlines used only where a decorated native window clips
     /// an outer pane corner. Kept out of `QuadInstance`: cell backgrounds
     /// dominate that buffer, and paying a larger instance for every cell to
     /// fix at most two window corners would be the wrong hot-path trade-off.
-    pane_outlines: OutlinePipeline,
+    pane_outlines: OutlineLayer,
     /// Pane backgrounds, images and cards dim before contrast-resolved text.
-    pane_dimming: QuadPipeline,
-    text_decorations: QuadPipeline,
+    pane_dimming: QuadLayer,
+    text_decorations: QuadLayer,
     /// Preview-lane dimming and scrollbars draw after lane content.
-    overlay_quads: QuadPipeline,
+    overlay_quads: QuadLayer,
     /// Third quad pass drawn after the overlay quads, for overlay chrome
     /// (context menu, settings panel, confirm bar, resize chip, and similar).
     /// It draws between `overlay_quads` and `menu_text_renderer`, so the panels
     /// sit above pane dimming and the main text while their own labels land
     /// *on top of* the panel bg.
-    menu_quads: QuadPipeline,
+    menu_quads: QuadLayer,
     /// Dedicated TextRenderer for the text drawn over `menu_quads`
     /// (settings lines, the resize chip, hint labels, ...; menu rows have
     /// `menu_level_text`). Shares
@@ -761,13 +773,13 @@ pub struct Renderer {
     /// renderers against one atlas); rendered after `menu_quads` so menu labels
     /// sit above the panel bg.
     menu_text_renderer: TextRenderer,
-    rounded_surfaces: rounded_surface::RoundedSurfacePipeline,
-    toast_surfaces: rounded_surface::RoundedSurfacePipeline,
+    rounded_surfaces: RoundedSurfaceLayer,
+    toast_surfaces: RoundedSurfaceLayer,
     /// Every open menu or picker level's shadow, panel and selection, drawn
     /// level by level (`menu_level_draws`).
-    menu_surfaces: rounded_surface::RoundedSurfacePipeline,
+    menu_surfaces: RoundedSurfaceLayer,
     /// Menu row swatches, drawn above the row highlight and below row text.
-    menu_swatch_surfaces: rounded_surface::RoundedSurfacePipeline,
+    menu_swatch_surfaces: RoundedSurfaceLayer,
     /// Each open menu level's slice of `menu_surfaces`, `menu_quads` and
     /// `menu_swatch_surfaces`, root first.
     menu_level_draws: Vec<MenuLevelDraw>,
@@ -779,24 +791,24 @@ pub struct Renderer {
     confirmation_text_renderer: TextRenderer,
     confirmation_text: confirm::ConfirmText,
     confirmation_labels_prepared: bool,
-    imgs: imgpipe::ImagePipeline,
-    card_base: QuadPipeline,
-    card_cursors: QuadPipeline,
+    imgs: ImageLayer,
+    card_base: QuadLayer,
+    card_cursors: QuadLayer,
     card_cursor_quad_range: Option<std::ops::Range<u32>>,
-    card_decoration: QuadPipeline,
-    card_posters: Option<imgpipe::ImagePipeline>,
+    card_decoration: QuadLayer,
+    card_posters: Option<ImageLayer>,
     /// The preview lanes: their panels' quads, their images (charged to the
     /// preview account like card posters, made on first use) and their text,
     /// drawn above the terminal and below every overlay.
-    lane_quads: QuadPipeline,
-    lane_img: Option<imgpipe::ImagePipeline>,
+    lane_quads: QuadLayer,
+    lane_img: Option<ImageLayer>,
     lane_text_renderer: TextRenderer,
     /// Each lane's text, by pane, kept while its lane shows.
     lane_texts: std::collections::HashMap<u64, media_lane::LaneText>,
     /// Whether the lane text renderer last prepared any text, so closing the
     /// last lane prepares it once more, empty.
     lane_labels_prepared: bool,
-    card_image_shared: imgpipe::ImageShared,
+    card_image_shared: ImageSharedLayer,
     card_frames: Vec<inline_cards::CardFrame>,
     card_scene: card_scene::CardScene,
     /// The cards the last frame drew, presented or not: the next frame
@@ -813,7 +825,7 @@ pub struct Renderer {
     card_labels_prepared: bool,
     /// Single-instance overlay pipeline drawn between menu chrome and menu
     /// text, so the receipt thumbnail cannot cover its own status labels.
-    media_receipt_img: imgpipe::ImagePipeline,
+    media_receipt_img: ImageLayer,
     /// Dedicated pipeline for the **background image (wallpaper)**, drawn at
     /// the very back, between the surface clear and the cell/chrome `quads`
     /// pass. Cell backgrounds (selection, syntax, TUI panels), chrome (tab bar /
@@ -821,12 +833,12 @@ pub struct Renderer {
     /// OPAQUELY on top of the wallpaper (the standard kitty / wezterm /
     /// alacritty layering). Inline kitty / sixel images stay in `imgs`, drawn
     /// *after* the quads so they sit over cell backgrounds.
-    bg_imgs: imgpipe::ImagePipeline,
+    bg_imgs: ImageLayer,
     /// Procedural starfield wallpaper (`background-type = starfield`),
     /// drawn in the same back-most slot as `bg_imgs`. Stateless on the GPU side
     /// (just a per-frame uniform); the only state is `starfield_started`.
-    starfield: starfield::StarfieldPipeline,
-    presentation: present::PresentationPipeline,
+    starfield: StarfieldLayer,
+    presentation: PresentLayer,
     /// Playback clock for the starfield drift — `elapsed()` feeds the shader's
     /// continuous `time` so motion is smooth-valued even though we repaint at a
     /// low fps cap.
@@ -2387,19 +2399,14 @@ impl Renderer {
             // Preview pressure cannot prevent a text window. Retry admission
             // on the next actual frame after another preview releases space.
             self.card_posters = self.card_image_shared.layer_with_instance_limit(
-                &self.gpu.device,
+                self.device.handle(),
                 kettle_core::GraphicsBudget::previews(),
                 4096,
             );
         }
         if let Some(posters) = &mut self.card_posters {
-            posters.prepare_frame(&self.gpu.device, &self.card_scene.posters);
-            posters.upload(
-                &self.gpu.device,
-                &self.gpu.queue,
-                [sw, sh],
-                &self.card_scene.posters,
-            );
+            posters.prepare_frame(self.device.handle(), &self.card_scene.posters);
+            posters.upload(self.device.handle(), [sw, sh], &self.card_scene.posters);
             self.card_scene
                 .apply_upload_results(posters.drawn_item_indices());
         } else {
@@ -3814,7 +3821,7 @@ impl Renderer {
 
         // Assemble text areas (panes + tab bar + search).
         self.viewport.update(
-            &self.gpu.queue,
+            self.device.handle(),
             Resolution {
                 width: self.config.width,
                 height: self.config.height,
@@ -3833,8 +3840,8 @@ impl Renderer {
             .and_then(|cursor| cursor.builtin);
         // A mapped instance buffer becomes writable again only through a poll
         // (or a submit) after the frames that drew from it have finished.
-        if self.gpu.mapped_uploads() {
-            let _ = self.gpu.device.poll(wgpu::PollType::Poll);
+        if let Some(gpu) = self.device.gpu().filter(|gpu| gpu.mapped_uploads()) {
+            let _ = gpu.device.poll(wgpu::PollType::Poll);
         }
         // Cell-locked pane text has its OWN damage gate. A cursor blink
         // can force `need_prepare` via `cursor_char_changed` for the separate
@@ -3853,7 +3860,7 @@ impl Renderer {
             self.grid_glyphs_dirty =
                 !self
                     .glyph_pipeline
-                    .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &gi);
+                    .upload(self.device.handle(), [sw, sh], &gi);
             self.glyph_instances = gi;
             self.glyph_clips = gc;
         }
@@ -6019,8 +6026,7 @@ impl Renderer {
         }
         let cursor_glyph = cursor_glyph.or(emoji_cursor);
         self.glyph_pipeline.set_cursor(
-            &self.gpu.device,
-            &self.gpu.queue,
+            self.device.handle(),
             cursor_glyph
                 .as_ref()
                 .map(|(glyphs, rect, range)| (glyphs.as_slice(), *rect, range.clone())),
@@ -6100,8 +6106,7 @@ impl Renderer {
             // frame. Any `?` return leaves the retry latch set for the next
             // redraw.
             self.text_renderer.prepare(
-                &self.gpu.device,
-                &self.gpu.queue,
+                self.device.handle(),
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
@@ -6113,8 +6118,7 @@ impl Renderer {
                 self.text_prepares += 1;
                 let has_preedit = !ime_areas.is_empty();
                 self.ime_text_renderer.prepare(
-                    &self.gpu.device,
-                    &self.gpu.queue,
+                    self.device.handle(),
                     &mut self.font_system,
                     &mut self.atlas,
                     &self.viewport,
@@ -6134,8 +6138,7 @@ impl Renderer {
                 self.text_prepares += 1;
                 let has_labels = !card_areas.is_empty();
                 self.card_text_renderer.prepare(
-                    &self.gpu.device,
-                    &self.gpu.queue,
+                    self.device.handle(),
                     &mut self.font_system,
                     &mut self.atlas,
                     &self.viewport,
@@ -6149,8 +6152,7 @@ impl Renderer {
                 self.text_prepares += 1;
                 let has_labels = !lane_areas.is_empty();
                 self.lane_text_renderer.prepare(
-                    &self.gpu.device,
-                    &self.gpu.queue,
+                    self.device.handle(),
                     &mut self.font_system,
                     &mut self.atlas,
                     &self.viewport,
@@ -6164,8 +6166,7 @@ impl Renderer {
                 self.text_prepares += 1;
                 let has_labels = !confirmation_areas.is_empty();
                 self.confirmation_text_renderer.prepare(
-                    &self.gpu.device,
-                    &self.gpu.queue,
+                    self.device.handle(),
                     &mut self.font_system,
                     &mut self.atlas,
                     &self.viewport,
@@ -6175,8 +6176,7 @@ impl Renderer {
                 self.confirmation_labels_prepared = has_labels;
             }
             self.menu_text_renderer.prepare(
-                &self.gpu.device,
-                &self.gpu.queue,
+                self.device.handle(),
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
@@ -6187,19 +6187,14 @@ impl Renderer {
             // chrome and the next level. Renderers past the open levels are
             // kept for reuse and are not drawn.
             while self.menu_level_text.len() < menu_level_areas.len() {
-                self.menu_level_text.push(TextRenderer::new(
-                    &mut self.atlas,
-                    &self.gpu.device,
-                    wgpu::MultisampleState::default(),
-                    None,
-                ));
+                self.menu_level_text
+                    .push(TextRenderer::new(&mut self.atlas, self.device.handle()));
             }
             for (renderer, areas) in self.menu_level_text.iter_mut().zip(menu_level_areas) {
                 self.chrome_prepares += 1;
                 self.text_prepares += 1;
                 renderer.prepare(
-                    &self.gpu.device,
-                    &self.gpu.queue,
+                    self.device.handle(),
                     &mut self.font_system,
                     &mut self.atlas,
                     &self.viewport,
@@ -6277,8 +6272,7 @@ impl Renderer {
             };
             self.text_prepares += 1;
             self.cursor_glyph_renderer.prepare(
-                &self.gpu.device,
-                &self.gpu.queue,
+                self.device.handle(),
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
@@ -6293,8 +6287,7 @@ impl Renderer {
                     .is_none_or(|marks| !marks.has_room(gmarks))
                 {
                     self.cursor_marks = Some(cursor_marks::CursorMarks::new(
-                        &self.gpu.device,
-                        &self.gpu.queue,
+                        self.device.handle(),
                         &self.glyphon_cache,
                         self.config.format,
                         &mut self.font_system,
@@ -6303,8 +6296,7 @@ impl Renderer {
                 if let Some(marks) = self.cursor_marks.as_mut() {
                     self.text_prepares += 1;
                     marks.prepare(
-                        &self.gpu.device,
-                        &self.gpu.queue,
+                        self.device.handle(),
                         &mut self.font_system,
                         &mut self.swash,
                         &self.viewport,
@@ -6332,17 +6324,16 @@ impl Renderer {
             self.text_prepare_dirty = false;
         }
         self.pane_bases
-            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &pane_bases);
-        self.quads
-            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &quads);
+            .upload(self.device.handle(), [sw, sh], &pane_bases);
+        self.quads.upload(self.device.handle(), [sw, sh], &quads);
         self.pane_dimming
-            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &pane_dim);
+            .upload(self.device.handle(), [sw, sh], &pane_dim);
         self.text_decorations
-            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &decorations);
+            .upload(self.device.handle(), [sw, sh], &decorations);
         self.ime_quads
-            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &ime_q);
+            .upload(self.device.handle(), [sw, sh], &ime_q);
         self.pane_outlines
-            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &pane_outlines);
+            .upload(self.device.handle(), [sw, sh], &pane_outlines);
         // Return the scratch to the pool (keeps its capacity for next
         // frame). Last use of `quads` is the upload just above.
         self.quad_scratch = quads;
@@ -6350,46 +6341,32 @@ impl Renderer {
         // `imgs`. Prepare all layers before uploading: protect their complete
         // draw lists, transfer only needed exact-size retired textures, and
         // release the rest before admitting new allocations.
-        self.card_base.upload(
-            &self.gpu.device,
-            &self.gpu.queue,
-            [sw, sh],
-            &self.card_scene.base,
-        );
-        self.card_cursors.upload(
-            &self.gpu.device,
-            &self.gpu.queue,
-            [sw, sh],
-            &self.card_scene.cursors,
-        );
-        self.card_decoration.upload(
-            &self.gpu.device,
-            &self.gpu.queue,
-            [sw, sh],
-            &self.card_scene.decoration,
-        );
-        self.bg_imgs.prepare_frame(&self.gpu.device, &bg_img_items);
-        self.imgs.prepare_frame(&self.gpu.device, &img_items);
+        self.card_base
+            .upload(self.device.handle(), [sw, sh], &self.card_scene.base);
+        self.card_cursors
+            .upload(self.device.handle(), [sw, sh], &self.card_scene.cursors);
+        self.card_decoration
+            .upload(self.device.handle(), [sw, sh], &self.card_scene.decoration);
+        self.bg_imgs
+            .prepare_frame(self.device.handle(), &bg_img_items);
+        self.imgs.prepare_frame(self.device.handle(), &img_items);
         self.media_receipt_img
-            .prepare_frame(&self.gpu.device, &media_receipt_items);
+            .prepare_frame(self.device.handle(), &media_receipt_items);
         if self.lane_img.is_none() && !lane_items.is_empty() {
             // Preview pressure cannot prevent a frame: without room a lane
             // paints its frame and text, and tries again next frame.
             self.lane_img = self.card_image_shared.layer_with_instance_limit(
-                &self.gpu.device,
+                self.device.handle(),
                 kettle_core::GraphicsBudget::previews(),
                 MAX_LANE_IMAGES,
             );
         }
         if let Some(lanes) = &mut self.lane_img {
-            lanes.prepare_frame(&self.gpu.device, &lane_items);
+            lanes.prepare_frame(self.device.handle(), &lane_items);
         }
-        let wallpaper_upload_complete = self.bg_imgs.upload_retained(
-            &self.gpu.device,
-            &self.gpu.queue,
-            [sw, sh],
-            &bg_img_items,
-        );
+        let wallpaper_upload_complete =
+            self.bg_imgs
+                .upload_retained(self.device.handle(), [sw, sh], &bg_img_items);
         opaque_wallpaper_covers_surface &= wallpaper_upload_complete;
         // Refresh the procedural starfield's per-frame uniform (just
         // resolution + the continuous `time` clock; the look is baked into the
@@ -6399,52 +6376,39 @@ impl Renderer {
             kettle_config::BackgroundType::Starfield
         ) {
             self.starfield.upload(
-                &self.gpu.queue,
+                self.device.handle(),
                 [sw, sh],
                 starfield_time(cfg.background_animation, self.starfield_started.elapsed()),
             );
         }
-        self.imgs
-            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &img_items);
-        self.media_receipt_img.upload(
-            &self.gpu.device,
-            &self.gpu.queue,
-            [sw, sh],
-            &media_receipt_items,
-        );
+        self.imgs.upload(self.device.handle(), [sw, sh], &img_items);
+        self.media_receipt_img
+            .upload(self.device.handle(), [sw, sh], &media_receipt_items);
         if let Some(lanes) = &mut self.lane_img {
-            lanes.upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &lane_items);
+            lanes.upload(self.device.handle(), [sw, sh], &lane_items);
         }
         self.lane_quads
-            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &lane_q);
+            .upload(self.device.handle(), [sw, sh], &lane_q);
         if let Some(viewer) = overlay.media_viewer_rect {
             quad::exclude_rect(&mut over, viewer);
         }
         self.overlay_quads
-            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &over);
+            .upload(self.device.handle(), [sw, sh], &over);
         self.transport_surface_count = transport_surfaces.len() as u32;
         transport_surfaces.extend_from_slice(&settings_surfaces);
         self.settings_surface_count = settings_surfaces.len() as u32;
         transport_surfaces.extend_from_slice(&confirmation_surfaces);
-        self.rounded_surfaces.upload(
-            &self.gpu.device,
-            &self.gpu.queue,
-            [sw, sh],
-            &transport_surfaces,
-        );
+        self.rounded_surfaces
+            .upload(self.device.handle(), [sw, sh], &transport_surfaces);
         self.toast_surfaces
-            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &toast_surfaces);
+            .upload(self.device.handle(), [sw, sh], &toast_surfaces);
         self.menu_surfaces
-            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &menu_surfaces);
-        self.menu_swatch_surfaces.upload(
-            &self.gpu.device,
-            &self.gpu.queue,
-            [sw, sh],
-            &menu_swatches,
-        );
+            .upload(self.device.handle(), [sw, sh], &menu_surfaces);
+        self.menu_swatch_surfaces
+            .upload(self.device.handle(), [sw, sh], &menu_swatches);
         self.menu_level_draws = menu_level_draws;
         self.menu_quads
-            .upload(&self.gpu.device, &self.gpu.queue, [sw, sh], &menu_q);
+            .upload(self.device.handle(), [sw, sh], &menu_q);
 
         let target_size = [self.config.width.max(1), self.config.height.max(1)];
         let scene_is_opaque = final_scene_is_uniformly_opaque(cfg, opaque_wallpaper_covers_surface);
@@ -6479,8 +6443,24 @@ impl Renderer {
             self.presentation.discard_target();
         }
 
-        let mut encoder = self
-            .gpu
+        let gpu = match &self.device {
+            RenderDevice::Gpu(gpu) => gpu.clone(),
+            RenderDevice::Cpu(_) => {
+                return self.submit_cpu_frame(
+                    backend::CpuFrameRequest {
+                        target_size,
+                        cursor_on: overlay.cursor_visible,
+                        needs_presentation,
+                        need_prepare,
+                        scene_facts,
+                        screenshot: screenshot_request,
+                    },
+                    cfg,
+                    pre_present,
+                );
+            }
+        };
+        let mut encoder = gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("kettle-encoder"),
@@ -6611,9 +6591,11 @@ impl Renderer {
         // 6K transient capture. If visible presentation cannot allocate, still
         // submit the already encoded screenshot before scheduling recovery.
         if needs_presentation
-            && !self
-                .presentation
-                .ensure_target(&self.gpu.device, target_size[0], target_size[1])
+            && !self.presentation.ensure_target(
+                backend::DeviceRef::gpu(&gpu.device, &gpu.queue),
+                target_size[0],
+                target_size[1],
+            )
         {
             self.submit_offscreen_screenshot(encoder, prepared_screenshot);
             if need_prepare {
@@ -6625,7 +6607,8 @@ impl Renderer {
         }
         let scene_view = if needs_presentation {
             self.presentation
-                .scene_view()
+                .gpu()
+                .and_then(present::PresentationPipeline::scene_view)
                 .expect("presentation target ensured after surface acquisition")
         } else {
             &surface_view
@@ -6655,12 +6638,14 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            self.presentation.draw(&mut pass);
+            if let Some(presentation) = self.presentation.gpu() {
+                presentation.draw(&mut pass);
+            }
         }
-        let submission = self.gpu.queue.submit(std::iter::once(encoder.finish()));
+        let submission = gpu.queue.submit(std::iter::once(encoder.finish()));
         self.dispatch_prepared_screenshot(prepared_screenshot, submission);
         pre_present();
-        self.gpu.queue.present(frame);
+        gpu.queue.present(frame);
         if reconfigure_after_present {
             self.configure_surface();
         }

@@ -636,14 +636,17 @@ impl ImageItem {
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct Inst {
-    pos: [f32; 2],
-    size: [f32; 2],
-    uv_origin: [f32; 2],
-    uv_size: [f32; 2],
+pub(crate) struct Inst {
+    pub(crate) pos: [f32; 2],
+    pub(crate) size: [f32; 2],
+    pub(crate) uv_origin: [f32; 2],
+    pub(crate) uv_size: [f32; 2],
     // Crop pixel centers; a negative minimum leaves repeat sampling unclamped.
-    uv_clamp: [f32; 4],
+    pub(crate) uv_clamp: [f32; 4],
 }
+
+/// One image quad as the image shader consumes it.
+pub(crate) type ImageInstance = Inst;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -1560,6 +1563,203 @@ impl ImagePipeline {
                 self.reusable.entry(size).or_default().push(cached);
             }
         }
+    }
+}
+
+/// The CPU backend's image layer: [`ImagePipeline`]'s admission, instance and
+/// draw rules, with each image's own pixels as its texture.
+///
+/// `ImageData` already holds sRGB RGBA8 in CPU memory, so the layer keeps a
+/// reference to it in place of a texture copy. It charges the graphics budget
+/// what the GPU layer charges for the same frame (its uniform, its instance
+/// buffer and one texture per live image), so a CPU window admits exactly the
+/// images a GPU window would.
+pub(crate) struct CpuImageLayer {
+    budget: GraphicsBudget,
+    max_instances: usize,
+    _screen: GraphicsReservation,
+    instance_reservation: GraphicsReservation,
+    cap: usize,
+    instances: Vec<Inst>,
+    textures: HashMap<usize, (ImageData, GraphicsReservation)>,
+    draws: Vec<(usize, bool, u32, u32)>,
+    last_dropped_warn: Option<usize>,
+    retained_key: Option<u64>,
+}
+
+impl CpuImageLayer {
+    /// A layer drawing at most `max_instances` images a frame, or `None` as
+    /// [`ImageShared::layer_with_instance_limit`] refuses one.
+    pub(crate) fn new(budget: GraphicsBudget, max_instances: usize) -> Option<Self> {
+        if max_instances == 0 {
+            return None;
+        }
+        let screen = budget.reserve_gpu(std::mem::size_of::<Screen>())?;
+        let cap = 64.min(max_instances);
+        let instance_reservation =
+            budget.reserve_gpu(cap.checked_mul(std::mem::size_of::<Inst>())?)?;
+        Some(Self {
+            budget,
+            max_instances,
+            _screen: screen,
+            instance_reservation,
+            cap,
+            instances: Vec::new(),
+            textures: HashMap::new(),
+            draws: Vec::new(),
+            last_dropped_warn: None,
+            retained_key: None,
+        })
+    }
+
+    /// Release the textures of images `items` no longer draw, as
+    /// [`ImagePipeline::prepare_frame`] retires them.
+    pub(crate) fn prepare_frame(&mut self, items: &[ImageItem]) {
+        let live: HashSet<usize> = items
+            .iter()
+            .take(self.max_instances)
+            .map(|item| item.image.allocation_key())
+            .collect();
+        self.textures.retain(|key, _| live.contains(key));
+    }
+
+    pub(crate) fn upload(&mut self, items: &[ImageItem]) {
+        self.retained_key = None;
+        let _ = self.upload_inner(items);
+    }
+
+    pub(crate) fn upload_retained(&mut self, screen: [f32; 2], items: &[ImageItem]) -> bool {
+        let key = retained_upload_key(screen, items);
+        if self.retained_key == Some(key) {
+            return true;
+        }
+        let complete = self.upload_inner(items);
+        self.retained_key = complete.then_some(key);
+        complete
+    }
+
+    /// [`ImagePipeline::upload_inner`], with an image's pixels as its
+    /// texture.
+    fn upload_inner(&mut self, items: &[ImageItem]) -> bool {
+        self.draws.clear();
+        if items.is_empty() {
+            self.last_dropped_warn = None;
+            self.instances.clear();
+            return true;
+        }
+        let item_count = capped_instance_count(items.len(), self.max_instances);
+        let dropped = items.len() - item_count;
+        let (should_warn, next_warn_state) =
+            dropped_warn_transition(dropped, self.last_dropped_warn);
+        self.last_dropped_warn = next_warn_state;
+        if should_warn {
+            log::warn!(
+                "skipping {dropped} image placement(s): per-frame budget of {} exceeded ({} requested this frame)",
+                self.max_instances,
+                items.len()
+            );
+        }
+        if item_count > self.cap {
+            let Some(next_cap) = item_count.checked_next_power_of_two() else {
+                log::warn!("image instance count overflow; skipping frame images");
+                return false;
+            };
+            let next_cap = next_cap.min(self.max_instances);
+            let Some(bytes) = next_cap.checked_mul(std::mem::size_of::<Inst>()) else {
+                log::warn!("image instance buffer size overflow; skipping frame images");
+                return false;
+            };
+            let Some(reservation) = self.budget.reserve_gpu(bytes) else {
+                log::warn!("image instance buffer growth exceeds the graphics budget");
+                return false;
+            };
+            self.instance_reservation = reservation;
+            self.cap = next_cap;
+        }
+        self.instances.clear();
+        let mut complete = true;
+        for (i, item) in items.iter().take(item_count).enumerate() {
+            let uv = item
+                .uv_override
+                .or_else(|| source_uv(&item.image, item.source_rect, item.source_crop));
+            let Some((uv_origin, uv_size)) = uv else {
+                self.instances.push(Inst::zeroed());
+                log::warn!("skipping image placement with an invalid source rectangle");
+                continue;
+            };
+            let Some(mut instance) =
+                clipped_instance(item.rect, uv_origin, uv_size, item.clip_rect)
+            else {
+                self.instances.push(Inst::zeroed());
+                continue;
+            };
+            instance.uv_clamp = item.uv_clamp();
+            self.instances.push(instance);
+            if let Some(key) = self.ensure_texture(&item.image) {
+                record_draw(&mut self.draws, key, item.repeat, i as u32);
+            } else {
+                complete = false;
+            }
+        }
+        complete
+    }
+
+    fn ensure_texture(&mut self, img: &ImageData) -> Option<usize> {
+        let Some(texture_bytes) = valid_texture_bytes(
+            img,
+            crate::backend::CPU_MAX_TEXTURE_DIMENSION,
+            self.budget.limits().image_bytes,
+        ) else {
+            log::warn!(
+                "skipping {}x{} image: {} bytes exceeds/mismatches texture dimensions or budget",
+                img.width,
+                img.height,
+                img.byte_len()
+            );
+            return None;
+        };
+        let key = img.allocation_key();
+        if !self.textures.contains_key(&key) {
+            let Some(reservation) = self.budget.reserve_gpu(texture_bytes) else {
+                log::warn!("skipping image texture: graphics budget exhausted");
+                return None;
+            };
+            self.textures.insert(key, (img.clone(), reservation));
+        }
+        Some(key)
+    }
+
+    pub(crate) fn drawn_item_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.draws
+            .iter()
+            .flat_map(|(_, _, first, count)| *first..first.saturating_add(*count))
+            .map(|index| index as usize)
+    }
+
+    pub(crate) fn has_draws(&self) -> bool {
+        !self.draws.is_empty()
+    }
+
+    pub(crate) fn drawn_rects(&self) -> Vec<[f32; 4]> {
+        self.drawn_item_indices()
+            .filter_map(|index| self.instances.get(index))
+            .map(|inst| [inst.pos[0], inst.pos[1], inst.size[0], inst.size[1]])
+            .collect()
+    }
+
+    /// Each draw: its instances, the image it samples, and whether it
+    /// repeats, in the order [`ImagePipeline::draw`] issues them.
+    pub(crate) fn draws(&self) -> impl Iterator<Item = (&[Inst], &ImageData, bool)> + '_ {
+        self.draws
+            .iter()
+            .filter_map(|&(key, repeat, first, count)| {
+                let (image, _) = self.textures.get(&key)?;
+                let instances = crate::backend::cpu::instance_slice(
+                    &self.instances,
+                    first..first.saturating_add(count),
+                );
+                Some((instances, image, repeat))
+            })
     }
 }
 

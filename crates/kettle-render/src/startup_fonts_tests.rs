@@ -18,17 +18,19 @@ fn the_renderer_takes_over_matching_startup_fonts() {
             .0
             .to_owned()
     };
-    // Every constructor, windowed or headless, ends in `with_gpu`, which
-    // takes its fonts over through `take_over_fonts`.
-    let constructor = body("fn with_gpu(", "\n    }\n");
-    assert_eq!(
-        constructor
-            .matches("let fonts = take_over_fonts(fonts, cfg, scale);")
-            .count(),
-        1
-    );
-    assert!(!constructor.contains("StartupFonts::load("));
-    assert!(!constructor.contains("FontSystem::new()"));
+    // Every constructor, windowed or headless, ends in `with_gpu` or
+    // `with_cpu`, and both take their fonts over the same way.
+    for constructor in ["fn with_gpu(", "pub(crate) fn with_cpu("] {
+        let constructor = body(constructor, "\n    }\n");
+        assert_eq!(
+            constructor
+                .matches("let fonts = take_over_fonts(fonts, cfg, scale);")
+                .count(),
+            1
+        );
+        assert!(!constructor.contains("StartupFonts::load("));
+        assert!(!constructor.contains("FontSystem::new()"));
+    }
     let take_over = body("fn take_over_fonts(", "\n}\n");
     assert!(take_over.contains("Some(fonts) if fonts.matches(cfg, scale) => fonts,"));
     assert!(take_over.contains("Some(fonts) => fonts.remeasure(cfg, scale),"));

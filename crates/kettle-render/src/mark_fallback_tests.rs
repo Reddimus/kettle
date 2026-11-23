@@ -549,8 +549,8 @@ fn moved_mark_and_builtin_cursor_transitions_keep_the_current_patch() {
         };
         eprintln!(
             "MARK_BUILTIN_GPU: mapping={allow_mapping}, mapped={}, {:?}",
-            renderer.gpu.mapped_uploads(),
-            renderer.gpu.adapter_info()
+            renderer.gpu().mapped_uploads(),
+            renderer.gpu().adapter_info()
         );
         let mut snap = snapshot_of(32, 3, "#\u{301}\x1b[1;21H\u{2592}\x1b[1;1H".as_bytes());
         frame_of_snapshot(&mut renderer, &cfg, &snap);

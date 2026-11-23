@@ -675,10 +675,13 @@ impl Renderer {
         layer: std::ptr::NonNull<std::ffi::c_void>,
     ) -> anyhow::Result<()> {
         self.cursor_layer = None;
+        let Some(gpu) = self.device.gpu() else {
+            return Err(anyhow!("a CPU renderer presents no cursor layer"));
+        };
         let target = wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(layer.as_ptr());
         // SAFETY: the caller guarantees `layer` is a live CAMetalLayer.
-        let surface = unsafe { self.gpu.instance.create_surface_unsafe(target) }?;
-        let caps = surface.get_capabilities(&self.gpu.adapter);
+        let surface = unsafe { gpu.instance.create_surface_unsafe(target) }?;
+        let caps = surface.get_capabilities(&gpu.adapter);
         // The main surface's format when the layer takes it, so both layers
         // hold the same pixel format; otherwise the layer's first sRGB one.
         let format = if caps.formats.contains(&self.config.format) {
@@ -740,7 +743,10 @@ impl Renderer {
         if !self.has_cursor_layer() {
             return CursorPatchOutcome::Ineligible(CursorPatchIneligible::NoLayer);
         }
-        let info = self.gpu.adapter.get_info();
+        // A CPU renderer never has a layer, so it returned above.
+        let Some(info) = self.device.gpu().map(|gpu| gpu.adapter.get_info()) else {
+            return CursorPatchOutcome::Ineligible(CursorPatchIneligible::NoLayer);
+        };
         if !measured_layer_adapter(&info.name, info.backend) {
             return CursorPatchOutcome::Ineligible(CursorPatchIneligible::UnmeasuredGpu);
         }
@@ -761,14 +767,14 @@ impl Renderer {
         facts: &SceneFacts,
         cfg: &Config,
     ) -> Result<(), CursorPatchFailure> {
+        let Some(gpu) = self.device.gpu().cloned() else {
+            return Err(CursorPatchFailure::Lost);
+        };
         let Some(layer) = self.cursor_layer.as_mut() else {
             return Err(CursorPatchFailure::Lost);
         };
-        let scope = self
-            .gpu
-            .device
-            .push_error_scope(wgpu::ErrorFilter::Validation);
-        layer.fit(&self.gpu.device, rect.width, rect.height);
+        let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        layer.fit(&gpu.device, rect.width, rect.height);
         if let Some(error) = pollster::block_on(scope.pop()) {
             log::warn!("cursor layer configure failed: {error}");
             layer.configured = None;
@@ -802,7 +808,7 @@ impl Renderer {
         // A failed submission must discard the acquired drawable. The layer
         // keeps its old contents; C2 hides it until a new Presented result.
         self.submit_cursor_patch(rect, facts, cfg, &view, format)?;
-        self.gpu.queue.present(frame);
+        gpu.queue.present(frame);
         Ok(())
     }
 
@@ -826,19 +832,18 @@ impl Renderer {
         view: &wgpu::TextureView,
         format: wgpu::TextureFormat,
     ) -> Result<(), CursorPatchFailure> {
-        let scope = self
-            .gpu
-            .device
-            .push_error_scope(wgpu::ErrorFilter::Validation);
+        let Some(gpu) = self.device.gpu().cloned() else {
+            return Err(CursorPatchFailure::Lost);
+        };
+        let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let result = (|| {
-            let mut encoder =
-                self.gpu
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("kettle-cursor-patch-encoder"),
-                    });
+            let mut encoder = gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("kettle-cursor-patch-encoder"),
+                });
             self.encode_cursor_patch(rect, facts, cfg, view, format, &mut encoder)?;
-            self.gpu.queue.submit(std::iter::once(encoder.finish()));
+            gpu.queue.submit(std::iter::once(encoder.finish()));
             Ok(())
         })();
         let validation = pollster::block_on(scope.pop());
@@ -1049,12 +1054,15 @@ impl Renderer {
         format: wgpu::TextureFormat,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Result<(), CursorPatchFailure> {
+        let Some(gpu) = self.device.gpu() else {
+            return Err(CursorPatchFailure::Lost);
+        };
         let patch = self
             .cursor_patch
-            .get_or_insert_with(|| PatchPipeline::new(&self.gpu.device));
-        patch.ensure_pipeline(&self.gpu.device, format);
+            .get_or_insert_with(|| PatchPipeline::new(&gpu.device));
+        patch.ensure_pipeline(&gpu.device, format);
         if !patch.ensure_targets(
-            &self.gpu.device,
+            &gpu.device,
             &self.graphics_budget,
             self.config.format,
             rect.width,
@@ -1103,15 +1111,15 @@ impl Renderer {
     ) -> Result<PatchCapture, CursorPatchIneligible> {
         let (rect, facts) = self.plan_cursor_patch(cfg)?;
         let format = self.config.format;
-        let target = readable_target(&self.gpu.device, format, rect.width, rect.height);
+        let target = readable_target(&self.gpu().device, format, rect.width, rect.height);
         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
-            .gpu
+            .gpu()
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         self.encode_cursor_patch(rect, &facts, cfg, &view, format, &mut encoder)
             .expect("the patch encodes");
-        let bytes = read_texture(&self.gpu.device, &self.gpu.queue, &target, encoder);
+        let bytes = read_texture(&self.gpu().device, &self.gpu().queue, &target, encoder);
         let pixels =
             image::RgbaImage::from_raw(rect.width, rect.height, bytes).expect("the patch is RGBA");
         Ok(PatchCapture { rect, pixels })
@@ -1126,7 +1134,7 @@ impl Renderer {
         cursor_on: bool,
     ) -> image::RgbaImage {
         let (target, encoder) = self.scene_target_for_tests(cfg, rect, cursor_on, Some(rect));
-        let bytes = read_texture(&self.gpu.device, &self.gpu.queue, &target, encoder);
+        let bytes = read_texture(&self.gpu().device, &self.gpu().queue, &target, encoder);
         image::RgbaImage::from_raw(rect.width, rect.height, bytes).expect("the window is RGBA")
     }
 
@@ -1139,14 +1147,14 @@ impl Renderer {
     ) -> (wgpu::Texture, wgpu::CommandEncoder) {
         let facts = self.last_scene.expect("a frame was rendered");
         let target = readable_target(
-            &self.gpu.device,
+            &self.gpu().device,
             self.config.format,
             rect.width,
             rect.height,
         );
         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
-            .gpu
+            .gpu()
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         self.encode_gpu_scene_pass(
@@ -1176,11 +1184,11 @@ impl Renderer {
         let output =
             if facts.alpha_mode == wgpu::CompositeAlphaMode::PostMultiplied && facts.translucent {
                 let mut presentation = crate::present::PresentationPipeline::new(
-                    &self.gpu.device,
+                    &self.gpu().device,
                     self.config.format,
                     self.graphics_budget.clone(),
                 );
-                assert!(presentation.ensure_target(&self.gpu.device, rect.width, rect.height));
+                assert!(presentation.ensure_target(&self.gpu().device, rect.width, rect.height));
                 self.encode_gpu_scene_pass(
                     presentation.scene_view().expect("presentation target"),
                     facts.target_size,
@@ -1191,7 +1199,7 @@ impl Renderer {
                 )
                 .expect("live scene renders");
                 let target = readable_target(
-                    &self.gpu.device,
+                    &self.gpu().device,
                     self.config.format,
                     rect.width,
                     rect.height,
@@ -1220,7 +1228,7 @@ impl Renderer {
             } else {
                 scene
             };
-        let mut bytes = read_texture(&self.gpu.device, &self.gpu.queue, &output, encoder);
+        let mut bytes = read_texture(&self.gpu().device, &self.gpu().queue, &output, encoder);
         // What each surface shows: PreMultiplied and PostMultiplied present
         // these bytes as they are (the latter after its presentation pass
         // above), and an Opaque surface ignores their alpha.
@@ -1656,9 +1664,7 @@ mod tests {
         let record = frame
             .rfind("self.last_scene = Some(scene_facts);")
             .expect("record");
-        let present = frame
-            .find("self.gpu.queue.present(frame);")
-            .expect("present");
+        let present = frame.find("gpu.queue.present(frame);").expect("present");
         let outcome = frame.find("Ok(FrameOutcome::Presented)").expect("outcome");
         assert!(present < record && record < outcome);
         let headless = frame
@@ -1702,9 +1708,7 @@ mod tests {
             .expect("arm body");
         assert!(validation_arm.contains("layer.configured = None;"));
         let submit = layer.find("self.submit_cursor_patch(").expect("submit");
-        let present = layer
-            .find("self.gpu.queue.present(frame);")
-            .expect("present");
+        let present = layer.find("gpu.queue.present(frame);").expect("present");
         assert!(submit < present);
         assert!(
             layer[submit..present].contains("?;"),
@@ -1825,7 +1829,7 @@ mod tests {
             width: 16,
             height: 16,
         };
-        let target = readable_target(&renderer.gpu.device, renderer.config.format, 16, 16);
+        let target = readable_target(&renderer.gpu().device, renderer.config.format, 16, 16);
         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
         // Pipeline format mismatches the drawable. wgpu rejects the combine
         // pass at encoding/submit without returning a synchronous Result.
@@ -1851,12 +1855,12 @@ mod tests {
         let Some((renderer, _cfg)) = crate::headless_tests::renderer(320, 120) else {
             return;
         };
-        let patch = PatchPipeline::new(&renderer.gpu.device);
-        let target = readable_target(&renderer.gpu.device, renderer.config.format, 1, 1);
+        let patch = PatchPipeline::new(&renderer.gpu().device);
+        let target = readable_target(&renderer.gpu().device, renderer.config.format, 1, 1);
         let view = target.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = patch.bind_group(&renderer.gpu.device, &view, &view);
+        let bind_group = patch.bind_group(&renderer.gpu().device, &view, &view);
         let mut encoder = renderer
-            .gpu
+            .gpu()
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         assert_eq!(
@@ -1894,7 +1898,7 @@ mod tests {
     // Parity exercises only the rasterizers with recorded crop probes. WARP
     // still runs portable eligibility and combine tests, but cannot present.
     fn measured_parity_adapter(renderer: &Renderer) -> bool {
-        let info = renderer.gpu.adapter.get_info();
+        let info = renderer.gpu().adapter.get_info();
         measured_layer_adapter(&info.name, info.backend)
             || (info.backend == wgpu::Backend::Vulkan
                 && info.device_type == wgpu::DeviceType::Cpu
@@ -2701,7 +2705,7 @@ mod tests {
             eprintln!("no GPU adapter on this host; skipped");
             return;
         };
-        let info = renderer.gpu.adapter.get_info();
+        let info = renderer.gpu().adapter.get_info();
         if !measured_layer_adapter(&info.name, info.backend) {
             eprintln!("unmeasured Metal adapter; layer presentation not run");
             return;

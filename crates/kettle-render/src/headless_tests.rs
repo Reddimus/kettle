@@ -394,7 +394,7 @@ fn a_renderer_compiles_each_distinct_pipeline_once() {
     let mut quads: Vec<&wgpu::RenderPipeline> = replacing
         .iter()
         .chain(&blending)
-        .map(|layer| layer.pipeline())
+        .map(|layer| layer.gpu().expect("a GPU layer").pipeline())
         .collect();
     quads.sort();
     quads.dedup();
@@ -402,7 +402,8 @@ fn a_renderer_compiles_each_distinct_pipeline_once() {
     assert!(
         blending
             .iter()
-            .all(|layer| layer.pipeline() == blending[0].pipeline())
+            .all(|layer| layer.gpu().map(|l| l.pipeline())
+                == blending[0].gpu().map(|l| l.pipeline()))
     );
     let image_layers = [
         &renderer.imgs,
@@ -413,8 +414,10 @@ fn a_renderer_compiles_each_distinct_pipeline_once() {
         &renderer.media_receipt_img,
         &renderer.bg_imgs,
     ];
-    let mut images: Vec<&wgpu::RenderPipeline> =
-        image_layers.iter().map(|layer| layer.pipeline()).collect();
+    let mut images: Vec<&wgpu::RenderPipeline> = image_layers
+        .iter()
+        .map(|layer| layer.gpu().expect("a GPU layer").pipeline())
+        .collect();
     images.sort();
     images.dedup();
     assert_eq!(images.len(), 1, "all image layers share one pipeline");
@@ -443,7 +446,7 @@ fn a_blink_changes_no_uploaded_quads_and_prepares_no_text() {
         };
         if !allow_mapping {
             assert!(
-                !renderer.gpu.mapped_uploads(),
+                !renderer.gpu().mapped_uploads(),
                 "the forced queue device has no mapped uploads"
             );
         }
@@ -503,7 +506,7 @@ fn a_steady_frame_writes_nothing_and_a_change_writes_only_the_difference() {
         };
         if !allow_mapping {
             assert!(
-                !renderer.gpu.mapped_uploads(),
+                !renderer.gpu().mapped_uploads(),
                 "the forced queue device has no mapped uploads"
             );
         }
@@ -566,10 +569,10 @@ fn printing_writes_nothing_through_the_queue_on_shared_memory() {
         eprintln!("no GPU adapter on this host; skipped");
         return;
     };
-    let info = renderer.gpu.adapter.get_info();
+    let info = renderer.gpu().adapter.get_info();
     // The production policy decides, so a host it keeps on the queue
     // (Windows, a discrete GPU, GL) skips rather than fails.
-    let shared = upload::mapped_upload_features(&renderer.gpu.adapter)
+    let shared = upload::mapped_upload_features(&renderer.gpu().adapter)
         .contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS);
     if !shared {
         eprintln!(
@@ -579,7 +582,7 @@ fn printing_writes_nothing_through_the_queue_on_shared_memory() {
         return;
     }
     assert!(
-        renderer.gpu.mapped_uploads(),
+        renderer.gpu().mapped_uploads(),
         "the shared-memory device enabled mapped uploads"
     );
     let first = snapshot_of(20, 4, b"line 1\r\n");
@@ -911,13 +914,21 @@ fn the_glyph_ring_outgrows_its_first_buffer() {
     .expect("glyph pipeline");
     let screen = [64.0, 32.0];
     let glyph = <GlyphInstance as bytemuck::Zeroable>::zeroed();
-    glyphs.upload(&device, &queue, screen, &[glyph]);
+    glyphs.upload(
+        crate::backend::DeviceRef::gpu(&device, &queue),
+        screen,
+        &[glyph],
+    );
     let size = std::mem::size_of::<GlyphInstance>() as u64;
     assert!(
         100 * size > 4096,
         "100 instances outgrow the first 4 KiB buffer"
     );
-    glyphs.upload(&device, &queue, screen, &[glyph; 100]);
+    glyphs.upload(
+        crate::backend::DeviceRef::gpu(&device, &queue),
+        screen,
+        &[glyph; 100],
+    );
     let counts = glyphs.upload_counts();
     assert_eq!(
         (
@@ -1080,9 +1091,17 @@ fn every_pipeline_skips_an_unchanged_upload() {
         GlyphPipeline::new_with_budget(&device, format, kettle_core::GraphicsBudget::default())
             .expect("glyph pipeline");
     let glyph = [<GlyphInstance as bytemuck::Zeroable>::zeroed()];
-    glyphs.upload(&device, &queue, screen, &glyph);
+    glyphs.upload(
+        crate::backend::DeviceRef::gpu(&device, &queue),
+        screen,
+        &glyph,
+    );
     let first = writes(glyphs.upload_counts());
-    glyphs.upload(&device, &queue, screen, &glyph);
+    glyphs.upload(
+        crate::backend::DeviceRef::gpu(&device, &queue),
+        screen,
+        &glyph,
+    );
     assert_eq!(
         writes(glyphs.upload_counts()),
         first + 1,
@@ -1274,9 +1293,9 @@ fn the_blink_phase_reaches_only_the_draw() {
     );
     assert_eq!(
         src.matches("overlay.cursor_visible").count(),
-        3,
-        "only the live and the capture scene passes read the phase, and the \
-         frame records it for a cursor-layer hand-off"
+        4,
+        "only the live, the capture and the CPU scene passes read the phase, \
+         and the frame records it for a cursor-layer hand-off"
     );
     assert!(src.contains("cursor_on: overlay.cursor_visible,"));
     let scene = src
@@ -3614,7 +3633,7 @@ fn horizontal_translucent_active_surface_matches_terminal_pixels() {
             }
         }
     }
-    eprintln!("TAB_SURFACE_GPU_PASS: {:?}", renderer.gpu.adapter_info());
+    eprintln!("TAB_SURFACE_GPU_PASS: {:?}", renderer.gpu().adapter_info());
 }
 
 #[test]
@@ -4190,7 +4209,7 @@ fn grapheme_positive_scalars_do_not_displace_the_next_cell_in_either_renderer() 
             "{mode:?} must keep X at column 2"
         );
     }
-    eprintln!("GRAPHEME_GPU_PASS: {:?}", renderer.gpu.adapter_info());
+    eprintln!("GRAPHEME_GPU_PASS: {:?}", renderer.gpu().adapter_info());
 }
 
 #[test]
@@ -4321,7 +4340,7 @@ fn grapheme_vs15_prefers_a_monochrome_face() {
             .count();
         eprintln!(
             "GRAPHEME_VS15_GPU: colored={colored} ink={ink} adapter={:?}",
-            renderer.gpu.adapter_info()
+            renderer.gpu().adapter_info()
         );
         assert!(ink > 0, "text glyph must be visible");
         assert_eq!(
@@ -4378,7 +4397,7 @@ fn grapheme_unsupported_zwj_emoji_uses_one_image_and_keeps_the_next_cell_clear()
             .count();
         eprintln!(
             "GRAPHEME_ZWJ_GPU: visible_images={visible} adapter={:?}",
-            renderer.gpu.adapter_info()
+            renderer.gpu().adapter_info()
         );
         assert_eq!(
             visible, 1,
@@ -4562,7 +4581,7 @@ fn grapheme_replacement_stays_consistent_under_a_cursor_on_cached_frames() {
     }
     eprintln!(
         "GRAPHEME_CURSOR_GPU_PASS: {:?}",
-        renderer.gpu.adapter_info()
+        renderer.gpu().adapter_info()
     );
 }
 
@@ -4643,7 +4662,7 @@ fn grapheme_prefixes_keep_the_first_spacing_glyph_visible_in_its_cell() {
     }
     eprintln!(
         "GRAPHEME_PREFIX_GPU_PASS: {:?}",
-        renderer.gpu.adapter_info()
+        renderer.gpu().adapter_info()
     );
 }
 
@@ -4713,7 +4732,7 @@ fn grapheme_prefix_cursor_anchors_the_spacing_glyph_on_cached_frames() {
     }
     eprintln!(
         "GRAPHEME_PREFIX_CURSOR_GPU_PASS: {:?}",
-        renderer.gpu.adapter_info()
+        renderer.gpu().adapter_info()
     );
 }
 
@@ -5006,7 +5025,10 @@ fn special_attribute_colors_render_only_when_enabled_and_override_ansi_on_reques
             );
         }
     }
-    eprintln!("SPECIAL_COLOR_GPU_PASS: {:?}", renderer.gpu.adapter_info());
+    eprintln!(
+        "SPECIAL_COLOR_GPU_PASS: {:?}",
+        renderer.gpu().adapter_info()
+    );
 }
 
 #[test]
