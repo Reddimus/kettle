@@ -1826,7 +1826,15 @@ impl App {
         );
         let exit_frames = &layer.exit_frames;
         serde_json::json!({
-            "renderer": if layer.is_active() { "layer" } else { "gpu" },
+            // Who draws the cursor: the macOS layer, or the frame renderer
+            // (`gpu`, or `cpu` for a window drawn on the CPU).
+            "renderer": if layer.is_active() {
+                "layer"
+            } else {
+                ws.renderer
+                    .as_ref()
+                    .map_or("gpu", |renderer| renderer.backend().as_str())
+            },
             "layer_rect": layer.active().map(|(_, _, rect)| rect),
             "phase_on": phase_on,
             "next_edge_ms": next_edge

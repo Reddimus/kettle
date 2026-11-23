@@ -337,7 +337,7 @@ fn window_one_takes_the_vulkan_instance_started_after_the_config() {
         .expect("config loaded");
     let start = run
         .find(
-            "kettle_render::EarlyGpuInstance::start(&initial_cfg, event_loop.owned_display_handle());",
+            "kettle_render::EarlyGpuInstance::start(&initial_cfg, event_loop.owned_display_handle())",
         )
         .expect("run_with starts the early instance");
     assert!(loaded < start, "the config is final before it decides");

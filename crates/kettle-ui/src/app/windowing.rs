@@ -355,10 +355,11 @@ impl App {
         pos: Option<winit::dpi::Position>,
         size: Option<winit::dpi::PhysicalSize<u32>>,
     ) -> Result<u64, Box<WindowOpen>> {
-        let Some(gpu) = self.gpu.clone() else {
-            log::warn!("open_window: GPU context not ready (window 1 still initializing)");
+        let gpu = self.gpu.clone();
+        if !self.renderers_ready() {
+            log::warn!("open_window: renderer not ready (window 1 still initializing)");
             return Err(Box::new(open));
-        };
+        }
         let source_color = match &open {
             WindowOpen::AdoptTab { source_color, .. } => *source_color,
             _ => None,
@@ -443,15 +444,25 @@ impl App {
         let scale = window.scale_factor() as f32;
         // Synchronous renderer init against the shared device — no block_on,
         // no watchdog (those are window-1 costs; see Renderer::new_with_gpu).
-        let renderer = match Renderer::new_with_gpu(
-            &gpu,
-            window.clone(),
-            size.width.max(1),
-            size.height.max(1),
-            scale,
-            &self.cfg,
-            Some(fonts),
-        ) {
+        // A CPU app draws every window on the CPU.
+        let renderer = match &gpu {
+            Some(gpu) => Renderer::new_with_gpu(
+                gpu,
+                window.clone(),
+                size.width.max(1),
+                size.height.max(1),
+                scale,
+                &self.cfg,
+                Some(fonts),
+            ),
+            None => cpu_window::cpu_window_renderer(
+                &window,
+                event_loop.owned_display_handle(),
+                &self.cfg,
+                Some(fonts),
+            ),
+        };
+        let renderer = match renderer {
             Ok(r) => r,
             Err(e) => {
                 log::error!("open_window: renderer init failed: {e}");
@@ -3103,9 +3114,10 @@ impl App {
     }
 
     pub(super) fn drain_activation_requests(&mut self, event_loop: &ActiveEventLoop) {
-        // Keep requests queued while window 1 is still creating the shared GPU
-        // context. `resumed` calls this again immediately after initialization.
-        if self.gpu.is_none() {
+        // Keep requests queued while window 1 is still creating its renderer
+        // (and the shared GPU context). `resumed` calls this again
+        // immediately after initialization.
+        if !self.renderers_ready() {
             return;
         }
         let pending = self

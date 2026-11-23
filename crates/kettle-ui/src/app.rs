@@ -132,6 +132,7 @@ mod actions;
 mod broadcast;
 mod clipboard;
 mod completion;
+mod cpu_window;
 mod ctl_snapshot;
 mod cursor;
 mod exit;
@@ -421,6 +422,9 @@ pub struct App {
     /// in `resumed`; `open_window` reuses it for the synchronous (no
     /// adapter/device request) renderer init of windows 2..N.
     gpu: Option<kettle_render::GpuContext>,
+    /// Window 1 draws on the CPU (`renderer`), so every window does, and
+    /// `gpu` stays `None`: no GPU driver is loaded.
+    cpu_rendering: bool,
     /// The system fonts, loading on their own thread since `run_with`
     /// began. Window 1 takes them before its first spawn; later windows load their own.
     font_preload: Option<crate::font_preload::FontPreload>,
@@ -750,7 +754,7 @@ impl ApplicationHandler<UserEvent> for App {
         if self.quick_terminal.wayland && self.quick_terminal.initial_focus {
             self.quick_terminal.previous = Default::default();
         }
-        if show_initial_quick && !self.quick_terminal.model.visible && self.gpu.is_some() {
+        if show_initial_quick && !self.quick_terminal.model.visible && self.renderers_ready() {
             self.toggle_quick_terminal(event_loop);
         }
         self.reconcile_quick_hotkey();
@@ -1191,6 +1195,10 @@ impl ApplicationHandler<UserEvent> for App {
                     earliest_deadline =
                         Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
                 }
+            }
+            if let Some(deadline) = Self::tick_cpu_presenter(&mut ws, now) {
+                earliest_deadline =
+                    Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
             }
             let wait = self.about_to_wait_inner(&mut ws, event_loop);
             self.finish_window_dispatch(event_loop, seq, ws);

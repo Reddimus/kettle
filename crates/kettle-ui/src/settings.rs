@@ -51,6 +51,12 @@ const LANGUAGE_LABELS: &[Label] = &[
 ];
 
 /// Graphics API names are proper names.
+const RENDERER_LABELS: &[Label] = &[
+    Label::Text(Text::SettingsValueAutomatic),
+    name("CPU"),
+    name("GPU"),
+];
+
 const GPU_BACKEND_LABELS: &[Label] = &[
     Label::Text(Text::SettingsValueAutomatic),
     name("DirectX 12"),
@@ -185,6 +191,7 @@ pub fn description(field: &Field) -> Text {
         Text::SettingsFieldBuiltinBoxDrawing => Text::SettingsDescriptionFieldBuiltinBoxDrawing,
         Text::SettingsFieldFontSize => Text::SettingsDescriptionFieldFontSize,
         Text::SettingsFieldGpuBackend => Text::SettingsDescriptionFieldGpuBackend,
+        Text::SettingsFieldRenderer => Text::SettingsDescriptionFieldRenderer,
         Text::SettingsFieldGpuDevice => Text::SettingsDescriptionFieldGpuDevice,
         Text::SettingsFieldGpuForceSoftware => Text::SettingsDescriptionFieldGpuForceSoftware,
         Text::SettingsFieldGpuPowerPreference => Text::SettingsDescriptionFieldGpuPowerPreference,
@@ -1125,6 +1132,14 @@ pub fn categories(gpus: &[(String, String)]) -> Vec<Category> {
             groups: Vec::new(),
             name: T::SettingsCategoryGraphics,
             fields: vec![
+                // CPU or GPU drawing (`renderer`): the CPU on Linux by
+                // default. Applies on restart, like the GPU rows below.
+                choice(
+                    T::SettingsFieldRenderer,
+                    "renderer",
+                    &["auto", "cpu", "gpu"],
+                    RENDERER_LABELS,
+                ),
                 // Tier A: the power-preference policy (integrated vs discrete).
                 // Applies on restart — the renderer/device graph can't hot-swap.
                 choice(
@@ -1801,6 +1816,7 @@ fn read_choice(cfg: &Config, key: &str) -> String {
         }
         .to_string(),
         // Graphics.
+        "renderer" => cfg.renderer.as_str().to_string(),
         "gpu-power-preference" => match cfg.gpu_power_preference {
             kettle_config::GpuPowerPreference::Low => "low",
             kettle_config::GpuPowerPreference::High => "high",
