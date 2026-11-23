@@ -406,7 +406,10 @@ impl CpuPresenter {
 
 /// One frame being drawn. Present it with [`CpuFrame::present`]; dropping
 /// it instead leaves the buffer's contents unknown (its next use repaints
-/// in full) and presents nothing.
+/// in full) and presents nothing. While a frame is deferred, the next frame
+/// is handed that frame's buffer; dropping it drops the deferred frame too,
+/// which is then never committed. Its changes go out with the next frame
+/// presented.
 pub struct CpuFrame<'a> {
     inner: FrameInner<'a>,
 }

@@ -164,9 +164,13 @@ pub(super) struct ShmPresenter {
     /// Commit the next frame in full, without waiting for a callback.
     force_next: bool,
     occluded: bool,
-    /// A frame drawn into `.0` but not committed, and the damage since the
-    /// last commit.
-    deferred: Option<(u64, Vec<Rect>)>,
+    /// The buffer holding a frame drawn but not committed.
+    deferred: Option<u64>,
+    /// Damage presented since the last commit. It outlives `deferred`: when
+    /// the deferred frame's buffer is drawn over and abandoned, the frame is
+    /// gone but the screen still lacks its changes, so the next commit
+    /// carries them.
+    uncommitted: Vec<Rect>,
     commits: u64,
     deferrals: u64,
     allocations: u64,
@@ -228,6 +232,7 @@ impl ShmPresenter {
             force_next: true,
             occluded: false,
             deferred: None,
+            uncommitted: Vec::new(),
             commits: 0,
             deferrals: 0,
             allocations: 0,
@@ -248,6 +253,7 @@ impl ShmPresenter {
         self.book.invalidate();
         self.history.clear();
         self.deferred = None;
+        self.uncommitted.clear();
         self.force_next = true;
     }
 
@@ -304,7 +310,7 @@ impl ShmPresenter {
     fn remove(&mut self, ids: Vec<u64>) -> usize {
         let mut removed = 0;
         for id in ids {
-            if self.deferred.as_ref().is_some_and(|(d, _)| *d == id) {
+            if self.deferred == Some(id) {
                 self.deferred = None;
             }
             if self.book.remove(id).is_some() {
@@ -419,55 +425,51 @@ impl ShmPresenter {
         let current = normalize(damage, width, height);
         self.history.push(current.clone());
         self.book.drew(id, now, HISTORY_FRAMES);
-        let mut pending = match self.deferred.take() {
-            Some((_, carried)) => carried,
-            None => Vec::new(),
-        };
-        pending.extend(current);
-        let pending = if self.force_next {
-            vec![Rect::full(width, height)]
-        } else {
-            normalize(&pending, width, height)
-        };
-        if pending.is_empty() {
+        self.uncommitted.extend(current);
+        self.uncommitted = normalize(&self.uncommitted, width, height);
+        if self.uncommitted.is_empty() && !self.force_next {
             return Ok(PresentOutcome::Unchanged);
         }
+        // `id` now holds every change not yet on screen.
+        self.deferred = Some(id);
         self.dispatch();
         if !self.gate_open(now) {
-            self.deferred = Some((id, pending));
             self.deferrals += 1;
             return Ok(PresentOutcome::Deferred);
         }
-        self.commit(id, &pending, now, pre_commit)
+        self.commit(id, now, pre_commit)
     }
 
     pub(super) fn flush(&mut self, pre_commit: impl FnOnce()) -> Result<PresentOutcome> {
         self.dispatch();
         let now = Instant::now();
-        let Some((id, pending)) = self.deferred.take() else {
+        let Some(id) = self.deferred else {
             return Ok(PresentOutcome::Unchanged);
         };
         if !self.gate_open(now) {
-            self.deferred = Some((id, pending));
             return Ok(PresentOutcome::Deferred);
         }
-        self.commit(id, &pending, now, pre_commit)
+        self.commit(id, now, pre_commit)
     }
 
     fn commit(
         &mut self,
         id: u64,
-        damage: &[Rect],
         now: Instant,
         pre_commit: impl FnOnce(),
     ) -> Result<PresentOutcome> {
+        let damage = if self.force_next {
+            vec![Rect::full(self.width, self.height)]
+        } else {
+            self.uncommitted.clone()
+        };
         let slot = self
             .book
             .get(id)
             .ok_or_else(|| anyhow!("CPU present buffer {id} vanished"))?;
         self.surface.attach(Some(&slot.backing.buffer), 0, 0);
         if self.surface.version() >= 4 {
-            for rect in damage {
+            for rect in &damage {
                 self.surface.damage_buffer(
                     rect.x as i32,
                     rect.y as i32,
@@ -489,6 +491,8 @@ impl ShmPresenter {
         pre_commit();
         self.surface.commit();
         self.book.committed(id);
+        self.deferred = None;
+        self.uncommitted.clear();
         self.frame = Some((serial, now));
         self.force_next = false;
         self.commits += 1;
@@ -598,7 +602,15 @@ impl ShmFrame<'_> {
 impl Drop for ShmFrame<'_> {
     fn drop(&mut self) {
         if !self.done {
+            // The buffer may hold half a frame now. If it held the deferred
+            // frame, that frame is gone: nothing may commit this buffer
+            // until a frame is presented into it again. Its damage stays in
+            // `uncommitted`, and the buffer's age is 0, so the next frame
+            // repaints it in full and commits the lost frame's changes too.
             self.presenter.book.abandoned(self.id);
+            if self.presenter.deferred == Some(self.id) {
+                self.presenter.deferred = None;
+            }
         }
     }
 }

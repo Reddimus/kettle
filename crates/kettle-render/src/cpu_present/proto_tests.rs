@@ -60,6 +60,19 @@ fn copy(dst: &mut [u32], src: &[u32], rect: Rect) {
     }
 }
 
+fn covers(damage: &[[i32; 4]], rect: Rect) -> bool {
+    // Every pixel of `rect` lies in some damage rectangle.
+    (rect.y..rect.y + rect.height).all(|y| {
+        (rect.x..rect.x + rect.width).all(|x| {
+            let (x, y) = (i64::from(x), i64::from(y));
+            damage.iter().any(|d| {
+                let [dx, dy, dw, dh] = d.map(i64::from);
+                x >= dx && y >= dy && x < dx + dw && y < dy + dh
+            })
+        })
+    })
+}
+
 /// A compositor, a client playing winit, and a presenter on its surface.
 fn fixture(cfg: Config) -> Option<(Server, TestClient, ShmPresenter)> {
     let (server, mut streams) = Server::start(cfg, 1);
@@ -86,4 +99,57 @@ fn an_older_compositor_still_gets_a_presenter() {
     let log = server.log();
     assert_eq!(log.shm_versions, vec![1]);
     assert_eq!(log.commits.last().expect("commit").pixels, scene.truth);
+}
+
+// --- an abandoned draw into a deferred frame's buffer ---
+
+#[test]
+fn an_abandoned_draw_over_a_deferred_frame_never_reaches_the_screen() {
+    let Some((server, mut client, mut p)) = fixture(Config::default()) else {
+        return;
+    };
+    let mut scene = Scene::new();
+    assert_eq!(
+        scene.present(&mut p, r(0, 0, W, H), 1),
+        PresentOutcome::Presented
+    );
+    client.roundtrip();
+    // The frame callback is held, so B is deferred in its buffer.
+    assert_eq!(
+        scene.present(&mut p, r(0, 0, 10, 10), 2),
+        PresentOutcome::Deferred
+    );
+    // C is drawn into B's buffer and dropped half-way.
+    {
+        let mut frame = p.buffer_mut().expect("buffer");
+        frame.pixels_mut()[..(W * 4) as usize].fill(0xdead_beef);
+    }
+    server.fire_frames(&mut client);
+    assert_eq!(
+        p.flush(|| {}).expect("flush"),
+        PresentOutcome::Unchanged,
+        "the abandoned buffer was committed"
+    );
+    assert!(!p.has_deferred());
+    // D repaints in full and carries B's changes.
+    assert_eq!(
+        scene.present(&mut p, r(20, 20, 5, 5), 3),
+        PresentOutcome::Presented
+    );
+    client.roundtrip();
+    let log = server.log();
+    for (i, c) in log.commits.iter().enumerate() {
+        assert!(
+            !c.pixels.contains(&0xdead_beef),
+            "commit {i} shows the abandoned draw"
+        );
+    }
+    assert_eq!(log.commits.len(), 2);
+    let last = log.commits.last().expect("commit");
+    assert_eq!(last.pixels, scene.truth, "the last commit is the scene");
+    assert!(
+        covers(&last.damage, r(0, 0, 10, 10)),
+        "B's damage was not carried: {:?}",
+        last.damage
+    );
 }
