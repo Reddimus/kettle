@@ -24,6 +24,8 @@ use crate::window_state::WindowState;
 /// How long a held frame may wait before the loop tries it again when no
 /// frame callback has woken it: the presenter's own callback timeout.
 const HELD_FRAME_RETRY: Duration = Duration::from_secs(1);
+/// The soonest the loop looks at an idle spare buffer again.
+const IDLE_RECHECK: Duration = Duration::from_millis(250);
 
 impl App {
     /// Whether window 1's renderer is up, so later windows, the quick
@@ -64,8 +66,21 @@ fn cpu_presenter_tick(
         let released = renderer.release_idle_buffers();
         log::debug!("renderer: released {released} idle CPU buffer(s)");
     }
-    let held = renderer.has_held_frame().then_some(now + HELD_FRAME_RETRY);
-    match (renderer.idle_release_deadline(), held) {
+    next_presenter_wake(
+        renderer.idle_release_deadline(),
+        renderer.has_held_frame(),
+        now,
+    )
+}
+
+/// When the loop must next service a presenter: its idle deadline, at least
+/// [`IDLE_RECHECK`] away (a spare the compositor still holds cannot go yet,
+/// and a deadline in the past would spin the loop), and a retry for a held
+/// frame.
+fn next_presenter_wake(idle: Option<Instant>, held: bool, now: Instant) -> Option<Instant> {
+    let idle = idle.map(|deadline| deadline.max(now + IDLE_RECHECK));
+    let held = held.then_some(now + HELD_FRAME_RETRY);
+    match (idle, held) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
     }
@@ -152,6 +167,29 @@ mod tests {
             panic!("nothing is held, so nothing is committed")
         });
         assert_eq!(wake, None);
+    }
+
+    #[test]
+    fn a_presenter_never_asks_for_a_wake_in_the_past() {
+        let now = Instant::now();
+        assert_eq!(next_presenter_wake(None, false, now), None);
+        let past = now - Duration::from_secs(5);
+        assert_eq!(
+            next_presenter_wake(Some(past), false, now),
+            Some(now + IDLE_RECHECK),
+            "a spare that could not be released is looked at again later"
+        );
+        let later = now + Duration::from_secs(3);
+        assert_eq!(next_presenter_wake(Some(later), false, now), Some(later));
+        assert_eq!(
+            next_presenter_wake(Some(later), true, now),
+            Some(now + HELD_FRAME_RETRY),
+            "a held frame is retried first"
+        );
+        assert_eq!(
+            next_presenter_wake(None, true, now),
+            Some(now + HELD_FRAME_RETRY)
+        );
     }
 
     #[cfg(target_os = "linux")]
