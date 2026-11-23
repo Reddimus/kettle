@@ -779,6 +779,45 @@ pub enum GpuPowerPreference {
     Auto,
 }
 
+/// `renderer`: what draws Kettle's frames.
+///
+/// `Auto` draws on the CPU on Linux, presenting through shared memory with no
+/// GPU driver loaded, and on the GPU elsewhere. `Cpu` asks for the CPU
+/// renderer, which exists on Linux only; on macOS and Windows it is logged
+/// and the GPU is used. `Gpu` always uses wgpu. A renderer that cannot start
+/// falls back to the other one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RendererPreference {
+    /// The CPU on Linux, the GPU elsewhere.
+    #[default]
+    Auto,
+    /// Software rendering into shared memory (Linux).
+    Cpu,
+    /// wgpu, on the adapter the `gpu-*` keys select.
+    Gpu,
+}
+
+impl RendererPreference {
+    /// The config value: `auto`, `cpu` or `gpu`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Cpu => "cpu",
+            Self::Gpu => "gpu",
+        }
+    }
+
+    /// Parse a config value; `None` for anything else.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" | "automatic" => Some(Self::Auto),
+            "cpu" | "software" => Some(Self::Cpu),
+            "gpu" | "wgpu" => Some(Self::Gpu),
+            _ => None,
+        }
+    }
+}
+
 /// `gpu-backend`: which wgpu graphics backend to request. `Auto`
 /// uses Kettle's deterministic native order (DX12 on Windows, Metal on macOS,
 /// Vulkan elsewhere). An explicit backend applies independently of a physical
@@ -1841,6 +1880,9 @@ pub struct Config {
     /// `window-position-y` / `window_position_y`: initial window y position in
     /// physical pixels. Negative coordinates are valid on multi-monitor setups.
     pub window_position_y: Option<i32>,
+    /// `renderer`: CPU or GPU rendering (see [`RendererPreference`]). New
+    /// windows pick it up; the first window's renderer needs a restart.
+    pub renderer: RendererPreference,
     /// `gpu-power-preference`: which adapter wgpu requests at startup.
     /// Defaults to `Auto`: let wgpu / the platform choose unless the user pins
     /// a specific GPU below or explicitly asks for low/high power preference.
@@ -1861,7 +1903,8 @@ pub struct Config {
     /// longer enumerates (e.g. eGPU unplugged, driver swap). Empty = unset.
     pub gpu_name: String,
     /// `gpu-force-software`: force wgpu's software/fallback adapter
-    /// (`force_fallback_adapter`). Slow; for debugging GPU-driver issues.
+    /// (`force_fallback_adapter`). Slow; for debugging GPU-driver issues. On
+    /// Linux it selects the CPU renderer instead, which needs no driver.
     pub gpu_force_software: bool,
     /// Terminator parity (terminatorlib/config.py:75
     /// `geometry_hinting`): resize in font-step increments.
@@ -3510,6 +3553,7 @@ impl Default for Config {
             window_position_y: None,
             gpu_power_preference: GpuPowerPreference::default(),
             gpu_backend: GpuBackend::default(),
+            renderer: RendererPreference::default(),
             gpu_vendor_id: 0,
             gpu_device_id: 0,
             gpu_name: String::new(),
@@ -4704,6 +4748,7 @@ impl Config {
                         | "automatic"
                         | "none"
                 ),
+                "renderer" => RendererPreference::parse(v).is_some(),
                 "gpu-backend" | "gpu_backend" => matches!(
                     v.to_ascii_lowercase().as_str(),
                     "auto" | "dx12" | "d3d12" | "directx12" | "vulkan" | "vk" | "metal" | "gl"
@@ -5765,6 +5810,9 @@ impl Config {
                         "auto" | "automatic" | "none" => GpuPowerPreference::Auto,
                         _ => GpuPowerPreference::Auto,
                     };
+                }
+                "renderer" => {
+                    cfg.renderer = RendererPreference::parse(&e.value).unwrap_or_default();
                 }
                 "gpu-backend" | "gpu_backend" => {
                     cfg.gpu_backend = match e.value.to_ascii_lowercase().as_str() {
@@ -9090,6 +9138,28 @@ cell-height = 1.2\n";
         // `--check-config` accepts the documented spellings, flags garbage.
         assert!(Config::detect_malformed_values("chrome-background = auto").is_empty());
         assert!(!Config::detect_malformed_values("chrome-background = rainbow").is_empty());
+    }
+
+    #[test]
+    fn renderer_key_parses_and_defaults_to_auto() {
+        assert_eq!(Config::default().renderer, RendererPreference::Auto);
+        assert_eq!(Config::parse_text("").renderer, RendererPreference::Auto);
+        for (text, want) in [
+            ("renderer = cpu", RendererPreference::Cpu),
+            ("renderer = GPU", RendererPreference::Gpu),
+            ("renderer = auto", RendererPreference::Auto),
+            ("renderer = software", RendererPreference::Cpu),
+            ("renderer = bogus", RendererPreference::Auto),
+        ] {
+            assert_eq!(Config::parse_text(text).renderer, want, "{text}");
+        }
+        for value in ["auto", "cpu", "gpu"] {
+            let parsed = RendererPreference::parse(value).expect("documented value");
+            assert_eq!(parsed.as_str(), value);
+            assert!(Config::detect_malformed_values(&format!("renderer = {value}")).is_empty());
+        }
+        assert!(!Config::detect_malformed_values("renderer = vulkan").is_empty());
+        assert_eq!(registered_config_key("renderer"), Some("renderer"));
     }
 
     #[test]
