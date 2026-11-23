@@ -554,7 +554,14 @@ copy and the CPU text layout. On Linux,
 `no_gpu_driver_is_loaded_by_a_cpu_renderer` renders in a fresh test process and
 fails when any Vulkan loader, Mesa, LLVM or NVIDIA library, or a `/dev/dri`
 node, is mapped. It runs the same check on a GPU child to prove the check sees
-a driver. Run them with `cargo test -p kettle-render --lib backend::`.
+a driver. `backend::text::parity_tests` renders the same text areas through
+glyphon on a headless device and through the CPU text path over a
+translucent frame, and fails when any channel differs by more than 2. Its
+cases cover Latin at several sizes and fractional positions, bold and italic,
+CJK, Arabic, colour emoji, custom glyphs, scaled areas, `TextBounds` and
+scissor clipping, translucent text and Spanish Settings strings. The CJK,
+Arabic and emoji cases need the host's Noto faces when `KETTLE_REQUIRE_GPU` is
+set. Run them with `cargo test -p kettle-render --lib backend::`.
 
 ### Host requirements and skipped tests
 
