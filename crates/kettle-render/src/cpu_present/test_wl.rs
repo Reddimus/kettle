@@ -9,9 +9,6 @@
 //! The test side is libwayland-client (wayland-client's `system` backend),
 //! as in production. A host without libwayland-client skips these tests.
 
-// The tests that use the rest arrive with the fixes they cover.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::os::fd::OwnedFd;
@@ -72,7 +69,6 @@ pub struct Log {
     pub shm_binds: usize,
     pub shm_versions: Vec<u32>,
     pub shm_releases: usize,
-    pub fixes_binds: usize,
     pub fixes_destroyed: usize,
     pub registries_destroyed: usize,
     /// Buffers committed and not yet released.
@@ -521,7 +517,7 @@ impl Dispatch<wl_buffer::WlBuffer, BufferData> for State {
 
 impl GlobalDispatch<wl_fixes::WlFixes, ()> for State {
     fn bind(
-        state: &mut Self,
+        _: &mut Self,
         _: &ServerHandle,
         _: &Client,
         resource: New<wl_fixes::WlFixes>,
@@ -529,7 +525,6 @@ impl GlobalDispatch<wl_fixes::WlFixes, ()> for State {
         init: &mut DataInit<'_, Self>,
     ) {
         init.init(resource, ());
-        state.log().fixes_binds += 1;
     }
 }
 

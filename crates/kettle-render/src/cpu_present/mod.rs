@@ -27,8 +27,10 @@
 //!   commits with `wl_surface.frame`.
 //! - **X11: softbuffer** ([`PresenterKind::SoftbufferX11`]): MIT-SHM, falling
 //!   back to `PutImage`. Translucent only when winit created the window with
-//!   a depth-32 visual (`with_transparent(true)` where the server has one);
-//!   otherwise opaque.
+//!   a depth-32 visual (`with_transparent(true)` where the server has one),
+//!   which the presenter asks on the window's own connection; otherwise
+//!   opaque. On a depth-32 window an opaque frame's alpha byte is set to
+//!   0xff before it is sent, since the server keeps all 32 bits.
 //! - **Wayland fallback: softbuffer** ([`PresenterKind::SoftbufferWayland`])
 //!   when the `wl_shm` presenter cannot start. Opaque only (softbuffer 0.4
 //!   presents XRGB8888 on Wayland), two buffers always, and it blocks in

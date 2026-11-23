@@ -2485,6 +2485,7 @@ version = "6.0.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "as-raw-xcb-connection",
  "bytemuck",
  "crossbeam-channel",
  "glyphon",
@@ -2506,6 +2507,7 @@ dependencies = [
  "softbuffer",
  "swash",
  "tempfile",
+ "tiny-xlib",
  "unicode-bidi",
  "unicode-segmentation",
  "unicode-width",

@@ -89,8 +89,8 @@ impl SoftPresenter {
             RawDisplayHandle::Wayland(_) => PresenterKind::SoftbufferWayland,
             _ => PresenterKind::SoftbufferX11,
         };
-        let alpha =
-            kind == PresenterKind::SoftbufferX11 && x11_window_depth(raw_window) == Some(32);
+        let alpha = kind == PresenterKind::SoftbufferX11
+            && x11_window_depth(raw_display, raw_window) == Some(32);
         let context =
             softbuffer::Context::new(display).map_err(|e| anyhow!("softbuffer context: {e}"))?;
         let surface =
@@ -196,6 +196,7 @@ impl SoftPresenter {
             age,
             format: self.format,
             wayland: self.kind == PresenterKind::SoftbufferWayland,
+            force_alpha: self.alpha && self.format == PixelFormat::Opaque,
         })
     }
 
@@ -232,6 +233,8 @@ pub(super) struct SoftFrame<'a> {
     format: PixelFormat,
     /// On Wayland every present commits, even with no damage.
     wayland: bool,
+    /// An opaque frame on a window whose visual carries alpha.
+    force_alpha: bool,
 }
 
 impl SoftFrame<'_> {
@@ -273,7 +276,7 @@ impl SoftFrame<'_> {
         damage: &[Rect],
         pre_commit: impl FnOnce(),
     ) -> Result<PresentOutcome> {
-        let Some(buffer) = self.buffer.take() else {
+        let Some(mut buffer) = self.buffer.take() else {
             return Ok(PresentOutcome::Unchanged);
         };
         let (w, h) = (self.width, self.height);
@@ -296,6 +299,9 @@ impl SoftFrame<'_> {
                 })
             })
             .collect();
+        if self.force_alpha {
+            force_opaque(&mut buffer, w, &out);
+        }
         pre_commit();
         buffer
             .present_with_damage(&rects)
@@ -321,18 +327,47 @@ impl Drop for SoftFrame<'_> {
     }
 }
 
-/// The depth of an X11 window's visual, asked on a short-lived connection
-/// of its own (softbuffer keeps its depth private).
-fn x11_window_depth(window: RawWindowHandle) -> Option<u8> {
-    use x11rb::connection::Connection as _;
+/// Set the alpha byte of `rects` to opaque. On an X11 window with a
+/// depth-32 visual softbuffer sends all 32 bits, and winit's
+/// `set_transparent(false)` does nothing on X11, so the `0x00RRGGBB` pixels
+/// of an opaque frame would be see-through under a compositing manager.
+pub(super) fn force_opaque(pixels: &mut [u32], width: u32, rects: &[Rect]) {
+    for rect in rects {
+        for y in rect.y..rect.y + rect.height {
+            let row = y as usize * width as usize;
+            let span = row + rect.x as usize..row + (rect.x + rect.width) as usize;
+            for px in &mut pixels[span] {
+                *px |= 0xff00_0000;
+            }
+        }
+    }
+}
+
+/// The depth of an X11 window's visual, asked on the window's own
+/// connection (the display handle softbuffer is given), since `$DISPLAY`
+/// may name another server and softbuffer keeps the depth it reads private.
+fn x11_window_depth(display: RawDisplayHandle, window: RawWindowHandle) -> Option<u8> {
+    use as_raw_xcb_connection::AsRawXcbConnection as _;
     use x11rb::protocol::xproto::ConnectionExt as _;
+    use x11rb::xcb_ffi::XCBConnection;
     let id = match window {
         RawWindowHandle::Xlib(h) => u32::try_from(h.window).ok()?,
         RawWindowHandle::Xcb(h) => h.window.get(),
         _ => return None,
     };
-    let (conn, _) = x11rb::connect(None).ok()?;
-    let depth = conn.get_geometry(id).ok()?.reply().ok()?.depth;
-    let _ = conn.flush();
-    Some(depth)
+    let raw = match display {
+        RawDisplayHandle::Xcb(h) => h.connection?.as_ptr(),
+        RawDisplayHandle::Xlib(h) => {
+            // SAFETY: winit's live Xlib display, which the caller's display
+            // handle keeps open for this call. `from_ptr` returns it in a
+            // ManuallyDrop, so it is never closed here.
+            let display = unsafe { tiny_xlib::Display::from_ptr(h.display?.as_ptr()) };
+            display.as_raw_xcb_connection().cast()
+        }
+        _ => return None,
+    };
+    // SAFETY: `raw` is the live XCB connection under the window's display,
+    // open for this call; `false`: x11rb does not disconnect it on drop.
+    let conn = unsafe { XCBConnection::from_raw_xcb_connection(raw, false) }.ok()?;
+    Some(conn.get_geometry(id).ok()?.reply().ok()?.depth)
 }

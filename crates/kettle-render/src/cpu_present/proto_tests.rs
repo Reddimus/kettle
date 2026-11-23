@@ -466,3 +466,133 @@ fn softbuffer_reports_an_empty_damage_wayland_commit_as_presented() {
     assert_eq!(server.log().commits.len(), 2, "both presents committed");
     assert_eq!(second.expect("present"), PresentOutcome::Presented);
 }
+
+// --- opaque frames on an ARGB X11 window ---
+
+mod x11 {
+    use std::ffi::c_void;
+    use std::num::NonZeroU32;
+    use std::ptr::NonNull;
+    use std::sync::Arc;
+
+    use raw_window_handle::{
+        DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
+        RawWindowHandle, WindowHandle, XcbDisplayHandle, XcbWindowHandle,
+    };
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::xproto::{
+        ColormapAlloc, ConnectionExt as _, CreateWindowAux, ImageFormat, VisualClass, WindowClass,
+    };
+    use x11rb::xcb_ffi::XCBConnection;
+
+    use super::super::soft::SoftPresenter;
+    use super::super::{PixelFormat, PresenterKind};
+
+    struct Handles {
+        conn: Arc<XCBConnection>,
+        screen: i32,
+        window: u32,
+        visual: u32,
+    }
+
+    impl HasWindowHandle for Handles {
+        fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+            let mut h = XcbWindowHandle::new(NonZeroU32::new(self.window).expect("window"));
+            h.visual_id = NonZeroU32::new(self.visual);
+            // SAFETY: the window lives until the test ends.
+            Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Xcb(h)) })
+        }
+    }
+
+    impl HasDisplayHandle for Handles {
+        fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+            let ptr = NonNull::new(self.conn.get_raw_xcb_connection().cast::<c_void>());
+            let h = XcbDisplayHandle::new(ptr, self.screen);
+            // SAFETY: `conn` keeps the connection open.
+            Ok(unsafe { DisplayHandle::borrow_raw(RawDisplayHandle::Xcb(h)) })
+        }
+    }
+
+    /// Run with an X server in `KETTLE_TEST_X11_DISPLAY` and no `DISPLAY`,
+    /// so only the window's own connection can answer.
+    #[test]
+    fn opaque_frames_on_an_argb_window_are_opaque() {
+        let Ok(name) = std::env::var("KETTLE_TEST_X11_DISPLAY") else {
+            eprintln!("skipping: KETTLE_TEST_X11_DISPLAY unset");
+            return;
+        };
+        let name = std::ffi::CString::new(name).expect("display name");
+        let (conn, screen_num) = XCBConnection::connect(Some(&name)).expect("X connection");
+        let conn = Arc::new(conn);
+        let screen = &conn.setup().roots[screen_num];
+        let root = screen.root;
+        let visual = screen
+            .allowed_depths
+            .iter()
+            .filter(|d| d.depth == 32)
+            .flat_map(|d| d.visuals.iter())
+            .find(|v| v.class == VisualClass::TRUE_COLOR)
+            .expect("an ARGB visual")
+            .visual_id;
+        let colormap = conn.generate_id().expect("id");
+        conn.create_colormap(ColormapAlloc::NONE, colormap, root, visual)
+            .expect("colormap");
+        let window = conn.generate_id().expect("id");
+        conn.create_window(
+            32,
+            window,
+            root,
+            0,
+            0,
+            64,
+            32,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            visual,
+            &CreateWindowAux::new()
+                .border_pixel(0)
+                .background_pixel(0)
+                .colormap(colormap),
+        )
+        .expect("window");
+        conn.map_window(window).expect("map");
+        conn.flush().expect("flush");
+        let handles = Arc::new(Handles {
+            conn: conn.clone(),
+            screen: screen_num as i32,
+            window,
+            visual,
+        });
+        let mut p = SoftPresenter::new(handles.clone(), handles.clone()).expect("softbuffer");
+        assert_eq!(p.kind(), PresenterKind::SoftbufferX11);
+        assert!(
+            p.supports_translucency(),
+            "the window's depth-32 visual was not seen on its own connection"
+        );
+        p.resize(64, 32, 1.0);
+        assert_eq!(p.set_format(PixelFormat::Opaque), PixelFormat::Opaque);
+        let mut frame = p.buffer_mut().expect("buffer");
+        // Opaque frames leave the alpha byte to the presenter.
+        frame.pixels_mut().fill(0x0011_2233);
+        frame.present(&[], || {}).expect("present");
+        conn.get_input_focus().expect("sync").reply().expect("sync");
+        let image = conn
+            .get_image(ImageFormat::Z_PIXMAP, window, 0, 0, 64, 32, !0)
+            .expect("get_image")
+            .reply()
+            .expect("image");
+        assert_eq!(image.depth, 32);
+        let px: Vec<u32> = image
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| u32::from_ne_bytes(*b))
+            .collect();
+        assert!(
+            px.iter().all(|&p| p == 0xff11_2233),
+            "an opaque frame reached the window with alpha {:#x}",
+            px[0] >> 24
+        );
+    }
+}
