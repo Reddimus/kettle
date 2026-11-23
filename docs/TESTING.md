@@ -2386,6 +2386,13 @@ root-cause explanation for earlier unidentified intermittent failures.
   titlebars, menus, and the first content row after resize or fullscreen.
 - [ ] Check real minimize/restore, occlusion, window close, and focus changes.
   Verify other OS windows survive and keep working.
+- [ ] On Linux, run `cargo run --release -p kettle-render --example
+  cpu_present_live` on Wayland, then with `WAYLAND_DISPLAY` unset on X11, and
+  with `--softbuffer` for the Wayland fallback. It checks every frame of the
+  CPU presenter against a reference, resizes, switches between opaque and
+  translucent frames, floods presents, and samples PSS with two, one and no
+  buffers. It prints `CPU_PRESENT_RESULT` and exits 1 on any failure.
+  `--maximize` skips the resizes and measures at the maximized size.
 - [ ] Drag and tear off tabs with the native pointer, redock them, and cancel
   a gesture. Control-plane movement alone does not test that gesture.
 - [ ] On macOS, inspect decorated and borderless windows with blur on/off,

@@ -16,6 +16,9 @@ mod background;
 mod batching;
 mod capture;
 mod completion;
+// Presents CPU-drawn frames over wl_shm or X11 SHM, with no GPU driver.
+#[cfg(target_os = "linux")]
+pub mod cpu_present;
 mod emoji_raster;
 mod fonts;
 mod geometry;
