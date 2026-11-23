@@ -58,6 +58,21 @@ struct Uniforms {
     stars: [Star; NSTARS],
 }
 
+impl Uniforms {
+    /// The frame at `resolution` and `time_secs`, as
+    /// [`StarfieldPipeline::upload`] writes it.
+    fn frame(seeds: &[StarSeed; NSTARS], resolution: [f32; 2], time_secs: f32) -> Self {
+        let mut u = Uniforms {
+            resolution,
+            count: 0,
+            _pad: 0,
+            stars: [Star::default(); NSTARS],
+        };
+        u.count = build_frame_stars(seeds, resolution, time_secs, &mut u.stars);
+        u
+    }
+}
+
 /// The part of a star that never changes: its direction from the centre, its
 /// phase along the flight path, and its colour.
 ///
@@ -344,13 +359,7 @@ impl StarfieldPipeline {
     /// An animated starfield changes every frame, so it writes every frame; a
     /// still one (no animation) writes only when the size changes.
     pub fn upload(&mut self, queue: &wgpu::Queue, resolution: [f32; 2], time_secs: f32) {
-        let mut u = Uniforms {
-            resolution,
-            count: 0,
-            _pad: 0,
-            stars: [Star::default(); NSTARS],
-        };
-        u.count = build_frame_stars(&self.seeds, resolution, time_secs, &mut u.stars);
+        let u = Uniforms::frame(&self.seeds, resolution, time_secs);
         write_buffer_if_changed(
             queue,
             &self.uniform_buf,

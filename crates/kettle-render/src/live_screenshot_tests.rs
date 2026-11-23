@@ -94,7 +94,7 @@ fn live_capture_is_encoded_before_swapchain_acquisition() {
         .find("self.create_screenshot_target(target_size)")
         .expect("live capture must allocate an independent offscreen target");
     let render = normalized
-        .find("self.encode_scene_pass( &capture.view")
+        .find("self.encode_gpu_scene_pass( &capture.view")
         .expect("live capture must render the scene into its target");
     let copy = normalized
         .find("self.prepare_texture_screenshot(")

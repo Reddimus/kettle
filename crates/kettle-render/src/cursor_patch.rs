@@ -1069,11 +1069,18 @@ impl Renderer {
             return Err(CursorPatchFailure::Budget);
         };
         for (view, cursor_on) in [(&targets.on_view, true), (&targets.off_view, false)] {
-            self.encode_scene_pass(view, facts.target_size, cfg, cursor_on, Some(rect), encoder)
-                .map_err(|error| {
-                    log::warn!("cursor patch pass failed: {error}");
-                    CursorPatchFailure::Validation
-                })?;
+            self.encode_gpu_scene_pass(
+                view,
+                facts.target_size,
+                cfg,
+                cursor_on,
+                Some(rect),
+                encoder,
+            )
+            .map_err(|error| {
+                log::warn!("cursor patch pass failed: {error}");
+                CursorPatchFailure::Validation
+            })?;
         }
         patch.encode_combine(encoder, target, format, &targets.bind_group)
     }
@@ -1142,7 +1149,7 @@ impl Renderer {
             .gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        self.encode_scene_pass(
+        self.encode_gpu_scene_pass(
             &view,
             facts.target_size,
             cfg,
@@ -1174,7 +1181,7 @@ impl Renderer {
                     self.graphics_budget.clone(),
                 );
                 assert!(presentation.ensure_target(&self.gpu.device, rect.width, rect.height));
-                self.encode_scene_pass(
+                self.encode_gpu_scene_pass(
                     presentation.scene_view().expect("presentation target"),
                     facts.target_size,
                     cfg,
@@ -1576,7 +1583,7 @@ mod tests {
     #[test]
     fn the_patch_reuses_the_scene_pass_and_uploads_nothing() {
         let src = production_source();
-        assert!(src.contains("self.encode_scene_pass("));
+        assert!(src.contains("self.encode_gpu_scene_pass("));
         assert!(src.contains("Some(rect),"));
         for draw in [
             ".draw_hiding(",

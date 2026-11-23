@@ -6493,7 +6493,7 @@ impl Renderer {
         let prepared_screenshot = if let Some(request) = screenshot_request {
             match self.create_screenshot_target(target_size) {
                 Ok(capture) => {
-                    if let Err(error) = self.encode_scene_pass(
+                    if let Err(error) = self.encode_gpu_scene_pass(
                         &capture.view,
                         target_size,
                         cfg,
@@ -6630,7 +6630,7 @@ impl Renderer {
         } else {
             &surface_view
         };
-        self.encode_scene_pass(
+        self.encode_gpu_scene_pass(
             scene_view,
             target_size,
             cfg,

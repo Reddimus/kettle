@@ -231,12 +231,9 @@ impl Renderer {
         }
     }
 
-    /// Encode the whole scene into `target`. With a `window`, `target` holds
-    /// only that rect of the `target_size` scene (a cursor patch pass): the
-    /// viewport maps the scene 1:1 with the window's top-left at the origin,
-    /// so every pipeline keeps its full-size screen uniform. The live window
-    /// and an offscreen capture draw the same pass, configured alpha included.
-    pub(crate) fn encode_scene_pass(
+    /// Encode the whole scene into the GPU `target` (see
+    /// [`Self::encode_scene_pass`]).
+    pub(crate) fn encode_gpu_scene_pass(
         &self,
         target: &wgpu::TextureView,
         target_size: [u32; 2],
@@ -245,7 +242,7 @@ impl Renderer {
         window: Option<PatchRect>,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Result<()> {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("kettle-pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
@@ -261,6 +258,23 @@ impl Renderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        self.encode_scene_pass(pass, target_size, cfg, cursor_on, window)
+    }
+
+    /// Draw the whole scene into `pass`, whose target the caller cleared to
+    /// transparent. With a `window`, the target holds only that rect of the
+    /// `target_size` scene (a cursor patch pass): the viewport maps the scene
+    /// 1:1 with the window's top-left at the origin, so every pipeline keeps
+    /// its full-size screen uniform. The live window and an offscreen capture
+    /// draw the same pass, configured alpha included.
+    pub(crate) fn encode_scene_pass(
+        &self,
+        mut pass: wgpu::RenderPass<'_>,
+        target_size: [u32; 2],
+        cfg: &Config,
+        cursor_on: bool,
+        window: Option<PatchRect>,
+    ) -> Result<()> {
         if let Some(window) = window {
             pass.set_viewport(
                 -(window.x as f32),
