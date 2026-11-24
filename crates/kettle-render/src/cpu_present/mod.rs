@@ -27,8 +27,10 @@
 //!   commits with `wl_surface.frame`.
 //! - **X11: softbuffer** ([`PresenterKind::SoftbufferX11`]): MIT-SHM, falling
 //!   back to `PutImage`. Translucent only when winit created the window with
-//!   a depth-32 visual (`with_transparent(true)` where the server has one);
-//!   otherwise opaque.
+//!   a depth-32 visual (`with_transparent(true)` where the server has one),
+//!   which the presenter asks on the window's own connection; otherwise
+//!   opaque. On a depth-32 window an opaque frame's alpha byte is set to
+//!   0xff before it is sent, since the server keeps all 32 bits.
 //! - **Wayland fallback: softbuffer** ([`PresenterKind::SoftbufferWayland`])
 //!   when the `wl_shm` presenter cannot start. Opaque only (softbuffer 0.4
 //!   presents XRGB8888 on Wayland), two buffers always, and it blocks in
@@ -45,6 +47,16 @@
 //! [`CpuPresenter::set_format`], and its own frame callback
 //! (`pre_present_notify`), which throttles `RedrawRequested`.
 //!
+//! # Threads
+//!
+//! A presenter can be built on any thread, but frames must be presented
+//! (and flushed) on winit's event-loop thread. winit commits the same
+//! `wl_surface` from that thread (decorations, the opaque region, a scale
+//! change), and a Wayland commit applies everything staged on the surface:
+//! presenting on another thread could let winit's commit carry a buffer
+//! the presenter has attached but not yet committed, or apply a new buffer
+//! scale to a buffer sized for the old one.
+//!
 //! # Frame pacing
 //!
 //! A commit asks for a `wl_surface.frame` callback. A frame presented before
@@ -56,16 +68,40 @@
 //! once the callback has arrived. Callers redraw on winit's frame-paced
 //! `RedrawRequested` and pass `pre_present_notify` to
 //! [`CpuFrame::present_with`], which calls it only for a frame that is
-//! committed; a caller that may stop redrawing with a frame deferred calls
-//! `flush` when its loop wakes (`about_to_wait`): the callback's arrival
-//! wakes winit's loop, since it reads the same socket. A resize, a format change or a return from
-//! occlusion commits at once. A callback that has not come after
-//! [`FRAME_CALLBACK_TIMEOUT`] stops holding frames back.
+//! committed. A resize, a format change or a return from occlusion commits
+//! at once. A callback that has not come after [`FRAME_CALLBACK_TIMEOUT`]
+//! stops holding frames back.
+//!
+//! A caller can stop drawing with a frame deferred (the end of a burst of
+//! output), and must then flush that frame itself:
+//!
+//! ```ignore
+//! // about_to_wait
+//! if presenter.has_deferred() {
+//!     presenter.flush_with(|| window.pre_present_notify())?;
+//! }
+//! if let Some(at) = presenter.pending_deadline() {
+//!     event_loop.set_control_flow(ControlFlow::WaitUntil(at)); // or earlier
+//! }
+//! ```
+//!
+//! The deadline is what makes this work. The frame callback reaches the
+//! process on winit's socket, but it is an event for the presenter's own
+//! queue, so winit's queue gets nothing from it. Under `ControlFlow::Wait`,
+//! winit 0.30's Wayland loop then goes back to sleep without running
+//! `about_to_wait`, and the frame would stay off screen until some unrelated
+//! event. With any `WaitUntil` armed, every wake runs a loop iteration, so
+//! the callback's arrival is seen at once; the deadline itself bounds the
+//! wait when no callback comes.
 
 mod book;
 mod damage;
+#[cfg(test)]
+mod proto_tests;
 mod shm;
 mod soft;
+#[cfg(test)]
+mod test_wl;
 #[cfg(test)]
 mod tests;
 
@@ -76,7 +112,7 @@ use std::time::Instant;
 use anyhow::{Result, anyhow};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle};
 
-pub use book::{IDLE_RELEASE, MAX_BUFFERS};
+pub use book::{BUSY_RECHECK, IDLE_RELEASE, MAX_BUFFERS};
 pub use damage::{HISTORY_FRAMES, MAX_DAMAGE_RECTS, Rect};
 pub use shm::FRAME_CALLBACK_TIMEOUT;
 
@@ -158,6 +194,9 @@ pub struct PresenterStats {
     /// Shared-memory bytes mapped for those buffers.
     pub buffer_bytes: usize,
     pub commits: u64,
+    /// Of those, commits made because a frame callback did not come within
+    /// [`FRAME_CALLBACK_TIMEOUT`] (a hidden surface, usually).
+    pub timed_out_commits: u64,
     pub deferred: u64,
     /// Buffers created over the presenter's life.
     pub allocations: u64,
@@ -198,7 +237,11 @@ fn check_extent(width: u32, height: u32) -> Result<(), FrameError> {
     Ok(())
 }
 
-pub(crate) type WindowOwner = Arc<dyn HasWindowHandle + Send + Sync>;
+/// A window's handles: the window itself, and the connection it is on.
+pub(crate) trait WindowHandles: HasWindowHandle + HasDisplayHandle {}
+impl<T: HasWindowHandle + HasDisplayHandle + ?Sized> WindowHandles for T {}
+
+pub(crate) type WindowOwner = Arc<dyn WindowHandles + Send + Sync>;
 pub(crate) type DisplayOwner = Arc<dyn HasDisplayHandle + Send + Sync>;
 
 /// A CPU framebuffer presenter for one window.
@@ -221,9 +264,15 @@ impl CpuPresenter {
     /// A presenter for `window`, on the connection `display` (winit's
     /// `owned_display_handle()`, or the window itself). Both handles are
     /// kept for the presenter's life. Opaque until [`Self::set_format`].
+    ///
+    /// The window must be on `display`'s connection: on Wayland its own
+    /// display handle must name the same `wl_display`, and, where
+    /// libwayland can say (1.23 and later), so must its surface. A window
+    /// from another connection is an error here; libwayland would abort
+    /// the process on the first present.
     pub fn new<W, D>(window: Arc<W>, display: D) -> Result<Self>
     where
-        W: HasWindowHandle + Send + Sync + 'static,
+        W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
         D: HasDisplayHandle + Send + Sync + 'static,
     {
         Self::with_preference(window, display, PresenterPreference::Auto)
@@ -235,7 +284,7 @@ impl CpuPresenter {
         preference: PresenterPreference,
     ) -> Result<Self>
     where
-        W: HasWindowHandle + Send + Sync + 'static,
+        W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
         D: HasDisplayHandle + Send + Sync + 'static,
     {
         let started = Instant::now();
@@ -352,6 +401,17 @@ impl CpuPresenter {
         }
     }
 
+    /// While a frame is deferred, the latest time to call [`Self::flush`]
+    /// for it: the frame callback's timeout. Arm `ControlFlow::WaitUntil`
+    /// with it (or an earlier time) and flush in `about_to_wait`, as the
+    /// module docs show. `None` when nothing is deferred.
+    pub fn pending_deadline(&self) -> Option<Instant> {
+        match &self.inner {
+            Inner::Shm(p) => p.pending_deadline(),
+            Inner::Soft(_) => None,
+        }
+    }
+
     /// The last commit's frame callback has not arrived: a frame presented
     /// now would be deferred.
     pub fn frame_pending(&mut self) -> bool {
@@ -362,7 +422,7 @@ impl CpuPresenter {
     }
 
     /// Release every spare buffer now, keeping the one with the newest
-    /// frame. Returns how many went.
+    /// frame (none while occluded). Returns how many went.
     pub fn release_idle_buffers(&mut self) -> usize {
         match &mut self.inner {
             Inner::Shm(p) => p.release_idle_buffers(),
@@ -370,9 +430,14 @@ impl CpuPresenter {
         }
     }
 
-    /// When a spare buffer becomes idle enough for
-    /// [`Self::release_idle_buffers`]; `None` with no spare. A caller with
-    /// nothing to draw wakes at this time to release it.
+    /// When to call [`Self::release_idle_buffers`] next; `None` with no
+    /// spare. A caller with nothing to draw arms `ControlFlow::WaitUntil`
+    /// with it. A free spare is due [`IDLE_RELEASE`] after its last use. A
+    /// spare the compositor still holds is checked again a second later
+    /// (its release wakes nobody): that time is never in the past when
+    /// first given, so the timer cannot spin, and it stays put until
+    /// `release_idle_buffers` runs, so it comes due. After [`BUSY_RECHECK`]
+    /// such a spare is left for the next frame.
     pub fn idle_release_deadline(&self) -> Option<Instant> {
         match &self.inner {
             Inner::Shm(p) => p.idle_release_deadline(),
@@ -382,7 +447,10 @@ impl CpuPresenter {
 
     /// The window is hidden (minimised, or occluded as winit reports). While
     /// occluded every buffer the compositor has released goes, the newest
-    /// too: the compositor keeps showing what it last read. On return the
+    /// too: the compositor keeps showing what it last read. A buffer it
+    /// releases later goes when the presenter next dispatches (any call
+    /// here, or [`Self::release_idle_buffers`] at
+    /// [`Self::idle_release_deadline`], which stays armed). On return the
     /// next frame repaints in full and commits without waiting for a frame
     /// callback, which compositors withhold from hidden surfaces.
     pub fn set_occluded(&mut self, occluded: bool) {
@@ -402,7 +470,10 @@ impl CpuPresenter {
 
 /// One frame being drawn. Present it with [`CpuFrame::present`]; dropping
 /// it instead leaves the buffer's contents unknown (its next use repaints
-/// in full) and presents nothing.
+/// in full) and presents nothing. While a frame is deferred, the next frame
+/// is handed that frame's buffer; dropping it drops the deferred frame too,
+/// which is then never committed. Its changes go out with the next frame
+/// presented.
 pub struct CpuFrame<'a> {
     inner: FrameInner<'a>,
 }
@@ -482,7 +553,9 @@ impl CpuFrame<'_> {
     }
 
     /// [`Self::present`], running `pre_commit` just before the commit, and
-    /// not at all when the frame is deferred or unchanged. Pass winit's
+    /// not at all when the frame is deferred or unchanged. It runs before
+    /// the presenter stages anything on the surface: if it unwinds, nothing
+    /// is attached and the frame stays deferred. Pass winit's
     /// `pre_present_notify` here, not before the call: winit asks for its
     /// frame callback at once, so calling it for a frame that is then
     /// deferred leaves winit waiting on a callback no commit will bring,

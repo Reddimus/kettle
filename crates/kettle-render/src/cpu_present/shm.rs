@@ -1,8 +1,10 @@
 //! The Kettle-owned Wayland presenter: one memfd, `wl_shm_pool` and
 //! `wl_buffer` per buffer, on winit's connection and surface.
 
+use std::ffi::c_void;
 use std::fs::File;
 use std::os::fd::AsFd;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow};
@@ -25,7 +27,9 @@ use super::{
 /// A frame callback that has not come after this stops holding frames back.
 /// Compositors withhold callbacks from hidden surfaces; a window that is
 /// visible again commits at once through [`ShmPresenter::set_occluded`], and
-/// this bounds the wait when nothing reports occlusion.
+/// this bounds the wait when nothing reports occlusion. While the callback
+/// is still out, the presenter commits at most once per this interval and
+/// asks for no further callback, so a hidden surface never piles them up.
 pub const FRAME_CALLBACK_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Events the presenter's own queue receives.
@@ -130,6 +134,49 @@ fn create_buffer(
     Ok(pool.create_buffer(0, w, h, stride, format, qh, id))
 }
 
+type GetDisplay = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+
+/// libwayland-client's `wl_proxy_get_display` (1.23 and later), if the
+/// loaded library has it.
+fn get_display_fn() -> Option<GetDisplay> {
+    static GET_DISPLAY: OnceLock<Option<GetDisplay>> = OnceLock::new();
+    *GET_DISPLAY.get_or_init(|| {
+        // SAFETY: RTLD_NOLOAD only returns the libwayland-client already
+        // loaded for winit's connection; it loads nothing and runs no
+        // initialiser. The handle is never closed, so the symbol stays
+        // valid for the life of the process.
+        let lib = unsafe {
+            libc::dlopen(
+                c"libwayland-client.so.0".as_ptr(),
+                libc::RTLD_NOW | libc::RTLD_NOLOAD,
+            )
+        };
+        if lib.is_null() {
+            return None;
+        }
+        // SAFETY: `lib` is a live handle and the name is a C string.
+        let sym = unsafe { libc::dlsym(lib, c"wl_proxy_get_display".as_ptr()) };
+        // SAFETY: when present, the symbol is
+        // `struct wl_display *wl_proxy_get_display(struct wl_proxy *)`
+        // (wayland-client-core.h), which `GetDisplay` matches.
+        (!sym.is_null()).then(|| unsafe { std::mem::transmute::<*mut c_void, GetDisplay>(sym) })
+    })
+}
+
+#[cfg(test)]
+pub(super) fn can_ask_proxy_display() -> bool {
+    get_display_fn().is_some()
+}
+
+/// The `wl_display` a proxy belongs to; `None` with a libwayland older
+/// than 1.23, which has no way to ask.
+fn proxy_display(proxy: std::ptr::NonNull<c_void>) -> Option<*mut c_void> {
+    let get = get_display_fn()?;
+    // SAFETY: `proxy` is the live `wl_surface` proxy of the window handle
+    // the caller holds; the call only reads it.
+    Some(unsafe { get(proxy.as_ptr()) })
+}
+
 fn memfd(bytes: usize) -> Result<File> {
     use rustix::fs::{MemfdFlags, SealFlags};
     let fd = rustix::fs::memfd_create(
@@ -158,16 +205,29 @@ pub(super) struct ShmPresenter {
     width: u32,
     height: u32,
     format: PixelFormat,
-    /// The serial and time of the last commit's frame callback, until done.
-    frame: Option<(u64, Instant)>,
+    /// The serial of the one frame callback out, until it is done. A commit
+    /// made while it is out asks for no other.
+    callback: Option<u64>,
+    /// When the last commit went out.
+    last_commit: Option<Instant>,
+    /// [`FRAME_CALLBACK_TIMEOUT`]; shorter in tests.
+    pub(super) frame_timeout: Duration,
     next_serial: u64,
     /// Commit the next frame in full, without waiting for a callback.
     force_next: bool,
     occluded: bool,
-    /// A frame drawn into `.0` but not committed, and the damage since the
-    /// last commit.
-    deferred: Option<(u64, Vec<Rect>)>,
+    /// When a spare the compositor holds is checked again; see
+    /// `idle_release_deadline`.
+    recheck: std::cell::Cell<Option<Instant>>,
+    /// The buffer holding a frame drawn but not committed.
+    deferred: Option<u64>,
+    /// Damage presented since the last commit. It outlives `deferred`: when
+    /// the deferred frame's buffer is drawn over and abandoned, the frame is
+    /// gone but the screen still lacks its changes, so the next commit
+    /// carries them.
+    uncommitted: Vec<Rect>,
     commits: u64,
+    timed_out_commits: u64,
     deferrals: u64,
     allocations: u64,
     _window: WindowOwner,
@@ -190,6 +250,29 @@ impl ShmPresenter {
         else {
             return Err(anyhow!("not a Wayland window"));
         };
+        // The presenter's queue is on `display`. A surface of another
+        // connection would make libwayland abort at the first frame
+        // callback ("Proxy and queue point to different wl_displays").
+        let window_display = match window
+            .display_handle()
+            .map_err(|e| anyhow!("window display handle: {e}"))?
+            .as_raw()
+        {
+            RawDisplayHandle::Wayland(h) => h.display,
+            _ => return Err(anyhow!("the window is not on a Wayland display")),
+        };
+        if window_display != wl_display.display {
+            return Err(anyhow!(
+                "the window and the display are on different Wayland connections"
+            ));
+        }
+        if let Some(surface_display) = proxy_display(wl_window.surface)
+            && surface_display != wl_display.display.as_ptr()
+        {
+            return Err(anyhow!(
+                "the window's surface is on another Wayland connection"
+            ));
+        }
         // SAFETY: the pointer is the live `wl_display` of winit's
         // connection, kept alive by `display`, which this presenter holds
         // until after `conn` drops (field order). A foreign backend never
@@ -199,7 +282,25 @@ impl ShmPresenter {
         let (globals, queue) =
             registry_queue_init::<QueueState>(&conn).context("Wayland registry")?;
         let qh = queue.handle();
-        let shm: wl_shm::WlShm = globals.bind(&qh, 1..=1, ()).context("binding wl_shm")?;
+        // Neither global outlives the presenter where the compositor allows
+        // it: wl_shm v2 has `release` (sent on drop), and the registry,
+        // which has no destructor, goes through wl_fixes (wayland 1.24),
+        // which registry_queue_init binds when it is offered. Elsewhere each
+        // presenter leaves a registry and a wl_shm on the connection.
+        let shm: wl_shm::WlShm = globals.bind(&qh, 1..=2, ()).context("binding wl_shm")?;
+        let fixes = globals
+            .contents()
+            .with_list(|list| list.iter().any(|g| g.interface == "wl_fixes"));
+        globals.destroy();
+        log::debug!(
+            "CPU present: wl_shm v{}, registry {}",
+            shm.version(),
+            if fixes {
+                "destroyed (wl_fixes)"
+            } else {
+                "kept"
+            }
+        );
         // SAFETY: the pointer is winit's live `wl_surface` proxy on this
         // display, kept alive by `window`, held until after `surface` drops.
         let surface_id = unsafe {
@@ -223,12 +324,17 @@ impl ShmPresenter {
             width: 1,
             height: 1,
             format: PixelFormat::Opaque,
-            frame: None,
+            callback: None,
+            last_commit: None,
+            frame_timeout: FRAME_CALLBACK_TIMEOUT,
             next_serial: 1,
             force_next: true,
             occluded: false,
+            recheck: std::cell::Cell::new(None),
             deferred: None,
+            uncommitted: Vec::new(),
             commits: 0,
+            timed_out_commits: 0,
             deferrals: 0,
             allocations: 0,
             _window: window,
@@ -248,6 +354,7 @@ impl ShmPresenter {
         self.book.invalidate();
         self.history.clear();
         self.deferred = None;
+        self.uncommitted.clear();
         self.force_next = true;
     }
 
@@ -275,21 +382,31 @@ impl ShmPresenter {
         if let Err(err) = self.queue.dispatch_pending(&mut self.state) {
             log::warn!("CPU present: Wayland dispatch failed: {err}");
         }
+        let mut late = Vec::new();
         for id in self.state.released.drain(..) {
             self.book.released(id);
+            if self.occluded {
+                late.push(id);
+            }
         }
         for serial in self.state.frames_done.drain(..) {
-            if self.frame.is_some_and(|(pending, _)| serial >= pending) {
-                self.frame = None;
+            if self.callback.is_some_and(|out| serial >= out) {
+                self.callback = None;
             }
+        }
+        // A hidden window keeps no buffer the compositor has let go: the
+        // surface keeps showing what it last read.
+        if !late.is_empty() {
+            self.remove(late);
         }
     }
 
     fn gate_open(&self, now: Instant) -> bool {
         self.force_next
+            || self.callback.is_none()
             || self
-                .frame
-                .is_none_or(|(_, at)| now.saturating_duration_since(at) >= FRAME_CALLBACK_TIMEOUT)
+                .last_commit
+                .is_none_or(|at| now.saturating_duration_since(at) >= self.frame_timeout)
     }
 
     pub(super) fn frame_pending(&mut self) -> bool {
@@ -301,10 +418,20 @@ impl ShmPresenter {
         self.deferred.is_some()
     }
 
+    pub(super) fn pending_deadline(&self) -> Option<Instant> {
+        self.deferred?;
+        let now = Instant::now();
+        if self.gate_open(now) {
+            // Due now, or as soon as a pending callback is dispatched.
+            return Some(now);
+        }
+        Some(self.last_commit.map_or(now, |at| at + self.frame_timeout))
+    }
+
     fn remove(&mut self, ids: Vec<u64>) -> usize {
         let mut removed = 0;
         for id in ids {
-            if self.deferred.as_ref().is_some_and(|(d, _)| *d == id) {
+            if self.deferred == Some(id) {
                 self.deferred = None;
             }
             if self.book.remove(id).is_some() {
@@ -323,13 +450,34 @@ impl ShmPresenter {
     }
 
     pub(super) fn release_idle_buffers(&mut self) -> usize {
+        self.recheck.set(None);
         self.dispatch();
-        let spares = self.book.spares(true);
+        let spares = self.book.spares(!self.occluded);
         self.remove(spares)
     }
 
     pub(super) fn idle_release_deadline(&self) -> Option<Instant> {
-        self.book.idle_deadline()
+        let now = Instant::now();
+        let keep_newest = !self.occluded;
+        // A held spare is checked again a second on. The time stays put
+        // until `release_idle_buffers` runs: a caller that recomputes the
+        // deadline when it wakes and compares it with the clock must see
+        // it come due, and one never in the past cannot spin.
+        let recheck = if self.book.held_spare(now, keep_newest) {
+            let at = self
+                .recheck
+                .get()
+                .unwrap_or(now + super::book::IDLE_RELEASE);
+            self.recheck.set(Some(at));
+            Some(at)
+        } else {
+            self.recheck.set(None);
+            None
+        };
+        match (self.book.idle_deadline(keep_newest), recheck) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     pub(super) fn set_occluded(&mut self, occluded: bool) {
@@ -342,7 +490,8 @@ impl ShmPresenter {
             let all = self.book.spares(false);
             self.remove(all);
         } else {
-            self.frame = None;
+            // The withheld callback stays the one out: the compositor sends
+            // it once it shows the surface again.
             self.force_next = true;
         }
     }
@@ -419,55 +568,64 @@ impl ShmPresenter {
         let current = normalize(damage, width, height);
         self.history.push(current.clone());
         self.book.drew(id, now, HISTORY_FRAMES);
-        let mut pending = match self.deferred.take() {
-            Some((_, carried)) => carried,
-            None => Vec::new(),
-        };
-        pending.extend(current);
-        let pending = if self.force_next {
-            vec![Rect::full(width, height)]
-        } else {
-            normalize(&pending, width, height)
-        };
-        if pending.is_empty() {
+        self.uncommitted.extend(current);
+        self.uncommitted = normalize(&self.uncommitted, width, height);
+        if self.uncommitted.is_empty() && !self.force_next {
             return Ok(PresentOutcome::Unchanged);
         }
+        // `id` now holds every change not yet on screen.
+        self.deferred = Some(id);
         self.dispatch();
         if !self.gate_open(now) {
-            self.deferred = Some((id, pending));
             self.deferrals += 1;
             return Ok(PresentOutcome::Deferred);
         }
-        self.commit(id, &pending, now, pre_commit)
+        self.commit(id, now, pre_commit)
     }
 
     pub(super) fn flush(&mut self, pre_commit: impl FnOnce()) -> Result<PresentOutcome> {
         self.dispatch();
         let now = Instant::now();
-        let Some((id, pending)) = self.deferred.take() else {
+        let Some(id) = self.deferred else {
             return Ok(PresentOutcome::Unchanged);
         };
         if !self.gate_open(now) {
-            self.deferred = Some((id, pending));
             return Ok(PresentOutcome::Deferred);
         }
-        self.commit(id, &pending, now, pre_commit)
+        self.commit(id, now, pre_commit)
     }
 
     fn commit(
         &mut self,
         id: u64,
-        damage: &[Rect],
         now: Instant,
         pre_commit: impl FnOnce(),
     ) -> Result<PresentOutcome> {
-        let slot = self
+        let damage = if self.force_next {
+            vec![Rect::full(self.width, self.height)]
+        } else {
+            self.uncommitted.clone()
+        };
+        let timed_out = self.callback.is_some() && !self.force_next;
+        let buffer = self
             .book
             .get(id)
+            .map(|slot| slot.backing.buffer.clone())
             .ok_or_else(|| anyhow!("CPU present buffer {id} vanished"))?;
-        self.surface.attach(Some(&slot.backing.buffer), 0, 0);
+        // Caller code runs first, before anything is staged on the surface.
+        // If it unwinds, the surface owner's next commit carries nothing of
+        // ours, and the frame stays deferred. It runs only when this commit
+        // is certain: winit's `pre_present_notify` asks for its own frame
+        // callback at once, and would wait for a commit that never comes.
+        pre_commit();
+        // From here to the commit nothing fails and no caller code runs, so
+        // on the surface owner's thread (see the module docs) the attach
+        // and the commit are one step. The buffer is the compositor's from
+        // the attach on.
+        self.book.committed(id);
+        self.surface.attach(Some(&buffer), 0, 0);
         if self.surface.version() >= 4 {
-            for rect in damage {
+            for rect in &damage {
                 self.surface.damage_buffer(
                     rect.x as i32,
                     rect.y as i32,
@@ -480,18 +638,19 @@ impl ShmPresenter {
             // everything, as Mesa's WSI does.
             self.surface.damage(0, 0, i32::MAX, i32::MAX);
         }
-        let serial = self.next_serial;
-        self.next_serial += 1;
-        self.surface.frame(&self.qh, serial);
-        // winit's `pre_present_notify` adds its own frame callback to the
-        // next commit; it runs only when that commit is certain, or winit
-        // would wait on a callback for a commit that never comes.
-        pre_commit();
+        if self.callback.is_none() {
+            let serial = self.next_serial;
+            self.next_serial += 1;
+            self.surface.frame(&self.qh, serial);
+            self.callback = Some(serial);
+        }
         self.surface.commit();
-        self.book.committed(id);
-        self.frame = Some((serial, now));
+        self.deferred = None;
+        self.uncommitted.clear();
+        self.last_commit = Some(now);
         self.force_next = false;
         self.commits += 1;
+        self.timed_out_commits += u64::from(timed_out);
         // Buffers of an old size or format are no longer needed once a frame
         // of the new one is up; busy ones go when released.
         let stale = self.book.stale(self.width, self.height, self.format);
@@ -516,9 +675,10 @@ impl ShmPresenter {
             busy_buffers: self.book.busy_count(),
             buffer_bytes: self.book.iter().map(|s| s.backing.capacity).sum(),
             commits: self.commits,
+            timed_out_commits: self.timed_out_commits,
             deferred: self.deferrals,
             allocations: self.allocations,
-            frame_callback_pending: self.frame.is_some(),
+            frame_callback_pending: self.callback.is_some(),
         }
     }
 }
@@ -529,6 +689,9 @@ impl Drop for ShmPresenter {
         let all: Vec<u64> = self.book.iter().map(|s| s.id).collect();
         for id in all {
             self.book.remove(id);
+        }
+        if self.shm.version() >= 2 {
+            self.shm.release();
         }
         self.flush_connection();
     }
@@ -598,7 +761,15 @@ impl ShmFrame<'_> {
 impl Drop for ShmFrame<'_> {
     fn drop(&mut self) {
         if !self.done {
+            // The buffer may hold half a frame now. If it held the deferred
+            // frame, that frame is gone: nothing may commit this buffer
+            // until a frame is presented into it again. Its damage stays in
+            // `uncommitted`, and the buffer's age is 0, so the next frame
+            // repaints it in full and commits the lost frame's changes too.
             self.presenter.book.abandoned(self.id);
+            if self.presenter.deferred == Some(self.id) {
+                self.presenter.deferred = None;
+            }
         }
     }
 }

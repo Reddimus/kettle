@@ -21,8 +21,12 @@ pub(super) struct SoftPresenter {
     /// X11 only: the window has a depth-32 visual, so the alpha byte reaches
     /// the compositing manager.
     alpha: bool,
+    /// The size frames get, as asked; the surface is sized to it at the
+    /// next `buffer_mut`, which refuses a size past the limits.
     width: u32,
     height: u32,
+    /// The size the softbuffer surface has.
+    surface_size: (u32, u32),
     format: PixelFormat,
     ages: SoftAges,
     commits: u64,
@@ -85,8 +89,8 @@ impl SoftPresenter {
             RawDisplayHandle::Wayland(_) => PresenterKind::SoftbufferWayland,
             _ => PresenterKind::SoftbufferX11,
         };
-        let alpha =
-            kind == PresenterKind::SoftbufferX11 && x11_window_depth(raw_window) == Some(32);
+        let alpha = kind == PresenterKind::SoftbufferX11
+            && x11_window_depth(raw_display, raw_window) == Some(32);
         let context =
             softbuffer::Context::new(display).map_err(|e| anyhow!("softbuffer context: {e}"))?;
         let surface =
@@ -99,6 +103,7 @@ impl SoftPresenter {
             alpha,
             width: 0,
             height: 0,
+            surface_size: (0, 0),
             format: PixelFormat::Opaque,
             ages: SoftAges::default(),
             commits: 0,
@@ -125,21 +130,34 @@ impl SoftPresenter {
 
     pub(super) fn resize(&mut self, width: u32, height: u32, scale: f64) {
         let (w, h) = buffer_extent(width, height, scale);
-        if (w, h) == (self.width, self.height) || check_extent(w, h).is_err() {
-            return;
+        if (w, h) != (self.width, self.height) {
+            self.width = w;
+            self.height = h;
+            self.history.clear();
+            self.ages.reset();
+        }
+    }
+
+    /// Size the surface to the asked size, or refuse it as the wl_shm
+    /// presenter does: a frame of the old size would be drawn for a window
+    /// of the new one.
+    fn apply_size(&mut self) -> Result<(), FrameError> {
+        let (w, h) = (self.width, self.height);
+        check_extent(w, h)?;
+        if self.surface_size == (w, h) {
+            return Ok(());
         }
         let (Some(nw), Some(nh)) = (NonZeroU32::new(w), NonZeroU32::new(h)) else {
-            return;
+            return Err(FrameError::TooLarge {
+                width: w,
+                height: h,
+            });
         };
-        match self.surface.resize(nw, nh) {
-            Ok(()) => {
-                self.width = w;
-                self.height = h;
-                self.history.clear();
-                self.ages.reset();
-            }
-            Err(err) => log::warn!("CPU present: softbuffer resize to {w}x{h} failed: {err}"),
-        }
+        self.surface
+            .resize(nw, nh)
+            .map_err(|e| FrameError::Backend(anyhow!("softbuffer resize to {w}x{h}: {e}")))?;
+        self.surface_size = (w, h);
+        Ok(())
     }
 
     pub(super) fn set_format(&mut self, format: PixelFormat) -> PixelFormat {
@@ -161,6 +179,7 @@ impl SoftPresenter {
     }
 
     pub(super) fn buffer_mut(&mut self) -> Result<SoftFrame<'_>, FrameError> {
+        self.apply_size()?;
         let (width, height) = (self.width, self.height);
         let buffer = self
             .surface
@@ -176,6 +195,8 @@ impl SoftPresenter {
             height,
             age,
             format: self.format,
+            wayland: self.kind == PresenterKind::SoftbufferWayland,
+            force_alpha: self.alpha && self.format == PixelFormat::Opaque,
         })
     }
 
@@ -190,8 +211,9 @@ impl SoftPresenter {
             kind: self.kind,
             buffers,
             busy_buffers: 0,
-            buffer_bytes: buffers * self.width as usize * self.height as usize * 4,
+            buffer_bytes: buffers * self.surface_size.0 as usize * self.surface_size.1 as usize * 4,
             commits: self.commits,
+            timed_out_commits: 0,
             deferred: 0,
             allocations: buffers as u64,
             frame_callback_pending: false,
@@ -209,6 +231,10 @@ pub(super) struct SoftFrame<'a> {
     height: u32,
     age: u8,
     format: PixelFormat,
+    /// On Wayland every present commits, even with no damage.
+    wayland: bool,
+    /// An opaque frame on a window whose visual carries alpha.
+    force_alpha: bool,
 }
 
 impl SoftFrame<'_> {
@@ -250,7 +276,7 @@ impl SoftFrame<'_> {
         damage: &[Rect],
         pre_commit: impl FnOnce(),
     ) -> Result<PresentOutcome> {
-        let Some(buffer) = self.buffer.take() else {
+        let Some(mut buffer) = self.buffer.take() else {
             return Ok(PresentOutcome::Unchanged);
         };
         let (w, h) = (self.width, self.height);
@@ -273,15 +299,20 @@ impl SoftFrame<'_> {
                 })
             })
             .collect();
+        if self.force_alpha {
+            force_opaque(&mut buffer, w, &out);
+        }
         pre_commit();
         buffer
             .present_with_damage(&rects)
             .map_err(|e| anyhow!("softbuffer present: {e}"))?;
         *self.commits += 1;
-        Ok(if out.is_empty() {
-            PresentOutcome::Unchanged
-        } else {
+        // softbuffer's Wayland backend attaches and commits whatever the
+        // damage; its X11 backend sends nothing for none.
+        Ok(if self.wayland || !out.is_empty() {
             PresentOutcome::Presented
+        } else {
+            PresentOutcome::Unchanged
         })
     }
 }
@@ -296,18 +327,47 @@ impl Drop for SoftFrame<'_> {
     }
 }
 
-/// The depth of an X11 window's visual, asked on a short-lived connection
-/// of its own (softbuffer keeps its depth private).
-fn x11_window_depth(window: RawWindowHandle) -> Option<u8> {
-    use x11rb::connection::Connection as _;
+/// Set the alpha byte of `rects` to opaque. On an X11 window with a
+/// depth-32 visual softbuffer sends all 32 bits, and winit's
+/// `set_transparent(false)` does nothing on X11, so the `0x00RRGGBB` pixels
+/// of an opaque frame would be see-through under a compositing manager.
+pub(super) fn force_opaque(pixels: &mut [u32], width: u32, rects: &[Rect]) {
+    for rect in rects {
+        for y in rect.y..rect.y + rect.height {
+            let row = y as usize * width as usize;
+            let span = row + rect.x as usize..row + (rect.x + rect.width) as usize;
+            for px in &mut pixels[span] {
+                *px |= 0xff00_0000;
+            }
+        }
+    }
+}
+
+/// The depth of an X11 window's visual, asked on the window's own
+/// connection (the display handle softbuffer is given), since `$DISPLAY`
+/// may name another server and softbuffer keeps the depth it reads private.
+fn x11_window_depth(display: RawDisplayHandle, window: RawWindowHandle) -> Option<u8> {
+    use as_raw_xcb_connection::AsRawXcbConnection as _;
     use x11rb::protocol::xproto::ConnectionExt as _;
+    use x11rb::xcb_ffi::XCBConnection;
     let id = match window {
         RawWindowHandle::Xlib(h) => u32::try_from(h.window).ok()?,
         RawWindowHandle::Xcb(h) => h.window.get(),
         _ => return None,
     };
-    let (conn, _) = x11rb::connect(None).ok()?;
-    let depth = conn.get_geometry(id).ok()?.reply().ok()?.depth;
-    let _ = conn.flush();
-    Some(depth)
+    let raw = match display {
+        RawDisplayHandle::Xcb(h) => h.connection?.as_ptr(),
+        RawDisplayHandle::Xlib(h) => {
+            // SAFETY: winit's live Xlib display, which the caller's display
+            // handle keeps open for this call. `from_ptr` returns it in a
+            // ManuallyDrop, so it is never closed here.
+            let display = unsafe { tiny_xlib::Display::from_ptr(h.display?.as_ptr()) };
+            display.as_raw_xcb_connection().cast()
+        }
+        _ => return None,
+    };
+    // SAFETY: `raw` is the live XCB connection under the window's display,
+    // open for this call; `false`: x11rb does not disconnect it on drop.
+    let conn = unsafe { XCBConnection::from_raw_xcb_connection(raw, false) }.ok()?;
+    Some(conn.get_geometry(id).ok()?.reply().ok()?.depth)
 }

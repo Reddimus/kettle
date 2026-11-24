@@ -61,6 +61,9 @@ crossbeam-channel = "0.5.15"
 # `cpu_present`: CPU frames presented with no GPU driver in the process.
 # Every crate here except softbuffer is already in the graph through winit.
 [target.'cfg(target_os = "linux")'.dependencies]
+# Looks up libwayland-client's `wl_proxy_get_display` (1.23+), to check a
+# window's surface is on the presenter's connection.
+libc = "0.2.191"
 # Maps each wl_shm buffer's memfd.
 memmap2 = "0.9.12"
 # memfd_create, ftruncate and seals for those buffers.
@@ -76,8 +79,14 @@ softbuffer = { version = "0.4.8", default-features = false, features = [
 # The wl_shm presenter binds its own queue on winit's wl_display (`system`)
 # and loads libwayland-client at run time, as winit does (`dlopen`).
 wayland-client = { version = "0.31.15", features = ["system", "dlopen"] }
-# Asks an X11 window's depth, to know whether its visual carries alpha.
-x11rb = "0.13.2"
+# Asks an X11 window's depth, on the window's own connection, to know
+# whether its visual carries alpha. `allow-unsafe-code` wraps that
+# connection, and tiny-xlib finds it under winit's Xlib display, as
+# softbuffer does; softbuffer already pulls in all three with these
+# features.
+x11rb = { version = "0.13.2", features = ["allow-unsafe-code"] }
+tiny-xlib = { version = "0.2.5", features = ["dlopen"] }
+as-raw-xcb-connection = "1.0.1"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 # The live `cpu_present_live` example opens a real window. Same version and
@@ -89,6 +98,9 @@ winit = { version = "0.30.13", default-features = false, features = [
     "wayland-dlopen",
     "wayland-csd-adwaita-notitle",
 ] }
+# An in-process compositor for the wl_shm presenter's protocol tests. Its
+# dependencies are all in the graph already through wayland-client.
+wayland-server = "0.31.14"
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 # The cursor patch test hands a standalone CAMetalLayer to the renderer.

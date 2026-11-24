@@ -64,7 +64,11 @@ impl Renderer {
         fonts: Option<StartupFonts>,
     ) -> Result<Self>
     where
-        W: raw_window_handle::HasWindowHandle + Send + Sync + 'static,
+        W: raw_window_handle::HasWindowHandle
+            + raw_window_handle::HasDisplayHandle
+            + Send
+            + Sync
+            + 'static,
         D: raw_window_handle::HasDisplayHandle + Send + Sync + 'static,
     {
         let presenter = crate::cpu_present::CpuPresenter::new(window, display)?;
