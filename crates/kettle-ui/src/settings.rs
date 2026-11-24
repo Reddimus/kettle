@@ -257,6 +257,14 @@ pub enum BlurState {
     Unavailable,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SettingsApply {
+    #[default]
+    None,
+    NewWindow,
+    Restart,
+}
+
 /// What a row shows under its label. While the window system cannot blur
 /// (`BlurState::Unavailable`), the Window blur row says so, and names the
 /// saved setting, instead of describing an effect the window will not show.
@@ -266,6 +274,7 @@ pub(crate) struct RowContext {
     pub blur: BlurState,
     pub quick: Option<crate::quick_terminal::portal::Status>,
     pub gnome: bool,
+    pub gpu_discovery_skipped: bool,
 }
 impl RowContext {
     pub(crate) fn unavailable(&self, field: &Field) -> bool {
@@ -288,6 +297,7 @@ impl From<BlurState> for RowContext {
             blur,
             quick: None,
             gnome: false,
+            gpu_discovery_skipped: false,
         }
     }
 }
@@ -298,7 +308,12 @@ pub fn row_description(
     cfg: &Config,
     tr: &Translator,
 ) -> String {
-    let RowContext { blur, quick, gnome } = context.into();
+    let RowContext {
+        blur,
+        quick,
+        gnome,
+        gpu_discovery_skipped,
+    } = context.into();
     if let Some(status) = &quick {
         match field.key {
             "quick-terminal-hotkey" => return status.note(tr, gnome),
@@ -309,6 +324,9 @@ pub fn row_description(
         }
     }
     match field.key {
+        "gpu" if gpu_discovery_skipped => {
+            tr.text(Text::SettingsNoteGpuDiscoverySkipped).to_string()
+        }
         "window-blur" if blur == BlurState::Unavailable => {
             tr.settings_note_blur_unavailable(&read(cfg, field, tr))
         }
@@ -325,11 +343,19 @@ pub fn row_value(
     cfg: &Config,
     tr: &Translator,
 ) -> String {
-    let RowContext { blur, quick, .. } = context.into();
+    let RowContext {
+        blur,
+        quick,
+        gpu_discovery_skipped,
+        ..
+    } = context.into();
     if field.key == "quick-terminal-hotkey"
         && let Some(status) = quick
     {
         return status.value(cfg, tr);
+    }
+    if field.key == "gpu" && gpu_discovery_skipped && read_choice(cfg, "gpu") != "auto" {
+        return gpu_pin_identity(cfg);
     }
     match (field.key, blur) {
         ("window-blur", BlurState::Unavailable) => {
@@ -1301,6 +1327,14 @@ fn owned_choice_index(cfg: &Config, key: &str, values: &[String]) -> Option<usiz
         .map(|(_, index)| index)
 }
 
+fn gpu_pin_identity(cfg: &Config) -> String {
+    if cfg.gpu_name.trim().is_empty() {
+        format!("{:04x}:{:04x}", cfg.gpu_vendor_id, cfg.gpu_device_id)
+    } else {
+        cfg.gpu_name.clone()
+    }
+}
+
 /// Read a field's current value from `cfg`, formatted for display next to its
 /// label (e.g. `"14 px"`, `"Automatic"`, `"On"`) in `tr`'s language. Returns a
 /// best-effort string; an unknown key (catalogue/Config drift) yields a
@@ -1347,12 +1381,7 @@ pub fn read(cfg: &Config, field: &Field, tr: &Translator) -> String {
                 if read_choice(cfg, field.key) == "auto" {
                     tr.text(T::SettingsValueAutomatic).to_string()
                 } else {
-                    let identity = if cfg.gpu_name.trim().is_empty() {
-                        format!("{:04x}:{:04x}", cfg.gpu_vendor_id, cfg.gpu_device_id)
-                    } else {
-                        cfg.gpu_name.clone()
-                    };
-                    tr.settings_value_not_detected(&identity)
+                    tr.settings_value_not_detected(&gpu_pin_identity(cfg))
                 }
             }),
         FieldKind::Number { suffix, .. } => {
@@ -4212,5 +4241,47 @@ mod hierarchy_geometry_tests {
             assert_eq!(nav.visible_fields(&cats, &tr), vec![focused]);
             assert_eq!(nav.focus_result(&cats, &cfg, &tr, 0), Some(focused));
         }
+    }
+}
+
+#[cfg(test)]
+mod cpu_gpu_pin_tests {
+    use super::*;
+
+    #[test]
+    fn cpu_settings_show_the_saved_pin_without_claiming_that_detection_failed() {
+        let cfg = Config {
+            gpu_name: "Mesa test adapter".to_string(),
+            ..Config::default()
+        };
+        let categories = categories(&[]);
+        let field = categories
+            .iter()
+            .flat_map(|c| &c.fields)
+            .find(|f| f.key == "gpu")
+            .unwrap();
+        let context = RowContext {
+            gpu_discovery_skipped: true,
+            ..RowContext::from(BlurState::Available)
+        };
+        let en = Translator::new(kettle_i18n::Language::En);
+        let es = Translator::new(kettle_i18n::Language::Es);
+        for (tr, note) in [
+            (
+                &en,
+                "GPU discovery was skipped because the CPU renderer is active.",
+            ),
+            (
+                &es,
+                "Se omitió la detección de GPU porque el renderizador por CPU está activo.",
+            ),
+        ] {
+            assert_eq!(
+                row_value(field, context.clone(), &cfg, tr),
+                "Mesa test adapter"
+            );
+            assert_eq!(row_description(field, context.clone(), &cfg, tr), note);
+        }
+        assert_eq!(read(&cfg, field, &en), "Mesa test adapter (not detected)");
     }
 }
