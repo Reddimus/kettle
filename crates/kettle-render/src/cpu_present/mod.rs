@@ -95,7 +95,7 @@
 //! wait when no callback comes.
 
 mod book;
-mod damage;
+pub(crate) mod damage;
 #[cfg(test)]
 mod proto_tests;
 mod shm;

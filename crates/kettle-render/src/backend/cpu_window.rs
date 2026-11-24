@@ -7,6 +7,7 @@ use super::cpu::{CpuPresentOutcome, CpuSurface, HeldFrameFlush};
 use crate::cpu_present::{
     CpuPresenter, FrameError, PixelFormat, PresentOutcome, PresenterKind, Rect,
 };
+use crate::cpu_raster::PixelRect;
 
 impl CpuSurface for CpuPresenter {
     fn resize(&mut self, width: u32, height: u32, scale: f64) {
@@ -32,7 +33,8 @@ impl CpuSurface for CpuPresenter {
 
     fn present_frame(
         &mut self,
-        draw: &mut dyn FnMut(&mut [u32], u32, u32) -> bool,
+        damage: &[PixelRect],
+        draw: &mut super::cpu::DrawFrame<'_>,
         pre_commit: &mut dyn FnMut(),
     ) -> CpuPresentOutcome {
         // A frame drawn now would only be held until the compositor's frame
@@ -50,11 +52,18 @@ impl CpuSurface for CpuPresenter {
             }
         };
         let (width, height) = (frame.width(), frame.height());
-        // Every frame damages the whole window until the renderer tracks
-        // damage. The buffer's age still decides what must be repainted, and
-        // with whole-window damage that is the whole buffer.
-        let damage = [Rect::full(width, height)];
-        if !frame.repaint_region(&damage).is_empty() && !draw(frame.pixels_mut(), width, height) {
+        let damage: Vec<Rect> = damage
+            .iter()
+            .map(|r| Rect::new(r.x, r.y, r.w, r.h))
+            .collect();
+        // What this buffer lacks: this frame's damage and that of every frame
+        // drawn since the buffer last was, or all of it.
+        let repaint: Vec<PixelRect> = frame
+            .repaint_region(&damage)
+            .iter()
+            .map(|r| PixelRect::new(r.x, r.y, r.width, r.height))
+            .collect();
+        if !repaint.is_empty() && !draw(frame.pixels_mut(), width, height, &repaint) {
             return CpuPresentOutcome::NotDrawn;
         }
         match frame.present_with(&damage, pre_commit) {

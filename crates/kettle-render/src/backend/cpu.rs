@@ -28,6 +28,7 @@ use crate::quad::QuadInstance;
 use crate::rounded_surface::RoundedSurface;
 use crate::starfield::StarfieldUniforms;
 
+use super::cpu_damage::{DamageTracker, TileHashes};
 use super::text::{CpuTextAtlas, CpuTextGlyph};
 
 /// The pipelines a scene pass draws with. The cursor patch is not among
@@ -65,6 +66,10 @@ pub(crate) enum CpuDraw<'a> {
         instances: &'a [GlyphInstance],
         color_atlas: CpuTextureView<'a>,
         mask_atlas: CpuTextureView<'a>,
+        /// Changes whenever a texel an earlier frame may have sampled is
+        /// written again (an evicted slot reused, the atlas cleared), so
+        /// damage tracking sees an unchanged instance over changed texels.
+        atlas_epoch: u64,
     },
     /// `imgpipe.rs`'s four-tap shader over one image, clamped or repeating.
     Images {
@@ -207,8 +212,13 @@ enum PassSink<'e> {
         target: CpuTarget<'e>,
         raster: &'e mut dyn CpuRaster,
         clips: Option<&'e [PixelRect]>,
-        /// [`CpuRaster::plan`] each draw first.
+        /// [`CpuRaster::plan`] each draw first; a signing pass already did.
         plan: bool,
+    },
+    /// Hashed into a damage signature (`cpu_damage.rs`).
+    Sign {
+        tiles: &'e mut TileHashes,
+        raster: &'e mut dyn CpuRaster,
     },
 }
 
@@ -226,8 +236,8 @@ impl<'e> CpuPass<'e> {
 
     /// A pass over `target` that draws only inside `clips` (all of it when
     /// `None`), which must not overlap and which the caller has cleared.
-    /// `plan` is false when the caller has already planned every draw of
-    /// the frame.
+    /// `plan` is false when a [`Self::signing`] pass of the same frame has
+    /// already planned every draw.
     pub(crate) fn clipped(
         target: CpuTarget<'e>,
         size: [u32; 2],
@@ -245,6 +255,22 @@ impl<'e> CpuPass<'e> {
             },
             size,
             records: Some(records),
+            scissor: [0, 0, size[0], size[1]],
+        }
+    }
+
+    /// A pass that draws nothing and hashes every draw into `tiles` (begun
+    /// at `size`), planning each with `raster` as the drawing pass will
+    /// find it.
+    pub(crate) fn signing(
+        tiles: &'e mut TileHashes,
+        size: [u32; 2],
+        raster: &'e mut dyn CpuRaster,
+    ) -> Self {
+        Self {
+            sink: PassSink::Sign { tiles, raster },
+            size,
+            records: None,
             scissor: [0, 0, size[0], size[1]],
         }
     }
@@ -281,6 +307,10 @@ impl<'e> CpuPass<'e> {
         let scissor = PixelRect::new(x, y, w, h);
         let screen = [self.size[0] as f32, self.size[1] as f32];
         match &mut self.sink {
+            PassSink::Sign { tiles, raster } => {
+                let salt = raster.plan(screen, scissor, &draw);
+                tiles.draw(screen, scissor, salt, &draw);
+            }
             PassSink::Raster {
                 target,
                 raster,
@@ -351,6 +381,10 @@ pub enum HeldFrameFlush {
     Failed,
 }
 
+/// What draws a window frame into a presenter's buffer: its pixels, width
+/// and height, and its repaint region ([`CpuSurface::present_frame`]).
+pub(crate) type DrawFrame<'a> = dyn FnMut(&mut [u32], u32, u32, &[PixelRect]) -> bool + 'a;
+
 /// A window's shared-memory buffers, as the CPU backend draws into them:
 /// `cpu_present::CpuPresenter` on Linux, a fake in tests.
 ///
@@ -372,14 +406,21 @@ pub(crate) trait CpuSurface: Send {
     /// frames are premultiplied now.
     fn set_translucent(&mut self, translucent: bool) -> bool;
 
-    /// Draw the next buffer with `draw` (its pixels, width and height,
-    /// whose contents are undefined) and present it, running `pre_commit`
-    /// only if, and just before, the frame is committed. `draw` returns
-    /// `false` to drop the frame. While [`Self::frame_pending`] holds, the
-    /// frame is not drawn at all ([`CpuPresentOutcome::Paced`]).
+    /// Draw the next buffer with `draw` and present it with `damage`, what
+    /// changed since the previous frame presented, running `pre_commit` only
+    /// if, and just before, the frame is committed.
+    ///
+    /// `draw` gets the buffer's pixels, width and height, and its repaint
+    /// region: `damage` widened by the buffer's age, the whole buffer when
+    /// its contents are unknown. Pixels outside the region hold the
+    /// previous frame; inside it they are undefined and must all be drawn.
+    /// `draw` is not called when the region is empty, and returns `false` to
+    /// drop the frame. While [`Self::frame_pending`] holds, the frame is not
+    /// drawn at all ([`CpuPresentOutcome::Paced`]).
     fn present_frame(
         &mut self,
-        draw: &mut dyn FnMut(&mut [u32], u32, u32) -> bool,
+        damage: &[PixelRect],
+        draw: &mut DrawFrame<'_>,
         pre_commit: &mut dyn FnMut(),
     ) -> CpuPresentOutcome;
 
@@ -440,6 +481,8 @@ pub(crate) struct CpuBackend {
     pub(crate) present_thread: Option<std::thread::ThreadId>,
     /// The draws of the last scene pass.
     pub(crate) draws: Vec<CpuDrawRecord>,
+    /// A window's damage tracking (`cpu_damage.rs`).
+    pub(crate) damage: DamageTracker,
 }
 
 impl CpuBackend {
@@ -455,6 +498,7 @@ impl CpuBackend {
             paced: false,
             present_thread: None,
             draws: Vec::new(),
+            damage: DamageTracker::default(),
         }
     }
 

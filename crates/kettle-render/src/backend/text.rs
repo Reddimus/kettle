@@ -85,6 +85,9 @@ pub(crate) enum CpuTextKey {
 /// One glyph raster as the CPU atlas holds it: a coverage mask (one byte per
 /// texel, `R8Unorm`) or straight sRGB colour (`Rgba8UnormSrgb`), rows packed.
 pub(crate) struct CpuGlyphRaster {
+    /// Unique to this raster for the life of the process, so damage
+    /// tracking can tell two rasters apart without reading their texels.
+    id: u64,
     color: bool,
     width: u16,
     height: u16,
@@ -102,6 +105,22 @@ impl std::fmt::Debug for CpuGlyphRaster {
 }
 
 impl CpuGlyphRaster {
+    fn new(color: bool, width: u16, height: u16, data: Box<[u8]>) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            color,
+            width,
+            height,
+            data,
+        }
+    }
+
+    /// The raster's identity; its texels never change.
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
     fn view(&self) -> Option<CpuTextureView<'_>> {
         let format = if self.color {
             CpuTextureFormat::Rgba8UnormSrgb
@@ -347,12 +366,12 @@ impl CpuTextAtlas {
                     return Err(PrepareError::AtlasFull);
                 }
             }
-            let raster = Arc::new(CpuGlyphRaster {
-                color: image.color,
-                width: image.width,
-                height: image.height,
-                data: image.data.into_boxed_slice(),
-            });
+            let raster = Arc::new(CpuGlyphRaster::new(
+                image.color,
+                image.width,
+                image.height,
+                image.data.into_boxed_slice(),
+            ));
             (inner, Some(raster))
         } else {
             (&mut self.color, None)
@@ -837,12 +856,12 @@ mod tests {
             top,
             width,
             height,
-            raster: Some(Arc::new(CpuGlyphRaster {
-                color: false,
+            raster: Some(Arc::new(CpuGlyphRaster::new(
+                false,
                 width,
                 height,
-                data: vec![255; usize::from(width) * usize::from(height)].into(),
-            })),
+                vec![255; usize::from(width) * usize::from(height)].into(),
+            ))),
         }
     }
 
@@ -980,18 +999,8 @@ mod tests {
         let mut fb = CpuFramebuffer::new(3, 1).unwrap();
         // Opaque black.
         fb.clear([0.0, 0.0, 0.0, 1.0]);
-        let mask = Arc::new(CpuGlyphRaster {
-            color: false,
-            width: 2,
-            height: 1,
-            data: vec![255, 128].into(),
-        });
-        let emoji = Arc::new(CpuGlyphRaster {
-            color: true,
-            width: 1,
-            height: 1,
-            data: vec![255, 0, 0, 255].into(),
-        });
+        let mask = Arc::new(CpuGlyphRaster::new(false, 2, 1, vec![255, 128].into()));
+        let emoji = Arc::new(CpuGlyphRaster::new(true, 1, 1, vec![255, 0, 0, 255].into()));
         let glyphs = [
             CpuTextGlyph {
                 pos: [0, 0],

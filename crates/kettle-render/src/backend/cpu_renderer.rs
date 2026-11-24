@@ -7,8 +7,9 @@ use anyhow::{Result, anyhow};
 use kettle_config::Config;
 
 use super::cpu::{CpuBackend, CpuPass, CpuPresentOutcome, CpuSurface, HeldFrameFlush};
+use super::cpu_damage::{DamageStats, TileHashes, disjoint};
 use super::{RenderDevice, ScenePass};
-use crate::cpu_raster::{CpuFramebuffer, CpuTarget};
+use crate::cpu_raster::{CpuFramebuffer, CpuTarget, PixelRect};
 use crate::cursor_patch::SceneFacts;
 use crate::{FrameOutcome, Renderer, ScreenshotRequest, StartupFonts};
 use kettle_core::{GraphicsBudget, GraphicsReservation};
@@ -124,7 +125,9 @@ impl Renderer {
     }
 
     /// Draw the scene pass into `target`, which holds the GPU pass's
-    /// transparent clear, then hand a pending screenshot its pixels.
+    /// transparent clear (inside `clips` when given), then hand a pending
+    /// screenshot its pixels. The caller has begun the raster's frame;
+    /// `plan` is false when a signing pass of this frame already planned it.
     #[allow(clippy::too_many_arguments)]
     fn draw_cpu_scene(
         &self,
@@ -136,11 +139,13 @@ impl Renderer {
         cfg: &Config,
         cursor_on: bool,
         screenshot: &mut Option<ScreenshotRequest>,
+        clips: Option<&[PixelRect]>,
+        plan: bool,
     ) -> Result<()> {
-        cpu_raster.begin_frame();
         draws.clear();
         {
-            let mut pass = CpuPass::new(target.reborrow(), size, cpu_raster, draws);
+            let mut pass =
+                CpuPass::clipped(target.reborrow(), size, cpu_raster, draws, clips, plan);
             if let Err(error) =
                 self.encode_scene_pass(ScenePass::Cpu(&mut pass), size, cfg, cursor_on, None)
             {
@@ -160,6 +165,20 @@ impl Renderer {
             self.dispatch_cpu_screenshot(screenshot, size, &pixels);
         }
         Ok(())
+    }
+
+    /// Run the scene pass into `tiles` (`cpu_damage.rs`): the frame's damage
+    /// signature, with no pixel drawn.
+    fn sign_cpu_scene(
+        &self,
+        cpu_raster: &mut dyn super::cpu::CpuRaster,
+        tiles: &mut TileHashes,
+        size: [u32; 2],
+        cfg: &Config,
+        cursor_on: bool,
+    ) -> Result<()> {
+        let mut pass = CpuPass::signing(tiles, size, cpu_raster);
+        self.encode_scene_pass(ScenePass::Cpu(&mut pass), size, cfg, cursor_on, None)
     }
 
     fn draw_cpu_frame<F>(
@@ -194,6 +213,7 @@ impl Renderer {
             held,
             paced,
             draws,
+            damage,
             ..
         } = cpu;
         let windowed = surface.is_some();
@@ -212,13 +232,54 @@ impl Renderer {
                 // `PostMultiplied` mode, so no straight-alpha pass runs.
                 debug_assert!(!needs_presentation, "a CPU window presents premultiplied");
                 *converted = false;
+                raster.begin_frame();
+                // Damage: what changed since the frame last drawn into a
+                // buffer, from this frame's draw list. A buffer the presenter
+                // rounded past the scene repeats the scene's edge, which the
+                // signature does not see, so it repaints in full.
+                // A frame the compositor is not ready for is not drawn
+                // (`Paced`), so it needs no signature either.
+                let (buffer_w, buffer_h) = surface.buffer_size();
+                let whole = PixelRect::new(0, 0, buffer_w, buffer_h);
+                let signing = Instant::now();
+                let signed = !damage.force_full
+                    && (buffer_w, buffer_h) == (width, height)
+                    && !surface.frame_pending()
+                    && self
+                        .sign_cpu_scene(
+                            raster.as_mut(),
+                            damage.begin(width, height),
+                            target_size,
+                            cfg,
+                            cursor_on,
+                        )
+                        .is_ok();
+                let frame_damage = match (signed, screenshot.is_none()) {
+                    // A screenshot is taken from a whole frame drawn now.
+                    (true, true) => damage.damage().unwrap_or_else(|| vec![whole]),
+                    _ => vec![whole],
+                };
+                let mut stats = DamageStats {
+                    damage: frame_damage.clone(),
+                    planned: if signed { damage.next().planned() } else { 0 },
+                    sign: signing.elapsed(),
+                    ..DamageStats::default()
+                };
                 let mut drawn = Ok(());
                 let mut pre_present = Some(pre_present);
                 let outcome = surface.present_frame(
-                    &mut |pixels, buffer_w, buffer_h| {
-                        // The buffer's contents are undefined; the clear is the
-                        // GPU pass's `LoadOp::Clear(TRANSPARENT)`.
-                        pixels.fill(0);
+                    &frame_damage,
+                    &mut |pixels, buffer_w, buffer_h, repaint| {
+                        let drawing = Instant::now();
+                        let whole = PixelRect::new(0, 0, buffer_w, buffer_h);
+                        let full = [buffer_w, buffer_h] != target_size
+                            || repaint.iter().any(|r| r.intersect(whole) == Some(whole));
+                        let clips = if full { vec![whole] } else { disjoint(repaint) };
+                        // The repainted pixels' contents are undefined; the
+                        // clear is the GPU pass's `LoadOp::Clear(TRANSPARENT)`.
+                        clear_rects(pixels, buffer_w, &clips);
+                        stats.full = full;
+                        stats.repainted.clone_from(&clips);
                         let Some(mut target) = CpuTarget::from_pixels(pixels, buffer_w, buffer_h)
                         else {
                             drawn = Err(anyhow!("a {buffer_w}x{buffer_h} CPU buffer is malformed"));
@@ -241,10 +302,13 @@ impl Renderer {
                             cfg,
                             cursor_on,
                             &mut screenshot,
+                            (!full).then_some(&clips[..]),
+                            !signed,
                         );
                         if drawn.is_ok() {
                             extend_edges(pixels, [buffer_w, buffer_h], target_size);
                         }
+                        stats.raster = drawing.elapsed();
                         drawn.is_ok()
                     },
                     &mut || {
@@ -253,6 +317,36 @@ impl Renderer {
                         }
                     },
                 );
+                match outcome {
+                    // The buffer now holds this frame: the next one is
+                    // compared with it.
+                    CpuPresentOutcome::Presented
+                    | CpuPresentOutcome::Deferred
+                    | CpuPresentOutcome::Unchanged => {
+                        if signed {
+                            damage.commit();
+                        } else {
+                            damage.reset();
+                        }
+                        log::trace!(
+                            target: "kettle_render::cpu_damage",
+                            "CPU frame {width}x{height}: {} damage rects, repainted {} of {} px{}, \
+                             sign {:?}, raster {:?}, {} cached draws",
+                            stats.damage.len(),
+                            stats.repainted.iter().map(|r| u64::from(r.w) * u64::from(r.h)).sum::<u64>(),
+                            u64::from(width) * u64::from(height),
+                            if stats.full { " (full)" } else { "" },
+                            stats.sign,
+                            stats.raster,
+                            stats.planned,
+                        );
+                        damage.last = stats;
+                    }
+                    CpuPresentOutcome::Lost => damage.reset(),
+                    // Not drawn into any buffer: the last drawn frame stays
+                    // the reference.
+                    _ => {}
+                }
                 if let Some(screenshot) = screenshot.take() {
                     if outcome == CpuPresentOutcome::Paced && self.pending_screenshot.is_none() {
                         // Not drawn yet: the frame that is drawn captures it.
@@ -293,6 +387,7 @@ impl Renderer {
                 };
                 // The clear is the GPU pass's `LoadOp::Clear(TRANSPARENT)`,
                 // which sizing the frame did.
+                raster.begin_frame();
                 self.draw_cpu_scene(
                     raster.as_mut(),
                     draws,
@@ -302,6 +397,8 @@ impl Renderer {
                     cfg,
                     cursor_on,
                     &mut screenshot,
+                    None,
+                    true,
                 )?;
                 *converted = false;
                 if needs_presentation {
@@ -597,6 +694,37 @@ impl Renderer {
         }
     }
 
+    /// The last frame's scene repainted whole by `raster` into a new
+    /// buffer: what a damage-tracked window buffer must hold after it.
+    /// Returns the pixels and their size.
+    #[cfg(test)]
+    pub(crate) fn cpu_full_repaint_for_tests(
+        &self,
+        raster: &mut dyn super::cpu::CpuRaster,
+        cfg: &Config,
+        cursor_on: bool,
+    ) -> Option<(Vec<u32>, u32, u32)> {
+        let size = [self.config.width.max(1), self.config.height.max(1)];
+        let mut frame = CpuFramebuffer::new(size[0], size[1])?;
+        raster.begin_frame();
+        let mut draws = Vec::new();
+        {
+            let mut pass = CpuPass::new(frame.target(), size, raster, &mut draws);
+            self.encode_scene_pass(ScenePass::Cpu(&mut pass), size, cfg, cursor_on, None)
+                .ok()?;
+        }
+        Some((frame.pixels().to_vec(), size[0], size[1]))
+    }
+
+    /// Make every frame of this CPU window a full repaint, as
+    /// `KETTLE_CPU_FULL_REPAINT=1` does.
+    #[cfg(test)]
+    pub(crate) fn set_cpu_full_repaint_for_tests(&mut self, full: bool) {
+        if let RenderDevice::Cpu(Some(cpu)) = &mut self.device {
+            cpu.damage.force_full = full;
+        }
+    }
+
     /// The frame last presented by an offscreen CPU renderer.
     #[cfg(test)]
     pub(crate) fn cpu_presented_for_tests(&self) -> Option<&CpuFramebuffer> {
@@ -663,6 +791,19 @@ fn size_offscreen_frame(
     *frame = Some(new);
     *reservation = Some(charge);
     true
+}
+
+/// Clear `rects` of a `width`-pixel-wide buffer to transparent black.
+fn clear_rects(pixels: &mut [u32], width: u32, rects: &[PixelRect]) {
+    let width = width as usize;
+    for r in rects {
+        let (x0, x1) = (r.x as usize, (r.x + r.w) as usize);
+        for y in r.y as usize..(r.y + r.h) as usize {
+            if let Some(row) = pixels.get_mut(y * width + x0..y * width + x1) {
+                row.fill(0);
+            }
+        }
+    }
 }
 
 /// A buffer larger than the scene (an integer-scale Wayland buffer is
