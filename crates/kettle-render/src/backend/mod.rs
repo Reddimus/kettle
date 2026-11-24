@@ -25,6 +25,7 @@ mod cpu_renderer;
 #[cfg(target_os = "linux")]
 mod cpu_window;
 pub(crate) mod layers;
+pub(crate) mod offscreen;
 pub(crate) mod text;
 
 pub use cpu::HeldFrameFlush;

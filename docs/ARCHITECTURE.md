@@ -3866,7 +3866,7 @@ moving existing items.
 | `theme` | Chrome/terminal color derivation, contrast caching, visual bell and surface alpha policy |
 | `background` | Decoded wallpaper state, bounded decode worker and animation scheduling |
 | `screenshot` | Live capture requests, cancellation, bounded workers, readback, cropping and atomic persistence |
-| `capture` | Synthetic screenshot scenes, GPU diagnostic render fixtures and offscreen self-test |
+| `capture` | Synthetic screenshot scenes (`kettle --screenshot`, drawn on the configured backend: the CPU renderer by default on Linux, through `backend::offscreen`), GPU diagnostic render fixtures and the offscreen GPU self-test |
 | `quad`, `glyphpipe`, `imgpipe`, `outline`, `rounded_surface`, `starfield`, `present`, `upload` | Existing GPU pipelines, presentation conversion and retained/mapped uploads; the glyph, image and starfield modules also hold their CPU twins |
 | `builtin_glyphs` | Box drawing, block elements, Powerline separators, triangles and braille rasterized from each cell's pixel rectangle; stroke widths and pixel snapping |
 | `chrome`, `color`, `confirm` | Existing contrast policy, terminal color resolution and final confirmation layout/text |

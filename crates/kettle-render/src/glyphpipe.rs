@@ -1923,6 +1923,7 @@ impl GlyphPipeline {
     /// pane rect via a scissor (so glyphs can't bleed across panes / into chrome).
     /// An empty `clips` draws everything unclipped (used when there's a single
     /// full-surface region).
+    #[cfg(test)]
     pub fn draw(
         &self,
         pass: &mut wgpu::RenderPass<'_>,

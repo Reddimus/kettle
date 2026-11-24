@@ -175,11 +175,15 @@ fn screenshot_routes_pane_text_by_renderer_mode() {
     );
     // Grid mode builds a GlyphPipeline and draws it in the pass.
     assert!(
-        src.contains("let mut grid_glyphs =") && src.contains("GlyphPipeline::new_with_budget("),
-        "Grid screenshot path must build a GlyphPipeline"
+        src.contains("let mut grid_glyphs =")
+            && src.contains("GlyphPipeline::new_with_budget(")
+            && src.contains("GlyphPipeline::new_cpu("),
+        "Grid screenshot path must build a GlyphPipeline on either backend"
     );
     assert!(
-        src.contains("grid_glyphs.draw(&mut pass, &grid_clips, [w, h]);"),
+        src.contains(
+            "grid_glyphs.draw_in_window(\n                pass,\n                &grid_clips,"
+        ),
         "Grid screenshot path must draw the cell-locked pane glyphs in the pass"
     );
     // The annotation buffer (chrome) still goes through glyphon in both modes.

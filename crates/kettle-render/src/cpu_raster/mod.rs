@@ -48,9 +48,7 @@ mod bench_tests;
 #[cfg(test)]
 mod parity_tests;
 
-#[cfg(test)]
-use srgb::tables;
-use srgb::unorm8;
+use srgb::{tables, unorm8};
 
 /// The largest framebuffer or texture side, the same cap wgpu's default
 /// limits put on a 2D texture.
@@ -272,7 +270,6 @@ pub(crate) fn pixels_to_rgba8(pixels: &[u32]) -> Vec<u8> {
     pixels.iter().flat_map(|&p| unpack(p)).collect()
 }
 
-#[cfg(test)]
 /// The packed pixel a `LoadOp::Clear(color)` stores.
 pub(crate) fn clear_pixel(color: [f64; 4]) -> u32 {
     let t = tables();

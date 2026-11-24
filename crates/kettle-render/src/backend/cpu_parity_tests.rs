@@ -773,3 +773,55 @@ fn a_scale_change_reaches_the_cpu_presenter() {
     assert_eq!(log.sizes, [(200, 80), (200, 80)]);
     assert_eq!(log.scales, [1.0, 2.0]);
 }
+
+/// `kettle --screenshot` draws on the configured backend. Its scenes (tab
+/// bar, split panes, grid and glyphon text, a context menu, a scrollbar, a
+/// bell flash) agree between the two within 2 per channel.
+#[test]
+fn screenshot_scenes_draw_the_same_on_the_cpu_and_the_gpu() {
+    use crate::DebugScene;
+    use kettle_config::RendererPreference;
+    let _serialized = gpu_test_guard();
+    let dir = kettle_test_support::private_tempdir("kettle-cpu-capture-");
+    for (name, scene) in [
+        ("default", DebugScene::Default),
+        ("menu", DebugScene::ContextMenu),
+        ("scrollbar", DebugScene::Scrollbar),
+        ("bell", DebugScene::BellFlash),
+    ] {
+        let shot = |renderer| {
+            let cfg = kettle_config::Config {
+                renderer,
+                gpu_force_software: false,
+                ..gpu_test_config()
+            };
+            let out = dir.path().join(format!("{name}-{renderer:?}.png"));
+            crate::capture_png_with(&cfg, 60, 14, &out, scene)
+                .map(|_| image::open(&out).expect("a PNG").to_rgba8())
+        };
+        let cpu = shot(RendererPreference::Cpu).expect("the CPU capture needs no adapter");
+        let Ok(gpu) = shot(RendererPreference::Gpu) else {
+            no_gpu_adapter();
+            return;
+        };
+        if let Some(dump) = std::env::var_os("KETTLE_CPU_PARITY_DUMP") {
+            let dump = std::path::Path::new(&dump);
+            cpu.save(dump.join(format!("capture-{name}-cpu.png")))
+                .expect("dump");
+            gpu.save(dump.join(format!("capture-{name}-gpu.png")))
+                .expect("dump");
+        }
+        // The menu's shadows stack translucent layers over text, where each
+        // backend rounds every layer to 8 bits and lavapipe's sRGB encode is
+        // up to 0.65 of a code off (A2's deep-stack finding): a few channels
+        // may reach 3 or 4. Everything else stays within 2.
+        let (worst, over) = difference(&cpu, &gpu);
+        let channels = cpu.as_raw().len();
+        assert!(
+            worst <= 4 && over * 10_000 <= channels,
+            "capture {name}: {over} of {channels} channels differ by more than 2 (worst {worst})"
+        );
+        let first = cpu.get_pixel(0, 0).0;
+        assert!(cpu.pixels().any(|p| p.0 != first), "{name}: an empty frame");
+    }
+}
