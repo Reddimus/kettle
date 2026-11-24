@@ -84,6 +84,14 @@ fn gpu(label: &str) -> Option<Gpu> {
 }
 
 /// Some precision choices are specific to the lavapipe reference driver.
+///
+/// The SDF pipelines (rounded surfaces, outlines) follow lavapipe's fine
+/// `fwidth`, and straight presentation follows its division and rounding.
+/// Other drivers choose differently within the shader language's freedom:
+/// CI's Microsoft Basic Render Driver (Dx12) differs by up to 59 codes on
+/// SDF edges, and Apple's paravirtual Metal device by 4 in presentation.
+/// The CPU renderer runs only on Linux, where its reference is lavapipe, so
+/// those cases compare against lavapipe alone.
 fn lavapipe(label: &str) -> Option<Gpu> {
     let gpu = gpu(label)?;
     if !gpu.lavapipe {
@@ -1183,7 +1191,7 @@ fn random_surfaces(
 #[test]
 fn rounded_surfaces_match_the_gpu() {
     let _serialized = gpu_test_guard();
-    let Some(gpu) = gpu("cpu-parity-rounded") else {
+    let Some(gpu) = lavapipe("cpu-parity-rounded") else {
         return;
     };
     let (w, h) = (240u32, 160u32);
@@ -1247,7 +1255,7 @@ fn rounded_surfaces_match_the_gpu() {
 #[test]
 fn outlines_match_the_gpu() {
     let _serialized = gpu_test_guard();
-    let Some(gpu) = gpu("cpu-parity-outlines") else {
+    let Some(gpu) = lavapipe("cpu-parity-outlines") else {
         return;
     };
     let (w, h) = (240u32, 160u32);
@@ -1477,7 +1485,7 @@ fn gpu_presented_scene(gpu: &Gpu, w: u32, h: u32, init: &[u8], replace: &QuadPip
 #[test]
 fn presentation_matches_the_gpu() {
     let _serialized = gpu_test_guard();
-    let Some(gpu) = gpu("cpu-parity-present") else {
+    let Some(gpu) = lavapipe("cpu-parity-present") else {
         return;
     };
     let (w, h) = (96u32, 64u32);
