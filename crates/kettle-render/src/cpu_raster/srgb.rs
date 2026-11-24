@@ -31,7 +31,7 @@ pub(crate) struct SrgbTables {
     /// The code at the start of each 16-unit bin of 16-bit linear.
     enc16: [u8; 4096],
     /// The smallest 16-bit linear value that rounds to code `v + 1`.
-    thr16: [u32; 256],
+    threshold16: [u32; 256],
     /// The code at the start of each 1/4096 bin of `f32` linear.
     encf: [u8; 4096],
     /// The smallest `f32` linear value that rounds to code `v + 1`.
@@ -52,7 +52,7 @@ impl SrgbTables {
         let mut dec16 = [0u16; 256];
         let mut decf = [0f32; 256];
         let mut unorm = [0f32; 256];
-        let mut thr16 = [u32::MAX; 256];
+        let mut threshold16 = [u32::MAX; 256];
         let mut thrf = [f32::INFINITY; 256];
         for v in 0..256 {
             let lin = decode_f64(v as f64 / 255.0);
@@ -62,7 +62,7 @@ impl SrgbTables {
             if v < 255 {
                 // Encoding rounds up to `v + 1` from this linear value on.
                 let t = decode_f64((v as f64 + 0.5) / 255.0);
-                thr16[v] = (t * 65535.0).ceil() as u32;
+                threshold16[v] = (t * 65535.0).ceil() as u32;
                 let mut t32 = t as f32;
                 if f64::from(t32) < t {
                     t32 = t32.next_up();
@@ -74,7 +74,7 @@ impl SrgbTables {
         let mut encf = [0u8; 4096];
         for i in 0..4096 {
             let lo16 = (i * 16) as u32;
-            enc16[i] = thr16[..255].iter().filter(|&&t| t <= lo16).count() as u8;
+            enc16[i] = threshold16[..255].iter().filter(|&&t| t <= lo16).count() as u8;
             let lof = i as f32 / 4096.0;
             encf[i] = thrf[..255].iter().filter(|&&t| t <= lof).count() as u8;
         }
@@ -83,7 +83,7 @@ impl SrgbTables {
             decf,
             unorm,
             enc16,
-            thr16,
+            threshold16,
             encf,
             thrf,
         }
@@ -93,7 +93,7 @@ impl SrgbTables {
     #[inline(always)]
     pub(crate) fn encode16(&self, lin: u16) -> u8 {
         let v = self.enc16[usize::from(lin >> 4)];
-        v + u8::from(u32::from(lin) >= self.thr16[usize::from(v)])
+        v + u8::from(u32::from(lin) >= self.threshold16[usize::from(v)])
     }
 
     /// `f32` linear to an sRGB byte, clamped to `0..=1` and correctly rounded.
@@ -158,7 +158,10 @@ mod tests {
     fn each_encode_bin_spans_less_than_one_code() {
         let t = tables();
         for v in 0..254 {
-            assert!(t.thr16[v + 1] - t.thr16[v] > 16, "16-bit thresholds {v}");
+            assert!(
+                t.threshold16[v + 1] - t.threshold16[v] > 16,
+                "16-bit thresholds {v}"
+            );
             assert!(
                 t.thrf[v + 1] - t.thrf[v] > 1.0 / 4096.0,
                 "f32 thresholds {v}"
