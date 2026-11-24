@@ -2484,7 +2484,7 @@ dependencies = [
  "objc2-quartz-core 0.3.2",
  "pollster",
  "raw-window-handle",
- "read-fonts 0.37.0",
+ "read-fonts 0.46.0",
  "swash",
  "tempfile",
  "unicode-bidi",
