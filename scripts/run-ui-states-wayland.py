@@ -561,7 +561,8 @@ def guarded_smoke(smoke, directory, native):
             index = len(list(directory.glob('fixture-*.log')))
             target = directory / f'fixture-{index:03d}.log'
             if self.log.exists():
-                target.write_text(read_text(self.log), encoding='utf-8')
+                # As read: no newline translation (Windows would double a CRLF).
+                target.write_text(read_text(self.log), encoding='utf-8', newline='')
             with (directory / 'fixtures.jsonl').open('a', encoding='utf-8') as output:
                 output.write(json.dumps({'log': target.name, 'pid': self.proc.pid if self.proc else None,
                                          'cleanup': getattr(self, '_termination_receipt', None)}) + '\n')
