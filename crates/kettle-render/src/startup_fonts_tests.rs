@@ -1,4 +1,4 @@
-use super::{PreparedFonts, StartupFonts, production_source};
+use super::{FontSystem, PreparedFonts, Renderer, StartupFonts, fontdb, production_source};
 use kettle_config::Config;
 
 /// A window's first renderer takes over the fonts its first pane was
@@ -31,11 +31,36 @@ fn the_renderer_takes_over_matching_startup_fonts() {
         assert!(!constructor.contains("StartupFonts::load("));
         assert!(!constructor.contains("FontSystem::new()"));
     }
+    // Both hand their fonts to `with_layers`, which must not replace them.
+    let tail = body("fn with_layers(", "\n    }\n");
+    assert!(tail.contains("} = fonts;"));
+    assert!(!tail.contains("StartupFonts::load("));
+    assert!(!tail.contains("FontSystem::new"));
     let take_over = body("fn take_over_fonts(", "\n}\n");
     assert!(take_over.contains("Some(fonts) if fonts.matches(cfg, scale) => fonts,"));
     assert!(take_over.contains("Some(fonts) => fonts.remeasure(cfg, scale),"));
     assert!(take_over.contains("None => StartupFonts::load(cfg, scale),"));
     assert_eq!(src.matches("StartupFonts::load(cfg, scale)").count(), 1);
+}
+
+/// A renderer given startup fonts draws with their font system, whether
+/// they match its scale or are measured again for it: the constructor and
+/// its shared tail, `with_layers`, keep it rather than building one. The
+/// supplied system carries a locale no other system has.
+#[test]
+fn a_renderer_keeps_the_font_system_it_was_given() {
+    const MARKER: &str = "x-kettle-startup-fonts";
+    let cfg = Config::default();
+    for scale in [1.0, 2.0] {
+        let mut fonts = StartupFonts::load(&cfg, 1.0);
+        let placeholder =
+            FontSystem::new_with_locale_and_db(String::new(), fontdb::Database::new());
+        let (_, db) = std::mem::replace(&mut fonts.font_system, placeholder).into_locale_and_db();
+        fonts.font_system = FontSystem::new_with_locale_and_db(MARKER.to_owned(), db);
+        let renderer =
+            Renderer::new_cpu_offscreen(64, 32, scale, &cfg, Some(fonts)).expect("CPU renderer");
+        assert_eq!(renderer.font_system.locale(), MARKER, "at {scale}x");
+    }
 }
 
 /// Fonts prepared before the scale is known measure the cell a direct
