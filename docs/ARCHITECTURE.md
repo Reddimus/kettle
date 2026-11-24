@@ -3896,9 +3896,17 @@ text areas for glyphon. Its `RendererBackend` decides what executes them.
   (`backend::layers`) that keeps a copy of its instances and textures. The
   glyph pipeline shares its atlas packer and slot cache with the GPU path
   and keeps its atlases in memory. glyphon's `Cache`, `TextAtlas`,
-  `Viewport` and `TextRenderer` are Kettle stand-ins (`backend::text`); on the
-  CPU, `prepare` runs glyphon's layout pass and keeps the glyphs it would
-  rasterize.
+  `Viewport` and `TextRenderer` are Kettle stand-ins (`backend::text`). On the
+  CPU they repeat glyphon 0.12 step for step:
+  - `prepare` runs glyphon's layout pass.
+  - It rasterizes each new key through `SwashCache` (or the custom-glyph
+    callback) into `CpuTextAtlas`, which caches, evicts and grows as
+    glyphon's mask and colour atlases do.
+  - It places and clips each glyph to its `TextBounds` as `prepare_glyph`
+    does.
+  - `draw_cpu_text` then blends the glyphs as glyphon's shader does in its
+    `Accurate` colour mode: a mask in its sRGB-decoded colour, a colour raster
+    as is, both straight-alpha over the sRGB scene.
 - **One draw list.** `encode_scene_pass` draws into a `ScenePass`, a wgpu
   render pass or a `CpuPass`, so both backends issue the same draws in the
   same order under the same scissors. `CpuPass` records each draw and hands
