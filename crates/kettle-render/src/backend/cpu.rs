@@ -86,7 +86,6 @@ pub(crate) enum CpuDraw<'a> {
     /// (see `text.rs`).
     Text {
         glyphs: &'a [CpuTextGlyph],
-        #[allow(dead_code, reason = "glyph rasters carry their own pixels")]
         atlas: &'a CpuTextAtlas,
     },
 }

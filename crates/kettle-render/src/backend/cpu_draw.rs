@@ -215,9 +215,11 @@ impl CpuRaster for SoftRaster {
                     draw_starfield(band, resolution, live, clip, &mut Vec::new());
                 });
             }
-            // glyphon's text areas: the CPU text compositor in `text.rs`
-            // rasterizes and draws them. Until it does, they draw nothing.
-            CpuDraw::Text { .. } => {}
+            // glyphon's text areas, prepared by the CPU text compositor in
+            // `text.rs`: chrome, titles, hints and overlay text.
+            CpuDraw::Text { glyphs, atlas } => {
+                super::text::draw_cpu_text(target, screen, scissor, glyphs, atlas);
+            }
         }
     }
 

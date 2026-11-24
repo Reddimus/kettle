@@ -741,10 +741,6 @@ fn place_glyph(
 /// glyphon's pipeline draws its vertices with a `screen`-sized viewport
 /// uniform (the target's size). `atlas` is the one the glyphs were prepared
 /// from; each glyph already holds its raster.
-#[cfg_attr(
-    not(test),
-    allow(dead_code, reason = "the CPU raster's `CpuDraw::Text` arm calls it")
-)]
 pub(crate) fn draw_cpu_text(
     target: &mut CpuTarget<'_>,
     screen: [f32; 2],

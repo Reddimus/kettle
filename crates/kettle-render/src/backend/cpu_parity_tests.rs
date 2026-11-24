@@ -3,9 +3,9 @@
 //! `cpu_raster`'s per-pipeline tolerance, and the CPU window path must draw
 //! into its presenter's buffer and commit through its pre-commit hook.
 //!
-//! Chrome text (tab titles, the status bar, menus) is glyphon's and drawn by
-//! the CPU text compositor; these scenes keep to the grid, so they measure
-//! the eight pipelines.
+//! Chrome text (tab titles, pane titles, the status bar, menus) is glyphon's
+//! and drawn by the CPU text compositor (`text.rs`); the chrome scene checks
+//! it, the others keep to the grid and the eight pipelines.
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -17,8 +17,10 @@ use super::RendererBackend;
 use super::cpu::{CpuPresentOutcome, CpuSurface};
 use crate::cpu_raster::pixels_to_rgba8;
 use crate::gpu_tests::{gpu_test_config, gpu_test_guard};
-use crate::headless_tests::{capture, focused, no_gpu_adapter, pane, snapshot_of};
-use crate::{FrameOutcome, Renderer, StatusBar, TabBar};
+use crate::headless_tests::{
+    capture, capture_with_tabs, focused, no_gpu_adapter, pane, snapshot_of,
+};
+use crate::{FrameOutcome, Renderer, StatusBar, TabActivity, TabBar, TabSeg};
 
 /// The largest channel difference between two frames, and how many
 /// channels differ by more than 2.
@@ -116,6 +118,76 @@ fn a_starfield_draws_the_same_on_the_cpu_and_the_gpu() {
     };
     let snap = snapshot_of(48, 8, b"$ ");
     assert_backends_agree("starfield", &cfg, &snap, (420, 160), false);
+}
+
+/// Chrome text: a tab title is a glyphon text area, which the CPU raster
+/// draws through the text compositor.
+#[test]
+fn chrome_text_draws_the_same_on_the_cpu_and_the_gpu() {
+    let _serialized = gpu_test_guard();
+    let (w, h) = (420, 200);
+    let cfg = kettle_config::Config {
+        show_titlebar: false,
+        ..opaque()
+    };
+    let snap = snapshot_of(48, 6, TEXT);
+    let mut tabs = TabBar::hidden();
+    tabs.height = 36.0;
+    tabs.segments.push(TabSeg {
+        idx: 0,
+        rect: (0.0, 0.0, 220.0, 36.0),
+        title_rect: (8.0, 0.0, 170.0, 36.0),
+        hint: None,
+        close: (180.0, 0.0, 36.0, 36.0),
+        title: "kettle: ~/src".into(),
+        path: None,
+        active: true,
+        activity: TabActivity::Normal,
+    });
+    let frame = |backend| {
+        let mut renderer =
+            Renderer::headless_for_tests_on(backend, &cfg, w, h, 1.0, false).expect("builds")?;
+        let mut view = pane(&snap, w, h - 36);
+        view.rect = (0.0, 36.0, w as f32, (h - 36) as f32);
+        view.terminal = view.rect;
+        Some(capture_with_tabs(
+            &mut renderer,
+            &cfg,
+            &[view],
+            &focused(true),
+            &tabs,
+        ))
+    };
+    let cpu = frame(RendererBackend::Cpu).expect("a CPU renderer needs no adapter");
+    let Some(gpu) = frame(RendererBackend::Gpu) else {
+        no_gpu_adapter();
+        return;
+    };
+    if let Some(dir) = std::env::var_os("KETTLE_CPU_PARITY_DUMP") {
+        let dir = std::path::Path::new(&dir);
+        cpu.save(dir.join("chrome-cpu.png")).expect("dump");
+        gpu.save(dir.join("chrome-gpu.png")).expect("dump");
+    }
+    // The GPU drew the title: many pixels far from the tab's fill.
+    let inked = |img: &image::RgbaImage, y0: u32, y1: u32| {
+        let first = img.get_pixel(4, y0 + 2).0;
+        (y0..y1)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let p = img.get_pixel(x, y).0;
+                (0..3)
+                    .map(|c| u32::from(p[c].abs_diff(first[c])))
+                    .sum::<u32>()
+                    > 60
+            })
+            .count()
+    };
+    assert!(inked(&gpu, 0, 36) > 40, "the GPU drew the tab title");
+    let (worst, over) = difference(&cpu, &gpu);
+    assert!(
+        over == 0,
+        "chrome: {over} channels differ by more than 2 (worst {worst})"
+    );
 }
 
 /// The test config with an opaque background (the default is slightly
