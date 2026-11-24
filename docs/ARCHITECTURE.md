@@ -3928,8 +3928,9 @@ text areas for glyphon. Its `RendererBackend` decides what executes them.
   translucent window gets premultiplied ARGB buffers, as the GPU's
   `PreMultiplied` surface does. An offscreen CPU renderer draws into its own
   `CpuFramebuffer` and converts to straight alpha for a `PostMultiplied`
-  surface. A pending screenshot is copied from either through the same
-  persistence pool.
+  surface. A pending screenshot converts directly from the borrowed scene into
+  one fallibly allocated RGBA buffer. Its graphics reservation stays with the
+  persistence worker until the PNG is saved or the job fails.
 - **The window loop.** All of it runs on winit's event-loop thread, the
   only thread that presents (a debug build panics on a second one).
   - A frame is not drawn while the compositor still holds the last one:

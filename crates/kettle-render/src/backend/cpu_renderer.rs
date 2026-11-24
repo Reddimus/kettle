@@ -131,7 +131,6 @@ impl Renderer {
         cpu_raster: &mut dyn super::cpu::CpuRaster,
         draws: &mut Vec<super::cpu::CpuDrawRecord>,
         mut target: CpuTarget<'_>,
-        pixels_for_capture: impl FnOnce(&mut CpuTarget<'_>) -> Vec<u32>,
         size: [u32; 2],
         cfg: &Config,
         cursor_on: bool,
@@ -156,8 +155,7 @@ impl Renderer {
         // A capture holds the scene as drawn, before presentation, as the
         // GPU's offscreen capture pass does.
         if let Some(screenshot) = screenshot.take() {
-            let pixels = pixels_for_capture(&mut target);
-            self.dispatch_cpu_screenshot(screenshot, size, &pixels);
+            self.dispatch_cpu_screenshot(screenshot, size, target.pixels(), target.width());
         }
         Ok(())
     }
@@ -236,7 +234,6 @@ impl Renderer {
                             raster.as_mut(),
                             draws,
                             target,
-                            |target| capture_pixels(target, buffer_w, buffer_h, target_size),
                             target_size,
                             cfg,
                             cursor_on,
@@ -297,7 +294,6 @@ impl Renderer {
                     raster.as_mut(),
                     draws,
                     scene.target(),
-                    |target| target.pixels().to_vec(),
                     target_size,
                     cfg,
                     cursor_on,
@@ -607,27 +603,6 @@ impl Renderer {
             cpu.scene.as_ref()
         }
     }
-}
-
-/// A screenshot's `size` pixels from a window buffer of `buffer_w` x
-/// `buffer_h`: the same pixels when the sizes agree, else the overlap, padded
-/// with transparent black.
-fn capture_pixels(
-    target: &mut CpuTarget<'_>,
-    buffer_w: u32,
-    buffer_h: u32,
-    [width, height]: [u32; 2],
-) -> Vec<u32> {
-    if [buffer_w, buffer_h] == [width, height] {
-        return target.pixels().to_vec();
-    }
-    let mut out = vec![0u32; width as usize * height as usize];
-    let (w, h) = (width.min(buffer_w) as usize, height.min(buffer_h) as usize);
-    for y in 0..h {
-        let src = &target.pixels()[y * buffer_w as usize..][..w];
-        out[y * width as usize..][..w].copy_from_slice(src);
-    }
-    out
 }
 
 /// Size an offscreen frame to `width` x `height`, cleared to transparent
