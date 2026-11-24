@@ -5,7 +5,7 @@ use std::num::NonZeroU32;
 use anyhow::{Result, anyhow};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
-use super::damage::{DamageHistory, Rect, normalize};
+use super::damage::{DamageHistory, Exposures, Rect, normalize};
 use super::{
     DisplayOwner, FrameError, PixelFormat, PresentOutcome, PresenterKind, PresenterStats,
     WindowOwner, buffer_extent, check_extent,
@@ -31,6 +31,13 @@ pub(super) struct SoftPresenter {
     format: PixelFormat,
     ages: SoftAges,
     commits: u64,
+    /// X11: what the server lost of the window since the last present, and
+    /// the connection that hears of it ([`ExposeWatcher`]).
+    exposures: Exposures,
+    watcher: Option<ExposeWatcher>,
+    /// X11 with no watcher: every present sends the whole buffer, since an
+    /// exposed region could not be told apart from an unchanged one.
+    send_whole: bool,
 }
 
 /// Corrects the buffer age softbuffer reports.
@@ -90,12 +97,14 @@ impl SoftPresenter {
             RawDisplayHandle::Wayland(_) => PresenterKind::SoftbufferWayland,
             _ => PresenterKind::SoftbufferX11,
         };
-        let (alpha, x11_put_image_limit) = if kind == PresenterKind::SoftbufferX11 {
-            x11_window_properties(raw_display, raw_window)
-                .ok_or_else(|| anyhow!("could not query the X11 CPU presentation transport"))?
+        let (alpha, x11_put_image_limit, watcher) = if kind == PresenterKind::SoftbufferX11 {
+            let props = x11_window_properties(raw_display, raw_window)
+                .ok_or_else(|| anyhow!("could not query the X11 CPU presentation transport"))?;
+            (props.alpha, props.put_image_limit, props.watcher)
         } else {
-            (false, None)
+            (false, None, None)
         };
+        let send_whole = kind == PresenterKind::SoftbufferX11 && watcher.is_none();
         let context =
             softbuffer::Context::new(display).map_err(|e| anyhow!("softbuffer context: {e}"))?;
         let surface =
@@ -113,6 +122,9 @@ impl SoftPresenter {
             format: PixelFormat::Opaque,
             ages: SoftAges::default(),
             commits: 0,
+            exposures: Exposures::default(),
+            watcher,
+            send_whole,
         };
         presenter.resize(1, 1, 1.0);
         Ok(presenter)
@@ -132,6 +144,12 @@ impl SoftPresenter {
 
     pub(super) fn supports_translucency(&self) -> bool {
         self.alpha
+    }
+
+    /// X11: exposed regions are heard of and sent again, region by region.
+    #[cfg(test)]
+    pub(super) fn watches_exposures(&self) -> bool {
+        self.watcher.is_some()
     }
 
     pub(super) fn resize(&mut self, width: u32, height: u32, scale: f64) {
@@ -200,6 +218,9 @@ impl SoftPresenter {
             history: &mut self.history,
             ages: &mut self.ages,
             commits: &mut self.commits,
+            exposures: &mut self.exposures,
+            watcher: &mut self.watcher,
+            send_whole: &mut self.send_whole,
             width,
             height,
             age,
@@ -236,6 +257,9 @@ pub(super) struct SoftFrame<'a> {
     history: &'a mut DamageHistory,
     ages: &'a mut SoftAges,
     commits: &'a mut u64,
+    exposures: &'a mut Exposures,
+    watcher: &'a mut Option<ExposeWatcher>,
+    send_whole: &'a mut bool,
     width: u32,
     height: u32,
     age: u8,
@@ -292,10 +316,24 @@ impl SoftFrame<'_> {
         let current = normalize(damage, w, h);
         self.history.push(current.clone());
         let full = self.ages.presented();
-        let out = if full {
+        // X11 without a compositing manager drops the pixels of a window
+        // that another one covered: the regions uncovered since the last
+        // present are sent again from this buffer, which still holds them.
+        if let Some(watcher) = self.watcher.as_mut()
+            && let Err(error) = watcher.take(self.exposures)
+        {
+            log::warn!(
+                "CPU present: lost the X11 exposure watch ({error}); every frame now sends \
+                 the whole window"
+            );
+            *self.watcher = None;
+            *self.send_whole = true;
+        }
+        let out = if full || *self.send_whole {
+            self.exposures.clear();
             vec![Rect::full(w, h)]
         } else {
-            current
+            self.exposures.upload(&current, w, h)
         };
         let rects: Vec<softbuffer::Rect> = out
             .iter()
@@ -365,11 +403,18 @@ fn check_put_image(width: u32, height: u32, maximum_bytes: usize) -> Result<(), 
     Ok(())
 }
 
+/// What the presenter needs to know of an X11 window.
+struct X11Window {
+    /// The window has a depth-32 visual, so the alpha byte reaches the
+    /// compositing manager.
+    alpha: bool,
+    /// Without MIT-SHM: the largest request the server takes.
+    put_image_limit: Option<usize>,
+    watcher: Option<ExposeWatcher>,
+}
+
 /// Use the same connection as softbuffer; `$DISPLAY` may name a different server.
-fn x11_window_properties(
-    display: RawDisplayHandle,
-    window: RawWindowHandle,
-) -> Option<(bool, Option<usize>)> {
+fn x11_window_properties(display: RawDisplayHandle, window: RawWindowHandle) -> Option<X11Window> {
     use as_raw_xcb_connection::AsRawXcbConnection as _;
     use x11rb::connection::RequestConnection as _;
     use x11rb::protocol::xproto::ConnectionExt as _;
@@ -395,7 +440,153 @@ fn x11_window_properties(
     let conn = unsafe { XCBConnection::from_raw_xcb_connection(raw, false) }.ok()?;
     let depth = conn.get_geometry(id).ok()?.reply().ok()?.depth;
     let put_image_limit = (!x11_shm_available(&conn)).then(|| conn.maximum_request_bytes());
-    Some((depth == 32, put_image_limit))
+    let watcher = match ExposeWatcher::open(&conn, id) {
+        Ok(watcher) => Some(watcher),
+        Err(reason) => {
+            log::info!(
+                "CPU present: not watching the X11 window for exposures ({reason}); every \
+                 frame sends the whole window"
+            );
+            None
+        }
+    };
+    Some(X11Window {
+        alpha: depth == 32,
+        put_image_limit,
+        watcher,
+    })
+}
+
+/// The X11 window's `Expose` events, on a connection of the presenter's own.
+///
+/// Without a compositing manager the X server keeps no copy of what another
+/// window covers: uncovering it asks the client to draw it again. winit
+/// turns that into `RedrawRequested`, the same event as Kettle's own redraw
+/// requests (and merged with one pending), so the renderer sees a frame
+/// that changed nowhere there and repaints nothing, and softbuffer's MIT-SHM
+/// path sends only the frame's damage. The retained buffer still holds the
+/// lost pixels; they only need sending again. winit reads every event on its
+/// connection, so a second connection to the same server selects `Expose`
+/// on the window (any number of clients may), and each present first reads
+/// what it heard.
+pub(super) struct ExposeWatcher {
+    conn: x11rb::xcb_ffi::XCBConnection,
+}
+
+/// The property that proves the watcher's server is the window's.
+const PROBE_PROPERTY: &[u8] = b"_KETTLE_CPU_PRESENT_PROBE";
+
+impl ExposeWatcher {
+    /// Connect to the window's server and select `Expose` on `window`.
+    /// `winit` is the window's own connection: a nonce written on the window
+    /// through it must read back through the new one, so a `$DISPLAY` that
+    /// names another server is refused.
+    fn open(winit: &x11rb::xcb_ffi::XCBConnection, window: u32) -> Result<Self, String> {
+        use x11rb::connection::Connection as _;
+        use x11rb::protocol::xproto::{
+            AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, EventMask, PropMode,
+        };
+        use x11rb::wrapper::ConnectionExt as _;
+        let name = watcher_display().ok_or("no display name to connect to")?;
+        let name = std::ffi::CString::new(name).map_err(|_| "a display name with a NUL")?;
+        let (conn, _) = x11rb::xcb_ffi::XCBConnection::connect(Some(&name))
+            .map_err(|e| format!("connecting: {e}"))?;
+        let atom = winit
+            .intern_atom(false, PROBE_PROPERTY)
+            .map_err(|e| e.to_string())?
+            .reply()
+            .map_err(|e| e.to_string())?
+            .atom;
+        let nonce = probe_nonce();
+        winit
+            .change_property8(PropMode::REPLACE, window, atom, AtomEnum::CARDINAL, &nonce)
+            .map_err(|e| e.to_string())?
+            .check()
+            .map_err(|e| e.to_string())?;
+        let same = (|| {
+            let here = conn
+                .intern_atom(true, PROBE_PROPERTY)
+                .ok()?
+                .reply()
+                .ok()?
+                .atom;
+            if here != atom {
+                return Some(false);
+            }
+            let value = conn
+                .get_property(false, window, atom, AtomEnum::CARDINAL, 0, 4)
+                .ok()?
+                .reply()
+                .ok()?
+                .value;
+            Some(value == nonce)
+        })();
+        if let Ok(cookie) = winit.delete_property(window, atom) {
+            let _ = cookie.check();
+        }
+        if same != Some(true) {
+            return Err("the display names another server than the window's".into());
+        }
+        conn.change_window_attributes(
+            window,
+            &ChangeWindowAttributesAux::new().event_mask(EventMask::EXPOSURE),
+        )
+        .map_err(|e| e.to_string())?
+        .check()
+        .map_err(|e| e.to_string())?;
+        conn.flush().map_err(|e| e.to_string())?;
+        Ok(Self { conn })
+    }
+
+    /// Add every region exposed so far to `into`. After the round trip the
+    /// server has sent this connection every `Expose` it made before, so
+    /// before the one that brought winit's redraw.
+    fn take(&mut self, into: &mut Exposures) -> Result<(), String> {
+        use x11rb::connection::Connection as _;
+        use x11rb::protocol::Event;
+        use x11rb::protocol::xproto::ConnectionExt as _;
+        self.conn
+            .get_input_focus()
+            .map_err(|e| e.to_string())?
+            .reply()
+            .map_err(|e| e.to_string())?;
+        while let Some(event) = self.conn.poll_for_event().map_err(|e| e.to_string())? {
+            if let Event::Expose(e) = event {
+                into.add(Rect::new(
+                    e.x.into(),
+                    e.y.into(),
+                    e.width.into(),
+                    e.height.into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The server the watcher connects to: winit's, which Xlib opens from
+/// `$DISPLAY`. Tests use only their own server, never `$DISPLAY`.
+fn watcher_display() -> Option<String> {
+    #[cfg(test)]
+    let name = std::env::var("KETTLE_TEST_X11_DISPLAY");
+    #[cfg(not(test))]
+    let name = std::env::var("DISPLAY");
+    name.ok().filter(|n| !n.is_empty())
+}
+
+/// 16 bytes no other process writes: per-process random hash keys.
+fn probe_nonce() -> [u8; 16] {
+    use std::hash::{BuildHasher, Hasher};
+    let half = |i: u64| {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u32(std::process::id());
+        h.write_u64(i);
+        h.finish().to_ne_bytes()
+    };
+    let mut out = [0u8; 16];
+    out[..8].copy_from_slice(&half(0));
+    out[8..].copy_from_slice(&half(1));
+    out
 }
 
 // Querying the extension alone does not prove fd attachment is supported

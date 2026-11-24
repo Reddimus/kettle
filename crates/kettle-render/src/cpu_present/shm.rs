@@ -205,6 +205,8 @@ pub(super) struct ShmPresenter {
     conn: Connection,
     width: u32,
     height: u32,
+    /// The scale of the last resize.
+    scale: f64,
     format: PixelFormat,
     /// The serial of the one frame callback out, until it is done. A commit
     /// made while it is out asks for no other.
@@ -324,6 +326,7 @@ impl ShmPresenter {
             conn,
             width: 1,
             height: 1,
+            scale: 1.0,
             format: PixelFormat::Opaque,
             callback: None,
             last_commit: None,
@@ -365,7 +368,14 @@ impl ShmPresenter {
             self.width = w;
             self.height = h;
             self.invalidate();
+        } else if scale != self.scale {
+            // winit stages the new buffer scale (or viewport destination) on
+            // the surface, and only a commit applies it: the next frame is
+            // committed even if its pixels are unchanged. The buffers keep
+            // their contents, so nothing is repainted.
+            self.force_next = true;
         }
+        self.scale = scale;
     }
 
     pub(super) fn set_format(&mut self, format: PixelFormat) -> PixelFormat {

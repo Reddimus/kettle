@@ -179,3 +179,92 @@ impl DamageHistory {
         normalize(&all, width, height)
     }
 }
+
+/// Regions the window system lost and asked to be drawn again (X11
+/// `Expose`) while the retained buffer still holds them. The frame has not
+/// changed there, so the renderer repaints nothing; the presenter sends
+/// them again with its next present, whatever that frame's damage.
+#[derive(Debug, Default)]
+pub struct Exposures {
+    rects: Vec<Rect>,
+}
+
+impl Exposures {
+    /// More than this collapse to their bounding box until they are sent.
+    const MAX: usize = 64;
+
+    pub fn add(&mut self, rect: Rect) {
+        if rect.is_empty() {
+            return;
+        }
+        if self.rects.len() >= Self::MAX {
+            let bounds = self.rects.iter().fold(rect, |acc, r| acc.union(r));
+            self.rects.clear();
+            self.rects.push(bounds);
+            return;
+        }
+        self.rects.push(rect);
+    }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.rects.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.rects.clear();
+    }
+
+    /// What a present of a `width` x `height` buffer sends: `current`, the
+    /// frame's own (normalized) damage, and every region exposed since the
+    /// last present, clipped to the buffer. The exposures are spent.
+    pub fn upload(&mut self, current: &[Rect], width: u32, height: u32) -> Vec<Rect> {
+        if self.rects.is_empty() {
+            return current.to_vec();
+        }
+        let mut all = current.to_vec();
+        all.append(&mut self.rects);
+        normalize(&all, width, height)
+    }
+}
+
+#[cfg(test)]
+mod exposure_tests {
+    use super::*;
+
+    #[test]
+    fn exposed_regions_go_out_with_the_next_present_once() {
+        let mut exposed = Exposures::default();
+        assert_eq!(exposed.upload(&[], 100, 50), Vec::<Rect>::new());
+        exposed.add(Rect::new(10, 10, 20, 8));
+        // Partly outside the buffer: clipped.
+        exposed.add(Rect::new(90, 40, 30, 30));
+        exposed.add(Rect::new(0, 0, 0, 5));
+        let current = [Rect::new(0, 0, 4, 4)];
+        let sent = exposed.upload(&current, 100, 50);
+        assert_eq!(
+            sent,
+            [
+                Rect::new(0, 0, 4, 4),
+                Rect::new(10, 10, 20, 8),
+                Rect::new(90, 40, 10, 10)
+            ]
+        );
+        assert!(exposed.is_empty());
+        assert_eq!(exposed.upload(&current, 100, 50), current);
+    }
+
+    #[test]
+    fn a_storm_of_exposures_stays_bounded_and_covers_them_all() {
+        let mut exposed = Exposures::default();
+        for i in 0..1000 {
+            exposed.add(Rect::new(i % 97, i % 41, 3, 2));
+        }
+        assert!(exposed.rects.len() <= Exposures::MAX);
+        let sent = exposed.upload(&[], 200, 100);
+        for i in 0..1000 {
+            let r = Rect::new(i % 97, i % 41, 3, 2);
+            assert!(sent.iter().any(|s| s.contains(&r)), "{r:?} not sent");
+        }
+    }
+}

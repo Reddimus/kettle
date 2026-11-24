@@ -115,6 +115,41 @@ fn a_disconnected_wayland_transport_rejects_the_first_present() {
     assert!(frame.present(&[Rect::full(W, H)], || {}).is_err());
 }
 
+/// A scale change that keeps the buffer's size: winit stages the new buffer
+/// scale (or viewport) on the surface, and only a commit applies it, so the
+/// next frame is committed even when nothing in it changed.
+#[test]
+fn a_scale_change_at_an_unchanged_buffer_size_is_committed() {
+    let Some((server, mut client, mut p)) = fixture(Config::default()) else {
+        return;
+    };
+    let mut scene = Scene::new();
+    assert_eq!(
+        scene.present(&mut p, r(0, 0, W, H), 3),
+        PresentOutcome::Presented
+    );
+    client.roundtrip();
+    let unchanged = |p: &mut ShmPresenter, scene: &Scene| {
+        let mut frame = p.buffer_mut().expect("buffer");
+        for rr in frame.repaint_region(&[]) {
+            copy(frame.pixels_mut(), &scene.truth, rr);
+        }
+        frame.present(&[], || {}).expect("present")
+    };
+    assert_eq!(unchanged(&mut p, &scene), PresentOutcome::Unchanged);
+    p.resize(W, H, 2.0);
+    assert_eq!(p.size(), (W, H), "an even size needs no rounding");
+    assert_eq!(unchanged(&mut p, &scene), PresentOutcome::Presented);
+    client.roundtrip();
+    let log = server.log();
+    assert_eq!(log.commits.len(), 2);
+    assert_eq!(log.commits.last().expect("commit").pixels, scene.truth);
+    drop(log);
+    // The same scale again changes nothing.
+    p.resize(W, H, 2.0);
+    assert_eq!(unchanged(&mut p, &scene), PresentOutcome::Unchanged);
+}
+
 // --- an abandoned draw into a deferred frame's buffer ---
 
 #[test]
@@ -644,6 +679,120 @@ mod x11 {
             px.iter().all(|&p| p == 0xff11_2233),
             "an opaque frame reached the window with alpha {:#x}",
             px[0] >> 24
+        );
+    }
+
+    /// The window's pixels as the server has them.
+    fn window_pixels(conn: &XCBConnection, window: u32, w: u16, h: u16) -> Vec<u32> {
+        conn.get_input_focus().expect("sync").reply().expect("sync");
+        let image = conn
+            .get_image(ImageFormat::Z_PIXMAP, window, 0, 0, w, h, !0)
+            .expect("get_image")
+            .reply()
+            .expect("image");
+        image
+            .data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| u32::from_ne_bytes(*b) & 0x00ff_ffff)
+            .collect()
+    }
+
+    /// Without a compositing manager the X server drops what another window
+    /// covers, and asks for it again (an `Expose`, which winit turns into a
+    /// redraw like any other). The frame is unchanged, so it has no damage:
+    /// the presenter must send the exposed pixels again from its buffer.
+    /// Run with an X server in `KETTLE_TEST_X11_DISPLAY` and no compositing
+    /// manager.
+    #[test]
+    fn pixels_another_window_uncovered_are_sent_again() {
+        let Ok(name) = std::env::var("KETTLE_TEST_X11_DISPLAY") else {
+            eprintln!("skipping: KETTLE_TEST_X11_DISPLAY unset");
+            return;
+        };
+        let name = std::ffi::CString::new(name).expect("display name");
+        let (conn, screen_num) = XCBConnection::connect(Some(&name)).expect("X connection");
+        let conn = Arc::new(conn);
+        let screen = &conn.setup().roots[screen_num];
+        let (root, visual, depth) = (screen.root, screen.root_visual, screen.root_depth);
+        let (w, h) = (96u16, 48u16);
+        let window = conn.generate_id().expect("id");
+        conn.create_window(
+            depth,
+            window,
+            root,
+            0,
+            0,
+            w,
+            h,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            visual,
+            &CreateWindowAux::new().background_pixel(0),
+        )
+        .expect("window");
+        conn.map_window(window).expect("map");
+        conn.flush().expect("flush");
+        let handles = Arc::new(Handles {
+            conn: conn.clone(),
+            screen: screen_num as i32,
+            window,
+            visual,
+        });
+        let mut p = SoftPresenter::new(handles.clone(), handles.clone()).expect("softbuffer");
+        assert!(
+            p.watches_exposures(),
+            "the window's own server was not watched"
+        );
+        p.resize(u32::from(w), u32::from(h), 1.0);
+        let pattern: Vec<u32> = (0..u32::from(w) * u32::from(h))
+            .map(|i| 0x0010_2030 + (i % 97) * 0x0001_0203)
+            .collect();
+        let mut frame = p.buffer_mut().expect("buffer");
+        frame.pixels_mut().copy_from_slice(&pattern);
+        frame.present(&[], || {}).expect("present");
+        assert_eq!(
+            window_pixels(&conn, window, w, h),
+            pattern,
+            "the first frame"
+        );
+        // Another window covers part of it, and goes.
+        let cover = conn.generate_id().expect("id");
+        conn.create_window(
+            depth,
+            cover,
+            root,
+            16,
+            8,
+            40,
+            24,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            visual,
+            &CreateWindowAux::new()
+                .background_pixel(0x00ff_0000)
+                .override_redirect(1),
+        )
+        .expect("cover");
+        conn.map_window(cover).expect("map");
+        conn.get_input_focus().expect("sync").reply().expect("sync");
+        conn.destroy_window(cover).expect("destroy");
+        conn.get_input_focus().expect("sync").reply().expect("sync");
+        assert_ne!(
+            window_pixels(&conn, window, w, h),
+            pattern,
+            "the server kept the covered pixels: this server cannot show the bug"
+        );
+        // The redraw the exposure brings: nothing in the frame changed.
+        let frame = p.buffer_mut().expect("buffer");
+        assert_eq!(frame.age(), 1, "the buffer holds the last frame");
+        assert!(frame.repaint_region(&[]).is_empty());
+        frame.present(&[], || {}).expect("present");
+        assert_eq!(
+            window_pixels(&conn, window, w, h),
+            pattern,
+            "the uncovered pixels were not sent again"
         );
     }
 }
