@@ -20,6 +20,7 @@
 //!   matching path for each call.
 
 pub(crate) mod cpu;
+pub(crate) mod cpu_damage;
 mod cpu_draw;
 mod cpu_renderer;
 #[cfg(target_os = "linux")]
@@ -31,6 +32,8 @@ pub(crate) mod text;
 pub use cpu::HeldFrameFlush;
 pub(crate) use cpu_renderer::CpuFrameRequest;
 
+#[cfg(all(test, target_os = "linux"))]
+mod cpu_damage_tests;
 #[cfg(test)]
 mod cpu_parity_tests;
 #[cfg(test)]

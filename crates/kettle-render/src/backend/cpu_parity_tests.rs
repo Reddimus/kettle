@@ -296,16 +296,19 @@ impl CpuSurface for FakeSurface {
 
     fn present_frame(
         &mut self,
-        draw: &mut dyn FnMut(&mut [u32], u32, u32) -> bool,
+        _damage: &[crate::cpu_raster::PixelRect],
+        draw: &mut super::cpu::DrawFrame<'_>,
         pre_commit: &mut dyn FnMut(),
     ) -> CpuPresentOutcome {
         if self.log.lock().unwrap().callback_out {
             return CpuPresentOutcome::Paced;
         }
         let (w, h) = self.extent();
-        // A recycled buffer's old contents must not show through.
+        // A recycled buffer's old contents must not show through: its age is
+        // unknown, so it is repainted whole.
         self.buffer = vec![0xdead_beef; w as usize * h as usize];
-        if !draw(&mut self.buffer, w, h) {
+        let whole = [crate::cpu_raster::PixelRect::new(0, 0, w, h)];
+        if !draw(&mut self.buffer, w, h, &whole) {
             self.log.lock().unwrap().held = false;
             return CpuPresentOutcome::NotDrawn;
         }

@@ -11,6 +11,12 @@
 //!   and repeats unchanged from one frame to the next (the wallpaper) is
 //!   drawn once into a cache at its final size and then copied. Its four-tap
 //!   filter costs 20–25 ns a pixel, 30–40 ms for a full-screen stretch.
+//!   Whether a draw comes from the cache is settled in
+//!   [`CpuRaster::plan`], once a frame, and reported there, because a
+//!   translucent cached image can differ from a direct draw by one code.
+//! - **Clipping.** A damage-tracked frame draws each draw once per repaint
+//!   rectangle ([`CpuRaster::draw_clipped`]). The pixels inside are exactly
+//!   the unclipped draw's, and banding follows the clipped area.
 
 use std::sync::Arc;
 
@@ -64,18 +70,37 @@ impl SoftRaster {
         }
     }
 
-    /// How many bands a draw covering about `pixels` pixels of `target`
-    /// gets.
-    fn bands_for(&self, target: &CpuTarget<'_>, pixels: u64) -> u32 {
-        if self.max_bands == 1 || pixels < BAND_MIN_PIXELS {
+    /// How many bands a draw covering about `pixels` pixels of the area
+    /// `clip` (in a target's rows) gets.
+    fn bands_for(&self, clip: PixelRect, pixels: u64) -> u32 {
+        let area = u64::from(clip.w) * u64::from(clip.h);
+        if self.max_bands == 1 || pixels < BAND_MIN_PIXELS || area < BAND_MIN_PIXELS {
             return 1;
         }
-        let rows = target.rows();
-        let frame = u64::from(target.width()) * u64::from(rows.end - rows.start);
-        u32::try_from(frame.div_ceil(PIXELS_PER_BAND))
+        u32::try_from(area.div_ceil(PIXELS_PER_BAND))
             .unwrap_or(MAX_BANDS)
             .clamp(1, self.max_bands)
     }
+}
+
+/// Run `draw` on `bands` bands of the rows of `target` that `clip` covers,
+/// from an even row so every band starts on one ([`CpuTarget::draw_banded`]).
+fn draw_rows(
+    target: &mut CpuTarget<'_>,
+    clip: PixelRect,
+    bands: u32,
+    draw: impl Fn(&mut CpuTarget<'_>) + Sync,
+) {
+    if bands <= 1 {
+        draw(target);
+        return;
+    }
+    let rows = target.rows();
+    let start = (clip.y & !1).clamp(rows.start, rows.end);
+    let end = clip.y.saturating_add(clip.h).clamp(start, rows.end);
+    let (_, rest) = target.reborrow().split_at_row(start);
+    let (mut middle, _) = rest.split_at_row(end);
+    middle.draw_banded(bands, draw);
 }
 
 impl Default for SoftRaster {
@@ -130,7 +155,44 @@ impl CpuRaster for SoftRaster {
         scissor: PixelRect,
         draw: &CpuDraw<'_>,
     ) {
-        let clip = Some(scissor);
+        self.draw_clipped(target, screen, scissor, scissor, draw);
+    }
+
+    fn plan(&mut self, screen: [f32; 2], scissor: PixelRect, draw: &CpuDraw<'_>) -> u64 {
+        let CpuDraw::Images {
+            instances,
+            image,
+            repeat,
+        } = *draw
+        else {
+            return 0;
+        };
+        let Some(texture) = image_view(image) else {
+            return 0;
+        };
+        let pixels = covered_pixels(scissor, instances.iter().map(|i| (i.pos, i.size)));
+        let cached = pixels >= IMAGE_CACHE_MIN_PIXELS
+            && self.images.plan(
+                screen,
+                scissor,
+                instances,
+                image,
+                texture,
+                repeat,
+                self.max_bands,
+            );
+        u64::from(cached)
+    }
+
+    fn draw_clipped(
+        &mut self,
+        target: &mut CpuTarget<'_>,
+        screen: [f32; 2],
+        scissor: PixelRect,
+        clip_rect: PixelRect,
+        draw: &CpuDraw<'_>,
+    ) {
+        let clip = Some(clip_rect);
         match *draw {
             CpuDraw::Quads { replace, instances } => {
                 let mode = if replace {
@@ -139,9 +201,10 @@ impl CpuRaster for SoftRaster {
                     QuadBlend::Blend
                 };
                 // Fills are a few nanoseconds a pixel; only very large ones band.
-                let pixels = covered_pixels(scissor, instances.iter().map(|q| (q.pos, q.size))) / 4;
-                let bands = self.bands_for(target, pixels);
-                target.draw_banded(bands, |band| {
+                let pixels =
+                    covered_pixels(clip_rect, instances.iter().map(|q| (q.pos, q.size))) / 4;
+                let bands = self.bands_for(clip_rect, pixels);
+                draw_rows(target, clip_rect, bands, |band| {
                     draw_quads(band, screen, instances, mode, clip);
                 });
             }
@@ -149,17 +212,18 @@ impl CpuRaster for SoftRaster {
                 instances,
                 color_atlas,
                 mask_atlas,
+                ..
             } => {
                 let atlases = GlyphAtlases {
                     color: color_atlas,
                     mask: mask_atlas,
                 };
                 let bands = if instances.len() >= BAND_MIN_GLYPHS {
-                    self.bands_for(target, u64::MAX)
+                    self.bands_for(clip_rect, u64::MAX)
                 } else {
                     1
                 };
-                target.draw_banded(bands, |band| {
+                draw_rows(target, clip_rect, bands, |band| {
                     draw_glyphs(band, screen, instances, atlases, clip);
                 });
             }
@@ -171,54 +235,51 @@ impl CpuRaster for SoftRaster {
                 let Some(texture) = image_view(image) else {
                     return;
                 };
-                let pixels = covered_pixels(scissor, instances.iter().map(|i| (i.pos, i.size)));
-                if pixels >= IMAGE_CACHE_MIN_PIXELS
-                    && self.images.draw(
-                        target,
-                        screen,
-                        scissor,
-                        instances,
-                        image,
-                        texture,
-                        repeat,
-                        self.max_bands,
-                    )
+                // The cache is keyed by the draw's own scissor, so it serves
+                // every repaint rectangle of the draw alike.
+                let whole = covered_pixels(scissor, instances.iter().map(|i| (i.pos, i.size)));
+                if whole >= IMAGE_CACHE_MIN_PIXELS
+                    && let Some(entry) = self
+                        .images
+                        .planned(screen, scissor, instances, image, repeat)
                 {
+                    composite(target, entry, clip_rect);
                     return;
                 }
-                let bands = self.bands_for(target, pixels.saturating_mul(4));
-                target.draw_banded(bands, |band| {
+                let pixels = covered_pixels(clip_rect, instances.iter().map(|i| (i.pos, i.size)));
+                let bands = self.bands_for(clip_rect, pixels.saturating_mul(4));
+                draw_rows(target, clip_rect, bands, |band| {
                     for inst in instances {
                         draw_image(band, screen, inst, texture, address(repeat), clip);
                     }
                 });
             }
             CpuDraw::RoundedSurfaces { instances } => {
-                let pixels = covered_pixels(scissor, instances.iter().map(|s| (s.pos, s.size)));
-                let bands = self.bands_for(target, pixels);
-                target.draw_banded(bands, |band| {
+                let pixels = covered_pixels(clip_rect, instances.iter().map(|s| (s.pos, s.size)));
+                let bands = self.bands_for(clip_rect, pixels);
+                draw_rows(target, clip_rect, bands, |band| {
                     draw_rounded_surfaces(band, screen, instances, clip);
                 });
             }
             CpuDraw::Outlines { instances } => {
-                let pixels = covered_pixels(scissor, instances.iter().map(|o| (o.pos, o.size)));
-                let bands = self.bands_for(target, pixels);
-                target.draw_banded(bands, |band| {
+                let pixels = covered_pixels(clip_rect, instances.iter().map(|o| (o.pos, o.size)));
+                let bands = self.bands_for(clip_rect, pixels);
+                draw_rows(target, clip_rect, bands, |band| {
                     draw_outlines(band, screen, instances, clip);
                 });
             }
             CpuDraw::Starfield { uniforms } => {
                 let live = &uniforms.stars[..(uniforms.count as usize).min(uniforms.stars.len())];
                 let resolution = uniforms.resolution;
-                let bands = self.bands_for(target, u64::MAX);
-                target.draw_banded(bands, |band| {
+                let bands = self.bands_for(clip_rect, u64::MAX);
+                draw_rows(target, clip_rect, bands, |band| {
                     draw_starfield(band, resolution, live, clip, &mut Vec::new());
                 });
             }
             // glyphon's text areas, prepared by the CPU text compositor in
             // `text.rs`: chrome, titles, hints and overlay text.
             CpuDraw::Text { glyphs, atlas } => {
-                super::text::draw_cpu_text(target, screen, scissor, glyphs, atlas);
+                super::text::draw_cpu_text(target, screen, clip_rect, glyphs, atlas);
             }
         }
     }
@@ -300,12 +361,11 @@ impl ImageCache {
         }
     }
 
-    /// Draw from the cache, caching the draw first when it repeats. `false`
-    /// when the caller should draw it directly.
+    /// Settle whether this frame draws the image from the cache, caching it
+    /// first when it repeats. `true` when it does.
     #[allow(clippy::too_many_arguments)]
-    fn draw(
+    fn plan(
         &mut self,
-        target: &mut CpuTarget<'_>,
         screen: [f32; 2],
         scissor: PixelRect,
         instances: &[ImageInstance],
@@ -324,12 +384,24 @@ impl ImageCache {
             self.candidate = None;
             self.entry = cache_image(key, screen, scissor, instances, image, texture, max_bands);
         }
-        let Some(entry) = &self.entry else {
+        if self.entry.is_none() {
             return false;
-        };
+        }
         self.used = true;
-        composite(target, entry, scissor);
         true
+    }
+
+    /// The cached draw this frame's plan chose for this draw, if any.
+    fn planned(
+        &self,
+        screen: [f32; 2],
+        scissor: PixelRect,
+        instances: &[ImageInstance],
+        image: &kettle_core::ImageData,
+        repeat: bool,
+    ) -> Option<&CachedImage> {
+        let entry = self.entry.as_ref().filter(|_| self.used)?;
+        (entry.key == ImageKey::new(image, repeat, screen, scissor, instances)).then_some(entry)
     }
 }
 
@@ -474,16 +546,14 @@ mod tests {
                 *p = pack((i % 251) as u8, (i % 13) as u8 * 9, 40, 255);
             }
             let instances = [inst];
-            raster.draw(
-                &mut fb.target(),
-                screen,
-                PixelRect::new(0, 0, w, h - 20),
-                &CpuDraw::Images {
-                    instances: &instances,
-                    image: &image,
-                    repeat: false,
-                },
-            );
+            let draw = CpuDraw::Images {
+                instances: &instances,
+                image: &image,
+                repeat: false,
+            };
+            let scissor = PixelRect::new(0, 0, w, h - 20);
+            raster.plan(screen, scissor, &draw);
+            raster.draw(&mut fb.target(), screen, scissor, &draw);
         }
         fb
     }
@@ -533,6 +603,119 @@ mod tests {
         );
     }
 
+    /// A busy scene of every shape pipeline and a cached translucent image,
+    /// drawn whole, and drawn again only inside a few rectangles over the
+    /// whole frame with those rectangles cleared, on one band and on eight.
+    #[test]
+    fn clipped_draws_match_the_whole_draw_inside_their_rectangles() {
+        use crate::outline::OutlineInstance;
+        use crate::quad::QuadInstance;
+        use crate::rounded_surface::RoundedSurface;
+        let (w, h) = (640u32, 400u32);
+        let screen = [w as f32, h as f32];
+        let mut image = wallpaper(64, 40).rgba.to_vec();
+        for px in image.as_chunks_mut::<4>().0 {
+            px[3] = 150;
+        }
+        let image = kettle_core::ImageData::new(64, 40, image).expect("small image");
+        let inst = stretched(screen, &image);
+        let quads: Vec<QuadInstance> = (0..40)
+            .map(|i| QuadInstance {
+                pos: [(i * 37 % 600) as f32 + 0.3, (i * 23 % 380) as f32 + 0.6],
+                size: [41.5, 17.25],
+                color: [0.9, (i % 5) as f32 / 5.0, 0.3, 0.55],
+            })
+            .collect();
+        let surfaces = [RoundedSurface {
+            pos: [100.5, 60.25],
+            size: [300.0, 200.0],
+            fill: [0.2, 0.3, 0.9, 0.7],
+            stroke: [1.0, 1.0, 1.0, 0.8],
+            params: [14.0, 1.5, 0.0, 0.0],
+        }];
+        let outlines = [OutlineInstance {
+            pos: [50.5, 40.5],
+            size: [500.0, 300.0],
+            color: [1.0, 0.8, 0.0, 0.9],
+            border_width: 2.0,
+            corner_radius: 9.0,
+            corner_mask: 0b1111,
+            dash: 6.0,
+            gap: 4.0,
+        }];
+        let instances = [inst];
+        let draws = [
+            CpuDraw::Quads {
+                replace: true,
+                instances: &quads[..4],
+            },
+            CpuDraw::Images {
+                instances: &instances,
+                image: &image,
+                repeat: false,
+            },
+            CpuDraw::Quads {
+                replace: false,
+                instances: &quads,
+            },
+            CpuDraw::RoundedSurfaces {
+                instances: &surfaces,
+            },
+            CpuDraw::Outlines {
+                instances: &outlines,
+            },
+        ];
+        let scissor = PixelRect::new(0, 0, w, h - 10);
+        let frame = |raster: &mut SoftRaster,
+                     fb: &mut CpuFramebuffer,
+                     clips: Option<&[PixelRect]>| {
+            raster.begin_frame();
+            for draw in &draws {
+                raster.plan(screen, scissor, draw);
+            }
+            for draw in &draws {
+                match clips {
+                    None => raster.draw(&mut fb.target(), screen, scissor, draw),
+                    Some(clips) => {
+                        for clip in clips {
+                            if let Some(clip) = scissor.intersect(*clip) {
+                                raster.draw_clipped(&mut fb.target(), screen, scissor, clip, draw);
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        let clips = [
+            PixelRect::new(0, 0, 64, 64),
+            PixelRect::new(96, 33, 333, 101),
+            PixelRect::new(97, 300, 500, 100),
+            PixelRect::new(600, 10, 40, 290),
+        ];
+        for bands in [1, 8] {
+            let mut whole = SoftRaster::with_max_bands(bands);
+            let mut clipped = SoftRaster::with_max_bands(bands);
+            let mut reference = CpuFramebuffer::new(w, h).expect("frame");
+            let mut fb = CpuFramebuffer::new(w, h).expect("frame");
+            // The second and third frames draw the image from the cache.
+            for _ in 0..3 {
+                reference.pixels_mut().fill(0);
+                frame(&mut whole, &mut reference, None);
+                fb.pixels_mut().copy_from_slice(reference.pixels());
+                for c in &clips {
+                    for y in c.y..c.y + c.h {
+                        for x in c.x..c.x + c.w {
+                            fb.pixels_mut()[(y * w + x) as usize] = 0;
+                        }
+                    }
+                }
+                frame(&mut clipped, &mut fb, Some(&clips));
+                assert_eq!(fb, reference, "{bands} bands");
+            }
+            assert!(clipped.images.entry.is_some(), "the image was cached");
+        }
+    }
+
     #[test]
     fn banded_and_single_threaded_draws_match() {
         let one = frames(&mut SoftRaster::with_max_bands(1), 1, false);
@@ -543,15 +726,20 @@ mod tests {
     #[test]
     fn bands_follow_the_frame_size_and_the_host() {
         let raster = SoftRaster::with_max_bands(8);
-        let mut small = CpuFramebuffer::new(800, 500).expect("frame");
-        let mut panel = CpuFramebuffer::new(1600, 1000).expect("frame");
-        let mut uhd = CpuFramebuffer::new(3840, 2160).expect("frame");
-        assert_eq!(raster.bands_for(&small.target(), 1_000), 1);
-        assert_eq!(raster.bands_for(&small.target(), u64::MAX), 1);
-        assert_eq!(raster.bands_for(&panel.target(), u64::MAX), 4);
-        assert_eq!(raster.bands_for(&uhd.target(), u64::MAX), 8);
+        let small = PixelRect::new(0, 0, 800, 500);
+        let panel = PixelRect::new(0, 0, 1600, 1000);
+        let uhd = PixelRect::new(0, 0, 3840, 2160);
+        assert_eq!(raster.bands_for(small, 1_000), 1);
+        assert_eq!(raster.bands_for(small, u64::MAX), 1);
+        assert_eq!(raster.bands_for(panel, u64::MAX), 4);
+        assert_eq!(raster.bands_for(uhd, u64::MAX), 8);
         let two = SoftRaster::with_max_bands(2);
-        assert_eq!(two.bands_for(&uhd.target(), u64::MAX), 2);
+        assert_eq!(two.bands_for(uhd, u64::MAX), 2);
+        // A small repaint rectangle of a large frame stays on one thread.
+        assert_eq!(
+            raster.bands_for(PixelRect::new(64, 64, 96, 64), u64::MAX),
+            1
+        );
     }
 
     /// The animated starfield's CPU cost per frame, single-threaded and on
@@ -582,7 +770,7 @@ mod tests {
                     times.push(started.elapsed().as_secs_f64() * 1000.0);
                 }
                 times.sort_by(f64::total_cmp);
-                let used = raster.bands_for(&fb.target(), u64::MAX);
+                let used = raster.bands_for(PixelRect::new(0, 0, w, h), u64::MAX);
                 println!(
                     "starfield {w}x{h} max_bands={bands} (used {used}): median {:.2} ms, p90 {:.2} ms, \
                      {:.1}% of one core at 10 fps",

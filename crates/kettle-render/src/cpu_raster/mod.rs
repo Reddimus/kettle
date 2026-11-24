@@ -331,6 +331,7 @@ impl<'a> CpuTarget<'a> {
     }
 
     /// The framebuffer's width, which is also this band's.
+    #[cfg(test)]
     pub(crate) fn width(&self) -> u32 {
         self.width
     }

@@ -1000,6 +1000,18 @@ pub struct GlyphPipeline {
     /// Raster placements of shaped emoji glyphs, which size their fitted
     /// images (see [`Self::placement`]). Nothing is uploaded for them.
     placements: HashMap<CacheKey, Option<GlyphSlot>>,
+    /// Changes whenever atlas texels an earlier frame may have sampled can be
+    /// written again: a slot freed for reuse, or the packer reset. The CPU
+    /// backend's damage tracking hashes it with every glyph draw, since an
+    /// instance's bytes do not change when its slot is given to another
+    /// glyph. Unique across pipelines ([`next_atlas_epoch`]).
+    atlas_epoch: u64,
+}
+
+/// A value no glyph atlas has had as its epoch yet.
+fn next_atlas_epoch() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// What a [`GlyphPipeline`] draws with on each backend.
@@ -1288,6 +1300,7 @@ impl GlyphPipeline {
             cursor_bounds: None,
             _cursor_gpu: cursor_gpu,
             placements: HashMap::new(),
+            atlas_epoch: next_atlas_epoch(),
         }
     }
 
@@ -1575,6 +1588,7 @@ impl GlyphPipeline {
 
     fn free_cached_slot(&mut self, cached: CachedSlot) {
         if let Some(slot) = cached.slot {
+            self.atlas_epoch = next_atlas_epoch();
             if slot.kind == 0 {
                 self.color.free_unmerged(slot);
             } else {
@@ -1915,6 +1929,7 @@ impl GlyphPipeline {
                 instances,
                 color_atlas,
                 mask_atlas,
+                atlas_epoch: self.atlas_epoch,
             });
         }
     }
@@ -2040,6 +2055,7 @@ impl GlyphPipeline {
         self.count = 0;
         self.color.allocator = AtlasAllocator::new(self.color.width, self.color.height);
         self.mask.allocator = AtlasAllocator::new(self.mask.width, self.mask.height);
+        self.atlas_epoch = next_atlas_epoch();
         self.slot_limit_epoch = None;
         self.exhausted_kinds = [false; 2];
         // The cursor instance points into the atlas too.
@@ -2058,6 +2074,75 @@ impl GlyphPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A glyph raster at `glyph_id`, `w` x `h`, in the CPU mask atlas.
+    fn cpu_mask_glyph(pipeline: &mut GlyphPipeline, glyph_id: u16, w: u32, h: u32) -> GlyphSlot {
+        let data = vec![200; (w * h) as usize];
+        let key = glyphon::cosmic_text::CacheKey::new(
+            glyphon::fontdb::ID::dummy(),
+            glyph_id,
+            13.0,
+            (0.0, 0.0),
+            glyphon::fontdb::Weight::NORMAL,
+            glyphon::cosmic_text::CacheKeyFlags::empty(),
+        )
+        .0;
+        pipeline
+            .ensure_glyph(DeviceRef::Cpu, key, || {
+                Some(RasterGlyph {
+                    color: false,
+                    width: w,
+                    height: h,
+                    left: 0,
+                    top: 0,
+                    data: &data,
+                })
+            })
+            .expect("the glyph is admitted")
+    }
+
+    /// Damage tracking hashes the epoch with every glyph draw, because an
+    /// instance's bytes do not change when its slot is given to another
+    /// glyph: freeing a slot and resetting the packer must change it, and
+    /// packing a new glyph into fresh space must not.
+    #[test]
+    fn the_atlas_epoch_changes_when_sampled_texels_can_be_rewritten() {
+        let mut pipeline = GlyphPipeline::new_cpu(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            GraphicsBudget::default(),
+        )
+        .expect("CPU glyph pipeline");
+        let other = GlyphPipeline::new_cpu(
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            GraphicsBudget::default(),
+        )
+        .expect("CPU glyph pipeline");
+        assert_ne!(
+            pipeline.atlas_epoch, other.atlas_epoch,
+            "unique across pipelines"
+        );
+        let start = pipeline.atlas_epoch;
+        let first = cpu_mask_glyph(&mut pipeline, 1, 8, 16);
+        cpu_mask_glyph(&mut pipeline, 2, 8, 16);
+        assert_eq!(pipeline.atlas_epoch, start, "fresh space reuses no texel");
+        // A frame passes, and the first glyph is evicted: its slot goes to the
+        // next glyph of its size.
+        pipeline.upload(DeviceRef::Cpu, [64.0, 64.0], &[]);
+        pipeline.evict_lru(pipeline.slots.len());
+        let evicted = pipeline.atlas_epoch;
+        assert_ne!(evicted, start, "a freed slot can be rewritten");
+        let reused = cpu_mask_glyph(&mut pipeline, 3, 8, 16);
+        assert_eq!(
+            (reused.atlas_x, reused.atlas_y),
+            (first.atlas_x, first.atlas_y),
+            "the freed slot is reused"
+        );
+        pipeline.clear();
+        assert_ne!(
+            pipeline.atlas_epoch, evicted,
+            "a reset packer rewrites from the origin"
+        );
+    }
 
     #[test]
     fn atlas_refusals_are_cached_for_one_frame_and_retried_next_frame() {

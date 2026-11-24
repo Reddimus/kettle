@@ -28,6 +28,7 @@ use crate::quad::QuadInstance;
 use crate::rounded_surface::RoundedSurface;
 use crate::starfield::StarfieldUniforms;
 
+use super::cpu_damage::{DamageTracker, TileHashes};
 use super::text::{CpuTextAtlas, CpuTextGlyph};
 
 /// The pipelines a scene pass draws with. The cursor patch is not among
@@ -65,6 +66,10 @@ pub(crate) enum CpuDraw<'a> {
         instances: &'a [GlyphInstance],
         color_atlas: CpuTextureView<'a>,
         mask_atlas: CpuTextureView<'a>,
+        /// Changes whenever a texel an earlier frame may have sampled is
+        /// written again (an evicted slot reused, the atlas cleared), so
+        /// damage tracking sees an unchanged instance over changed texels.
+        atlas_epoch: u64,
     },
     /// `imgpipe.rs`'s four-tap shader over one image, clamped or repeating.
     Images {
@@ -141,6 +146,32 @@ pub(crate) trait CpuRaster: Send {
         draw: &CpuDraw<'_>,
     );
 
+    /// Draw only the part of `draw` inside `clip`, which lies inside its
+    /// `scissor`. The pixels inside `clip` must be exactly those
+    /// [`Self::draw`] under `scissor` gives them: damage tracking repaints a
+    /// frame piece by piece and keeps the rest from earlier frames.
+    fn draw_clipped(
+        &mut self,
+        target: &mut CpuTarget<'_>,
+        screen: [f32; 2],
+        scissor: PixelRect,
+        clip: PixelRect,
+        draw: &CpuDraw<'_>,
+    ) {
+        let _ = scissor;
+        self.draw(target, screen, clip, draw);
+    }
+
+    /// Called once for each draw of a frame, before any of it is drawn, in
+    /// draw order: the rasterizer settles any per-frame choice of how to draw
+    /// it (such as drawing an image from a cache), and returns a value that
+    /// changes whenever that choice could change its pixels. Damage tracking
+    /// hashes it with the draw.
+    fn plan(&mut self, screen: [f32; 2], scissor: PixelRect, draw: &CpuDraw<'_>) -> u64 {
+        let _ = (screen, scissor, draw);
+        0
+    }
+
     /// The presentation pass (`present.rs`): `scene` converted to straight
     /// alpha into `output`, for a translucent `PostMultiplied` surface.
     /// `output` already has `scene`'s size.
@@ -168,11 +199,27 @@ impl CpuRaster for NoRaster {
 
 /// A scene pass on the CPU: the stand-in for a `wgpu::RenderPass`.
 pub(crate) struct CpuPass<'e> {
-    target: CpuTarget<'e>,
+    sink: PassSink<'e>,
     size: [u32; 2],
-    raster: &'e mut dyn CpuRaster,
-    records: &'e mut Vec<CpuDrawRecord>,
+    records: Option<&'e mut Vec<CpuDrawRecord>>,
     scissor: [u32; 4],
+}
+
+/// Where a pass's draws go.
+enum PassSink<'e> {
+    /// Rasterized into `target`, only inside `clips` when given.
+    Raster {
+        target: CpuTarget<'e>,
+        raster: &'e mut dyn CpuRaster,
+        clips: Option<&'e [PixelRect]>,
+        /// [`CpuRaster::plan`] each draw first; a signing pass already did.
+        plan: bool,
+    },
+    /// Hashed into a damage signature (`cpu_damage.rs`).
+    Sign {
+        tiles: &'e mut TileHashes,
+        raster: &'e mut dyn CpuRaster,
+    },
 }
 
 impl<'e> CpuPass<'e> {
@@ -184,11 +231,46 @@ impl<'e> CpuPass<'e> {
         raster: &'e mut dyn CpuRaster,
         records: &'e mut Vec<CpuDrawRecord>,
     ) -> Self {
+        Self::clipped(target, size, raster, records, None, true)
+    }
+
+    /// A pass over `target` that draws only inside `clips` (all of it when
+    /// `None`), which must not overlap and which the caller has cleared.
+    /// `plan` is false when a [`Self::signing`] pass of the same frame has
+    /// already planned every draw.
+    pub(crate) fn clipped(
+        target: CpuTarget<'e>,
+        size: [u32; 2],
+        raster: &'e mut dyn CpuRaster,
+        records: &'e mut Vec<CpuDrawRecord>,
+        clips: Option<&'e [PixelRect]>,
+        plan: bool,
+    ) -> Self {
         Self {
-            target,
+            sink: PassSink::Raster {
+                target,
+                raster,
+                clips,
+                plan,
+            },
             size,
-            raster,
-            records,
+            records: Some(records),
+            scissor: [0, 0, size[0], size[1]],
+        }
+    }
+
+    /// A pass that draws nothing and hashes every draw into `tiles` (begun
+    /// at `size`), planning each with `raster` as the drawing pass will
+    /// find it.
+    pub(crate) fn signing(
+        tiles: &'e mut TileHashes,
+        size: [u32; 2],
+        raster: &'e mut dyn CpuRaster,
+    ) -> Self {
+        Self {
+            sink: PassSink::Sign { tiles, raster },
+            size,
+            records: None,
             scissor: [0, 0, size[0], size[1]],
         }
     }
@@ -211,16 +293,44 @@ impl<'e> CpuPass<'e> {
         if draw.len() == 0 {
             return;
         }
-        self.records.push(CpuDrawRecord {
-            pipeline: draw.pipeline(),
-            instances: draw.len(),
-            scissor: self.scissor,
-        });
+        if let Some(records) = self.records.as_deref_mut() {
+            records.push(CpuDrawRecord {
+                pipeline: draw.pipeline(),
+                instances: draw.len(),
+                scissor: self.scissor,
+            });
+        }
         let [x, y, w, h] = self.scissor;
-        if w > 0 && h > 0 {
-            let screen = [self.size[0] as f32, self.size[1] as f32];
-            self.raster
-                .draw(&mut self.target, screen, PixelRect::new(x, y, w, h), &draw);
+        if w == 0 || h == 0 {
+            return;
+        }
+        let scissor = PixelRect::new(x, y, w, h);
+        let screen = [self.size[0] as f32, self.size[1] as f32];
+        match &mut self.sink {
+            PassSink::Sign { tiles, raster } => {
+                let salt = raster.plan(screen, scissor, &draw);
+                tiles.draw(screen, scissor, salt, &draw);
+            }
+            PassSink::Raster {
+                target,
+                raster,
+                clips,
+                plan,
+            } => {
+                if *plan {
+                    raster.plan(screen, scissor, &draw);
+                }
+                match clips {
+                    None => raster.draw_clipped(target, screen, scissor, scissor, &draw),
+                    Some(clips) => {
+                        for clip in clips.iter() {
+                            if let Some(clip) = scissor.intersect(*clip) {
+                                raster.draw_clipped(target, screen, scissor, clip, &draw);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -271,6 +381,10 @@ pub enum HeldFrameFlush {
     Failed,
 }
 
+/// What draws a window frame into a presenter's buffer: its pixels, width
+/// and height, and its repaint region ([`CpuSurface::present_frame`]).
+pub(crate) type DrawFrame<'a> = dyn FnMut(&mut [u32], u32, u32, &[PixelRect]) -> bool + 'a;
+
 /// A window's shared-memory buffers, as the CPU backend draws into them:
 /// `cpu_present::CpuPresenter` on Linux, a fake in tests.
 ///
@@ -297,14 +411,21 @@ pub(crate) trait CpuSurface: Send {
         Ok(())
     }
 
-    /// Draw the next buffer with `draw` (its pixels, width and height,
-    /// whose contents are undefined) and present it, running `pre_commit`
-    /// only if, and just before, the frame is committed. `draw` returns
-    /// `false` to drop the frame. While [`Self::frame_pending`] holds, the
-    /// frame is not drawn at all ([`CpuPresentOutcome::Paced`]).
+    /// Draw the next buffer with `draw` and present it with `damage`, what
+    /// changed since the previous frame presented, running `pre_commit` only
+    /// if, and just before, the frame is committed.
+    ///
+    /// `draw` gets the buffer's pixels, width and height, and its repaint
+    /// region: `damage` widened by the buffer's age, the whole buffer when
+    /// its contents are unknown. Pixels outside the region hold the
+    /// previous frame; inside it they are undefined and must all be drawn.
+    /// `draw` is not called when the region is empty, and returns `false` to
+    /// drop the frame. While [`Self::frame_pending`] holds, the frame is not
+    /// drawn at all ([`CpuPresentOutcome::Paced`]).
     fn present_frame(
         &mut self,
-        draw: &mut dyn FnMut(&mut [u32], u32, u32) -> bool,
+        damage: &[PixelRect],
+        draw: &mut DrawFrame<'_>,
         pre_commit: &mut dyn FnMut(),
     ) -> CpuPresentOutcome;
 
@@ -365,6 +486,8 @@ pub(crate) struct CpuBackend {
     pub(crate) present_thread: Option<std::thread::ThreadId>,
     /// The draws of the last scene pass.
     pub(crate) draws: Vec<CpuDrawRecord>,
+    /// A window's damage tracking (`cpu_damage.rs`).
+    pub(crate) damage: DamageTracker,
 }
 
 impl CpuBackend {
@@ -380,6 +503,7 @@ impl CpuBackend {
             paced: false,
             present_thread: None,
             draws: Vec::new(),
+            damage: DamageTracker::default(),
         }
     }
 
