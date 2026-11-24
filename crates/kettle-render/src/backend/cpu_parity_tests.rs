@@ -645,8 +645,12 @@ fn painted_cards_move_only_when_a_frame_is_committed() {
     let (mut renderer, log) = window(&cfg, false);
     renderer.resize(1200, 400);
     let (cards, snap, nonce) = crate::inline_cards::tests::fixture();
-    let mut view = pane(&snap, 1200, 400);
-    view.inline_cards = Some(&cards);
+    let card = |snap| {
+        let mut view = pane(snap, 1200, 400);
+        view.inline_cards = Some(&cards);
+        view
+    };
+    let empty = snapshot_of(20, 4, b"no card");
     let painted = |renderer: &Renderer| {
         renderer
             .painted_cards()
@@ -654,22 +658,19 @@ fn painted_cards_move_only_when_a_frame_is_committed() {
             .map(|card| card.nonce)
             .collect::<Vec<_>>()
     };
-    // Unchanged: nothing reached the screen, so nothing is painted.
-    log.lock().unwrap().mode = FakeMode::Unchanged;
     assert_eq!(
-        frame_of(&mut renderer, &cfg, &[view], || panic!("no commit")),
+        frame_of(&mut renderer, &cfg, &[pane(&empty, 1200, 400)], || {}),
         FrameOutcome::Presented
     );
-    assert!(
-        painted(&renderer).is_empty(),
-        "an unchanged frame paints nothing"
-    );
+    assert!(painted(&renderer).is_empty());
     // Deferred: drawn, but on screen only from the flush on.
-    log.lock().unwrap().mode = FakeMode::Defer;
-    let mut view = pane(&snap, 1200, 400);
-    view.inline_cards = Some(&cards);
+    {
+        let mut log = log.lock().unwrap();
+        log.mode = FakeMode::Defer;
+        log.callback_out = false;
+    }
     assert_eq!(
-        frame_of(&mut renderer, &cfg, &[view], || panic!("no commit")),
+        frame_of(&mut renderer, &cfg, &[card(&snap)], || panic!("no commit")),
         FrameOutcome::Presented
     );
     assert!(
@@ -679,7 +680,6 @@ fn painted_cards_move_only_when_a_frame_is_committed() {
     // A frame built while the compositor holds the last one is not drawn,
     // and does not stand in for the held one.
     log.lock().unwrap().callback_out = true;
-    let empty = snapshot_of(20, 4, b"no card");
     assert_eq!(
         frame_of(&mut renderer, &cfg, &[pane(&empty, 1200, 400)], || {
             panic!("no commit")
@@ -704,6 +704,42 @@ fn painted_cards_move_only_when_a_frame_is_committed() {
         FrameOutcome::Presented
     );
     assert!(painted(&renderer).is_empty());
+    // Unchanged: the presenter found nothing to commit, so the screen
+    // already shows this frame, and what it painted with it.
+    log.lock().unwrap().mode = FakeMode::Unchanged;
+    log.lock().unwrap().callback_out = false;
+    assert_eq!(
+        frame_of(&mut renderer, &cfg, &[card(&snap)], || panic!("no commit")),
+        FrameOutcome::Presented
+    );
+    assert_eq!(
+        painted(&renderer),
+        [nonce],
+        "an unchanged frame's card is on screen"
+    );
+    // An unchanged frame while one is held goes on screen with that frame's
+    // commit, which then shows what the unchanged frame painted.
+    log.lock().unwrap().mode = FakeMode::Defer;
+    assert_eq!(
+        frame_of(&mut renderer, &cfg, &[pane(&empty, 1200, 400)], || {
+            panic!("no commit")
+        }),
+        FrameOutcome::Presented
+    );
+    log.lock().unwrap().mode = FakeMode::Unchanged;
+    assert_eq!(
+        frame_of(&mut renderer, &cfg, &[card(&snap)], || panic!("no commit")),
+        FrameOutcome::Presented
+    );
+    assert_eq!(painted(&renderer), [nonce], "nothing new is on screen yet");
+    log.lock().unwrap().mode = FakeMode::Commit;
+    log.lock().unwrap().callback_out = false;
+    assert_eq!(renderer.flush_held_frame(|| {}), HeldFrameFlush::Presented);
+    assert_eq!(
+        painted(&renderer),
+        [nonce],
+        "the commit shows what the last frame drawn painted"
+    );
 }
 
 #[test]

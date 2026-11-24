@@ -215,6 +215,8 @@ impl Renderer {
             ..
         } = cpu;
         let windowed = surface.is_some();
+        // Whether the presenter holds a drawn frame for a later commit.
+        let mut still_held = false;
         let outcome = match surface.as_mut() {
             Some(surface) => {
                 // A window's frame is drawn where the compositor reads it, and
@@ -255,6 +257,7 @@ impl Renderer {
                     drawn,
                     ..
                 } = frame;
+                still_held = surface.has_deferred();
                 match outcome {
                     // The buffer now holds this frame: the next one is
                     // compared with it.
@@ -395,8 +398,21 @@ impl Renderer {
                 Ok(FrameOutcome::Presented)
             }
             CpuPresentOutcome::Unchanged => {
-                // Nothing new to show and nothing committed: the screen
-                // already holds this frame, and the painted state stays.
+                // Nothing to commit: a presenter reports a frame unchanged
+                // only when its pixels equal the last drawn frame's and
+                // nothing drawn waits for a commit, so the screen already
+                // shows this frame. What it painted is on screen with it:
+                // its cards and bidi rows can differ from the last frame's
+                // while its pixels do not (two tabs alike but for the pane
+                // and card they show). A frame still held puts it on screen
+                // with its own commit, so it takes this frame's instead.
+                if still_held {
+                    *held = Some(self.hold_painted(scene_facts));
+                } else {
+                    *held = None;
+                    self.last_scene = Some(scene_facts);
+                    self.commit_painted_cards();
+                }
                 Ok(FrameOutcome::Presented)
             }
             CpuPresentOutcome::Paced => Ok(FrameOutcome::Paced),
