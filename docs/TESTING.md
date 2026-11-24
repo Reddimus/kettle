@@ -591,8 +591,10 @@ sessions of typing, cursor moves and blinks, selection drags, scrolling,
 resizes, themes, opacity, Settings, tab switches, splits, toasts, the
 search bar, small and large translucent image placements and a second large
 image drawn over the first, the starfield, font size, HiDPI scale, two tabs
-that look alike but show different pending cards and bidi rows, and the
-bidi switch. Frames go to a fake surface that behaves as one of the
+that look alike but show different pending cards and bidi rows, the
+bidi switch, bursts of output that land in one frame (URLs that soft-wrap
+over three rows and scroll the grid, sometimes after a clear or stopping
+mid-line), and a hovered link's underline over such a URL. Frames go to a fake surface that behaves as one of the
 presenters, with the presenter's own buffer-age history, and every pixel the
 renderer must repaint is filled with garbage first:
 
@@ -614,8 +616,9 @@ be the ones that frame painted. `KETTLE_DAMAGE_SEEDS` and
 require the harness to fail a presenter that ignores buffer age and an X11
 presenter that never sends exposed pixels again. Targeted tests check that a
 paced attempt leaves the image cache alone, that a second image never takes
-the cache from the first in mid-frame, and that switching between tabs that
-look alike puts the new tab's card and bidi rows on screen. The module also
+the cache from the first in mid-frame, that switching between tabs that
+look alike puts the new tab's card and bidi rows on screen, and that floods
+of wrapped URLs under a moving hover equal full repaints on both presenters. The module also
 checks that typing and a blink repaint a few cells at scale 1 and 2, and that
 `KETTLE_CPU_FULL_REPAINT`'s switch repaints every frame whole.
 `damage_frame_cost` (ignored) times a typed character and a blink at
