@@ -2093,10 +2093,10 @@ mod tests {
         cases
     }
 
+    crate::visual_parity_tests::parity_scene! {
     /// Compositing the patch over the off frame gives the on frame, byte for
     /// byte in straight RGBA for alpha surfaces, and RGB for Opaque surfaces,
     /// across cursor shapes, colours, cell widths, scales and layouts.
-    #[test]
     fn the_patch_over_the_off_frame_is_the_on_frame() {
         let _serialized = gpu_test_guard();
         for case in cases() {
@@ -2106,7 +2106,7 @@ mod tests {
                 cfg.background_opacity = opacity;
             }
             let (width, height) = (320, 120);
-            let Some(mut renderer) = Renderer::headless_for_tests_with(
+            let Some(mut renderer) = crate::visual_parity_tests::renderer_with(
                 &cfg,
                 width,
                 height,
@@ -2117,10 +2117,8 @@ mod tests {
                 eprintln!("no GPU adapter on this host; skipped");
                 return;
             };
-            if !measured_parity_adapter(&renderer) {
-                eprintln!("unmeasured rasterizer; parity matrix not run");
-                return;
-            }
+            let patch_supported = renderer.backend() == crate::RendererBackend::Gpu
+                && measured_parity_adapter(&renderer);
             if let Some(mode) = case.surface_mode {
                 renderer.supported_alpha_modes = vec![mode];
             }
@@ -2165,8 +2163,9 @@ mod tests {
                 vec![pane(&snap, width, height)]
             };
             capture(&mut renderer, &cfg, &views, &focused(true));
-            let on = renderer.displayed_frame_for_tests(&cfg, true);
+            let on = patch_supported.then(|| renderer.displayed_frame_for_tests(&cfg, true));
             capture(&mut renderer, &cfg, &views, &focused(false));
+            let Some(on) = on else { continue };
             let off = renderer.displayed_frame_for_tests(&cfg, false);
             assert_cursor_edges_are_stable(&renderer);
             if matches!(
@@ -2214,6 +2213,7 @@ mod tests {
                 cfg.background_opacity
             );
         }
+    }
     }
 
     /// A patch pass renders the crop of the full frame: the offset viewport

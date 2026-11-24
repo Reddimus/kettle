@@ -5,6 +5,7 @@ use crate::batching::{EmojiCellImages, GlyphPositioning, GlyphSource, emit_posit
 use crate::glyphpipe::GlyphSlot;
 use crate::gpu_tests::gpu_test_guard;
 use crate::headless_tests::{capture, focused, pane, snapshot_of};
+use crate::visual_parity_tests::parity_scene;
 use crate::*;
 
 /// Font sizes of the C08 panel (13 and 16 px on macOS, 14 and 17 px on
@@ -246,7 +247,7 @@ fn frame(
     cfg.theme.cursor = cfg.theme.background;
     cfg.theme.cursor_text = cfg.theme.foreground;
     let (w, h) = ((400.0 * scale) as u32, (120.0 * scale) as u32);
-    let mut renderer = Renderer::headless_for_tests_with(&cfg, w, h, scale, false)
+    let mut renderer = crate::visual_parity_tests::renderer_with(&cfg, w, h, scale, false)
         .expect("headless renderer builds")?;
     if !system {
         renderer.font_system = bundled_fonts();
@@ -259,10 +260,10 @@ fn frame(
     Some((renderer, cfg, image))
 }
 
+parity_scene! {
 /// The live renderer draws an emoji 1:1 in whole pixels inside its row: the
 /// bundled font's lightning on every host, and a colour 😀 where the host
 /// has a colour emoji face.
-#[test]
 fn a_frame_draws_emoji_one_to_one_inside_the_row() {
     let _serial = gpu_test_guard();
     let mut checked_colour = false;
@@ -304,12 +305,13 @@ fn a_frame_draws_emoji_one_to_one_inside_the_row() {
         eprintln!("EMOJI_FIT_COLOUR_PASS");
     }
 }
+}
 
+parity_scene! {
 /// The block cursor over an emoji draws the pane's own images, so moving the
 /// cursor onto it changes no emoji pixel. The cursor block is the background
 /// colour here, so the whole cell must match the frame with the cursor
 /// elsewhere.
-#[test]
 fn the_block_cursor_draws_the_emoji_the_pane_draws() {
     let _serial = gpu_test_guard();
     for scale in SCALES {
@@ -354,6 +356,7 @@ fn the_block_cursor_draws_the_emoji_the_pane_draws() {
         }
     }
 }
+}
 
 #[test]
 fn emoji_cursor_cache_retains_keys_and_invalidates_when_switching_renderers() {
@@ -386,8 +389,8 @@ fn emoji_cursor_cache_retains_keys_and_invalidates_when_switching_renderers() {
     assert!(cache.changed(Some(7), false));
 }
 
+parity_scene! {
 /// Retain unchanged emoji cursors, and refresh glyphon when leaving them.
-#[test]
 fn an_emoji_cursor_retains_prepares_and_refreshes_after_moving_off() {
     let _serial = gpu_test_guard();
     let text = "\x1b[?2027h\u{26a1}X\u{a9}\u{fe0f}\x1b[1;1H";
@@ -451,11 +454,12 @@ fn an_emoji_cursor_retains_prepares_and_refreshes_after_moving_off() {
     assert!(renderer.chrome_prepares > after.0 && renderer.text_prepares > after.1);
     assert_eq!(renderer.cursor_glyph_buffer.lines[0].text(), "Y");
 }
+}
 
+parity_scene! {
 /// Fitted emoji images are keyed by their pixel size: one glyph fitted to one
 /// and to two columns in the same frame keeps both images, and a font-size
 /// change drops every image and placement of the old size.
-#[test]
 fn fitted_emoji_images_follow_their_size() {
     let _serial = gpu_test_guard();
     let text = "\x1b[?2027h\u{a9}\u{fe0f}X\r\n\x1b[?2027l\u{a9}\u{fe0f}X\x1b[?25l";
@@ -497,6 +501,7 @@ fn fitted_emoji_images_follow_their_size() {
         placed.iter().all(|&size| size == physical),
         "only placements at {physical} px are held: {placed:?}"
     );
+}
 }
 
 /// The host's colour emoji `text` shaped at `size` px, or `None` without a

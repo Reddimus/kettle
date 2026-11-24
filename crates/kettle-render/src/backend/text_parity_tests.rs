@@ -414,6 +414,14 @@ fn check(case: &str, rendered: &Rendered) -> u8 {
             worst = (px as u32 % W, px as u32 / W);
         }
     }
+    let counts = crate::visual_parity_tests::pixel_counts(gpu, cpu);
+    eprintln!(
+        "RASTER_PARITY text-{case} {W}x{H} max={max} mean={:.8} pixels1={} pixels2={} pixels_over2={}",
+        sum as f64 / gpu.len() as f64,
+        counts[1],
+        counts[2],
+        counts[3]
+    );
     // Text must have changed the frame, or the case proves nothing.
     let init = background();
     let touched = gpu

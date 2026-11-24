@@ -7,6 +7,7 @@ use crate::gpu_tests::gpu_test_guard;
 use crate::headless_tests::{capture, capture_with_tabs, focused, pane, renderer, snapshot_of};
 use crate::quad::QuadInstance;
 use crate::theme::{PaneBorderStyle, broadcast_border_color, pane_border_style};
+use crate::visual_parity_tests::parity_scene;
 use crate::{PaneBroadcast, PaneSnapshot, PaneView, Rect4, TabBar, color, rect};
 use kettle_config::{Config, Rgb, Theme};
 
@@ -190,11 +191,11 @@ fn colored(color: Rgb) -> [f32; 4] {
     rect(0.0, 0.0, 0.0, 0.0, color, 1.0).color
 }
 
+parity_scene! {
 /// A frame's outlines as it sends them to the GPU: the sending pane's four
 /// solid strips and the receiving pane's dashes in broadcast's colour, and
 /// the divider's four strips around the pane the broadcast does not reach.
 /// Stopping broadcast takes broadcast's colour off every pane.
-#[test]
 fn a_frame_outlines_the_sender_solid_and_each_receiver_dashed() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer((3.0 * W) as u32, H as u32) else {
@@ -278,11 +279,12 @@ fn a_frame_outlines_the_sender_solid_and_each_receiver_dashed() {
     assert_eq!(in_pane(&quads, divider, 1), strips(leaf(1)));
     assert_eq!(in_pane(&quads, divider, 2), strips(leaf(2)));
 }
+}
 
+parity_scene! {
 /// Per-pane titlebars follow the same roles: under a group scope a pane
 /// outside the group keeps the inactive bar even though the window
 /// broadcasts, and a receiving pane takes the receive bar.
-#[test]
 fn titlebars_mark_only_the_panes_the_broadcast_reaches() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer((3.0 * W) as u32, H as u32) else {
@@ -322,12 +324,13 @@ fn titlebars_mark_only_the_panes_the_broadcast_reaches() {
     assert_eq!(bar(1), receive, "the receiving pane");
     assert_eq!(bar(2), inactive, "the pane outside the group");
 }
+}
 
+parity_scene! {
 /// On a decorated macOS window the panes at the bottom corners are drawn by
 /// the rounded outline shader instead. A receiving pane's outline there
 /// carries the same dash as the four-quad path and the GPU draws it with
 /// gaps; the sender's stays solid.
-#[test]
 fn rounded_outlines_dash_receivers_too() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer((3.0 * W) as u32, H as u32) else {
@@ -390,6 +393,7 @@ fn rounded_outlines_dash_receivers_too() {
         "the receiver's is dashed"
     );
 }
+}
 
 /// Pixels of `frame` on the top row, `x0..x1`, painted the outline colour.
 fn on_outline(frame: &image::RgbaImage, outline: Rgb, x0: u32, x1: u32) -> Vec<bool> {
@@ -404,10 +408,10 @@ fn on_outline(frame: &image::RgbaImage, outline: Rgb, x0: u32, x1: u32) -> Vec<b
         .collect()
 }
 
+parity_scene! {
 /// A receiving pane at a rounded window corner is dimmed like any unfocused
 /// pane, but the outline's arc there is not: every pixel of the arc's stroke
 /// comes out the same with the unfocused-pane dim on and off.
-#[test]
 fn a_dimmed_receivers_rounded_arc_keeps_its_colour() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer((3.0 * W) as u32, H as u32) else {
@@ -461,11 +465,12 @@ fn a_dimmed_receivers_rounded_arc_keeps_its_colour() {
     }
     assert!(checked >= 16, "{checked} arc pixels");
 }
+}
 
+parity_scene! {
 /// The four-quad path and the rounded outline shader dash an edge the same
 /// way, on a fractional edge too: the top edge of a receiver 200.6 pixels
 /// wide shows the same dashes drawn either way.
-#[test]
 fn quads_and_the_outline_shader_dash_a_fractional_edge_alike() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer((3.0 * W) as u32, H as u32) else {
@@ -506,12 +511,13 @@ fn quads_and_the_outline_shader_dash_a_fractional_edge_alike() {
     assert_eq!(quad_row, shader_row);
     assert!(quad_row.iter().filter(|on| !**on).count() >= 10, "dashed");
 }
+}
 
+parity_scene! {
 /// Each outline is lifted against the background its own pane paints inside
 /// it: the colour the pane's program set with OSC 11, else the theme's,
 /// whichever pane has focus. TokyoNight Night's yellow passes on its own
 /// dark background and needs lifting on white.
-#[test]
 fn the_outline_is_lifted_against_the_background_a_program_sets() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer((3.0 * W) as u32, H as u32) else {
@@ -564,4 +570,5 @@ fn the_outline_is_lifted_against_the_background_a_program_sets() {
         count(&renderer, on_theme, 1) > 4,
         "the receiver keeps its own"
     );
+}
 }

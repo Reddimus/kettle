@@ -261,6 +261,8 @@ mod glyphpipe;
 mod headless_tests;
 #[cfg(test)]
 mod selection_contrast_gpu_tests;
+#[cfg(test)]
+mod visual_parity_tests;
 
 mod imgpipe;
 

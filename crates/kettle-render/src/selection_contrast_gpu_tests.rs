@@ -1,10 +1,11 @@
 use super::*;
 use crate::gpu_tests::{gpu_test_config, gpu_test_guard};
 use crate::headless_tests::{capture, pane, snapshot_of};
+use crate::visual_parity_tests::parity_scene;
 use alacritty_terminal::selection::SelectionRange;
 use kettle_core::{Column, Line, Point};
 
-#[test]
+parity_scene! {
 fn gpu_selection_perimeter_and_row_seams_match_the_resolved_fill() {
     let _serial = gpu_test_guard();
     for scale in [1.0, 2.0] {
@@ -15,7 +16,7 @@ fn gpu_selection_perimeter_and_row_seams_match_the_resolved_fill() {
             cfg.show_titlebar = false;
             let (width, height) = ((640.0 * scale) as u32, (240.0 * scale) as u32);
             let Some(mut renderer) =
-                Renderer::headless_for_tests_with(&cfg, width, height, scale, true)
+                crate::visual_parity_tests::renderer_with(&cfg, width, height, scale, true)
                     .expect("renderer builds")
             else {
                 eprintln!("SELECTION_GPU_SKIPPED: no adapter");
@@ -155,4 +156,5 @@ fn gpu_selection_perimeter_and_row_seams_match_the_resolved_fill() {
     eprintln!(
         "SELECTION_GPU_ACCEPTED: Grid/Legacy, 1x/2x, dark/light, active/inactive, exposed perimeter and no row seams"
     );
+}
 }
