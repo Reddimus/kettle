@@ -199,10 +199,17 @@ impl Renderer {
         let windowed = surface.is_some();
         let outcome = match surface.as_mut() {
             Some(surface) => {
-                // A window's frame is drawn where the compositor reads it. Its
-                // surface offers no `PostMultiplied` mode, so the scene is
-                // never converted: the premultiplied scene is what a GPU
-                // window's `PreMultiplied` surface is handed.
+                // A window's frame is drawn where the compositor reads it, and
+                // the scene's pixels are the presenter's format as they are:
+                // `wl_shm` ARGB8888 is premultiplied, and a GPU window's
+                // `PreMultiplied` surface is handed exactly these bytes
+                // (sRGB-encoded colour premultiplied in linear light; half-
+                // alpha white is 188, not 128). Converting to an
+                // encoded-space premultiply would move a translucent CPU
+                // window away from the GPU's by up to 44 codes, measured live
+                // (see `a_translucent_cpu_window_hands_over_what_a_
+                // premultiplied_gpu_surface_gets`). The surface offers no
+                // `PostMultiplied` mode, so no straight-alpha pass runs.
                 debug_assert!(!needs_presentation, "a CPU window presents premultiplied");
                 *converted = false;
                 let mut drawn = Ok(());

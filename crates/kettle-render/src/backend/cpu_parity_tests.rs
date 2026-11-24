@@ -458,6 +458,44 @@ fn a_translucent_cpu_window_presents_premultiplied() {
     assert!(px[3] > 0 && px[3] < 255, "translucent background: {px:?}");
 }
 
+/// What a translucent CPU window hands the compositor. `wl_shm`'s ARGB8888
+/// is premultiplied, and the compositor blends it in the encoded space. A
+/// GPU window's `PreMultiplied` surface is handed the scene as drawn:
+/// sRGB-encoded colour premultiplied in linear light. Half-alpha white is
+/// (188, 188, 188, 128) there, not the (128, 128, 128, 128) an
+/// encoded-space premultiply gives. Measured live on Tower (GNOME 50,
+/// NVIDIA): a #c0c0c0 background at opacity 0.5 composites to the same
+/// (141, 170, 208) on both renderers; the encoded-space premultiply would
+/// show 97 where both show 141. So the CPU window presents the scene as is,
+/// and this pins it.
+#[test]
+fn a_translucent_cpu_window_hands_over_what_a_premultiplied_gpu_surface_gets() {
+    let cfg = kettle_config::Config {
+        background_opacity: 0.5,
+        theme: kettle_config::Theme {
+            background: kettle_config::Rgb::new(255, 255, 255),
+            ..gpu_test_config().theme
+        },
+        ..gpu_test_config()
+    };
+    let (mut renderer, log) = window(&cfg, true);
+    let snap = snapshot_of(20, 4, b"");
+    assert_eq!(
+        frame_of(&mut renderer, &cfg, &[pane(&snap, 200, 80)], || {}),
+        FrameOutcome::Presented
+    );
+    let log = log.lock().unwrap();
+    // A pixel of plain background, away from the cursor and any text.
+    let px = log.frames[0].as_chunks::<4>().0[200 * 60 + 150];
+    for c in 0..3 {
+        assert!(
+            px[c].abs_diff(188) <= 2,
+            "half-alpha white stays linear-premultiplied: {px:?}"
+        );
+    }
+    assert!(px[3].abs_diff(128) <= 1, "alpha 0.5: {px:?}");
+}
+
 #[test]
 fn a_cpu_window_on_an_opaque_only_surface_stays_opaque() {
     let cfg = kettle_config::Config {
