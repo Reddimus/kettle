@@ -767,7 +767,7 @@ impl Renderer {
         facts: &SceneFacts,
         cfg: &Config,
     ) -> Result<(), CursorPatchFailure> {
-        let Some(gpu) = self.device.gpu().cloned() else {
+        let Some(gpu) = self.device.gpu() else {
             return Err(CursorPatchFailure::Lost);
         };
         let Some(layer) = self.cursor_layer.as_mut() else {
@@ -808,6 +808,10 @@ impl Renderer {
         // A failed submission must discard the acquired drawable. The layer
         // keeps its old contents; C2 hides it until a new Presented result.
         self.submit_cursor_patch(rect, facts, cfg, &view, format)?;
+        // The submit took `&mut self`, so borrow the queue again.
+        let Some(gpu) = self.device.gpu() else {
+            return Err(CursorPatchFailure::Lost);
+        };
         gpu.queue.present(frame);
         Ok(())
     }
@@ -832,17 +836,19 @@ impl Renderer {
         view: &wgpu::TextureView,
         format: wgpu::TextureFormat,
     ) -> Result<(), CursorPatchFailure> {
-        let Some(gpu) = self.device.gpu().cloned() else {
+        let Some(gpu) = self.device.gpu() else {
             return Err(CursorPatchFailure::Lost);
         };
         let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("kettle-cursor-patch-encoder"),
+            });
         let result = (|| {
-            let mut encoder = gpu
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("kettle-cursor-patch-encoder"),
-                });
             self.encode_cursor_patch(rect, facts, cfg, view, format, &mut encoder)?;
+            // The encode took `&mut self`, so borrow the queue again.
+            let gpu = self.device.gpu().ok_or(CursorPatchFailure::Lost)?;
             gpu.queue.submit(std::iter::once(encoder.finish()));
             Ok(())
         })();
@@ -1714,6 +1720,21 @@ mod tests {
             layer[submit..present].contains("?;"),
             "failed submit must discard the frame"
         );
+    }
+
+    /// A GPU frame and a cursor patch borrow the GPU context. A clone takes
+    /// four wgpu handle references and three `Arc` counts each time.
+    #[test]
+    fn frames_and_patches_borrow_the_gpu_context() {
+        let lib = kettle_test_support::production_source(include_str!("lib.rs"));
+        for (file, src) in [("lib.rs", lib), ("cursor_patch.rs", production_source())] {
+            for clone in ["gpu.clone()", ".gpu().cloned()"] {
+                assert!(
+                    !src.contains(clone),
+                    "{file} clones the GPU context: {clone}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -6448,8 +6448,9 @@ impl Renderer {
             self.presentation.discard_target();
         }
 
+        // Borrowed, not cloned: this runs every GPU frame.
         let gpu = match &self.device {
-            RenderDevice::Gpu(gpu) => gpu.clone(),
+            RenderDevice::Gpu(gpu) => gpu,
             RenderDevice::Cpu(_) => {
                 return self.submit_cpu_frame(
                     backend::CpuFrameRequest {
@@ -6650,6 +6651,11 @@ impl Renderer {
         let submission = gpu.queue.submit(std::iter::once(encoder.finish()));
         self.dispatch_prepared_screenshot(prepared_screenshot, submission);
         pre_present();
+        // The dispatch took `&mut self`, so borrow the queue again. Nothing
+        // replaces `self.device`, so this is the context the frame used.
+        let Some(gpu) = self.device.gpu() else {
+            return Err(anyhow!("the GPU context went away before present"));
+        };
         gpu.queue.present(frame);
         if reconfigure_after_present {
             self.configure_surface();
