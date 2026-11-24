@@ -565,6 +565,11 @@ struct World {
     twin_terms: [alacritty_terminal::Term<EventProxy>; 2],
     twin_cards: crate::inline_cards::InlineCards,
     tabs: Option<usize>,
+    /// A hovered link's underline: the viewport rows and columns of one URL
+    /// that soft-wraps over three rows, as kettle-ui hands them over.
+    hovered_link: Option<[LinkRect; 3]>,
+    /// The output floods made so far, numbering their URLs.
+    floods: u64,
     scale: f32,
     rng: Rng,
 }
@@ -594,6 +599,8 @@ impl World {
             twin_terms,
             twin_cards,
             tabs: None,
+            hovered_link: None,
+            floods: 0,
             scale: 1.0,
             rng: Rng(seed.wrapping_mul(0x2545_f491_4f6c_dd1d) | 1),
         };
@@ -845,6 +852,54 @@ impl World {
                 renderer.resize(self.size.0, self.size.1);
                 "resize"
             }
+            91..=92 => {
+                // A burst of output in one frame, as a fast command's lands
+                // between two frames: URLs that soft-wrap over three rows,
+                // scrolling the grid, sometimes after a clear and sometimes
+                // stopping mid-line, so the next burst continues the row.
+                let cols = self.terms[pane].columns();
+                let mut out = Vec::new();
+                if self.rng.chance(4) {
+                    out.extend_from_slice(b"\x1b[H\x1b[2J");
+                }
+                for _ in 0..1 + self.rng.below(6) {
+                    self.floods += 1;
+                    let q = "q".repeat(cols * 2 + cols / 2);
+                    out.extend_from_slice(
+                        format!(
+                            "https://example.invalid/wrapped-{:02}/{q}/end\r\n",
+                            self.floods % 100
+                        )
+                        .as_bytes(),
+                    );
+                }
+                if self.rng.chance(3) {
+                    let cut = out.len() - self.rng.below(cols as u64 * 2) as usize;
+                    out.truncate(cut.max(1));
+                }
+                self.feed(pane, &out);
+                "output flood"
+            }
+            93 => {
+                // The pointer rests on (or leaves) a URL that wraps over three
+                // rows: its whole length is underlined.
+                self.hovered_link = if self.hovered_link.is_some() && self.rng.chance(3) {
+                    None
+                } else {
+                    let cols = self.terms[pane].columns();
+                    let row = self.rng.below(19) as usize;
+                    let tail = 1 + self.rng.below(cols as u64 - 1) as usize;
+                    let link = |row, width| LinkRect {
+                        col: 0,
+                        row,
+                        width,
+                        hover: true,
+                        explicit: false,
+                    };
+                    Some([link(row, cols), link(row + 1, cols), link(row + 2, tail)])
+                };
+                "link hover"
+            }
             _ => "idle",
         }
     }
@@ -957,6 +1012,7 @@ impl World {
         let mut overlay = Overlay {
             window_focused: true,
             cursor_visible: self.cursor_on,
+            links: self.hovered_link.map(Vec::from).unwrap_or_default(),
             settings: self.settings.clone(),
             ..Overlay::default()
         };
@@ -1019,7 +1075,7 @@ fn translucent_image(w: u32, h: u32, tint: u8) -> kettle_core::ImageData {
 /// Every kind of change, in an order that also opens, scrolls and closes
 /// Settings, switches and hides tabs, and turns each toggle on and off:
 /// the scripted start of every session, so every session covers them all.
-const SCRIPT: [u64; 54] = [
+const SCRIPT: [u64; 60] = [
     0, 30, 25, 20, 40, 41, 41, 46, 47, 47, 51, 54, 56, 58, 59, 59, 61, 61, 62, 64, 66, 0, 67, 69,
     // One pane again, a small image, then a large one that small changes
     // leave in place, so its second frame draws it from the cache; then a
@@ -1027,10 +1083,13 @@ const SCRIPT: [u64; 54] = [
     64, 90, 71, 71, 30, 30, 84, 89, 30, 89, 84,
     // Two tabs that look alike, switched, a blink, bidi off and on again.
     86, 89, 86, 30, 88, 89, 88, 87, 74, 0, 75, 77, 78, 89, 67, 69, 74, 56, 58,
+    // An output flood under a hovered wrapped link, the hover moved, and
+    // another flood that scrolls it away.
+    91, 93, 91, 93, 30, 92,
 ];
 
 /// Every change's name, which the harness must all see.
-const CHANGES: [&str; 27] = [
+const CHANGES: [&str; 29] = [
     "type",
     "enter",
     "cursor move",
@@ -1056,6 +1115,8 @@ const CHANGES: [&str; 27] = [
     "twin switch",
     "twins off",
     "bidi",
+    "output flood",
+    "link hover",
     "idle",
     "first frame",
 ];
@@ -1365,6 +1426,29 @@ fn a_second_image_never_takes_the_cache_from_the_first_mid_frame() {
 /// An attempt the compositor is not ready for draws nothing, so it must
 /// leave the rasterizer's caches as they were: with one between every two
 /// frames drawn, a still image must still be cached from its second frame.
+/// The panel's C12 holdout, in frames: bursts of URLs that soft-wrap over
+/// three rows scroll the grid under a hovered link, the hover moves, the
+/// cursor blinks, and more output scrolls the underline away. Every frame,
+/// on both presenter models, must equal a full repaint.
+#[test]
+fn a_flood_of_wrapped_links_under_a_hover_equals_full_repaints() {
+    const FLOOD: u64 = 91;
+    const HOVER: u64 = 93;
+    const BLINK: u64 = 30;
+    let script = [
+        FLOOD, HOVER, FLOOD, FLOOD, HOVER, BLINK, HOVER, FLOOD, BLINK, FLOOD, HOVER, HOVER, FLOOD,
+        FLOOD, BLINK, HOVER, FLOOD,
+    ];
+    for (seed, model) in [(11, Model::Wayland), (12, Model::X11), (13, Model::Wayland)] {
+        let (stats, log) = session(seed, script.len() as u64, model, &script, Broken::default());
+        assert!(log.contains(&"output flood") && log.contains(&"link hover"));
+        assert!(
+            stats.partial > 0,
+            "seed {seed} {model:?}: no frame repainted only part of the buffer"
+        );
+    }
+}
+
 #[test]
 fn a_paced_attempt_leaves_the_image_cache_alone() {
     let cfg = kettle_config::Config {
