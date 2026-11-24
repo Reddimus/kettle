@@ -8,6 +8,11 @@ fn menu_width_and_inverse_share_one_formula() {
     assert_eq!(menu::panel_width(20.0, 8.0), 200.0);
     assert_eq!(menu::panel_columns(200.0, 8.0), 20);
     assert_eq!(menu::panel_width(1.0, 8.0), menu::MIN_W);
+
+    let cell_w = 8.4;
+    let width = menu::panel_width(58.0, cell_w);
+    assert_eq!(menu::panel_columns(width, cell_w), 58);
+    assert_eq!(menu::panel_columns(width - 1.0, cell_w), 57);
 }
 
 #[test]
@@ -758,6 +763,44 @@ fn only_visible_rows_with_swatches_paint_them() {
         assert_eq!(surface.fill, unit(*color, 1.0));
         assert_eq!(surface.stroke, unit(theme.foreground, 0.45));
         assert_eq!(surface.params[1], 1.0, "a 1 px outline");
+    }
+}
+
+#[test]
+fn context_menu_information_matches_shortcut_contrast() {
+    use super::chrome::{Colors, TEXT_CONTRAST};
+    use super::overlays::menu_row_text_color;
+    use kettle_config::Theme;
+
+    let row = ContextMenuRow {
+        label: "Shift+drag selects".into(),
+        informational: true,
+        ..Default::default()
+    };
+    let menu = ContextMenu {
+        anchor: (0.0, 0.0),
+        rows: vec![row],
+        highlight: 0,
+        scroll_offset: 0,
+        panel_w_clamped: 220.0,
+        panel_h_clamped: 28.0,
+        picker_header_height: 0.0,
+        status: None,
+        picker_footer: None,
+        a11y_label: None,
+    };
+    assert!(!super::overlays::menu_row_selected(&menu, 0));
+    for name in Theme::list() {
+        let theme = Theme::by_name(name);
+        let bg = theme.background;
+        let mut colors = Colors::default();
+        let ink = menu_row_text_color(&menu, &menu.rows[0], &theme, bg, &mut colors);
+        let shortcut = colors.secondary(theme.foreground, bg);
+        assert_eq!(ink, shortcut, "{name}");
+        assert!(
+            super::color::contrast_ratio(ink, bg) >= TEXT_CONTRAST,
+            "{name}"
+        );
     }
 }
 

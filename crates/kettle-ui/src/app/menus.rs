@@ -745,7 +745,9 @@ impl App {
         self.append_preferences_submenu_items(&mut items);
         let mut items = grouped_terminal_menu(items, tr);
         let shift_over_tracking = shift_menu_hint_due(ws, offer_copied, in_focused_pane, &self.cfg);
-        let info_columns = self.context_menu_info_columns(ws, &items);
+        let (sw, _) = self.context_menu_surface(ws);
+        let (cw, _) = self.menu_cell(ws);
+        let info_columns = context_menu_info_columns(sw, cw);
         prepend_mouse_override_row(&mut items, shift_over_tracking, info_columns, tr);
         self.show_context_menu(ws, items, px, py);
     }
@@ -911,22 +913,6 @@ impl App {
                 (w as f32, h as f32)
             })
             .unwrap_or((800.0, 600.0))
-    }
-
-    /// How many columns an Info line may take in a menu of `items`, measured
-    /// as `show_context_menu` measures the panel.
-    fn context_menu_info_columns(&self, ws: &WindowState, items: &[ContextMenuItem]) -> usize {
-        let items = filter_disabled(items.to_vec());
-        let hints = self.menu_item_hints(&items);
-        let widest = items
-            .iter()
-            .zip(hints.iter())
-            .map(|(item, hint)| context_menu_item_columns(item, hint))
-            .max()
-            .unwrap_or(0);
-        let (cw, _) = self.menu_cell(ws);
-        let (sw, _) = self.context_menu_surface(ws);
-        context_menu_info_columns(widest, sw, cw)
     }
 
     /// The renderer's FRACTIONAL cell metrics, for menu geometry. `cell_px`
@@ -2258,11 +2244,12 @@ pub(super) enum ContextMenuItem {
         action: PreviewMenuAction,
     },
     /// A static, non-dispatchable information line
-    /// (the About panel's version/update rows). Rendered like a disabled row
-    /// (dimmed), survives `filter_disabled`, never highlighted, claims no
-    /// mnemonic, and maps to no click.
+    /// (the Shift hint or About panel's version/update rows). Survives
+    /// `filter_disabled`, claims no mnemonic, and maps to no click.
     Info {
         label: String,
+        /// Paint instructions with the same contrast as shortcut labels.
+        secondary: bool,
         /// This line goes on with the sentence of the Info line above it,
         /// one the menu wrapped to its width. Assistive technology reads the
         /// whole sentence as that first line, and skips this one.
@@ -2275,6 +2262,7 @@ impl ContextMenuItem {
     pub(super) fn info(label: impl Into<String>) -> Self {
         Self::Info {
             label: label.into(),
+            secondary: false,
             continued: false,
         }
     }
@@ -3022,9 +3010,8 @@ pub(super) fn shift_menu_hint_due(
 
 /// Lead a grouped terminal menu with the Shift hint, as rows that do
 /// nothing, when Shift opened it over a program that has the mouse. The
-/// sentence is wrapped to `columns` (see `context_menu_info_columns`), one
-/// Info row per line, so it neither widens the menu nor loses its end to the
-/// ellipsis a row wider than the panel gets. Every line after the first is
+/// hint can widen the menu and wraps when it reaches the window's width
+/// limit, one Info row per line. Every line after the first is
 /// marked `continued`, so assistive technology reads the sentence once, whole.
 pub(super) fn prepend_mouse_override_row(
     items: &mut Vec<ContextMenuItem>,
@@ -3033,12 +3020,13 @@ pub(super) fn prepend_mouse_override_row(
     tr: kettle_i18n::Translator,
 ) {
     if shift_over_tracking {
-        let lines = wrap_menu_info(tr.text(kettle_i18n::Text::MouseOverrideHint), columns);
+        let lines = wrap_menu_info(tr.text(kettle_i18n::Text::MouseOverrideMenuHint), columns);
         let rows = lines
             .into_iter()
             .enumerate()
             .map(|(line, label)| ContextMenuItem::Info {
                 label,
+                secondary: true,
                 continued: line > 0,
             })
             .chain(std::iter::once(ContextMenuItem::Separator));
@@ -3046,13 +3034,10 @@ pub(super) fn prepend_mouse_override_row(
     }
 }
 
-/// The columns an Info line may take in a menu whose widest other row takes
-/// `widest_row`: that row's width, or the panel's minimum width if wider, but
-/// never more than a panel on a `surface_w`-pixel surface can show.
-pub(super) fn context_menu_info_columns(widest_row: usize, surface_w: f32, cell_w: f32) -> usize {
-    let natural = kettle_render::menu::panel_width(widest_row as f32, cell_w);
+/// The widest Info line the menu can fit within the surface.
+pub(super) fn context_menu_info_columns(surface_w: f32, cell_w: f32) -> usize {
     let (room, _) = clamp_context_menu_panel((f32::INFINITY, 0.0), (surface_w, 0.0));
-    kettle_render::menu::panel_columns(natural.min(room), cell_w).max(1)
+    kettle_render::menu::panel_columns(room, cell_w).max(1)
 }
 
 /// Break `text` at spaces into lines at most `columns` wide. A word wider
@@ -3437,9 +3422,9 @@ pub(super) fn context_menu_row(item: &ContextMenuItem, hint: String) -> ContextM
                 ..Default::default()
             }
         }
-        // Dropdown parity: Info renders as a dimmed
-        // (disabled-style) static line.
-        ContextMenuItem::Info { label, .. } => ContextMenuRow {
+        ContextMenuItem::Info {
+            label, secondary, ..
+        } => ContextMenuRow {
             toggle: None,
             swatches: None,
             matched_chars: None,
@@ -3447,6 +3432,7 @@ pub(super) fn context_menu_row(item: &ContextMenuItem, hint: String) -> ContextM
             separator: false,
             enabled: false,
             hint: String::new(),
+            informational: *secondary,
             ..Default::default()
         },
     }

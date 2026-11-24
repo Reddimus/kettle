@@ -79,6 +79,9 @@ pub struct ContextMenuRow {
     /// the first row. It is never selected, pressed, or announced as an
     /// option, and option indices skip it ([`menu_row_option`]).
     pub heading: bool,
+    /// Static information in a context menu, with the contrast of shortcut
+    /// labels. The row still uses `enabled` to determine selectability.
+    pub informational: bool,
 }
 
 /// The option a picker's row `row` is, counting only rows that can be
@@ -2196,7 +2199,15 @@ pub mod menu {
 
     /// Recover the number of text columns that fit inside a panel width.
     pub fn panel_columns(panel_width: f32, cell_width: f32) -> usize {
-        text_columns(panel_width - H_PAD, cell_width)
+        let columns = text_columns(panel_width - H_PAD, cell_width);
+        let next = columns.saturating_add(1);
+        // Inverting the panel width can round an exact fit below a whole
+        // column. Check the next column with the forward width calculation.
+        if cell_width > 0.0 && next as f32 * cell_width + H_PAD <= panel_width {
+            next
+        } else {
+            columns
+        }
     }
 
     /// Text-column budget after the caller has removed its slot's padding.
@@ -2326,9 +2337,8 @@ pub(crate) fn menu_row_background(
 }
 
 /// The colour of a menu row's label on `background`. A picker's disabled row
-/// is its empty-state message ("No matching command"), which people read, so
-/// it is secondary text; a context menu's disabled row is an unavailable
-/// command and stays muted.
+/// is its empty-state message ("No matching command"). Messages and static
+/// information use secondary text. Unavailable commands stay muted.
 pub(crate) fn menu_row_text_color(
     menu: &ContextMenu,
     row: &ContextMenuRow,
@@ -2338,7 +2348,7 @@ pub(crate) fn menu_row_text_color(
 ) -> Rgb {
     if row.enabled {
         colors.text(theme.foreground, background)
-    } else if menu.picker_header_height > 0.0 {
+    } else if row.informational || menu.picker_header_height > 0.0 {
         colors.secondary(theme.foreground, background)
     } else {
         colors.muted(theme.foreground, background)

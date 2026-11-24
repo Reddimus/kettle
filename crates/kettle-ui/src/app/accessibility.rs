@@ -3599,6 +3599,7 @@ fn join_wrapped_info_accessibility(
         let ContextMenuItem::Info {
             label,
             continued: false,
+            ..
         } = &items[first]
         else {
             first += 1;
@@ -3609,6 +3610,7 @@ fn join_wrapped_info_accessibility(
         while let Some(ContextMenuItem::Info {
             label,
             continued: true,
+            ..
         }) = items.get(end)
         {
             sentence.push(' ');

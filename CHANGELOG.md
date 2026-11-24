@@ -230,8 +230,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   or open the menu. It shows once each time a program turns the mouse on, and
   at most once every 30 seconds in a window, and not at all with
   `putty-paste-style` on, where Shift+right-click pastes. The menu that
-  Shift+right-click opens over such a program starts with the same sentence,
-  wrapped to the menu's width, and a screen reader reads it as one item.
+  Shift+right-click opens over such a program starts with a shorter
+  reminder of both gestures. The menu widens to fit it within the window,
+  the reminder uses the same contrast as shortcut labels, and a screen
+  reader reads it as one item.
 
 - The terminal context menu enables Copy only while the focused pane has
   a selection. After you clear the selection, the menu opens with focus

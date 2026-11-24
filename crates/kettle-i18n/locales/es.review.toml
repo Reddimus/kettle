@@ -1057,6 +1057,7 @@ settings_hint_reset = "accepted"
 a11y_output_lines = "accepted"
 a11y_main_menu = "accepted"
 mouse_override_hint = "accepted"
+mouse_override_menu_hint = "draft"
 font_size_chip = "accepted"
 menu_a11y_submenu = "accepted"
 
@@ -1371,6 +1372,7 @@ keys = [
     "update_a11y_failed",
     "update_a11y_restart",
     "mouse_override_hint",
+    "mouse_override_menu_hint",
     "font_size_chip",
     "a11y_header_find",
     "notification_toast_show",

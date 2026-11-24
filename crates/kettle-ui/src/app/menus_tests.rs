@@ -1705,6 +1705,7 @@ fn painted_menu_rows_match_hit_testing_and_accessibility_bounds() {
         .enumerate()
         .map(|(line, label)| ContextMenuItem::Info {
             label: (*label).into(),
+            secondary: true,
             continued: line > 0,
         })
         .collect();

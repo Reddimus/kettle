@@ -57,6 +57,7 @@ pub(crate) fn context_menu_text_damage_key(
             row.hint.hash(&mut hash);
             row.description.hash(&mut hash);
             row.heading.hash(&mut hash);
+            row.informational.hash(&mut hash);
             row.matched_chars.hash(&mut hash);
         }
     }
