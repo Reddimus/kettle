@@ -832,6 +832,7 @@ impl App {
         let context = crate::settings::RowContext {
             blur,
             quick: self.quick_portal_status(),
+            gpu_discovery_skipped: self.cpu_rendering,
             gnome: std::env::var("XDG_CURRENT_DESKTOP")
                 .unwrap_or_default()
                 .to_ascii_lowercase()
@@ -2420,7 +2421,7 @@ impl App {
                 false
             };
             if saved {
-                ws.settings_restart_pending = true;
+                ws.settings_restart_pending = crate::settings::SettingsApply::Restart;
             } else {
                 fire_notify(
                     self.ui_text
@@ -2466,7 +2467,7 @@ impl App {
                 "renderer" | "gpu-power-preference" | "gpu-backend" | "gpu-force-software"
             )
         {
-            ws.settings_restart_pending = true;
+            ws.settings_restart_pending = crate::settings::SettingsApply::Restart;
         }
         let surface_setting = matches!(
             key_str,
@@ -2477,8 +2478,12 @@ impl App {
         // Renderer colors and the surface's alpha mode reload immediately, so
         // only a change this window was not created able to show (an opaque
         // window turning translucent, or blur turned on) needs a new window.
-        if saved && surface_setting && ws.surface_caps.lacks_for(&self.cfg) {
-            ws.settings_restart_pending = true;
+        if saved
+            && surface_setting
+            && ws.surface_caps.lacks_for(&self.cfg)
+            && ws.settings_restart_pending == crate::settings::SettingsApply::None
+        {
+            ws.settings_restart_pending = crate::settings::SettingsApply::NewWindow;
         }
         // A theme pick needs no `save_session()`. `persist_pref` above durably
         // writes the config `theme =` line, the single source of truth on restart.

@@ -17,7 +17,7 @@ pub(super) fn settings_footer_note(
     active_gpu: Option<&str>,
     focused_key: Option<&str>,
     blur_unavailable: bool,
-    restart_pending: bool,
+    restart_pending: crate::settings::SettingsApply,
     language_pending: bool,
     agent_previews: Option<kettle_i18n::Text>,
 ) -> Option<String> {
@@ -46,9 +46,12 @@ pub(super) fn settings_footer_note(
     if language_pending {
         notes.push(tr.text(Text::SettingsNoteLanguagePending));
     }
-    if restart_pending {
-        // The pending flag records no cause, even when Graphics is selected.
-        notes.push(tr.text(Text::SettingsNoteRestart));
+    match restart_pending {
+        crate::settings::SettingsApply::None => {}
+        crate::settings::SettingsApply::NewWindow => notes.push(tr.text(Text::SettingsNoteRestart)),
+        crate::settings::SettingsApply::Restart => {
+            notes.push(tr.text(Text::SettingsNoteGraphicsRestart))
+        }
     }
     (!notes.is_empty()).then(|| notes.join("\n"))
 }

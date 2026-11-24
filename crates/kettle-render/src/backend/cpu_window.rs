@@ -30,6 +30,10 @@ impl CpuSurface for CpuPresenter {
         self.set_format(wanted) == PixelFormat::Premultiplied
     }
 
+    fn validate_startup(&mut self, pixel: u32) -> anyhow::Result<()> {
+        validate_initial_cpu_frame(self, pixel)
+    }
+
     fn present_frame(
         &mut self,
         draw: &mut dyn FnMut(&mut [u32], u32, u32) -> bool,
@@ -116,7 +120,24 @@ impl CpuSurface for CpuPresenter {
         match self.kind() {
             PresenterKind::WaylandShm => "wl_shm (Wayland)",
             PresenterKind::SoftbufferWayland => "softbuffer (Wayland)",
-            PresenterKind::SoftbufferX11 => "softbuffer (X11 SHM)",
+            PresenterKind::SoftbufferX11 => "softbuffer (X11)",
         }
     }
+}
+
+pub(super) fn validate_initial_cpu_frame(
+    surface: &mut dyn CpuSurface,
+    pixel: u32,
+) -> anyhow::Result<()> {
+    let outcome = surface.present_frame(
+        &mut |pixels, _, _| {
+            pixels.fill(pixel);
+            true
+        },
+        &mut || {},
+    );
+    if outcome != CpuPresentOutcome::Presented {
+        anyhow::bail!("initial CPU buffer acquire/present failed ({outcome:?})");
+    }
+    Ok(())
 }

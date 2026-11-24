@@ -2,6 +2,7 @@
 """Portable regressions for live UI smoke orchestration and ownership checks."""
 
 import ast
+import contextlib
 import importlib.util
 import io
 import inspect
@@ -323,6 +324,36 @@ class LiveUiTests(unittest.TestCase):
                 release.set()
             self.assertTrue(stopped.wait(1), 'abandoned launcher did not stop its worker')
 
+    def test_steady_uploads_rejects_a_cpu_fallback_before_reading_counters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def live_factory(_kettle, cfg, log, **_options):
+                self.assertIn("renderer = gpu", cfg.read_text())
+                log.write_text("renderer: CPU, presenting with softbuffer (X11)\n")
+                return contextlib.nullcontext(object())
+
+            with patch.object(checker, "LiveKettle", side_effect=live_factory):
+                with self.assertRaisesRegex(SystemExit, "live renderer must be GPU"):
+                    checker.run_steady_uploads("fixture", Path(directory), screenshots_only=True)
+
+    def test_cpu_idle_rejects_extra_presents_after_a_real_frame(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Mock()
+            fixture.json_ctl.side_effect = [
+                {"render_uploads": {"frames_presented": count}} for count in (1, 1, 2)
+            ]
+
+            def live_factory(_kettle, cfg, log, **_options):
+                self.assertIn("renderer = cpu", cfg.read_text())
+                log.write_text("renderer: CPU, presenting with softbuffer (X11)\n")
+                return contextlib.nullcontext(fixture)
+
+            with (
+                patch.object(checker, "LiveKettle", side_effect=live_factory),
+                patch.object(checker.time, "sleep"),
+                self.assertRaisesRegex(SystemExit, "unchanged window presented 1 extra frames"),
+            ):
+                checker.run_cpu_idle("fixture", Path(directory))
+
     def test_steady_printing_warms_the_measured_text_and_rejects_queue_writes(self):
         # A renderer may legitimately rasterize new shaped text. Replaying the
         # warmed text must still reject queue uploads and missing mapped work.
@@ -394,6 +425,7 @@ class LiveUiTests(unittest.TestCase):
                 with (
                     tempfile.TemporaryDirectory() as directory,
                     patch.object(checker, "LiveKettle", return_value=fixture),
+                    patch.object(checker, "require_live_renderer"),
                     patch.object(checker, "focus_live_kettle_window"),
                     patch.object(checker.time, "monotonic", side_effect=lambda: now[0]),
                     patch.object(checker.time, "sleep", side_effect=sleep),

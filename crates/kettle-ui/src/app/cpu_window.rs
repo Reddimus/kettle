@@ -1,10 +1,9 @@
 //! Windows whose frames are drawn on the CPU (Linux's default renderer).
 //!
-//! The `renderer` key picks the backend once, for window 1
-//! (`kettle_render::preferred_backend`); every later window follows it. A
-//! CPU window has no GPU context, so the app's `gpu` stays `None` and
-//! `cpu_rendering` records that windows can still be opened. Its presenter
-//! needs four things from the event loop, all on the loop's own thread:
+//! The `renderer` key picks the initial backend. Later windows use the
+//! running backend. An unusable CPU presenter can start the shared GPU
+//! renderer for that window and future windows. A CPU presenter needs
+//! four things from the event loop, all on the loop's own thread:
 //!
 //! - a frame held for the compositor's frame callback is committed when the
 //!   loop wakes ([`Renderer::flush_held_frame`]);
@@ -54,6 +53,13 @@ impl App {
                 window.pre_present_notify();
             }
         });
+        if tick.failed {
+            ws.output_pacer.presentation_failed();
+            ws.frame_recovery.schedule_renderer_rebuild(now);
+        }
+        if tick.committed {
+            ws.frame_recovery.presented();
+        }
         if tick.committed
             && ws
                 .card_sightings
@@ -77,6 +83,7 @@ impl App {
 struct PresenterTick {
     /// A held frame was committed.
     committed: bool,
+    failed: bool,
     /// A paced frame can be drawn now: the window should redraw.
     redraw: bool,
     /// When the loop must wake for the presenter next.
@@ -91,7 +98,9 @@ fn cpu_presenter_tick(
 ) -> PresenterTick {
     let mut tick = PresenterTick::default();
     if renderer.has_held_frame() {
-        tick.committed = renderer.flush_held_frame(pre_present) == HeldFrameFlush::Presented;
+        let outcome = renderer.flush_held_frame(pre_present);
+        tick.committed = outcome == HeldFrameFlush::Presented;
+        tick.failed = outcome == HeldFrameFlush::Failed;
     }
     tick.redraw = renderer.cpu_frame_ready();
     if renderer
@@ -125,7 +134,7 @@ fn future_or_floor(deadline: Instant, now: Instant) -> Instant {
 
 /// A CPU renderer for `window`, presenting through shared memory. Fails
 /// where there is no such presenter (any platform but Linux, or a display
-/// without `wl_shm` or X11 SHM); the caller then uses the GPU.
+/// without a usable Wayland or X11 transport); the caller then uses wgpu.
 pub(super) fn cpu_window_renderer<D>(
     window: &Arc<Window>,
     display: D,
@@ -158,10 +167,25 @@ where
     }
 }
 
-/// On Linux, a GPU renderer that failed to start, or started only on a
-/// software adapter (llvmpipe or lavapipe), is replaced by the CPU renderer:
-/// it is faster than either and loads no driver. Elsewhere, and when the CPU
-/// renderer cannot start either, the GPU result stands.
+/// Try one CPU rebuild for an isolated failure. An unusable replacement, or
+/// another failed frame before a successful present, takes the GPU path.
+pub(super) fn recover_cpu_window<T>(
+    retry_cpu: bool,
+    cpu: impl FnOnce() -> anyhow::Result<T>,
+    gpu: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    if retry_cpu {
+        match cpu() {
+            Ok(renderer) => return Ok(renderer),
+            Err(error) => log::warn!("renderer: CPU presenter rebuild failed ({error:#})"),
+        }
+    }
+    log::warn!("renderer: the CPU presenter is unusable; using the GPU");
+    gpu()
+}
+
+/// On Linux, a failed explicit GPU renderer startup falls back to the CPU.
+/// A usable wgpu software adapter still honors the explicit GPU preference.
 pub(super) fn gpu_or_cpu_fallback(
     gpu: anyhow::Result<Renderer>,
     cpu: impl FnOnce() -> anyhow::Result<Renderer>,
@@ -169,13 +193,10 @@ pub(super) fn gpu_or_cpu_fallback(
     if !cfg!(target_os = "linux") {
         return gpu;
     }
-    let reason = match &gpu {
-        Ok(renderer) if renderer.gpu_context().is_some_and(|gpu| gpu.is_software()) => {
-            "the GPU adapter is a software rasterizer".to_string()
-        }
-        Ok(_) => return gpu,
-        Err(error) => format!("no GPU adapter works ({error:#})"),
+    let Err(error) = &gpu else {
+        return gpu;
     };
+    let reason = format!("no GPU adapter works ({error:#})");
     match cpu() {
         Ok(renderer) => {
             log::warn!("renderer: {reason}; drawing on the CPU instead");
@@ -236,6 +257,41 @@ mod tests {
         assert!(
             error.to_string().contains("no adapter"),
             "the GPU error is kept"
+        );
+    }
+
+    #[test]
+    fn an_unusable_or_repeatedly_failing_cpu_presenter_uses_the_gpu() {
+        let mut recovery = crate::window_state::FrameRecoveryState::default();
+        let now = Instant::now();
+        recovery.schedule_renderer_rebuild(now);
+        assert_eq!(
+            recover_cpu_window(
+                recovery.first_renderer_rebuild(),
+                || Ok("CPU"),
+                || Ok("GPU")
+            )
+            .unwrap(),
+            "CPU"
+        );
+        assert_eq!(
+            recover_cpu_window(
+                recovery.first_renderer_rebuild(),
+                || Err(anyhow::anyhow!("first present failed")),
+                || Ok("GPU"),
+            )
+            .unwrap(),
+            "GPU"
+        );
+        recovery.schedule_renderer_rebuild(now);
+        assert_eq!(
+            recover_cpu_window(
+                recovery.first_renderer_rebuild(),
+                || panic!("a second CPU rebuild would repeat the failure"),
+                || Ok("GPU"),
+            )
+            .unwrap(),
+            "GPU"
         );
     }
 

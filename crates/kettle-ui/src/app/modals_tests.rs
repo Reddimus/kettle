@@ -291,10 +291,9 @@ fn surface_restart_hint_requires_a_successful_write_and_a_missing_capability() {
         .split_once("self.reload_config(ws);")
         .expect("reload in the persistence arm");
     assert!(
-        after_reload.contains(
-            "if saved && surface_setting && ws.surface_caps.lacks_for(&self.cfg) { \
-             ws.settings_restart_pending = true; }"
-        ),
+        after_reload.contains("&& ws.surface_caps.lacks_for(&self.cfg)")
+            && after_reload.contains("&& ws.settings_restart_pending == crate::settings::SettingsApply::None")
+            && after_reload.contains("ws.settings_restart_pending = crate::settings::SettingsApply::NewWindow;"),
         "a surface change the window can already show must not ask for a new window, \
          and a failed write must not promise one"
     );

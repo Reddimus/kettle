@@ -202,6 +202,8 @@ fn opaque() -> kettle_config::Config {
 /// What the next frames on the fake surface do.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum FakeMode {
+    #[cfg(target_os = "linux")]
+    FailFirstPresent,
     /// Commit each frame at once.
     #[default]
     Commit,
@@ -264,6 +266,38 @@ impl FakeSurface {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn a_failed_first_present_rejects_the_cpu_renderer_at_startup() {
+    let log = Arc::new(Mutex::new(SurfaceLog {
+        mode: FakeMode::FailFirstPresent,
+        ..SurfaceLog::default()
+    }));
+    let surface = FakeSurface {
+        log: Arc::clone(&log),
+        size: (0, 0),
+        buffer: Vec::new(),
+        translucency: false,
+    };
+    let result = Renderer::cpu_window_for_tests(
+        &kettle_config::Config::default(),
+        64,
+        32,
+        Box::new(surface),
+    );
+    let error = result
+        .err()
+        .expect("the app must be able to fall back before installing the renderer");
+    assert!(
+        error
+            .to_string()
+            .contains("initial CPU buffer acquire/present failed")
+    );
+    let log = log.lock().unwrap();
+    assert_eq!(log.draws, 1);
+    assert!(log.frames.is_empty());
+}
+
 impl CpuSurface for FakeSurface {
     fn resize(&mut self, width: u32, height: u32, scale: f64) {
         self.size = (width, height);
@@ -284,6 +318,14 @@ impl CpuSurface for FakeSurface {
         let on = translucent && self.translucency;
         self.log.lock().unwrap().translucent.push(on);
         on
+    }
+
+    #[cfg(target_os = "linux")]
+    fn validate_startup(&mut self, pixel: u32) -> anyhow::Result<()> {
+        if self.log.lock().unwrap().mode != FakeMode::FailFirstPresent {
+            return Ok(());
+        }
+        super::cpu_window::validate_initial_cpu_frame(self, pixel)
     }
 
     fn present_frame(
@@ -316,6 +358,11 @@ impl CpuSurface for FakeSurface {
                 CpuPresentOutcome::Deferred
             }
             FakeMode::Unchanged => CpuPresentOutcome::Unchanged,
+            #[cfg(target_os = "linux")]
+            FakeMode::FailFirstPresent => {
+                self.log.lock().unwrap().mode = FakeMode::Commit;
+                CpuPresentOutcome::Lost
+            }
         }
     }
 

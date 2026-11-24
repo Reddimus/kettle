@@ -70,6 +70,54 @@ impl App {
         }
     }
 
+    pub(super) fn install_shared_gpu(&mut self, renderer: &Renderer) {
+        if let Some(gpu) = renderer.gpu_context() {
+            let recovery_proxy = self.proxy.clone();
+            gpu.set_recovery_wake(kettle_render::ScreenshotRecoveryWake::new(move || {
+                let _ = recovery_proxy.send_event(UserEvent::Wakeup);
+            }));
+            log::info!("renderer: GPU");
+            self.gpu = Some(gpu.clone());
+            self.cpu_rendering = false;
+        }
+    }
+
+    /// Start wgpu for a CPU window whose presenter is unusable.
+    pub(super) fn gpu_window_after_cpu_failure(
+        &mut self,
+        window: Arc<Window>,
+    ) -> anyhow::Result<Renderer> {
+        let size = window.inner_size();
+        let scale = window.scale_factor() as f32;
+        if let Some(gpu) = &self.gpu {
+            return Renderer::new_with_gpu(
+                gpu,
+                window,
+                size.width.max(1),
+                size.height.max(1),
+                scale,
+                &self.cfg,
+                None,
+            );
+        }
+        let watchdog = GpuInitWatchdog::arm();
+        let result = pollster::block_on(Renderer::new_with_display_handle(
+            window.clone(),
+            window,
+            size.width.max(1),
+            size.height.max(1),
+            scale,
+            &self.cfg,
+            None,
+            None,
+        ));
+        drop(watchdog);
+        if let Ok(renderer) = &result {
+            self.install_shared_gpu(renderer);
+        }
+        result
+    }
+
     /// Recreate one window's surface and retained renderer resources while
     /// keeping the healthy process-wide adapter/device/queue. wgpu 30 requires
     /// this for `CurrentSurfaceTexture::Lost`; it is also the bounded repair
@@ -88,11 +136,14 @@ impl App {
         let recovery_state = old_renderer.recovery_state();
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
-        let mut replacement = if self.cpu_rendering {
-            // A CPU window has no device to lose: only its presenter's
-            // buffers are rebuilt.
-            cpu_window::cpu_window_renderer(&window, window.clone(), &self.cfg, None)
-                .map_err(|error| error.to_string())?
+        let mut replacement = if old_renderer.backend() == kettle_render::RendererBackend::Cpu {
+            let cfg = self.cfg.clone();
+            cpu_window::recover_cpu_window(
+                ws.frame_recovery.first_renderer_rebuild(),
+                || cpu_window::cpu_window_renderer(&window, window.clone(), &cfg, None),
+                || self.gpu_window_after_cpu_failure(window.clone()),
+            )
+            .map_err(|error| error.to_string())?
         } else {
             let Some(gpu) = self.gpu.as_ref() else {
                 return Err("shared GPU context is unavailable".to_string());

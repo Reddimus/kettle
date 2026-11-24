@@ -12,10 +12,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   shared memory (`wl_shm` on Wayland, MIT-SHM on X11), with no GPU driver
   loaded into the process. The new `renderer` key (`auto`, `cpu`, `gpu`; also
   in Settings > Graphics) chooses; `auto` keeps the GPU on macOS and Windows.
-  On Linux `gpu-force-software = true` now means the CPU renderer, and a
-  machine whose only GPU adapter is llvmpipe or lavapipe, or which has none,
-  draws on the CPU. If the shared-memory presenter cannot start, Kettle uses
-  the GPU. `kettle --gpu-info` names the renderer in use.
+  On Linux `gpu-force-software = true` selects the CPU renderer. An explicit
+  `renderer = gpu` can use a software wgpu adapter such as lavapipe. If wgpu
+  fails to start, Kettle tries the CPU renderer. If the CPU presenter cannot
+  start or recover, Kettle tries wgpu. `kettle --gpu-info` reports the configured
+  renderer preference and the adapter found by its headless probe.
 
 ## [6.0.0] — 2026-11-08
 

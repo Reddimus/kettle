@@ -104,6 +104,17 @@ fn an_older_compositor_still_gets_a_presenter() {
     assert_eq!(log.commits.last().expect("commit").pixels, scene.truth);
 }
 
+#[test]
+fn a_disconnected_wayland_transport_rejects_the_first_present() {
+    let Some((server, _client, mut presenter)) = fixture(Config::default()) else {
+        return;
+    };
+    let mut frame = presenter.buffer_mut().expect("initial buffer");
+    frame.pixels_mut().fill(0);
+    drop(server);
+    assert!(frame.present(&[Rect::full(W, H)], || {}).is_err());
+}
+
 // --- an abandoned draw into a deferred frame's buffer ---
 
 #[test]

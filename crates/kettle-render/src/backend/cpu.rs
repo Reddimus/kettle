@@ -292,6 +292,11 @@ pub(crate) trait CpuSurface: Send {
     /// frames are premultiplied now.
     fn set_translucent(&mut self, translucent: bool) -> bool;
 
+    /// Check a real present before the app commits to the window's backend.
+    fn validate_startup(&mut self, _pixel: u32) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     /// Draw the next buffer with `draw` (its pixels, width and height,
     /// whose contents are undefined) and present it, running `pre_commit`
     /// only if, and just before, the frame is committed. `draw` returns

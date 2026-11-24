@@ -554,16 +554,21 @@ jobs:
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
-          # The `bash -c '…$rc…'` invocation is single-quoted on
-          # purpose so the inner `$rc` expands inside the *nested*
-          # bash, not the outer wrapper. SC2016 flags the outer-shell
-          # view; disabled here because the inner expansion is what
-          # we want.
-          # shellcheck disable=SC2016
-          xvfb-run -a bash -c 'timeout 10 ./target/release/kettle >/tmp/out.log 2>&1; rc=$?; \
-            grep -qiE "panic|thread .* panicked" /tmp/out.log && { echo "panic in run"; cat /tmp/out.log; exit 1; }; \
-            test $rc -eq 124 -o $rc -eq 0 || { echo "bad exit $rc"; cat /tmp/out.log; exit 1; }; \
-            echo "headless run OK (exit $rc)"'
+          fixture=$(mktemp -d)
+          trap 'rm -rf "$fixture"' EXIT
+          mkdir -m 700 "$fixture/home" "$fixture/config-home"
+          printf '%s\n' 'renderer = gpu' 'record = false' 'restore-session = false' > "$fixture/kettle.cfg"
+          rc=0
+          env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET HOME="$fixture/home" \
+            XDG_CONFIG_HOME="$fixture/config-home" RUST_LOG=info xvfb-run -a timeout 10 \
+            ./target/release/kettle --config "$fixture/kettle.cfg" -e /bin/sh > "$fixture/kettle.log" 2>&1 || rc=$?
+          if { [ "$rc" -ne 124 ] && [ "$rc" -ne 0 ]; } ||
+            grep -qiE 'panic|thread .* panicked' "$fixture/kettle.log" ||
+            ! grep -qE 'renderer: GPU$' "$fixture/kettle.log"; then
+            cat "$fixture/kettle.log"
+            exit 1
+          fi
+          echo "headless GPU run OK (exit $rc)"
       - name: Command correlation in native shells (Linux)
         if: runner.os == 'Linux'
         timeout-minutes: 5
@@ -719,7 +724,8 @@ jobs:
         # GPU: the renderer keeps a copy of each buffer and writes only what
         # changed. Under Xvfb the window never gets focus, so --screenshots-only
         # runs just the first phase (screenshots of an unchanged window add no
-        # writes); the blinking phases run on a developer Mac.
+        # writes). The smoke requires a live wgpu renderer and also checks
+        # that an idle CPU window stops presenting.
         timeout-minutes: 5
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
@@ -741,7 +747,8 @@ jobs:
         # Every Kettle UI state (palette, Settings, Search, tabs, splits, theme
         # picker) in English and Spanish, captured through kettle ctl from a
         # fresh isolated Kettle each, so a pull request that changes the UI
-        # carries its images. Committed baselines under tests/ui-states/linux
+        # carries its images. Kettle uses CPU/wl_shm and Weston uses llvmpipe.
+        # Committed baselines under tests/ui-states/linux
         # are compared when present.
         timeout-minutes: 20
         run: |
@@ -791,6 +798,8 @@ jobs:
           LIBGL_ALWAYS_SOFTWARE: "1"
         run: |
           ./target/release/kettle --gpu-info | tee /tmp/gpu-info.txt
+          grep -qE '^Renderer preference: (auto|cpu|gpu)$' /tmp/gpu-info.txt
+          grep -qE '^Software adapter fallback: (yes|no)$' /tmp/gpu-info.txt
           grep -qE '^Backend:[[:space:]]+' /tmp/gpu-info.txt
           grep -qE '^Adapter:[[:space:]]+' /tmp/gpu-info.txt
           grep -qE '^Max texture:[[:space:]]+[0-9]+ px / side$' /tmp/gpu-info.txt
@@ -798,9 +807,9 @@ jobs:
         # Exercise the context menu's render path through the CLI.
         # `--screenshot` renders a no-overlay frame, and the `kettle-ui::app`
         # unit tests pin only the menu's behavior (highlight stepping, anchor
-        # clamping), not its appearance. Also run on macOS (real Metal GPU),
-        # not just Linux's software Vulkan. `wc -c <` instead of GNU
-        # `stat -c%s` keeps the size check portable to BSD/macOS stat.
+        # clamping), not its appearance. This exercises the default offscreen
+        # renderer on each platform (Linux CPU, macOS Metal). `wc -c <` keeps
+        # the size check portable to BSD/macOS.
         if: runner.os != 'Windows'
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
@@ -818,13 +827,9 @@ jobs:
             || { echo "kettle-menu.png is too small ($size bytes) — likely the blank-menu regression"; exit 1; }
           echo "screenshot-menu OK ($size bytes)"
       - name: --screenshot end-to-end (Linux/macOS)
-        # capture_png drives the real GPU text + quad + image pipeline
-        # (bundled Nerd Font, glyphon shaping, wgpu offscreen device +
-        # texture, image::save PNG encode). The offscreen_selftest unit test
-        # only compiles the WGSL shaders and covers none of that. No DISPLAY
-        # is needed; capture_png builds its own offscreen device with
-        # compatible_surface=None. Linux runs it on software Vulkan and macOS
-        # on the runner's real Metal GPU. `wc -c <` is BSD/macOS-portable.
+        # Exercise the default offscreen renderer from text shaping through
+        # PNG encoding. Linux uses CPU rasterization and macOS uses Metal.
+        # Neither capture opens a window. `wc -c <` is BSD/macOS-portable.
         if: runner.os != 'Windows'
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
@@ -832,8 +837,7 @@ jobs:
           ./target/release/kettle --screenshot /tmp/kettle-ci.png
           # PNG magic bytes (89 50 4E 47 = \211PNG) — guards against
           # capture_png silently producing a zero-byte or
-          # not-actually-PNG file. wgpu errors typically surface as
-          # a panic; this is the belt-and-suspenders check on the
+          # invalid PNG file. Check the encoded output at the
           # encode path.
           head -c 4 /tmp/kettle-ci.png | xxd | grep -q "8950 4e47"
           # Sanity floor: the default 96×28 cells render to ~765×500
@@ -1048,12 +1052,8 @@ jobs:
     # the observed build + test time; tighter than `build` because this job
     # is Linux-only (no Windows runner overhead).
     timeout-minutes: 30
-    # The `menu_visual.rs` integration test
-    # initializes wgpu (it renders a PNG via the same `capture_png_with`
-    # path the `--screenshot-menu` CLI flag uses). The MSRV job needs
-    # the same Vulkan + GL setup the matrix `build` job uses, otherwise
-    # `cargo test --workspace` panics in menu_visual.rs with
-    # `no GPU adapter: NotFound`.
+    # Keep the software Vulkan setup for workspace tests that exercise wgpu
+    # explicitly, including offscreen GPU and renderer parity tests.
     env:
       LIBGL_ALWAYS_SOFTWARE: "1"
     steps:

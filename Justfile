@@ -523,8 +523,8 @@ live-ui-helper-selftest:
     python scripts/check-live-ui-smoke.py self-test
 
 # Render the canonical "kettle in a terminal" screenshot — exercises
-# the full GPU pipeline (wgpu adapter + offscreen Vulkan device +
-# glyphon text + quad + image pipelines + image::save PNG encode).
+# configured renderer through PNG encoding (CPU by default on Linux,
+# wgpu on macOS and Windows).
 # Default OUT lands in the OS temp dir (`TMPDIR`, set at the top of this
 # Justfile to `/tmp` on Linux/macOS and `$env:TEMP` on Windows). Pass
 # `OUT=path` to override. `cargo run` handles the `.exe` suffix on Windows.
@@ -570,15 +570,21 @@ headless-gpu-smoke: release
       exit 1
     fi
     export LIBGL_ALWAYS_SOFTWARE=1
-    # A private file: a fixed name under the shared temporary directory could be
-    # precreated by another user, or as a symlink to one of ours.
-    log=$(mktemp "{{TMPDIR}}/kettle-headless-smoke.XXXXXX")
-    # The `bash -c '…$rc…'` invocation is single-quoted on purpose so
-    # the inner `$rc` expands inside the *nested* bash, not this one.
-    env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET xvfb-run -a bash -c 'timeout 10 ./target/release/kettle >'"$log"' 2>&1; rc=$?; \
-      grep -qiE "panic|thread .* panicked" '"$log"' && { echo "panic in run"; cat '"$log"'; exit 1; }; \
-      test $rc -eq 124 -o $rc -eq 0 || { echo "bad exit $rc"; cat '"$log"'; exit 1; }; \
-      echo "headless run OK (exit $rc)"'
+    fixture=$(mktemp -d "{{TMPDIR}}/kettle-headless-smoke.XXXXXX")
+    trap 'rm -rf "$fixture"' EXIT
+    mkdir -m 700 "$fixture/home" "$fixture/config-home"
+    printf '%s\n' 'renderer = gpu' 'record = false' 'restore-session = false' > "$fixture/kettle.cfg"
+    rc=0
+    env -u WAYLAND_DISPLAY -u WAYLAND_SOCKET HOME="$fixture/home" \
+      XDG_CONFIG_HOME="$fixture/config-home" RUST_LOG=info xvfb-run -a timeout 10 \
+      ./target/release/kettle --config "$fixture/kettle.cfg" -e /bin/sh > "$fixture/kettle.log" 2>&1 || rc=$?
+    if { [ "$rc" -ne 124 ] && [ "$rc" -ne 0 ]; } ||
+      grep -qiE 'panic|thread .* panicked' "$fixture/kettle.log" ||
+      ! grep -qE 'renderer: GPU$' "$fixture/kettle.log"; then
+      cat "$fixture/kettle.log"
+      exit 1
+    fi
+    echo "headless GPU run OK (exit $rc)"
 
 [macos]
 headless-gpu-smoke:
@@ -600,6 +606,8 @@ gpu-render-smoke: release
     # A private directory, for the reason headless-gpu-smoke gives.
     out_dir=$(mktemp -d "{{TMPDIR}}/kettle-gpu-render-smoke.XXXXXX")
     ./target/release/kettle --gpu-info | tee "$out_dir/gpu-info.txt"
+    grep -qE '^Renderer preference: (auto|cpu|gpu)$' "$out_dir/gpu-info.txt"
+    grep -qE '^Software adapter fallback: (yes|no)$' "$out_dir/gpu-info.txt"
     grep -qE '^Backend:[[:space:]]+' "$out_dir/gpu-info.txt"
     grep -qE '^Adapter:[[:space:]]+' "$out_dir/gpu-info.txt"
     grep -qE '^Max texture:[[:space:]]+[0-9]+ px / side$' "$out_dir/gpu-info.txt"

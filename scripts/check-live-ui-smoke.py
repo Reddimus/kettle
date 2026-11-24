@@ -19765,6 +19765,54 @@ def run_text_presentation(kettle: str, root: Path) -> Path:
 STEADY_UPLOAD_QUIET_KEYS = ("buffer_writes", "texture_writes", "text_prepares", "mapped_writes")
 
 
+def require_live_renderer(log: Path, expected: str) -> None:
+    choices = re.findall(
+        r"renderer: (GPU|CPU, presenting with [^\r\n]+)(?=\r?$)",
+        log.read_text(encoding="utf-8", errors="replace"),
+        re.M,
+    )
+    if not choices or not (choices[-1] == expected or choices[-1].startswith(expected + ",")):
+        raise SystemExit(f"live renderer must be {expected}, found {choices}: {log}")
+
+
+def run_cpu_idle(kettle: str, out: Path) -> None:
+    cfg = out / "cpu-idle.cfg"
+    write_fixture_config(
+        cfg,
+        "renderer = cpu\nrestore-session = false\nrecord = false\n"
+        "check-for-updates = false\nstatus-bar = off\ncursor-blink = false\n",
+    )
+    log = out / "cpu-idle.log"
+    with LiveKettle(
+        kettle, cfg, log, extra_args=["-e", "/bin/sh"],
+        extra_env={"PS1": "$ ", "ENV": None, "RUST_LOG": "info"},
+    ) as live:
+        require_live_renderer(log, "CPU")
+
+        def frames() -> int:
+            return int(live.json_ctl("ui_geometry")["render_uploads"]["frames_presented"])
+
+        # Wait for a real initial paint and a quiet interval after the prompt.
+        deadline = time.monotonic() + 10.0
+        before = frames()
+        while time.monotonic() < deadline:
+            time.sleep(0.2)
+            after = frames()
+            if before > 0 and after == before:
+                break
+            before = after
+        else:
+            raise SystemExit(f"CPU idle smoke: no initial stable frame: {before}")
+        time.sleep(1.0)
+        after = frames()
+        require_live_renderer(log, "CPU")
+        (out / "cpu-idle.json").write_text(
+            json.dumps({"before": before, "after": after}, indent=2) + "\n"
+        )
+        if after != before:
+            raise SystemExit(f"CPU idle smoke: unchanged window presented {after - before} extra frames")
+
+
 def run_steady_uploads(kettle: str, root: Path, screenshots_only: bool = False) -> Path:
     """A window whose content is not changing writes nothing to the GPU.
 
@@ -19795,6 +19843,7 @@ def run_steady_uploads(kettle: str, root: Path, screenshots_only: bool = False) 
         cfg,
         "\n".join(
             [
+                "renderer = gpu",
                 "agent-server = full",
                 "restore-session = false",
                 "update-check = false",
@@ -19919,13 +19968,15 @@ def run_steady_uploads(kettle: str, root: Path, screenshots_only: bool = False) 
     # prompt after a second of quiet (async prompt segments, a slow first load
     # after a build), and that is output, not a steady window.
     extra_args = [] if os.name == "nt" else ["-e", "/bin/sh"]
+    log = out / "kettle.log"
     with LiveKettle(
         kettle,
         cfg,
-        out / "kettle.log",
+        log,
         extra_args=extra_args,
-        extra_env={"PS1": "$ ", "ENV": None},
+        extra_env={"PS1": "$ ", "ENV": None, "RUST_LOG": "info"},
     ) as live:
+        require_live_renderer(log, "GPU")
         before = settled(live, "phase A")
         for index in range(5):
             live.screenshot(out / f"a-{index}.png")
@@ -21678,6 +21729,8 @@ def main() -> int:
         print(f"split-exit-resize smoke: OK artifacts={out}")
     if args.case in ("steady-uploads", "all"):
         out = run_steady_uploads(args.kettle, root, args.screenshots_only)
+        if sys.platform.startswith("linux"):
+            run_cpu_idle(args.kettle, out)
         print(f"steady-uploads smoke: OK artifacts={out}")
     if args.case in ("program-keys", "all"):
         out = run_program_keys(args.kettle, root)

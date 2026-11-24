@@ -460,7 +460,11 @@ impl App {
                 event_loop.owned_display_handle(),
                 &self.cfg,
                 Some(fonts),
-            ),
+            )
+            .or_else(|error| {
+                log::warn!("renderer: the CPU renderer could not start ({error:#}); using the GPU");
+                self.gpu_window_after_cpu_failure(window.clone())
+            }),
         };
         let renderer = match renderer {
             Ok(r) => r,

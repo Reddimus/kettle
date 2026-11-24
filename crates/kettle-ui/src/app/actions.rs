@@ -348,6 +348,7 @@ impl App {
         if self.cpu_rendering {
             // Listing adapters would load a GPU driver into a process that
             // draws on the CPU; the GPU rows keep their configured values.
+            self.gpu_choices.clear();
             self.gpu_discovery_pending = false;
         } else if let Some(choices) = crate::gpu_discovery::GPU_DISCOVERY.cached() {
             self.gpu_choices = choices.clone();
@@ -362,7 +363,7 @@ impl App {
                 },
             );
         }
-        ws.settings_restart_pending = false;
+        ws.settings_restart_pending = crate::settings::SettingsApply::None;
         ws.settings_nav = Some(crate::settings::SettingsNav::default());
     }
 

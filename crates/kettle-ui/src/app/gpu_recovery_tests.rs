@@ -229,7 +229,7 @@ fn a_fresh_window_starts_its_first_pane_before_the_window_and_gpu() {
 
 /// Drift guard. The GPU device-picker branch writes THREE keys
 /// (vendor/device/name) and must check every `persist_pref` result.
-/// Setting `settings_restart_pending = true` when none of the writes landed
+/// Setting `settings_restart_pending = crate::settings::SettingsApply::Restart` when none of the writes landed
 /// on disk tells the user a restart will apply a pin that silently reverts
 /// to auto. A behavioral test needs a live Settings overlay + a failing
 /// config write; pin the checked-result shape at the source.
@@ -251,7 +251,7 @@ fn gpu_picker_checks_persist_results_before_flagging_restart() {
     );
     assert!(
         arm.contains("if saved {")
-            && arm.contains("ws.settings_restart_pending = true;")
+            && arm.contains("ws.settings_restart_pending = crate::settings::SettingsApply::Restart;")
             && arm.contains("fire_notify("),
         "settings_restart_pending must only be set when the writes actually succeeded, \
              and a failure must be surfaced via fire_notify"

@@ -4,8 +4,8 @@
 # Builds a release binary if one isn't present, then runs three
 # measurements 5 times each:
 #   - `kettle --version`     (warm startup floor)
-#   - `kettle --screenshot`  (full GPU pipeline boot + render)
-#   - `kettle --screenshot-menu` (GPU pipeline + menu pass)
+#   - `kettle --screenshot`  (configured renderer boot + render)
+#   - `kettle --screenshot-menu` (configured renderer + menu pass)
 #
 # Output format per row: `<wall-clock>s, <peak RSS in MB>` so the
 # spread across runs is visible at a glance. Pipe to a file or
@@ -68,7 +68,7 @@ run_bench() {
 }
 
 run_bench "--version (startup floor)" "$BIN" --version
-run_bench "--screenshot (GPU pipeline + render)" "$BIN" --screenshot "$WORK_DIR/kettle-bench.png"
+run_bench "--screenshot (configured renderer + render)" "$BIN" --screenshot "$WORK_DIR/kettle-bench.png"
 run_bench "--screenshot-menu (with menu render pass)" "$BIN" --screenshot-menu "$WORK_DIR/kettle-bench-menu.png"
 
 echo ""

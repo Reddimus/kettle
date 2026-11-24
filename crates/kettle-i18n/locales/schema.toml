@@ -1665,6 +1665,12 @@ context = "crates/kettle-ui/src/app.rs settings_footer_note: footer note after t
 [messages.settings_note_new_shells]
 context = "crates/kettle-ui/src/app.rs settings_footer_note: shown on the Completion overlay row."
 
+[messages.settings_note_graphics_restart]
+context = "Settings footer after saving a renderer or GPU policy change that applies on the next launch."
+
+[messages.settings_note_gpu_discovery_skipped]
+context = "GPU device row description when the CPU renderer is active and adapter discovery was skipped."
+
 [messages.settings_note_restart]
 context = "crates/kettle-ui/src/app.rs settings_footer_note: a change needs a new renderer."
 

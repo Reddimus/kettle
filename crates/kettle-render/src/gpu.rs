@@ -1009,7 +1009,16 @@ impl Renderer {
         let mut surface = surface;
         if let Some(surface) = surface.as_mut() {
             surface.resize(width, height, f64::from(scale));
-            surface.set_translucent(alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied);
+            let translucent =
+                surface.set_translucent(alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied);
+            let opacity = if translucent {
+                f64::from(cfg.background_opacity)
+            } else {
+                1.0
+            };
+            let clear = crate::surface_clear_color(cfg.theme.background, opacity, alpha_mode);
+            let pixel = crate::cpu_raster::clear_pixel([clear.r, clear.g, clear.b, clear.a]);
+            surface.validate_startup(pixel)?;
         }
         let graphics_budget = kettle_core::GraphicsBudget::default();
         let fonts = take_over_fonts(fonts, cfg, scale);
@@ -2803,43 +2812,45 @@ async fn resolve_adapter_candidates(
 /// answer would otherwise require launching the binary, hitting the
 /// failure mode, and digging through `RUST_LOG=info` output.
 ///
-/// The first line says which renderer windows use (`renderer`). On the CPU
-/// renderer the GPU section describes what `renderer = gpu`, or the fallback,
-/// would use, and a host with no adapter is reported rather than an error.
+/// The first line reports the configured renderer preference. The adapter
+/// section describes a headless wgpu probe using the configured GPU policy.
 pub fn gpu_info(cfg: &Config) -> Result<String> {
     let choice = crate::backend::preferred_backend(cfg);
     let adapter = adapter_info_text(cfg);
     renderer_info_text(cfg, choice, adapter)
 }
 
-/// `--gpu-info`'s text: the renderer, then the GPU adapter's details.
+/// `--gpu-info`'s text: the configured preference, then the headless adapter.
 pub(crate) fn renderer_info_text(
     cfg: &Config,
     choice: crate::BackendChoice,
-    adapter: Result<String>,
+    adapter: Result<(String, bool)>,
 ) -> Result<String> {
-    let mut out = match choice.backend {
-        crate::RendererBackend::Cpu => format!(
-            "Renderer:       CPU (renderer = {}): frames are drawn on the CPU and presented \
-             through shared memory (wl_shm on Wayland, MIT-SHM on X11). Windows load no GPU \
-             driver; if the presenter cannot start they use the GPU below.\n",
-            cfg.renderer.as_str()
+    let mut out = format!("Renderer preference: {}\n", cfg.renderer.as_str());
+    match choice.backend {
+        crate::RendererBackend::Cpu => out.push_str(
+            "Preferred window renderer: CPU (wl_shm on Wayland, softbuffer on X11)\n\
+             Window fallback: wgpu if CPU presentation cannot start or recover\n",
         ),
-        crate::RendererBackend::Gpu if cfg!(target_os = "linux") => format!(
-            "Renderer:       GPU (renderer = {}). If no GPU adapter works, windows draw on \
-             the CPU.\n",
-            cfg.renderer.as_str()
-        ),
-        crate::RendererBackend::Gpu => format!(
-            "Renderer:       GPU (renderer = {})\n",
-            cfg.renderer.as_str()
-        ),
-    };
+        crate::RendererBackend::Gpu => {
+            out.push_str("Preferred window renderer: wgpu\n");
+            if cfg!(target_os = "linux") {
+                out.push_str("Window fallback: CPU if wgpu cannot start\n");
+            }
+        }
+    }
     if let Some(note) = choice.note {
         out.push_str(&format!("Renderer note:  {note}\n"));
     }
     match adapter {
-        Ok(adapter) => out.push_str(&adapter),
+        Ok((adapter, software_fallback)) => {
+            out.push_str(if software_fallback {
+                "Software adapter fallback: yes\n"
+            } else {
+                "Software adapter fallback: no\n"
+            });
+            out.push_str(&adapter);
+        }
         Err(error) if choice.backend == crate::RendererBackend::Cpu => {
             out.push_str(&format!("GPU adapter:    none usable ({error:#})"));
         }
@@ -2849,7 +2860,7 @@ pub(crate) fn renderer_info_text(
 }
 
 /// The adapter the GPU renderer would select, as `--gpu-info` prints it.
-fn adapter_info_text(cfg: &Config) -> Result<String> {
+fn adapter_info_text(cfg: &Config) -> Result<(String, bool)> {
     pollster::block_on(async {
         let (_instance, adapter) = resolve_headless_adapter(cfg, "gpu_info").await?;
         let info = adapter.get_info();
@@ -2862,7 +2873,10 @@ fn adapter_info_text(cfg: &Config) -> Result<String> {
         };
         let backend_fallback =
             configured_backend(cfg.gpu_backend).is_some_and(|requested| requested != info.backend);
-        Ok(format!(
+        let software_fallback = info.device_type == wgpu::DeviceType::Cpu
+            && !cfg.gpu_force_software
+            && pin_match_rank(&info, cfg) == u8::MAX;
+        let text = format!(
             "Backend policy: {requested_backend}\n\
              Backend:        {:?}\n\
              Backend fallback: {}\n\
@@ -2898,6 +2912,7 @@ fn adapter_info_text(cfg: &Config) -> Result<String> {
             limits.max_texture_dimension_2d,
             limits.max_buffer_size,
             limits.max_bind_groups,
-        ))
+        );
+        Ok((text, software_fallback))
     })
 }

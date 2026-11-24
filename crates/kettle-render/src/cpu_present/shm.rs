@@ -448,7 +448,7 @@ impl ShmPresenter {
             }
         }
         if removed > 0 {
-            self.flush_connection();
+            let _ = self.flush_connection();
         }
         removed
     }
@@ -664,16 +664,19 @@ impl ShmPresenter {
         // of the new one is up; busy ones go when released.
         let stale = self.book.stale(self.width, self.height, self.format);
         self.remove(stale);
-        self.flush_connection();
+        self.flush_connection()?;
         Ok(PresentOutcome::Presented)
     }
 
-    fn flush_connection(&self) {
+    fn flush_connection(&self) -> Result<()> {
         match self.conn.flush() {
-            Ok(()) => {}
+            Ok(()) => Ok(()),
             // The socket is full; winit's loop flushes again before it sleeps.
-            Err(WaylandError::Io(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(err) => log::warn!("CPU present: Wayland flush failed: {err}"),
+            Err(WaylandError::Io(err)) if err.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+            Err(err) => {
+                log::warn!("CPU present: Wayland flush failed: {err}");
+                Err(err.into())
+            }
         }
     }
 
@@ -702,7 +705,7 @@ impl Drop for ShmPresenter {
         if self.shm.version() >= 2 {
             self.shm.release();
         }
-        self.flush_connection();
+        let _ = self.flush_connection();
     }
 }
 

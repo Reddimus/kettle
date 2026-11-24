@@ -167,6 +167,10 @@ impl FrameRecoveryState {
         self.pending.is_some()
     }
 
+    pub(crate) fn first_renderer_rebuild(&self) -> bool {
+        self.renderer_attempts == 1
+    }
+
     pub(crate) fn renderer_rebuild_pending(&self) -> bool {
         self.pending
             .is_some_and(|pending| pending.action == FrameRecoveryAction::RebuildRenderer)
@@ -1241,12 +1245,11 @@ pub(crate) struct WindowState {
     /// Esc (cancel). Only meaningful while `settings_nav` is also `Some`.
     pub(crate) settings_text_edit: Option<crate::settings::SettingsTextEdit>,
     /// Set when a persisted Settings change needs a restart or a new window to
-    /// take effect. GPU pin, power preference, backend, and force-software
-    /// changes need the next launch; background opacity, background type, and
-    /// window blur need a new window only when `surface_caps` lacks what the
-    /// new config asks for. The settings overlay shows a restart
-    /// footer while this is true; opening the overlay clears it.
-    pub(crate) settings_restart_pending: bool,
+    /// take effect. Renderer and GPU policy changes need the next launch.
+    /// Background opacity, background type, and blur need a new window when
+    /// `surface_caps` lacks what the new config asks for. Opening Settings
+    /// clears the pending notice.
+    pub(crate) settings_restart_pending: crate::settings::SettingsApply,
     /// What this window's OS surface was created able to show. A Settings
     /// change asks for a new window only when it needs more than this.
     pub(crate) surface_caps: SurfaceCaps,
@@ -1923,7 +1926,7 @@ impl WindowState {
             palette_bound_only: false,
             settings_nav: None,
             settings_text_edit: None,
-            settings_restart_pending: false,
+            settings_restart_pending: Default::default(),
             surface_caps: SurfaceCaps::default(),
             last_bg_frame: None,
             layout_picker_input: None,
