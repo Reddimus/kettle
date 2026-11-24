@@ -589,29 +589,53 @@ pixels unchanged.
 harness. It drives a real CPU window renderer through seeded random
 sessions of typing, cursor moves and blinks, selection drags, scrolling,
 resizes, themes, opacity, Settings, tab switches, splits, toasts, the
-search bar, small and large translucent image placements, the starfield,
-font size and HiDPI scale. Frames go to a fake surface of up to three
-buffers that a model compositor holds and releases, with the presenter's
-own buffer-age history, and every pixel the renderer must repaint is filled
-with garbage first. After every frame the presented buffer must equal a full
-repaint of the same frame by a second rasterizer, byte for byte.
-`KETTLE_DAMAGE_SEEDS` and `KETTLE_DAMAGE_STEPS` (default 3 and 70) lengthen
-the run. The module also checks that typing and a blink repaint a few cells
-at scale 1 and 2, and that `KETTLE_CPU_FULL_REPAINT`'s switch repaints every
-frame whole. `damage_frame_cost` (ignored) times a typed character and a blink
-at 1600x1000 and 3840x2160 with and without damage tracking; run it with
+search bar, small and large translucent image placements and a second large
+image drawn over the first, the starfield, font size, HiDPI scale, two tabs
+that look alike but show different pending cards and bidi rows, and the
+bidi switch. Frames go to a fake surface that behaves as one of the
+presenters, with the presenter's own buffer-age history, and every pixel the
+renderer must repaint is filled with garbage first:
+
+- **Wayland** (odd seeds): up to three buffers that a model compositor holds
+  and releases; frame callbacks that come late, so attempts are paced and
+  drawn again, and drawn frames are sometimes held until a later flush or
+  commit; no commit for a frame with nothing new (`Unchanged`); and a
+  compositor that takes from each commit only what it damages.
+- **X11** (even seeds): one retained buffer, presents that send only their
+  rectangles, and other windows that cover and uncover random parts of the
+  window, whose pixels the model server then drops (`Expose`).
+
+After every frame drawn, the buffer must equal a full repaint of the same
+frame by a second rasterizer that draws only the frames drawn, byte for
+byte. Whenever no frame is held, the screen (the compositor's or the X
+server's copy) must equal it too, and the cards and bidi rows on screen must
+be the ones that frame painted. `KETTLE_DAMAGE_SEEDS` and
+`KETTLE_DAMAGE_STEPS` (default 4 and 80) lengthen the run. Negative controls
+require the harness to fail a presenter that ignores buffer age and an X11
+presenter that never sends exposed pixels again. Targeted tests check that a
+paced attempt leaves the image cache alone, that a second image never takes
+the cache from the first in mid-frame, and that switching between tabs that
+look alike puts the new tab's card and bidi rows on screen. The module also
+checks that typing and a blink repaint a few cells at scale 1 and 2, and that
+`KETTLE_CPU_FULL_REPAINT`'s switch repaints every frame whole.
+`damage_frame_cost` (ignored) times a typed character and a blink at
+1600x1000 and 3840x2160 with and without damage tracking; run it with
 `--ignored --nocapture` in an optimized build.
 
 `cpu_present::tests` and `cpu_present::proto_tests` test the Linux presenter.
 The protocol tests run it against an in-process Wayland compositor
 (`cpu_present::test_wl`, wayland-server) that records each commit's pixels
 and damage and holds frame callbacks and buffers until the test lets them
-go. They need libwayland-client at run time and skip without it. One X11
-test checks that opaque frames on a depth-32 window are sent with alpha
-0xff; it needs an X server named by `KETTLE_TEST_X11_DISPLAY` (for example
-`Xvfb :91 -screen 0 640x480x24` and `KETTLE_TEST_X11_DISPLAY=:91`), and
-skips when that is unset. It reads only that variable, never `DISPLAY`, so
-it cannot draw on a desktop session.
+go. They need libwayland-client at run time and skip without it. The X11
+tests check that opaque frames on a depth-32 window are sent with alpha
+0xff, and that pixels another window covered and uncovered are sent again
+by an unchanged frame. They need an X server named by
+`KETTLE_TEST_X11_DISPLAY` (for example `Xvfb :91 -screen 0 640x480x24` and
+`KETTLE_TEST_X11_DISPLAY=:91`) with no compositing manager, and skip when
+that is unset. The depth-32 test needs the server's Composite extension
+(without it Xvfb offers no depth-32 visual). They read only that variable,
+never `DISPLAY` (the presenter's exposure watcher too), so they cannot draw
+on a desktop session.
 
 ### Host requirements and skipped tests
 

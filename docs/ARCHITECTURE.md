@@ -3922,6 +3922,10 @@ text areas for glyphon. Its `RendererBackend` decides what executes them.
   parallelism); the result is bit-identical. A large image drawn unchanged
   two frames running (the wallpaper) is cached at its drawn size and copied
   after that, since its four-tap filter costs 30–40 ms a full-screen frame.
+  The cache holds one image. Each draw's choice is settled once a frame
+  (`CpuRaster::plan`) and holds for the whole frame: an entry a draw of the
+  frame is drawn from is not replaced by a later draw in the same frame,
+  which stays a candidate for the next.
 - **Damage tracking (`backend::cpu_damage`).** A window frame repaints only
   what changed since the frame its buffer holds.
   - Before drawing, the scene pass runs once more as a *signing* pass
@@ -3937,6 +3941,17 @@ text areas for glyphon. Its `RendererBackend` decides what executes them.
     disjoint, and draws each draw once per rectangle with its scissor
     intersected (`CpuRaster::draw_clipped`); the frame's own damage is
     presented. A frame with no damage commits nothing.
+  - The frame begins (`FrameDraw::begin`: the rasterizer's per-frame caches
+    advance and the signing pass runs) only once the presenter has a buffer
+    for it. An attempt the compositor is not ready for (`Paced`), or that
+    finds every buffer busy, leaves the caches and the signature as they
+    were, so a wallpaper stays cached however many attempts fall between two
+    frames.
+  - A frame the presenter reports `Unchanged` (no damage, nothing waiting
+    for a commit) is already on screen: what it painted (its cards and bidi
+    rows, which can differ while its pixels do not, as for two tabs alike but
+    for the pane and card they show) is published at once, or, with a frame
+    still held, handed to that frame's commit.
   - A frame is repainted in full when no frame can be compared (the first, a
     resize, a format change, a buffer rounded past the scene), for a pending
     screenshot, and when `KETTLE_CPU_FULL_REPAINT=1` is set, the diagnostic
@@ -4043,7 +4058,9 @@ and presents the frame's own damage.
     commits the same surface.
   - winit keeps the surface's scale state (`set_buffer_scale` or the
     fractional-scale viewport) and its opaque region. Buffers are always in
-    physical pixels.
+    physical pixels. winit stages a scale change on the surface for the next
+    commit, so after a scale change the next frame is committed (in full)
+    even when the buffer's size and pixels did not change.
 - **X11.** softbuffer presents with MIT-SHM, falling back to `PutImage`. A
   window with a depth-32 visual keeps its alpha; other windows are opaque.
   The depth is asked on the window's own connection, not `$DISPLAY`. On a
@@ -4051,6 +4068,21 @@ and presents the frame's own damage.
   is sent, since the server keeps all 32 bits and winit's
   `set_transparent(false)` does nothing on X11. X11 gives no frame callbacks,
   so pacing is the caller's.
+  - Without a compositing manager the server keeps no copy of what another
+    window covers: uncovering it sends `Expose`, which winit turns into a
+    plain `RedrawRequested` (merged with any Kettle requested). That frame
+    has no damage there, and MIT-SHM sends only the rectangles it is given,
+    so the presenter selects `Expose` on the window from a second connection
+    of its own (`ExposeWatcher`; winit reads every event on its connection)
+    and adds each exposed rectangle to the next present, from the retained
+    buffer, which still holds those pixels. A round trip before each present
+    makes every `Expose` sent before winit's redraw arrive first.
+  - The watcher connects to `$DISPLAY` (where Xlib opened winit's display;
+    tests use `KETTLE_TEST_X11_DISPLAY` only) and must prove it reached the
+    window's server: a nonce written on the window through winit's
+    connection must read back through its own. Without a watcher, every
+    present sends the whole buffer. The `PutImage` fallback sends the whole
+    image on every present anyway.
 - **Fallback.** If the `wl_shm` presenter cannot start, softbuffer presents on
   Wayland: opaque only, always two buffers. Its reported age is ignored for a
   buffer that predates the last resize, because softbuffer 0.4 keeps that age
