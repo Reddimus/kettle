@@ -1274,15 +1274,12 @@ Private Fontconfig configuration includes only `assets/fonts`, with no system
 config includes. The runner verifies `fc-list` against the repository TTF set
 and records every hash, including all four JetBrains Mono faces and the four
 bundled Fira Sans faces. Software-rendering environment settings are requests:
-the runner additionally requires Weston's actual headless/GL/llvmpipe log and
-version, a GL llvmpipe CPU adapter with driver details from `kettle --gpu-info`,
-and matching adapter selection in every live fixture log before and after
-screenshot. Fontdb's system-directory fallback also fails the run.
-An unknown or different adapter fails the run. The private GPU config requests
-GL/software for both diagnostics and live fixtures. Diagnostic parsers accept
-LF and CRLF line endings while retaining strict adapter/backend checks and
-the original raw diagnostic files. Portable regressions force CRLF input on
-every host; Windows CI also exercises the complete fixture path.
+the runner restricts GLVND to Mesa and checks Weston's actual headless
+GL/llvmpipe log and version. Each fixture uses `renderer = auto` and the runner separately verifies
+Kettle's CPU and `wl_shm` selection in its log before and after screenshots.
+A different renderer, a different presenter, or Fontdb's system-directory
+fallback fails the run. Diagnostic parsers accept LF and CRLF line endings
+and preserve the original raw logs.
 
 Startup defaults to 20 seconds (`--startup-timeout`, maximum 60); the matrix
 defaults to 900 seconds (`--run-timeout`, maximum 900). Native queries have
@@ -1643,7 +1640,7 @@ Prerequisites beyond the desktop are included in the proof column.
 | Text presentation | `just text-presentation-smoke` | Text-style bullet uses a monochrome face | Linux/macOS |
 | Update toast | `just update-toast-smoke` | Presented-frame gating, seven-second expiry, terminal preservation, Details/About, dismissal and once-per-state restart receipts | Linux/macOS |
 | Split exit resize | `just split-exit-resize-smoke` | Exiting split restores survivor grid and tty winsize | Linux/macOS |
-| Steady uploads | `just steady-uploads-smoke` | Unchanged frames and cursor blink avoid GPU uploads; paced output uses mapped writes where available | Linux/macOS |
+| Steady uploads | `just steady-uploads-smoke` | Explicit wgpu frames and cursor blink avoid GPU uploads; paced output uses mapped writes where available. On Linux a separate CPU window stays idle | Linux/macOS |
 | Cursor blink layer | `just cursor-blink-layer-smoke` | Native layer handoff, idle behavior, and exits; `--pixels` needs Screen Recording | macOS |
 | Job control | `just job-control-smoke` | Shell editing across suspend/bg/fg/exit, alternate screen, and negative controls | Linux/macOS |
 | Zoom keybind | `just zoom-keybind-smoke` | App zoom chords resolve and change geometry | Linux/macOS |
@@ -1890,7 +1887,9 @@ the right column by position, since split rounding can make the left column
 wider, and verifies the final right-edge geometry as well as pane order.
 This control-plane check does not prove native pointer event delivery.
 
-The steady-upload case needs a focused window for blink and output phases.
+The steady-upload case requires a live wgpu renderer before reading upload
+counters. It needs a focused window for blink and output phases. A separate
+Linux CPU fixture checks that an unchanged window stops presenting.
 `--screenshots-only` runs the narrower screenshot phase for environments such
 as Xvfb without a window manager. Record that restriction.
 A screenshot-capability failure is distinct from a rendering failure.
