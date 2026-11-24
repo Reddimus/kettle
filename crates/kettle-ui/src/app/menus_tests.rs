@@ -711,6 +711,12 @@ fn the_context_menu_carries_every_terminator_row() {
         .nth(1)
         .and_then(|b| b.split("\n    /// ").next())
         .expect("context_menu_items body");
+    let edit_rows = src
+        .split("fn terminal_edit_menu_rows(")
+        .nth(1)
+        .and_then(|body| body.split("\n}").next())
+        .expect("terminal_edit_menu_rows body");
+    let body = format!("{body}{edit_rows}");
     use kettle_i18n::{Language, Text as T, Translator};
     let en = Translator::new(Language::En);
     for (key, row, action) in [
@@ -2069,6 +2075,64 @@ fn shell_window(
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
     (ws, pane)
+}
+
+#[cfg(unix)]
+#[test]
+fn terminal_menu_copy_and_initial_focus_follow_the_current_selection() {
+    use kettle_core::{Column, Line, Point, Selection, SelectionType, Side};
+
+    let (mut ws, pane) = shell_window("printf 'known phrase'; sleep 10", |term| {
+        term.term.lock().unwrap().grid()[Line(0)][Column(0)].c == 'k'
+    });
+    let point = Point::new(Line(0), Column(0));
+    // A triple-click selects a line. A plain click elsewhere replaces the
+    // range with a zero-width drag anchor.
+    for (selection, copy_enabled, first_action) in [
+        (None, false, Action::Paste),
+        (
+            Some(Selection::new(SelectionType::Lines, point, Side::Left)),
+            true,
+            Action::Copy,
+        ),
+        (
+            Some(Selection::new(
+                SelectionType::Simple,
+                Point::new(Line(1), Column(0)),
+                Side::Right,
+            )),
+            false,
+            Action::Paste,
+        ),
+    ] {
+        ws.mux.panes[&pane].term.term.lock().unwrap().selection = selection;
+        let rows = super::terminal_edit_menu_rows(&ws, EN_TEXT);
+        let items = super::filter_disabled(super::grouped_terminal_menu(Vec::from(rows), EN_TEXT));
+        let first = items.iter().position(super::item_is_dispatchable).unwrap();
+        let rows = menu_rows(&items);
+        assert_eq!(rows[first].1, first_action);
+        assert_eq!(
+            rows,
+            [
+                ("Copy", Action::Copy, copy_enabled),
+                ("Paste", Action::Paste, true),
+                ("Select All", Action::SelectAll, true),
+            ],
+        );
+
+        super::arm_selection_gesture(&mut ws, pane, 0);
+        super::clear_selection_gesture(&mut ws);
+        assert_eq!(
+            ws.mux.panes[&pane]
+                .term
+                .term
+                .lock()
+                .unwrap()
+                .selection
+                .is_some(),
+            copy_enabled,
+        );
+    }
 }
 
 /// A real pane offers the rows only once its output carried a prompt mark,

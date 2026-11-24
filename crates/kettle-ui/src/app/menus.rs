@@ -342,21 +342,13 @@ impl App {
     /// `enabled` flag is computed from current state: Copy needs a
     /// selection, Select Command Output a right-click on a command's output
     /// (`clicked_row`), the split rows need an unzoomed tab, and Ungroup needs
-    /// any pane in the active tab to be in a group. `show_context_menu` runs the list
-    /// through `filter_disabled`, which hides disabled rows and the
-    /// separators they would orphan (Terminator-style) instead of greying
-    /// them out. That cuts visual clutter and leaves every visible row
-    /// actionable.
+    /// any pane in the active tab to be in a group. `show_context_menu`
+    /// hides most disabled rows. Copy remains visible and dimmed.
     pub(super) fn context_menu_items(
         &mut self,
         ws: &mut WindowState,
         clicked_row: Option<u64>,
     ) -> Vec<ContextMenuItem> {
-        let has_selection = ws
-            .mux
-            .focused()
-            .and_then(|p| p.term.term.lock().ok().map(|t| t.selection.is_some()))
-            .unwrap_or(false);
         let has_group = ws
             .mux
             .tab_pane_ids(ws.mux.active)
@@ -382,22 +374,11 @@ impl App {
             .unwrap_or(false);
         use kettle_i18n::Text as T;
         let tr = self.ui_text;
+        let [copy, paste, select_all] = terminal_edit_menu_rows(ws, tr);
         let mut items = vec![
-            ContextMenuItem::Item {
-                label: tr.text(T::MenuCopy),
-                action: Action::Copy,
-                enabled: has_selection,
-            },
-            ContextMenuItem::Item {
-                label: tr.text(T::MenuPaste),
-                action: Action::Paste,
-                enabled: true,
-            },
-            ContextMenuItem::Item {
-                label: tr.text(T::MenuSelectAll),
-                action: Action::SelectAll,
-                enabled: true,
-            },
+            copy,
+            paste,
+            select_all,
             // iTerm2, Terminal.app and Konsole keep find and clear one
             // right-click away, not behind a submenu.
             ContextMenuItem::Item {
@@ -855,7 +836,6 @@ impl App {
             self.abandon_torn_drag(Some(ws));
         }
 
-        // Terminator menu UX: every visible row is actionable.
         let items = filter_disabled(items);
         let highlight = items.iter().position(item_is_dispatchable).unwrap_or(0);
         let (cw, ch) = self.menu_cell(ws);
@@ -3093,6 +3073,40 @@ pub(super) fn wrap_menu_info(text: &str, columns: usize) -> Vec<String> {
         lines.push(line);
     }
     lines
+}
+
+pub(super) fn terminal_edit_menu_rows(
+    ws: &WindowState,
+    tr: kettle_i18n::Translator,
+) -> [ContextMenuItem; 3] {
+    use kettle_i18n::Text as T;
+    let has_selection = ws
+        .mux
+        .active_focus()
+        .and_then(|id| ws.mux.panes.get(&id))
+        .and_then(|pane| pane.term.term.lock().ok())
+        .is_some_and(|term| {
+            term.selection
+                .as_ref()
+                .is_some_and(|selection| selection.to_range(&term).is_some())
+        });
+    [
+        ContextMenuItem::Item {
+            label: tr.text(T::MenuCopy),
+            action: Action::Copy,
+            enabled: has_selection,
+        },
+        ContextMenuItem::Item {
+            label: tr.text(T::MenuPaste),
+            action: Action::Paste,
+            enabled: true,
+        },
+        ContextMenuItem::Item {
+            label: tr.text(T::MenuSelectAll),
+            action: Action::SelectAll,
+            enabled: true,
+        },
+    ]
 }
 
 /// Bound the terminal menu by categories, independently of optional commands.

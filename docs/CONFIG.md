@@ -720,6 +720,10 @@ reader receives one polite Status announcement with the full instructions,
 also available in Copy's accessible description. English and Spanish use the
 same physical modifiers regardless of `macos-option-as-alt`.
 
+The terminal context menu enables **Copy** only when the focused pane has
+selected text. After a plain click clears the selection, reopening the menu
+focuses its first available action, usually **Paste**.
+
 Copy drops trailing whitespace at the end of each copied line by default.
 `copy-trim-whitespace = false` includes every selected cell, trailing spaces
 and padding included. Blocks copy one selected column slice per row, separated by

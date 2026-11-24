@@ -1529,6 +1529,17 @@ pub(super) fn selection_copy_owner(selecting: bool, pane_id: Option<u64>) -> Opt
 }
 
 pub(super) fn clear_selection_gesture(ws: &mut WindowState) {
+    // A single press installs an anchor in case it becomes a drag.
+    // Once the gesture ends, retain only a selection that covers cells.
+    if let Some(pane) = ws.selecting_pane.and_then(|id| ws.mux.panes.get(&id))
+        && let Ok(mut term) = pane.term.term.lock()
+        && term
+            .selection
+            .as_ref()
+            .is_some_and(|selection| selection.to_range(&term).is_none())
+    {
+        term.selection = None;
+    }
     ws.selection_hint_plain = false;
     ws.selecting = false;
     ws.selecting_pane = None;

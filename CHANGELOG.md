@@ -233,6 +233,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Shift+right-click opens over such a program starts with the same sentence,
   wrapped to the menu's width, and a screen reader reads it as one item.
 
+- The terminal context menu enables Copy only while the focused pane has
+  a selection. After you clear the selection, the menu opens with focus
+  on its first available action, usually Paste.
+
 - Kettle draws box drawing, block elements, Powerline separators, the
   triangles ◢◣◤◥ and braille itself, to fit each cell, as Ghostty, WezTerm
   and kitty do. Lines are whole pixels sized from the font's underline, so
