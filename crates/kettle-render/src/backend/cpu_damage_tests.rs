@@ -26,7 +26,7 @@ use alacritty_terminal::term::Config as TermConfig;
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use kettle_core::EventProxy;
 
-use super::cpu::{CpuPresentOutcome, CpuRaster, CpuSurface, HeldFrameFlush};
+use super::cpu::{CpuPresentOutcome, CpuRaster, CpuSurface, FrameDraw, HeldFrameFlush};
 use super::cpu_draw::SoftRaster;
 use crate::cpu_present::damage::{DamageHistory, normalize};
 use crate::cpu_raster::PixelRect;
@@ -190,8 +190,7 @@ impl CpuSurface for RotatingSurface {
 
     fn present_frame(
         &mut self,
-        damage: &[PixelRect],
-        draw: &mut super::cpu::DrawFrame<'_>,
+        draw: &mut dyn FrameDraw,
         pre_commit: &mut dyn FnMut(),
     ) -> CpuPresentOutcome {
         self.release();
@@ -208,7 +207,8 @@ impl CpuSurface for RotatingSurface {
             Some(drawn) => u8::try_from(frames - drawn + 1).unwrap_or(0),
             None => 0,
         };
-        let damage: Vec<crate::cpu_present::Rect> = damage
+        let damage: Vec<crate::cpu_present::Rect> = draw
+            .begin(w, h)
             .iter()
             .map(|r| crate::cpu_present::Rect::new(r.x, r.y, r.w, r.h))
             .collect();
@@ -233,7 +233,7 @@ impl CpuSurface for RotatingSurface {
             .iter()
             .map(|r| u64::from(r.w) * u64::from(r.h))
             .sum();
-        if !repaint.is_empty() && !draw(&mut buffer.pixels, w, h, &repaint) {
+        if !repaint.is_empty() && !draw.draw(&mut buffer.pixels, w, h, &repaint) {
             buffer.drawn = None;
             return CpuPresentOutcome::NotDrawn;
         }

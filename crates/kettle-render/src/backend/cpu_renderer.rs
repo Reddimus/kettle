@@ -6,8 +6,8 @@ use std::time::Instant;
 use anyhow::{Result, anyhow};
 use kettle_config::Config;
 
-use super::cpu::{CpuBackend, CpuPass, CpuPresentOutcome, CpuSurface, HeldFrameFlush};
-use super::cpu_damage::{DamageStats, TileHashes, disjoint};
+use super::cpu::{CpuBackend, CpuPass, CpuPresentOutcome, CpuSurface, FrameDraw, HeldFrameFlush};
+use super::cpu_damage::{DamageStats, DamageTracker, TileHashes, disjoint};
 use super::{RenderDevice, ScenePass};
 use crate::cpu_raster::{CpuFramebuffer, CpuTarget, PixelRect};
 use crate::cursor_patch::SceneFacts;
@@ -230,90 +230,31 @@ impl Renderer {
                 // `PostMultiplied` mode, so no straight-alpha pass runs.
                 debug_assert!(!needs_presentation, "a CPU window presents premultiplied");
                 *converted = false;
-                raster.begin_frame();
-                // Damage: what changed since the frame last drawn into a
-                // buffer, from this frame's draw list. A buffer the presenter
-                // rounded past the scene repeats the scene's edge, which the
-                // signature does not see, so it repaints in full.
-                // A frame the compositor is not ready for is not drawn
-                // (`Paced`), so it needs no signature either.
-                let (buffer_w, buffer_h) = surface.buffer_size();
-                let whole = PixelRect::new(0, 0, buffer_w, buffer_h);
-                let signing = Instant::now();
-                let signed = !damage.force_full
-                    && (buffer_w, buffer_h) == (width, height)
-                    && !surface.frame_pending()
-                    && self
-                        .sign_cpu_scene(
-                            raster.as_mut(),
-                            damage.begin(width, height),
-                            target_size,
-                            cfg,
-                            cursor_on,
-                        )
-                        .is_ok();
-                let frame_damage = match (signed, screenshot.is_none()) {
-                    // A screenshot is taken from a whole frame drawn now.
-                    (true, true) => damage.damage().unwrap_or_else(|| vec![whole]),
-                    _ => vec![whole],
+                let mut frame = WindowFrame {
+                    renderer: &*self,
+                    raster: raster.as_mut(),
+                    draws: &mut *draws,
+                    damage: &mut *damage,
+                    cfg,
+                    target_size,
+                    cursor_on,
+                    screenshot: &mut screenshot,
+                    signed: false,
+                    stats: DamageStats::default(),
+                    drawn: Ok(()),
                 };
-                let mut stats = DamageStats {
-                    damage: frame_damage.clone(),
-                    planned: if signed { damage.next().planned() } else { 0 },
-                    sign: signing.elapsed(),
-                    ..DamageStats::default()
-                };
-                let mut drawn = Ok(());
                 let mut pre_present = Some(pre_present);
-                let outcome = surface.present_frame(
-                    &frame_damage,
-                    &mut |pixels, buffer_w, buffer_h, repaint| {
-                        let drawing = Instant::now();
-                        let whole = PixelRect::new(0, 0, buffer_w, buffer_h);
-                        let full = [buffer_w, buffer_h] != target_size
-                            || repaint.iter().any(|r| r.intersect(whole) == Some(whole));
-                        let clips = if full { vec![whole] } else { disjoint(repaint) };
-                        // The repainted pixels' contents are undefined; the
-                        // clear is the GPU pass's `LoadOp::Clear(TRANSPARENT)`.
-                        clear_rects(pixels, buffer_w, &clips);
-                        stats.full = full;
-                        stats.repainted.clone_from(&clips);
-                        let Some(mut target) = CpuTarget::from_pixels(pixels, buffer_w, buffer_h)
-                        else {
-                            drawn = Err(anyhow!("a {buffer_w}x{buffer_h} CPU buffer is malformed"));
-                            return false;
-                        };
-                        // The scene is drawn 1:1 from the buffer's origin. A
-                        // buffer that lags a resize shows its top-left part.
-                        target.set_viewport(crate::cpu_raster::Viewport {
-                            x: 0.0,
-                            y: 0.0,
-                            w: width as f32,
-                            h: height as f32,
-                        });
-                        drawn = self.draw_cpu_scene(
-                            raster.as_mut(),
-                            draws,
-                            target,
-                            target_size,
-                            cfg,
-                            cursor_on,
-                            &mut screenshot,
-                            (!full).then_some(&clips[..]),
-                            !signed,
-                        );
-                        if drawn.is_ok() {
-                            extend_edges(pixels, [buffer_w, buffer_h], target_size);
-                        }
-                        stats.raster = drawing.elapsed();
-                        drawn.is_ok()
-                    },
-                    &mut || {
-                        if let Some(pre_present) = pre_present.take() {
-                            pre_present();
-                        }
-                    },
-                );
+                let outcome = surface.present_frame(&mut frame, &mut || {
+                    if let Some(pre_present) = pre_present.take() {
+                        pre_present();
+                    }
+                });
+                let WindowFrame {
+                    signed,
+                    stats,
+                    drawn,
+                    ..
+                } = frame;
                 match outcome {
                     // The buffer now holds this frame: the next one is
                     // compared with it.
@@ -730,6 +671,116 @@ impl Renderer {
         } else {
             cpu.scene.as_ref()
         }
+    }
+}
+
+/// A window frame, drawn into the buffer the presenter hands out.
+struct WindowFrame<'a> {
+    renderer: &'a Renderer,
+    raster: &'a mut dyn super::cpu::CpuRaster,
+    draws: &'a mut Vec<super::cpu::CpuDrawRecord>,
+    damage: &'a mut DamageTracker,
+    cfg: &'a Config,
+    target_size: [u32; 2],
+    cursor_on: bool,
+    screenshot: &'a mut Option<ScreenshotRequest>,
+    /// The frame's damage came from its signature: committing it makes the
+    /// signature the next frame's reference.
+    signed: bool,
+    stats: DamageStats,
+    drawn: Result<()>,
+}
+
+impl FrameDraw for WindowFrame<'_> {
+    fn begin(&mut self, buffer_w: u32, buffer_h: u32) -> Vec<PixelRect> {
+        // The frame starts here, with a buffer to draw into: a frame that is
+        // paced, or finds every buffer busy, must not age the rasterizer's
+        // caches (a wallpaper drawn every frame would lose its cache entry
+        // to the attempts in between).
+        self.raster.begin_frame();
+        // Damage: what changed since the frame last drawn into a buffer, from
+        // this frame's draw list. A buffer the presenter rounded past the
+        // scene repeats the scene's edge, which the signature does not see,
+        // so it repaints in full.
+        let [width, height] = self.target_size;
+        let whole = PixelRect::new(0, 0, buffer_w, buffer_h);
+        let signing = Instant::now();
+        self.signed = !self.damage.force_full
+            && (buffer_w, buffer_h) == (width, height)
+            && self
+                .renderer
+                .sign_cpu_scene(
+                    self.raster,
+                    self.damage.begin(width, height),
+                    self.target_size,
+                    self.cfg,
+                    self.cursor_on,
+                )
+                .is_ok();
+        let frame_damage = match (self.signed, self.screenshot.is_none()) {
+            // A screenshot is taken from a whole frame drawn now.
+            (true, true) => self.damage.damage().unwrap_or_else(|| vec![whole]),
+            _ => vec![whole],
+        };
+        self.stats = DamageStats {
+            damage: frame_damage.clone(),
+            planned: if self.signed {
+                self.damage.next().planned()
+            } else {
+                0
+            },
+            sign: signing.elapsed(),
+            ..DamageStats::default()
+        };
+        frame_damage
+    }
+
+    fn draw(
+        &mut self,
+        pixels: &mut [u32],
+        buffer_w: u32,
+        buffer_h: u32,
+        repaint: &[PixelRect],
+    ) -> bool {
+        let drawing = Instant::now();
+        let [width, height] = self.target_size;
+        let whole = PixelRect::new(0, 0, buffer_w, buffer_h);
+        let full = [buffer_w, buffer_h] != self.target_size
+            || repaint.iter().any(|r| r.intersect(whole) == Some(whole));
+        let clips = if full { vec![whole] } else { disjoint(repaint) };
+        // The repainted pixels' contents are undefined; the clear is the GPU
+        // pass's `LoadOp::Clear(TRANSPARENT)`.
+        clear_rects(pixels, buffer_w, &clips);
+        self.stats.full = full;
+        self.stats.repainted.clone_from(&clips);
+        let Some(mut target) = CpuTarget::from_pixels(pixels, buffer_w, buffer_h) else {
+            self.drawn = Err(anyhow!("a {buffer_w}x{buffer_h} CPU buffer is malformed"));
+            return false;
+        };
+        // The scene is drawn 1:1 from the buffer's origin. A buffer that lags
+        // a resize shows its top-left part.
+        target.set_viewport(crate::cpu_raster::Viewport {
+            x: 0.0,
+            y: 0.0,
+            w: width as f32,
+            h: height as f32,
+        });
+        self.drawn = self.renderer.draw_cpu_scene(
+            self.raster,
+            self.draws,
+            target,
+            self.target_size,
+            self.cfg,
+            self.cursor_on,
+            self.screenshot,
+            (!full).then_some(&clips[..]),
+            !self.signed,
+        );
+        if self.drawn.is_ok() {
+            extend_edges(pixels, [buffer_w, buffer_h], self.target_size);
+        }
+        self.stats.raster = drawing.elapsed();
+        self.drawn.is_ok()
     }
 }
 

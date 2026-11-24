@@ -381,9 +381,21 @@ pub enum HeldFrameFlush {
     Failed,
 }
 
-/// What draws a window frame into a presenter's buffer: its pixels, width
-/// and height, and its repaint region ([`CpuSurface::present_frame`]).
-pub(crate) type DrawFrame<'a> = dyn FnMut(&mut [u32], u32, u32, &[PixelRect]) -> bool + 'a;
+/// What draws a window frame into a presenter's buffer
+/// ([`CpuSurface::present_frame`]).
+pub(crate) trait FrameDraw {
+    /// A `width` x `height` buffer is ready to draw into: begin the frame
+    /// and return its damage, what changed since the frame last drawn into
+    /// a buffer. Called once a frame, and only once the presenter has a
+    /// buffer for it, so per-frame state (the rasterizer's caches, the
+    /// damage signature) advances only for frames that are drawn: a frame
+    /// that is paced, or finds every buffer busy, leaves it as it was.
+    fn begin(&mut self, width: u32, height: u32) -> Vec<PixelRect>;
+
+    /// Draw the frame into `pixels` (`width` x `height`) inside `repaint`,
+    /// its repaint region. `false` drops the frame.
+    fn draw(&mut self, pixels: &mut [u32], width: u32, height: u32, repaint: &[PixelRect]) -> bool;
+}
 
 /// A window's shared-memory buffers, as the CPU backend draws into them:
 /// `cpu_present::CpuPresenter` on Linux, a fake in tests.
@@ -411,21 +423,21 @@ pub(crate) trait CpuSurface: Send {
         Ok(())
     }
 
-    /// Draw the next buffer with `draw` and present it with `damage`, what
-    /// changed since the previous frame presented, running `pre_commit` only
-    /// if, and just before, the frame is committed.
+    /// Draw the next buffer with `frame` and present it, running
+    /// `pre_commit` only if, and just before, the frame is committed.
     ///
-    /// `draw` gets the buffer's pixels, width and height, and its repaint
-    /// region: `damage` widened by the buffer's age, the whole buffer when
-    /// its contents are unknown. Pixels outside the region hold the
-    /// previous frame; inside it they are undefined and must all be drawn.
-    /// `draw` is not called when the region is empty, and returns `false` to
-    /// drop the frame. While [`Self::frame_pending`] holds, the frame is not
-    /// drawn at all ([`CpuPresentOutcome::Paced`]).
+    /// Once a buffer is acquired, [`FrameDraw::begin`] gives the frame's
+    /// damage, what changed since the previous frame drawn. Then
+    /// [`FrameDraw::draw`] gets the buffer's pixels, width and height, and
+    /// its repaint region: the damage widened by the buffer's age, the
+    /// whole buffer when its contents are unknown. Pixels outside the
+    /// region hold the previous frame; inside it they are undefined and
+    /// must all be drawn. `draw` is not called when the region is empty.
+    /// While [`Self::frame_pending`] holds, or no buffer is free, neither
+    /// is called ([`CpuPresentOutcome::Paced`], `RetryLater`).
     fn present_frame(
         &mut self,
-        damage: &[PixelRect],
-        draw: &mut DrawFrame<'_>,
+        frame: &mut dyn FrameDraw,
         pre_commit: &mut dyn FnMut(),
     ) -> CpuPresentOutcome;
 

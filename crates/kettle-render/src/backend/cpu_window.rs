@@ -3,7 +3,7 @@
 
 use std::time::Instant;
 
-use super::cpu::{CpuPresentOutcome, CpuSurface, HeldFrameFlush};
+use super::cpu::{CpuPresentOutcome, CpuSurface, FrameDraw, HeldFrameFlush};
 use crate::cpu_present::{
     CpuPresenter, FrameError, PixelFormat, PresentOutcome, PresenterKind, Rect,
 };
@@ -37,8 +37,7 @@ impl CpuSurface for CpuPresenter {
 
     fn present_frame(
         &mut self,
-        damage: &[PixelRect],
-        draw: &mut super::cpu::DrawFrame<'_>,
+        draw: &mut dyn FrameDraw,
         pre_commit: &mut dyn FnMut(),
     ) -> CpuPresentOutcome {
         // A frame drawn now would only be held until the compositor's frame
@@ -56,7 +55,8 @@ impl CpuSurface for CpuPresenter {
             }
         };
         let (width, height) = (frame.width(), frame.height());
-        let damage: Vec<Rect> = damage
+        let damage: Vec<Rect> = draw
+            .begin(width, height)
             .iter()
             .map(|r| Rect::new(r.x, r.y, r.w, r.h))
             .collect();
@@ -67,7 +67,7 @@ impl CpuSurface for CpuPresenter {
             .iter()
             .map(|r| PixelRect::new(r.x, r.y, r.width, r.height))
             .collect();
-        if !repaint.is_empty() && !draw(frame.pixels_mut(), width, height, &repaint) {
+        if !repaint.is_empty() && !draw.draw(frame.pixels_mut(), width, height, &repaint) {
             return CpuPresentOutcome::NotDrawn;
         }
         match frame.present_with(&damage, pre_commit) {
@@ -138,17 +138,20 @@ pub(super) fn validate_initial_cpu_frame(
     surface: &mut dyn CpuSurface,
     pixel: u32,
 ) -> anyhow::Result<()> {
-    // The first frame is the whole buffer: nothing has been presented yet.
-    let (width, height) = surface.buffer_size();
-    let whole = [PixelRect::new(0, 0, width, height)];
-    let outcome = surface.present_frame(
-        &whole,
-        &mut |pixels, _, _, _| {
-            pixels.fill(pixel);
+    /// The first frame is the whole buffer, one colour: nothing has been
+    /// presented yet.
+    struct Fill(u32);
+    impl FrameDraw for Fill {
+        fn begin(&mut self, width: u32, height: u32) -> Vec<PixelRect> {
+            vec![PixelRect::new(0, 0, width, height)]
+        }
+
+        fn draw(&mut self, pixels: &mut [u32], _: u32, _: u32, _: &[PixelRect]) -> bool {
+            pixels.fill(self.0);
             true
-        },
-        &mut || {},
-    );
+        }
+    }
+    let outcome = surface.present_frame(&mut Fill(pixel), &mut || {});
     if outcome != CpuPresentOutcome::Presented {
         anyhow::bail!("initial CPU buffer acquire/present failed ({outcome:?})");
     }
