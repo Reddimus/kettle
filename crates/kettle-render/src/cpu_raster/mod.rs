@@ -298,6 +298,7 @@ impl<'a> CpuTarget<'a> {
     /// a presenter's shared-memory buffer, so a frame is drawn where it is
     /// shown. `None` when a side is zero or past [`MAX_SIDE`], or `pixels`
     /// is not exactly `width * height` long.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn from_pixels(pixels: &'a mut [u32], width: u32, height: u32) -> Option<Self> {
         if CpuFramebuffer::len_for(width, height)? != pixels.len() {
             return None;
@@ -344,6 +345,7 @@ impl<'a> CpuTarget<'a> {
         self.viewport
     }
 
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn set_viewport(&mut self, viewport: Viewport) {
         self.viewport = viewport;
     }

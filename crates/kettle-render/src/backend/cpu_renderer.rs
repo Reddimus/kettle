@@ -1,5 +1,8 @@
 //! A CPU-backend renderer's frame: the CPU counterpart of the encoder,
 //! acquire and present tail of `Renderer::render_frame_with_status_and_pre_present`.
+//! Its window path (damage, presenting) runs only on Linux, where CPU windows
+//! exist; other platforms use the offscreen path.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use std::time::Instant;
 

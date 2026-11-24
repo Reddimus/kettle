@@ -14,6 +14,9 @@
 //! premultiplied by alpha in linear light. That is what an `Rgba8UnormSrgb`
 //! scene target holds after the same draws, so a GPU readback and a CPU frame
 //! compare directly, and it is the byte order of `wl_shm`'s ARGB8888.
+//! The windowed half (signing, presenting) runs only on Linux, where CPU
+//! windows exist; other platforms build it for the offscreen renderer and tests.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use std::ops::Range;
 use std::time::Instant;

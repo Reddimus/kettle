@@ -666,6 +666,7 @@ pub(crate) mod tests {
     /// at the same place, with a different nonce, under a line of concealed
     /// text that is right-to-left in the first and left-to-right in the
     /// second. Both cards are registered in the one `InlineCards`.
+    #[cfg(target_os = "linux")]
     pub(crate) fn twin_fixture() -> (InlineCards, [Term<EventProxy>; 2], [InlineNonce; 2]) {
         let nonces = [
             InlineNonce::new([2, 3, 4, 5, 6, 7]).unwrap(),

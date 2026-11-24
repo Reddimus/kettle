@@ -33,6 +33,8 @@
 //! different tile contents colliding would leave that tile stale until it
 //! changes again; the per-process key keeps terminal output from aiming at
 //! a collision.
+//! Only Linux has CPU windows; other platforms build this for tests.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 
 use std::sync::{Arc, OnceLock, Weak};
 
