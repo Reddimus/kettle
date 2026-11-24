@@ -3511,7 +3511,9 @@ frames compose onto a full base-sized canvas. If neither a background/edit frame
 nor that canvas can be obtained, the request leaves the stored image and frames
 unchanged; the decoded patch cannot substitute for the canvas. Before uploads,
 each image layer derives its live set from the complete drawable frame,
-including images drawn later. Root-frame edits refresh the active screen's physical,
+including images drawn later. The GPU and CPU layers share the live-set rule: a
+fully clipped placement, or an image no texture can hold, is not live, so it
+cannot keep a reservation a visible image needs. Root-frame edits refresh the active screen's physical,
 virtual, and relative placement bases through one shared core helper, including
 synchronized replay. Placement geometry, appended frames, frame selection, and
 the playback clock survive the refresh. Frame composition uses uppercase `X`/`Y`
