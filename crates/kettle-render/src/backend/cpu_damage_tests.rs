@@ -28,7 +28,7 @@ use kettle_core::EventProxy;
 
 use super::cpu::{CpuPresentOutcome, CpuRaster, CpuSurface, FrameDraw, HeldFrameFlush};
 use super::cpu_draw::SoftRaster;
-use crate::cpu_present::damage::{DamageHistory, normalize};
+use crate::cpu_present::damage::{DamageHistory, Exposures, Rect, normalize};
 use crate::cpu_raster::PixelRect;
 use crate::headless_tests::{pane, snapshot_of};
 use crate::*;
@@ -62,11 +62,32 @@ struct Buffer {
     drawn: Option<u64>,
 }
 
+/// Which presenter [`RotatingSurface`] behaves as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Model {
+    /// `wl_shm`: up to three buffers a compositor holds and releases, a frame
+    /// callback that paces frames and sometimes holds a drawn one for a later
+    /// commit, no commit for a frame with nothing new, and a compositor that
+    /// takes from each commit only what it damages.
+    Wayland,
+    /// softbuffer on X11 with MIT-SHM and no compositing manager: one
+    /// retained buffer, each present sends only its rectangles, and other
+    /// windows cover and uncover parts of the window, whose pixels the
+    /// server then drops (`Expose`).
+    X11,
+}
+
 /// What the harness reads back from the surface.
 #[derive(Default)]
 struct Shared {
-    /// The pixels of the buffer last presented, and its size.
-    presented: Option<(Vec<u32>, u32, u32)>,
+    /// The pixels of the buffer last drawn into, and its size.
+    drawn: Option<(Vec<u32>, u32, u32)>,
+    /// What the window shows: the compositor's copy (Wayland) or the X
+    /// server's (X11).
+    screen: Vec<u32>,
+    screen_size: (u32, u32),
+    /// The next this many frames are paced, whatever the callback.
+    force_paced: u32,
     /// Frames presented with each buffer age (0, 1, 2, 3+).
     ages: [usize; 4],
     /// Frames whose repaint region was not the whole buffer.
@@ -78,14 +99,23 @@ struct Shared {
     repainted: u64,
     total: u64,
     most_buffers: usize,
+    /// Attempts the compositor was not ready for.
+    paced: usize,
+    /// Frames drawn and held for a later commit.
+    deferred: usize,
+    /// Frames drawn with nothing to commit.
+    unchanged: usize,
+    /// Regions another window uncovered (X11).
+    exposed: usize,
+    /// Presents with no damage of their own that sent exposed pixels.
+    exposures_sent: usize,
 }
 
-/// Up to three shared-memory buffers as a Wayland compositor treats them:
-/// the newest committed buffer is held until the next commit, and sometimes
-/// the one before it too, so frames rotate through two or three buffers of
-/// different ages.
+/// A window surface as one of the presenters treats it ([`Model`]), with
+/// the presenter's own buffer-age history (`cpu_present::damage`).
 struct RotatingSurface {
     shared: Arc<Mutex<Shared>>,
+    model: Model,
     size: (u32, u32),
     buffers: Vec<Buffer>,
     held: Vec<usize>,
@@ -96,16 +126,34 @@ struct RotatingSurface {
     /// Off for timing runs: garbage-filling and copying out 4K frames would
     /// cost more than drawing them.
     checked: bool,
+    /// Wayland: frame callbacks come late and drawn frames are sometimes
+    /// held. Off for tests that count what each frame repaints.
+    pacing: bool,
+    /// Wayland: the last commit's frame callback has not come.
+    callback_out: bool,
+    /// Wayland: the buffer holding a frame drawn but not committed.
+    deferred: Option<usize>,
+    /// Damage drawn since the last commit (Wayland) or present (X11).
+    uncommitted: Vec<Rect>,
+    /// The next commit takes the whole buffer: the first, and after a
+    /// resize or a format change.
+    force_full: bool,
+    /// X11: what other windows uncovered since the last present.
+    exposures: Exposures,
     /// A broken presenter for the harness's negative control: the repaint
     /// region is only this frame's damage, whatever the buffer's age.
     ignores_age: bool,
+    /// A broken X11 presenter for a negative control: exposed pixels are
+    /// never sent again.
+    ignores_exposures: bool,
 }
 
 impl RotatingSurface {
-    fn new(seed: u64) -> (Self, Arc<Mutex<Shared>>) {
+    fn new(seed: u64, model: Model) -> (Self, Arc<Mutex<Shared>>) {
         let shared = Arc::new(Mutex::new(Shared::default()));
         let surface = Self {
             shared: shared.clone(),
+            model,
             size: (0, 0),
             buffers: Vec::new(),
             held: Vec::new(),
@@ -114,8 +162,22 @@ impl RotatingSurface {
             translucent: false,
             rng: Rng(seed ^ 0x5bd1_e995),
             checked: true,
+            pacing: true,
+            callback_out: false,
+            deferred: None,
+            uncommitted: Vec::new(),
+            force_full: true,
+            exposures: Exposures::default(),
             ignores_age: false,
+            ignores_exposures: false,
         };
+        (surface, shared)
+    }
+
+    /// A surface whose frames are all drawn and committed at once.
+    fn steady(seed: u64) -> (Self, Arc<Mutex<Shared>>) {
+        let (mut surface, shared) = Self::new(seed, Model::Wayland);
+        surface.pacing = false;
         (surface, shared)
     }
 
@@ -126,6 +188,9 @@ impl RotatingSurface {
         for buffer in &mut self.buffers {
             buffer.drawn = None;
         }
+        self.deferred = None;
+        self.uncommitted.clear();
+        self.force_full = true;
     }
 
     /// The compositor lets go of what it no longer shows. Like mutter it
@@ -144,6 +209,16 @@ impl RotatingSurface {
     }
 
     fn pick(&mut self) -> usize {
+        if self.model == Model::X11 {
+            if self.buffers.is_empty() {
+                self.buffers.push(Buffer {
+                    pixels: Vec::new(),
+                    size: (0, 0),
+                    drawn: None,
+                });
+            }
+            return 0;
+        }
         let (w, h) = self.size;
         let free = (0..self.buffers.len())
             .filter(|i| !self.held.contains(i))
@@ -163,6 +238,84 @@ impl RotatingSurface {
             return self.buffers.len() - 1;
         }
         self.held.remove(0)
+    }
+
+    /// Whether the compositor is not ready for a frame. Its callback for the
+    /// last commit comes, at random, by the time it is asked.
+    fn paced(&mut self) -> bool {
+        let mut shared = self.shared.lock().unwrap();
+        if shared.force_paced > 0 {
+            shared.force_paced -= 1;
+            return true;
+        }
+        drop(shared);
+        if self.callback_out && (!self.pacing || self.rng.chance(2)) {
+            self.callback_out = false;
+        }
+        self.callback_out
+    }
+
+    /// Another window covers part of this one and goes: the X server drops
+    /// those pixels and asks for them again.
+    fn expose_some(&mut self) {
+        let (w, h) = self.size;
+        let mut shared = self.shared.lock().unwrap();
+        if !self.checked || shared.screen_size != (w, h) || w == 0 || h == 0 || !self.rng.chance(3)
+        {
+            return;
+        }
+        let x = self.rng.below(u64::from(w)) as u32;
+        let y = self.rng.below(u64::from(h)) as u32;
+        let rw = 1 + self.rng.below(u64::from((w - x).min(128))) as u32;
+        let rh = 1 + self.rng.below(u64::from((h - y).min(64))) as u32;
+        for row in y..y + rh {
+            let at = (row * w) as usize;
+            for p in &mut shared.screen[at + x as usize..at + (x + rw) as usize] {
+                *p = self.rng.next() as u32;
+            }
+        }
+        shared.exposed += 1;
+        drop(shared);
+        self.exposures.add(Rect::new(x, y, rw, rh));
+    }
+
+    /// Show `rects` of buffer `index` on the screen.
+    fn show(&mut self, index: usize, rects: &[Rect]) {
+        if !self.checked {
+            return;
+        }
+        let (w, h) = self.size;
+        let buffer = &self.buffers[index];
+        let mut shared = self.shared.lock().unwrap();
+        if shared.screen_size != (w, h) {
+            shared.screen_size = (w, h);
+            shared.screen = vec![0xbad0_bad0; w as usize * h as usize];
+        }
+        for r in rects {
+            for y in r.y..r.y + r.height {
+                let row = (y * w) as usize;
+                let span = row + r.x as usize..row + (r.x + r.width) as usize;
+                shared.screen[span.clone()].copy_from_slice(&buffer.pixels[span]);
+            }
+        }
+    }
+
+    /// Wayland: commit buffer `index` with every change not yet on screen.
+    fn commit(&mut self, index: usize, pre_commit: &mut dyn FnMut()) {
+        let (w, h) = self.size;
+        let damage = if self.force_full {
+            vec![Rect::full(w, h)]
+        } else {
+            std::mem::take(&mut self.uncommitted)
+        };
+        pre_commit();
+        self.show(index, &damage);
+        self.uncommitted.clear();
+        self.force_full = false;
+        self.deferred = None;
+        self.callback_out = true;
+        self.held.retain(|&i| i != index);
+        self.held.push(index);
     }
 }
 
@@ -193,7 +346,15 @@ impl CpuSurface for RotatingSurface {
         draw: &mut dyn FrameDraw,
         pre_commit: &mut dyn FnMut(),
     ) -> CpuPresentOutcome {
-        self.release();
+        if self.model == Model::Wayland && self.paced() {
+            self.shared.lock().unwrap().paced += 1;
+            return CpuPresentOutcome::Paced;
+        }
+        if self.model == Model::X11 {
+            self.expose_some();
+        } else {
+            self.release();
+        }
         let (w, h) = self.size;
         let index = self.pick();
         let frames = self.frames;
@@ -207,10 +368,10 @@ impl CpuSurface for RotatingSurface {
             Some(drawn) => u8::try_from(frames - drawn + 1).unwrap_or(0),
             None => 0,
         };
-        let damage: Vec<crate::cpu_present::Rect> = draw
+        let damage: Vec<Rect> = draw
             .begin(w, h)
             .iter()
-            .map(|r| crate::cpu_present::Rect::new(r.x, r.y, r.w, r.h))
+            .map(|r| Rect::new(r.x, r.y, r.w, r.h))
             .collect();
         let current = normalize(&damage, w, h);
         let age = if self.ignores_age && age > 1 { 1 } else { age };
@@ -221,6 +382,7 @@ impl CpuSurface for RotatingSurface {
             .map(|r| PixelRect::new(r.x, r.y, r.width, r.height))
             .collect();
         // What the renderer must repaint is undefined: fill it with garbage.
+        let buffer = &mut self.buffers[index];
         for r in repaint.iter().filter(|_| self.checked) {
             for y in r.y..r.y + r.h {
                 let row = (y * w) as usize;
@@ -237,45 +399,96 @@ impl CpuSurface for RotatingSurface {
             buffer.drawn = None;
             return CpuPresentOutcome::NotDrawn;
         }
-        self.history.push(current);
+        self.history.push(current.clone());
         self.frames += 1;
         buffer.drawn = Some(self.frames);
-        pre_commit();
-        let mut shared = self.shared.lock().unwrap();
-        if self.checked {
-            shared.presented = Some((buffer.pixels.clone(), w, h));
+        {
+            let mut shared = self.shared.lock().unwrap();
+            if self.checked {
+                shared.drawn = Some((buffer.pixels.clone(), w, h));
+            }
+            shared.ages[usize::from(age.min(3))] += 1;
+            let whole = repaint.len() == 1 && repaint[0] == PixelRect::new(0, 0, w, h);
+            shared.partial += usize::from(!whole);
+            shared.empty += usize::from(repaint.is_empty());
+            shared.repainted += repainted;
+            shared.total += u64::from(w) * u64::from(h);
+            shared.most_buffers = shared.most_buffers.max(self.buffers.len());
         }
-        shared.ages[usize::from(age.min(3))] += 1;
-        let whole = repaint.len() == 1 && repaint[0] == PixelRect::new(0, 0, w, h);
-        shared.partial += usize::from(!whole);
-        shared.empty += usize::from(repaint.is_empty());
-        shared.repainted += repainted;
-        shared.total += u64::from(w) * u64::from(h);
-        shared.most_buffers = shared.most_buffers.max(self.buffers.len());
-        drop(shared);
-        self.held.retain(|&i| i != index);
-        self.held.push(index);
-        CpuPresentOutcome::Presented
+        match self.model {
+            Model::Wayland => {
+                // This buffer now holds every change not on screen; a frame
+                // held in another is superseded.
+                self.uncommitted.extend(current);
+                self.uncommitted = normalize(&self.uncommitted, w, h);
+                self.deferred = None;
+                if self.uncommitted.is_empty() && !self.force_full {
+                    self.shared.lock().unwrap().unchanged += 1;
+                    return CpuPresentOutcome::Unchanged;
+                }
+                if self.pacing && self.rng.chance(8) {
+                    // The compositor's callback is out after all: the frame
+                    // waits for it.
+                    self.deferred = Some(index);
+                    self.callback_out = true;
+                    self.shared.lock().unwrap().deferred += 1;
+                    return CpuPresentOutcome::Deferred;
+                }
+                self.commit(index, pre_commit);
+                CpuPresentOutcome::Presented
+            }
+            Model::X11 => {
+                let upload = if std::mem::take(&mut self.force_full) {
+                    self.exposures.clear();
+                    vec![Rect::full(w, h)]
+                } else if self.ignores_exposures {
+                    self.exposures.clear();
+                    current.clone()
+                } else {
+                    let exposed = !self.exposures.is_empty();
+                    let upload = self.exposures.upload(&current, w, h);
+                    if exposed && current.is_empty() {
+                        self.shared.lock().unwrap().exposures_sent += 1;
+                    }
+                    upload
+                };
+                pre_commit();
+                self.show(index, &upload);
+                if upload.is_empty() {
+                    self.shared.lock().unwrap().unchanged += 1;
+                    CpuPresentOutcome::Unchanged
+                } else {
+                    CpuPresentOutcome::Presented
+                }
+            }
+        }
     }
 
-    fn flush(&mut self, _pre_commit: &mut dyn FnMut()) -> HeldFrameFlush {
-        HeldFrameFlush::Nothing
+    fn flush(&mut self, pre_commit: &mut dyn FnMut()) -> HeldFrameFlush {
+        let Some(index) = self.deferred else {
+            return HeldFrameFlush::Nothing;
+        };
+        if self.paced() {
+            return HeldFrameFlush::StillHeld;
+        }
+        self.commit(index, pre_commit);
+        HeldFrameFlush::Presented
     }
 
     fn has_deferred(&self) -> bool {
-        false
+        self.deferred.is_some()
     }
 
     fn pending_deadline(&self) -> Option<Instant> {
-        None
+        self.deferred.map(|_| Instant::now())
     }
 
     fn frame_pending(&mut self) -> bool {
-        false
+        self.model == Model::Wayland && self.callback_out
     }
 
     fn frame_deadline(&self) -> Option<Instant> {
-        None
+        self.callback_out.then(Instant::now)
     }
 
     fn release_idle_buffers(&mut self) -> usize {
@@ -336,11 +549,21 @@ struct World {
     settings: Option<SettingsOverlay>,
     toast: bool,
     search: bool,
-    /// A placed image and the cells it spans.
-    image: Option<(kettle_core::ImageData, usize, usize)>,
+    /// A placed image, the cells it spans, and the absolute line it was
+    /// placed on.
+    image: Option<(kettle_core::ImageData, usize, usize, u64)>,
     /// The image placements made so far: they cycle through a small
     /// image, a large one, and none.
     images_placed: u64,
+    /// A second large translucent image, drawn after the first and
+    /// overlapping it: the rasterizer caches one image at a time.
+    image2: Option<(kettle_core::ImageData, u64)>,
+    /// Two tabs that look alike, each with a pending card at the same place
+    /// and concealed text (right-to-left in one, left-to-right in the
+    /// other): `Some(t)` shows tab `t` in the first pane, tab bar hidden.
+    twins: Option<usize>,
+    twin_terms: [alacritty_terminal::Term<EventProxy>; 2],
+    twin_cards: crate::inline_cards::InlineCards,
     tabs: Option<usize>,
     scale: f32,
     rng: Rng,
@@ -348,6 +571,7 @@ struct World {
 
 impl World {
     fn new(seed: u64) -> Self {
+        let (twin_cards, twin_terms, _) = crate::inline_cards::tests::twin_fixture();
         let mut world = Self {
             cfg: kettle_config::Config {
                 background_opacity: 1.0,
@@ -365,6 +589,10 @@ impl World {
             search: false,
             image: None,
             images_placed: 0,
+            image2: None,
+            twins: None,
+            twin_terms,
+            twin_cards,
             tabs: None,
             scale: 1.0,
             rng: Rng(seed.wrapping_mul(0x2545_f491_4f6c_dd1d) | 1),
@@ -376,10 +604,19 @@ impl World {
                 format!("\x1b[3{}mline {i} \x1b[1mbold\x1b[0m text\r\n", i % 8).as_bytes(),
             );
         }
+        // A right-to-left row, drawn in bidi order while `bidi` is on.
+        text.extend_from_slice("\u{05e9}\u{05dc}\u{05d5}\u{05dd} (1)\r\n".as_bytes());
         text.extend_from_slice(b"$ ");
         world.feed(0, &text);
         world.feed(1, b"other pane\r\n$ ");
         world
+    }
+
+    /// The absolute line `row` rows below the first pane's viewport top.
+    fn line_at(&self, row: u64) -> u64 {
+        let mut snap = PaneSnapshot::default();
+        snap.capture(&self.terms[0]);
+        crate::geometry::snapshot_viewport_top(&snap) + row
     }
 
     fn feed(&mut self, pane: usize, bytes: &[u8]) {
@@ -527,19 +764,25 @@ impl World {
                             24 + self.rng.below(24) as u32,
                             16 + self.rng.below(16) as u32,
                         );
-                        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
-                        for y in 0..h {
-                            for x in 0..w {
-                                let a = match (large, (x + y) % 5) {
-                                    (true, _) => 190,
-                                    (false, 0) => 120,
-                                    (false, _) => 255,
-                                };
-                                rgba.extend_from_slice(&[(x * 9) as u8, (y * 13) as u8, 200, a]);
-                            }
-                        }
                         let cells = if large { (60, 20) } else { (4, 2) };
-                        kettle_core::ImageData::new(w, h, rgba).map(|img| (img, cells.0, cells.1))
+                        let img = if large {
+                            translucent_image(w, h, 0)
+                        } else {
+                            let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+                            for y in 0..h {
+                                for x in 0..w {
+                                    let a = if (x + y) % 5 == 0 { 120 } else { 255 };
+                                    rgba.extend_from_slice(&[
+                                        (x * 9) as u8,
+                                        (y * 13) as u8,
+                                        200,
+                                        a,
+                                    ]);
+                                }
+                            }
+                            kettle_core::ImageData::new(w, h, rgba).expect("a small image")
+                        };
+                        Some((img, cells.0, cells.1, self.line_at(1)))
                     }
                 };
                 "image placement"
@@ -576,6 +819,31 @@ impl World {
                     .as_bytes(),
                 );
                 "small update"
+            }
+            84..=85 => {
+                self.image2 = match self.image2 {
+                    Some(_) => None,
+                    None => Some((translucent_image(40, 28, 7), self.line_at(3))),
+                };
+                "second image"
+            }
+            86 => {
+                self.twins = Some(self.twins.map_or(0, |t| 1 - t));
+                "twin switch"
+            }
+            87 => {
+                self.twins = None;
+                "twins off"
+            }
+            88 => {
+                self.cfg.bidi = !self.cfg.bidi;
+                "bidi"
+            }
+            90 => {
+                // Large enough that a large image is cached.
+                self.size = (640, 420);
+                renderer.resize(self.size.0, self.size.1);
+                "resize"
             }
             _ => "idle",
         }
@@ -623,34 +891,56 @@ impl World {
                 });
             }
         }
+        let place =
+            |img: &kettle_core::ImageData, line: u64, col: usize, cells: (usize, usize), id| {
+                kettle_core::Placement {
+                    abs_line: line,
+                    col,
+                    cell_cols: cells.0,
+                    cell_rows: cells.1,
+                    x_offset_cells: 0.0,
+                    y_offset_cells: 0.0,
+                    display_cols: cells.0 as f32,
+                    display_rows: cells.1 as f32,
+                    img: img.clone(),
+                    source_rect: None,
+                    source_crop: None,
+                    id: Some(id),
+                    placement_id: 0,
+                    kitty_params: None,
+                    z: 0,
+                }
+            };
         let images: Vec<kettle_core::Placement> = self
             .image
             .iter()
-            .map(|(img, cols, rows)| kettle_core::Placement {
-                abs_line: snaps[0].history_origin + 1,
-                col: 2,
-                cell_cols: *cols,
-                cell_rows: *rows,
-                x_offset_cells: 0.0,
-                y_offset_cells: 0.0,
-                display_cols: *cols as f32,
-                display_rows: *rows as f32,
-                img: img.clone(),
-                source_rect: None,
-                source_crop: None,
-                id: Some(7),
-                placement_id: 0,
-                kitty_params: None,
-                z: 0,
-            })
+            .map(|(img, cols, rows, line)| place(img, *line, 2, (*cols, *rows), 7))
+            .chain(
+                self.image2
+                    .iter()
+                    .map(|(img, line)| place(img, *line, 5, (60, 20), 8)),
+            )
             .collect();
+        let twin = self.twins.map(|t| {
+            let mut snap = PaneSnapshot::default();
+            snap.capture_with_card_marks(&self.twin_terms[t], true);
+            (t, snap)
+        });
         let mut panes = Vec::new();
         let split_w = if self.split {
             (w / 2.0 - 2.0).floor()
         } else {
             w
         };
-        let mut first = pane(&snaps[0], self.size.0, self.size.1);
+        let mut first = match &twin {
+            Some((t, snap)) => {
+                let mut view = pane(snap, self.size.0, self.size.1);
+                view.id = 100 + *t as u64;
+                view.inline_cards = Some(&self.twin_cards);
+                view
+            }
+            None => pane(&snaps[0], self.size.0, self.size.1),
+        };
         first.rect = (0.0, top, split_w, h - top);
         first.terminal = first.rect;
         first.images = &images;
@@ -709,18 +999,38 @@ impl World {
     }
 }
 
+/// A `w` x `h` image translucent enough that the rasterizer caches a large
+/// draw of it from its second frame (`cpu_draw.rs`), tinted by `tint`.
+fn translucent_image(w: u32, h: u32, tint: u8) -> kettle_core::ImageData {
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            rgba.extend_from_slice(&[
+                (x * 9) as u8 ^ tint,
+                (y * 13) as u8,
+                200u8.wrapping_sub(tint.wrapping_mul(9)),
+                190,
+            ]);
+        }
+    }
+    kettle_core::ImageData::new(w, h, rgba).expect("a small image")
+}
+
 /// Every kind of change, in an order that also opens, scrolls and closes
 /// Settings, switches and hides tabs, and turns each toggle on and off:
 /// the scripted start of every session, so every session covers them all.
-const SCRIPT: [u64; 40] = [
+const SCRIPT: [u64; 54] = [
     0, 30, 25, 20, 40, 41, 41, 46, 47, 47, 51, 54, 56, 58, 59, 59, 61, 61, 62, 64, 66, 0, 67, 69,
     // One pane again, a small image, then a large one that small changes
-    // leave in place, so its second frame draws it from the cache.
-    64, 71, 71, 30, 30, 74, 0, 75, 77, 78, 84, 67, 69, 74, 56, 58,
+    // leave in place, so its second frame draws it from the cache; then a
+    // second large one over it for a few frames, with a blink between.
+    64, 90, 71, 71, 30, 30, 84, 89, 30, 89, 84,
+    // Two tabs that look alike, switched, a blink, bidi off and on again.
+    86, 89, 86, 30, 88, 89, 88, 87, 74, 0, 75, 77, 78, 89, 67, 69, 74, 56, 58,
 ];
 
 /// Every change's name, which the harness must all see.
-const CHANGES: [&str; 23] = [
+const CHANGES: [&str; 27] = [
     "type",
     "enter",
     "cursor move",
@@ -742,6 +1052,10 @@ const CHANGES: [&str; 23] = [
     "font size",
     "scale",
     "small update",
+    "second image",
+    "twin switch",
+    "twins off",
+    "bidi",
     "idle",
     "first frame",
 ];
@@ -770,60 +1084,149 @@ fn env_count(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
-/// Run one seeded session of `steps` changes, checking every frame.
-fn run_session(seed: u64, steps: u64) -> (Shared, Vec<&'static str>) {
-    session(seed, steps, false)
+/// A frame's painted state, comparable: its cards, and each pane's bidi
+/// rows.
+type Painted = (Vec<PaintedCard>, Vec<BidiDigest>);
+type BidiDigest = (
+    (u32, u32, u32, u32),
+    Vec<Option<kettle_core::bidi::RowBidi>>,
+);
+
+fn bidi_digest(painted: &[crate::PaintedBidi]) -> Vec<BidiDigest> {
+    painted
+        .iter()
+        .map(|p| {
+            let (x, y, w, h) = p.terminal;
+            (
+                (x.to_bits(), y.to_bits(), w.to_bits(), h.to_bits()),
+                (0..64).map(|row| p.row(row).cloned()).collect(),
+            )
+        })
+        .collect()
 }
 
-fn session(seed: u64, steps: u64, ignores_age: bool) -> (Shared, Vec<&'static str>) {
+fn drawn_paint(renderer: &Renderer) -> Painted {
+    (
+        renderer.drawn_cards().to_vec(),
+        bidi_digest(&renderer.drawn_bidi),
+    )
+}
+
+fn painted_paint(renderer: &Renderer) -> Painted {
+    (
+        renderer.painted_cards().to_vec(),
+        bidi_digest(&renderer.painted_bidi),
+    )
+}
+
+/// What a session's broken presenter gets wrong, for the negative controls.
+#[derive(Clone, Copy, Default)]
+struct Broken {
+    ignores_age: bool,
+    ignores_exposures: bool,
+}
+
+/// Run one seeded session of `steps` changes on `model`, checking every frame.
+fn run_session(seed: u64, steps: u64, model: Model) -> (Shared, Vec<&'static str>) {
+    let script: Vec<u64> = SCRIPT.to_vec();
+    session(seed, steps, model, &script, Broken::default())
+}
+
+/// A session: the first frame, `script`'s changes, then random ones up to
+/// `steps`. After every frame drawn the buffer must equal a full repaint of
+/// it, and whenever no frame is held, the screen must show it, with the
+/// cards and bidi rows it painted on screen.
+fn session(
+    seed: u64,
+    steps: u64,
+    model: Model,
+    script: &[u64],
+    broken: Broken,
+) -> (Shared, Vec<&'static str>) {
     let mut world = World::new(seed);
-    let (mut surface, shared) = RotatingSurface::new(seed);
-    surface.ignores_age = ignores_age;
+    let (mut surface, shared) = RotatingSurface::new(seed, model);
+    surface.ignores_age = broken.ignores_age;
+    surface.ignores_exposures = broken.ignores_exposures;
     let mut renderer =
         Renderer::cpu_window_for_tests(&world.cfg, world.size.0, world.size.1, Box::new(surface))
             .expect("CPU window");
-    // The reference rasterizer draws every frame whole.
+    // The reference rasterizer draws every frame drawn, whole.
     let mut reference: Box<dyn CpuRaster> = Box::new(SoftRaster::new());
     let mut log: Vec<&'static str> = Vec::new();
+    let mut harness = Rng(seed ^ 0x2f0d_1c4b);
     for step in 0..=steps {
         let change = match step {
             0 => "first frame",
-            1..=40 => world.apply(&mut renderer, SCRIPT[step as usize - 1]),
+            n if n as usize <= script.len() => world.apply(&mut renderer, script[n as usize - 1]),
             _ => world.change(&mut renderer),
         };
         log.push(change);
-        let outcome = world.render(&mut renderer);
-        assert!(
-            matches!(outcome, FrameOutcome::Presented),
-            "seed {seed} step {step} ({change}): {outcome:?}"
-        );
+        let context = |log: &[&str]| {
+            let recent = &log[log.len().saturating_sub(8)..];
+            format!("seed {seed} {model:?} step {step} ({change}), recent changes {recent:?}")
+        };
+        // Draw the frame; an attempt the compositor is not ready for is drawn
+        // again once it is, and the loop flushes a held frame meanwhile.
+        let mut attempts = 0;
+        loop {
+            match world.render(&mut renderer) {
+                FrameOutcome::Presented => break,
+                FrameOutcome::Paced => {
+                    attempts += 1;
+                    assert!(attempts < 64, "{}: paced forever", context(&log));
+                    if harness.chance(2) {
+                        renderer.flush_held_frame(|| {});
+                    }
+                }
+                outcome => panic!("{}: {outcome:?}", context(&log)),
+            }
+        }
         let want = renderer
             .cpu_full_repaint_for_tests(reference.as_mut(), &world.cfg, world.cursor_on)
             .expect("a full repaint");
+        let painted = drawn_paint(&renderer);
         let planned = renderer
             .cpu_backend_for_tests()
             .map_or(0, |cpu| cpu.damage.last.planned);
-        shared.lock().unwrap().cached += usize::from(planned > 0);
-        let (got, w, h) = shared
-            .lock()
-            .unwrap()
-            .presented
-            .take()
-            .expect("a frame was presented");
-        assert_eq!(
-            (w, h),
-            (want.1, want.2),
-            "seed {seed} step {step} ({change}): buffer size"
-        );
+        let mut s = shared.lock().unwrap();
+        s.cached += usize::from(planned > 0);
+        let (got, w, h) = s.drawn.take().expect("a frame was drawn");
+        drop(s);
+        assert_eq!((w, h), (want.1, want.2), "{}: buffer size", context(&log));
         if got != want.0 {
-            let recent = &log[log.len().saturating_sub(8)..];
             panic!(
-                "seed {seed} step {step} ({change}): the damage-tracked buffer differs from a \
-                 full repaint: {}; damage {:?}; recent changes {recent:?}",
+                "{}: the damage-tracked buffer differs from a full repaint: {}; damage {:?}",
+                context(&log),
                 describe_difference(&got, &want.0, w),
                 renderer.cpu_backend_for_tests().map(|cpu| &cpu.damage.last),
             );
         }
+        if renderer.has_held_frame() && harness.chance(2) {
+            renderer.flush_held_frame(|| {});
+        }
+        if renderer.has_held_frame() {
+            // The screen shows an older frame until the held one goes out.
+            continue;
+        }
+        let s = shared.lock().unwrap();
+        assert_eq!(s.screen_size, (w, h), "{}: screen size", context(&log));
+        if s.screen != want.0 {
+            panic!(
+                "{}: the screen differs from a full repaint: {}; damage {:?}",
+                context(&log),
+                describe_difference(&s.screen, &want.0, w),
+                renderer.cpu_backend_for_tests().map(|cpu| &cpu.damage.last),
+            );
+        }
+        drop(s);
+        assert!(
+            painted_paint(&renderer) == painted,
+            "{}: what is on screen is not what the frame on screen painted: cards {:?}, \
+             drawn {:?}",
+            context(&log),
+            renderer.painted_cards(),
+            painted.0,
+        );
     }
     let stats = std::mem::take(&mut *shared.lock().unwrap());
     (stats, log)
@@ -831,13 +1234,20 @@ fn session(seed: u64, steps: u64, ignores_age: bool) -> (Shared, Vec<&'static st
 
 #[test]
 fn damage_tracked_frames_equal_full_repaints_through_random_sessions() {
-    let seeds = env_count("KETTLE_DAMAGE_SEEDS", 3);
-    let steps = env_count("KETTLE_DAMAGE_STEPS", 70).max(40);
-    let mut total = Shared::default();
+    let seeds = env_count("KETTLE_DAMAGE_SEEDS", 4);
+    let steps = env_count("KETTLE_DAMAGE_STEPS", 80).max(SCRIPT.len() as u64);
+    let mut totals = [Shared::default(), Shared::default()];
     let mut seen = std::collections::BTreeSet::new();
     for seed in 1..=seeds {
-        let (s, log) = run_session(seed * 0x9e37_79b9, steps);
+        // Odd seeds present as on Wayland, even ones as on X11.
+        let model = if seed % 2 == 1 {
+            Model::Wayland
+        } else {
+            Model::X11
+        };
+        let (s, log) = run_session(seed * 0x9e37_79b9, steps, model);
         seen.extend(log);
+        let total = &mut totals[usize::from(model == Model::X11)];
         for (t, a) in total.ages.iter_mut().zip(s.ages) {
             *t += a;
         }
@@ -847,38 +1257,65 @@ fn damage_tracked_frames_equal_full_repaints_through_random_sessions() {
         total.repainted += s.repainted;
         total.total += s.total;
         total.most_buffers = total.most_buffers.max(s.most_buffers);
+        total.paced += s.paced;
+        total.deferred += s.deferred;
+        total.unchanged += s.unchanged;
+        total.exposed += s.exposed;
+        total.exposures_sent += s.exposures_sent;
     }
-    let frames: usize = total.ages.iter().sum();
-    eprintln!(
-        "damage harness: {seeds} seeds x {steps} steps, {frames} frames; ages 0/1/2/3+ {:?}; \
-         {} partial, {} empty, {} with a cached image; repainted {:.1}% of the pixels presented; \
-         up to {} buffers",
-        total.ages,
-        total.partial,
-        total.empty,
-        total.cached,
-        100.0 * total.repainted as f64 / total.total.max(1) as f64,
-        total.most_buffers,
-    );
-    // The harness must exercise what it claims to: every change, buffers of
-    // every age, and frames that repaint only part of the buffer.
+    for (model, total) in [Model::Wayland, Model::X11].iter().zip(&totals) {
+        let frames: usize = total.ages.iter().sum();
+        eprintln!(
+            "damage harness ({model:?}): {steps} steps a seed, {frames} frames drawn; ages \
+             0/1/2/3+ {:?}; {} partial, {} empty, {} with a cached image, {} unchanged; {} paced \
+             attempts, {} held; {} exposures, {} sent by frames with no damage; repainted \
+             {:.1}% of the pixels drawn; up to {} buffers",
+            total.ages,
+            total.partial,
+            total.empty,
+            total.cached,
+            total.unchanged,
+            total.paced,
+            total.deferred,
+            total.exposed,
+            total.exposures_sent,
+            100.0 * total.repainted as f64 / total.total.max(1) as f64,
+            total.most_buffers,
+        );
+        // The harness must exercise what it claims to: every change, buffers
+        // of every age, frames that repaint only part of the buffer, frames
+        // with nothing to commit, and for each presenter what it alone does.
+        assert!(
+            total.partial * 4 > frames,
+            "{model:?}: too few partial frames: {}",
+            total.partial
+        );
+        assert!(
+            total.cached > 0,
+            "{model:?}: no frame drew an image from the cache"
+        );
+        assert!(total.unchanged > 0, "{model:?}: no frame was unchanged");
+        match model {
+            Model::Wayland => {
+                assert!(total.most_buffers >= 2, "frames rotated through one buffer");
+                assert!(
+                    total.ages[1] > 0 && total.ages[2] > 0,
+                    "ages {:?}",
+                    total.ages
+                );
+                assert!(total.paced > 0, "no attempt was paced");
+                assert!(total.deferred > 0, "no frame was held");
+            }
+            Model::X11 => {
+                assert!(
+                    total.exposures_sent > 0,
+                    "no frame without damage sent exposed pixels"
+                );
+            }
+        }
+    }
     let missing: Vec<_> = CHANGES.iter().filter(|c| !seen.contains(*c)).collect();
     assert!(missing.is_empty(), "changes never made: {missing:?}");
-    assert!(total.most_buffers >= 2, "frames rotated through one buffer");
-    assert!(
-        total.ages[1] > 0 && total.ages[2] > 0,
-        "ages {:?}",
-        total.ages
-    );
-    assert!(
-        total.partial * 4 > frames,
-        "too few partial frames: {}",
-        total.partial
-    );
-    assert!(
-        total.cached > 0,
-        "no frame drew an image from the rasterizer's cache"
-    );
 }
 
 /// The harness catches a presenter that hands back an old buffer without
@@ -886,7 +1323,161 @@ fn damage_tracked_frames_equal_full_repaints_through_random_sessions() {
 #[test]
 #[should_panic(expected = "differs from a full repaint")]
 fn the_harness_fails_a_presenter_that_ignores_buffer_age() {
-    session(5, 60, true);
+    let broken = Broken {
+        ignores_age: true,
+        ..Broken::default()
+    };
+    session(5, 60, Model::Wayland, &SCRIPT, broken);
+}
+
+/// The harness catches an X11 presenter that sends only each frame's
+/// damage, so what another window uncovered stays lost.
+#[test]
+#[should_panic(expected = "the screen differs from a full repaint")]
+fn the_harness_fails_an_x11_presenter_that_ignores_exposures() {
+    let broken = Broken {
+        ignores_exposures: true,
+        ..Broken::default()
+    };
+    session(6, 60, Model::X11, &SCRIPT, broken);
+}
+
+/// A large translucent image, then a second one drawn after it, both drawn
+/// from the cache on their second frame if they could be: the second must
+/// never take the cache from the first while a frame draws the first from
+/// it, or the tiles the frame repaints (the second image, a blink) draw the
+/// first directly next to tiles that keep its cached pixels.
+#[test]
+fn a_second_image_never_takes_the_cache_from_the_first_mid_frame() {
+    for model in [Model::Wayland, Model::X11] {
+        // Two placements: small, then large; idle; the second image; idle;
+        // blinks; the second image off; blinks.
+        let script = [90, 71, 71, 89, 89, 84, 89, 89, 30, 30, 89, 84, 30, 30, 89];
+        let (stats, _) = session(11, script.len() as u64, model, &script, Broken::default());
+        assert!(
+            stats.cached >= 6,
+            "{model:?}: {} frames drew from the cache",
+            stats.cached
+        );
+    }
+}
+
+/// An attempt the compositor is not ready for draws nothing, so it must
+/// leave the rasterizer's caches as they were: with one between every two
+/// frames drawn, a still image must still be cached from its second frame.
+#[test]
+fn a_paced_attempt_leaves_the_image_cache_alone() {
+    let cfg = kettle_config::Config {
+        background_opacity: 1.0,
+        ..crate::gpu_tests::gpu_test_config()
+    };
+    let (surface, shared) = RotatingSurface::steady(17);
+    let mut renderer =
+        Renderer::cpu_window_for_tests(&cfg, 560, 380, Box::new(surface)).expect("CPU window");
+    let snap = snapshot_of(64, 22, b"$ ");
+    let image = translucent_image(40, 28, 0);
+    let placement = kettle_core::Placement {
+        abs_line: snap.history_origin + 1,
+        col: 2,
+        cell_cols: 60,
+        cell_rows: 20,
+        x_offset_cells: 0.0,
+        y_offset_cells: 0.0,
+        display_cols: 60.0,
+        display_rows: 20.0,
+        img: image,
+        source_rect: None,
+        source_crop: None,
+        id: Some(7),
+        placement_id: 0,
+        kitty_params: None,
+        z: 0,
+    };
+    let images = [placement];
+    let mut cached = Vec::new();
+    for frame in 0..6 {
+        for attempt in 0..2 {
+            // Every frame after the first meets the compositor busy once.
+            shared.lock().unwrap().force_paced = u32::from(frame > 0 && attempt == 0);
+            let mut view = pane(&snap, 560, 380);
+            view.images = &images;
+            let outcome = renderer
+                .render_frame_with_status_and_pre_present(
+                    &[view],
+                    &TabBar::hidden(),
+                    &cfg,
+                    &Overlay {
+                        window_focused: true,
+                        cursor_visible: frame % 2 == 0,
+                        ..Overlay::default()
+                    },
+                    &StatusBar::hidden(),
+                    || {},
+                )
+                .expect("frame");
+            if outcome == FrameOutcome::Presented {
+                break;
+            }
+            assert_eq!(outcome, FrameOutcome::Paced, "frame {frame}");
+        }
+        let cpu = renderer.cpu_backend_for_tests().expect("CPU");
+        cached.push(cpu.damage.last.planned > 0);
+    }
+    assert_eq!(
+        shared.lock().unwrap().paced,
+        5,
+        "every frame after the first met one"
+    );
+    assert_eq!(
+        cached,
+        [false, true, true, true, true, true],
+        "the image is drawn from the cache from its second frame on"
+    );
+}
+
+/// Two tabs that look alike, each with a pending card at the same place,
+/// with the tab bar hidden: switching draws nothing new, but the cards on
+/// screen (which a click or assistive technology reaches) and the bidi rows
+/// (which map the pointer to cells) are the new tab's.
+#[test]
+fn switching_between_tabs_that_look_alike_puts_the_new_tab_on_screen() {
+    for model in [Model::Wayland, Model::X11] {
+        let mut world = World::new(3);
+        world.cfg.bidi = true;
+        let (mut surface, _shared) = RotatingSurface::new(3, model);
+        surface.pacing = false;
+        let mut renderer = Renderer::cpu_window_for_tests(
+            &world.cfg,
+            world.size.0,
+            world.size.1,
+            Box::new(surface),
+        )
+        .expect("CPU window");
+        let (_, _, nonces) = crate::inline_cards::tests::twin_fixture();
+        for (step, pick) in [86u64, 89, 86, 86, 86].into_iter().enumerate() {
+            world.apply(&mut renderer, pick);
+            assert_eq!(world.render(&mut renderer), FrameOutcome::Presented);
+            let unchanged = renderer
+                .cpu_backend_for_tests()
+                .is_some_and(|cpu| cpu.damage.last.damage.is_empty());
+            let t = world.twins.expect("a twin shown");
+            if step >= 2 {
+                assert!(unchanged, "{model:?} step {step}: the twins look alike");
+            }
+            let cards = renderer.painted_cards();
+            assert_eq!(cards.len(), 1, "{model:?} step {step}");
+            assert_eq!(
+                (cards[0].pane, cards[0].nonce),
+                (100 + t as u64, nonces[t]),
+                "{model:?} step {step}: the card on screen is the shown tab's"
+            );
+            assert!(painted_paint(&renderer) == drawn_paint(&renderer));
+            let rtl = renderer
+                .painted_row_bidi((0.0, 0.0, world.size.0 as f32, world.size.1 as f32), 0)
+                .is_some();
+            assert_eq!(rtl, t == 0, "{model:?} step {step}: tab {t}'s first row");
+        }
+    }
 }
 
 /// One typed character and one blink at `size`: the frame repaints only
@@ -896,7 +1487,7 @@ fn small_changes_repaint_little(size: (u32, u32), scale: f32) {
         background_opacity: 1.0,
         ..crate::gpu_tests::gpu_test_config()
     };
-    let (surface, shared) = RotatingSurface::new(7);
+    let (surface, shared) = RotatingSurface::steady(7);
     let mut renderer = Renderer::cpu_window_for_tests(&cfg, size.0, size.1, Box::new(surface))
         .expect("CPU window");
     renderer.set_scale(scale);
@@ -967,7 +1558,7 @@ fn the_full_repaint_switch_repaints_every_frame_whole() {
         background_opacity: 1.0,
         ..crate::gpu_tests::gpu_test_config()
     };
-    let (surface, shared) = RotatingSurface::new(3);
+    let (surface, shared) = RotatingSurface::steady(3);
     let mut renderer =
         Renderer::cpu_window_for_tests(&cfg, 200, 80, Box::new(surface)).expect("CPU window");
     renderer.set_cpu_full_repaint_for_tests(true);
@@ -1013,7 +1604,7 @@ fn damage_frame_cost() {
     };
     for (w, h, scale) in [(1600u32, 1000u32, 1.0f32), (3840, 2160, 2.0)] {
         for full in [true, false] {
-            let (mut surface, shared) = RotatingSurface::new(11);
+            let (mut surface, shared) = RotatingSurface::steady(11);
             surface.checked = false;
             let mut renderer =
                 Renderer::cpu_window_for_tests(&cfg, w, h, Box::new(surface)).expect("CPU window");

@@ -662,6 +662,37 @@ pub(crate) mod tests {
         harness_term(prefix_lines, CardHarness::ClaudeHook, label, 5)
     }
 
+    /// Two panes that look the same but are not: each shows a pending card
+    /// at the same place, with a different nonce, under a line of concealed
+    /// text that is right-to-left in the first and left-to-right in the
+    /// second. Both cards are registered in the one `InlineCards`.
+    pub(crate) fn twin_fixture() -> (InlineCards, [Term<EventProxy>; 2], [InlineNonce; 2]) {
+        let nonces = [
+            InlineNonce::new([2, 3, 4, 5, 6, 7]).unwrap(),
+            InlineNonce::new([7, 6, 5, 4, 3, 2]).unwrap(),
+        ];
+        let mut cards = InlineCards::default();
+        let label = "  \u{23bf} \u{00a0}PostToolUse:mcp__plugin_kettle_kettle__kettle_show says:";
+        let terms = [0, 1].map(|twin| {
+            cards.register_for(nonces[twin], 3, 12, CardHarness::ClaudeHook);
+            let (tx, _rx) = crossbeam_channel::unbounded();
+            let mut term = Term::new(
+                Config::default(),
+                &Size,
+                EventProxy::new(tx, std::sync::Arc::new(|| {})),
+            );
+            let hidden = ["\u{05d0}\u{05d1}\u{05d2}", "abc"][twin];
+            let output = format!(
+                "\x1b[8m{hidden}\x1b[0m\r\n{}",
+                card_text(label, 5, nonces[twin])
+            );
+            let mut processor: Processor = Processor::new();
+            processor.advance(&mut term, output.as_bytes());
+            term
+        });
+        (cards, terms, nonces)
+    }
+
     /// A card as `harness` prints it: `label` on its own line, then the
     /// rows and the caption at column `left`.
     fn harness_term(
