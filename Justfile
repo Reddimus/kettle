@@ -571,7 +571,8 @@ headless-gpu-smoke: release
     fi
     export LIBGL_ALWAYS_SOFTWARE=1
     fixture=$(mktemp -d "{{TMPDIR}}/kettle-headless-smoke.XXXXXX")
-    trap 'rm -rf "$fixture"' EXIT
+    # Kettle seals its shell-integration files read-only under HOME.
+    trap 'chmod -R u+w "$fixture" 2>/dev/null; rm -rf "$fixture"' EXIT
     mkdir -m 700 "$fixture/home" "$fixture/config-home"
     printf '%s\n' 'renderer = gpu' 'record = false' 'restore-session = false' > "$fixture/kettle.cfg"
     rc=0
