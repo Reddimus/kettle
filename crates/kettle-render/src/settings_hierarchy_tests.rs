@@ -493,7 +493,7 @@ fn settings_rich_hint_cache_recolours_unchanged_text_after_theme_and_metrics_cha
     }
 }
 
-#[test]
+crate::visual_parity_tests::parity_scene! {
 fn settings_cold_open_loads_bundled_bold_for_title_headings_and_labels() {
     let _serial = gpu_tests::gpu_test_guard();
     let Some((mut renderer, mut cfg)) = headless_tests::renderer(1280, 820) else {
@@ -507,18 +507,14 @@ fn settings_cold_open_loads_bundled_bold_for_title_headings_and_labels() {
     fonts::load_bundled_font(&mut renderer.font_system, kettle_config::font::REGULAR);
     renderer.bundled_style_faces_loaded = false;
     renderer.chrome_style_key = 0;
-    let _ = renderer
-        .render_frame(&[], &TabBar::hidden(), &cfg, &Overlay::default())
-        .unwrap();
+    headless_tests::capture(&mut renderer, &cfg, &[], &Overlay::default());
     assert!(!renderer.bundled_style_faces_loaded);
     let set = grouped();
     let overlay = Overlay {
         settings: Some(set.clone()),
         ..Default::default()
     };
-    let _ = renderer
-        .render_frame(&[], &TabBar::hidden(), &cfg, &overlay)
-        .unwrap();
+    headless_tests::capture(&mut renderer, &cfg, &[], &overlay);
     assert!(renderer.bundled_style_faces_loaded);
     let layout = settings_layout(
         &set,
@@ -544,10 +540,10 @@ fn settings_cold_open_loads_bundled_bold_for_title_headings_and_labels() {
             assert_eq!(face.weight, fontdb::Weight::BOLD, "{}", item.text);
         }
     }
-    eprintln!(
-        "SETTINGS_BOLD_GPU_PASS: {:?}",
-        renderer.gpu().adapter_info()
-    );
+    if renderer.backend() == RendererBackend::Gpu {
+        eprintln!("SETTINGS_BOLD_GPU_PASS: {:?}", renderer.gpu().adapter_info());
+    }
+}
 }
 
 #[test]

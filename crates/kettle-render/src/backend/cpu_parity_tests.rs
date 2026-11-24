@@ -22,22 +22,6 @@ use crate::headless_tests::{
 };
 use crate::{FrameOutcome, Renderer, StatusBar, TabActivity, TabBar, TabSeg};
 
-/// The largest channel difference between two frames, and how many
-/// channels differ by more than 2.
-fn difference(a: &image::RgbaImage, b: &image::RgbaImage) -> (u8, usize) {
-    assert_eq!(a.dimensions(), b.dimensions());
-    let mut worst = 0;
-    let mut over = 0;
-    for (pa, pb) in a.pixels().zip(b.pixels()) {
-        for c in 0..4 {
-            let d = pa.0[c].abs_diff(pb.0[c]);
-            worst = worst.max(d);
-            over += usize::from(d > 2);
-        }
-    }
-    (worst, over)
-}
-
 /// Render `snap` in one pane on each backend and compare the captures.
 fn assert_backends_agree(
     name: &str,
@@ -63,16 +47,7 @@ fn assert_backends_agree(
         no_gpu_adapter();
         return;
     };
-    if let Some(dir) = std::env::var_os("KETTLE_CPU_PARITY_DUMP") {
-        let dir = std::path::Path::new(&dir);
-        cpu.save(dir.join(format!("{name}-cpu.png"))).expect("dump");
-        gpu.save(dir.join(format!("{name}-gpu.png"))).expect("dump");
-    }
-    let (worst, over) = difference(&cpu, &gpu);
-    assert!(
-        over == 0,
-        "{name}: {over} channels differ by more than 2 (worst {worst})"
-    );
+    assert!(crate::visual_parity_tests::compare(name, 1, &gpu, &cpu));
     // The frames are not trivially equal: the scene drew something.
     let first = cpu.get_pixel(0, 0).0;
     assert!(cpu.pixels().any(|p| p.0 != first), "{name}: an empty frame");
@@ -163,11 +138,6 @@ fn chrome_text_draws_the_same_on_the_cpu_and_the_gpu() {
         no_gpu_adapter();
         return;
     };
-    if let Some(dir) = std::env::var_os("KETTLE_CPU_PARITY_DUMP") {
-        let dir = std::path::Path::new(&dir);
-        cpu.save(dir.join("chrome-cpu.png")).expect("dump");
-        gpu.save(dir.join("chrome-gpu.png")).expect("dump");
-    }
     // The GPU drew the title: many pixels far from the tab's fill.
     let inked = |img: &image::RgbaImage, y0: u32, y1: u32| {
         let first = img.get_pixel(4, y0 + 2).0;
@@ -183,11 +153,7 @@ fn chrome_text_draws_the_same_on_the_cpu_and_the_gpu() {
             .count()
     };
     assert!(inked(&gpu, 0, 36) > 40, "the GPU drew the tab title");
-    let (worst, over) = difference(&cpu, &gpu);
-    assert!(
-        over == 0,
-        "chrome: {over} channels differ by more than 2 (worst {worst})"
-    );
+    assert!(crate::visual_parity_tests::compare("chrome", 1, &gpu, &cpu));
 }
 
 /// The test config with an opaque background (the default is slightly
@@ -814,52 +780,131 @@ fn a_scale_change_reaches_the_cpu_presenter() {
 
 /// `kettle --screenshot` draws on the configured backend. Its scenes (tab
 /// bar, split panes, grid and glyphon text, a context menu, a scrollbar, a
-/// bell flash) agree between the two within 2 per channel.
+/// bell flash) agree between the two within the per-scene tolerance.
+#[cfg(target_os = "linux")]
 #[test]
 fn screenshot_scenes_draw_the_same_on_the_cpu_and_the_gpu() {
     use crate::DebugScene;
     use kettle_config::RendererPreference;
     let _serialized = gpu_test_guard();
     let dir = kettle_test_support::private_tempdir("kettle-cpu-capture-");
-    for (name, scene) in [
-        ("default", DebugScene::Default),
-        ("menu", DebugScene::ContextMenu),
-        ("scrollbar", DebugScene::Scrollbar),
-        ("bell", DebugScene::BellFlash),
+    use kettle_config::Theme;
+    let mut cfg = kettle_config::Config::default();
+    let Ok((instance, adapter)) = pollster::block_on(crate::gpu::resolve_headless_adapter(
+        &cfg,
+        "screenshot parity",
+    )) else {
+        no_gpu_adapter();
+        return;
+    };
+    eprintln!("screenshot parity adapter: {:?}", adapter.get_info());
+    drop(adapter);
+    drop(instance);
+
+    let mut failed = Vec::new();
+    for (name, scene, cols, rows, light, annotation) in [
+        (
+            "capture-default-60",
+            DebugScene::Default,
+            60,
+            14,
+            false,
+            None,
+        ),
+        (
+            "capture-menu-60",
+            DebugScene::ContextMenu,
+            60,
+            14,
+            false,
+            None,
+        ),
+        (
+            "capture-scrollbar-60",
+            DebugScene::Scrollbar,
+            60,
+            14,
+            false,
+            None,
+        ),
+        (
+            "capture-bell-60",
+            DebugScene::BellFlash,
+            60,
+            14,
+            false,
+            None,
+        ),
+        ("capture-default", DebugScene::Default, 96, 28, false, None),
+        ("capture-menu", DebugScene::ContextMenu, 96, 28, false, None),
+        (
+            "capture-scrollbar",
+            DebugScene::Scrollbar,
+            96,
+            28,
+            false,
+            None,
+        ),
+        (
+            "capture-bell-dark",
+            DebugScene::BellFlash,
+            96,
+            28,
+            false,
+            None,
+        ),
+        (
+            "capture-default-light",
+            DebugScene::Default,
+            96,
+            28,
+            true,
+            None,
+        ),
+        (
+            "capture-bell-light",
+            DebugScene::BellFlash,
+            96,
+            28,
+            true,
+            None,
+        ),
+        (
+            "capture-annotated",
+            DebugScene::Default,
+            96,
+            28,
+            false,
+            Some("A caption"),
+        ),
     ] {
+        cfg.font_size = if cols == 60 {
+            gpu_test_config().font_size
+        } else {
+            kettle_config::Config::default().font_size
+        };
+        cfg.theme = if light {
+            Theme::by_name("iTerm2 Solarized Light")
+        } else {
+            Theme::default()
+        };
         let shot = |renderer| {
             let cfg = kettle_config::Config {
                 renderer,
-                gpu_force_software: false,
-                ..gpu_test_config()
+                ..cfg.clone()
             };
             let out = dir.path().join(format!("{name}-{renderer:?}.png"));
-            crate::capture_png_with(&cfg, 60, 14, &out, scene)
-                .map(|_| image::open(&out).expect("a PNG").to_rgba8())
+            crate::capture_png_with_annotation(&cfg, cols, rows, &out, scene, annotation)
+                .expect("offscreen capture");
+            image::open(&out).expect("a PNG").to_rgba8()
         };
-        let cpu = shot(RendererPreference::Cpu).expect("the CPU capture needs no adapter");
-        let Ok(gpu) = shot(RendererPreference::Gpu) else {
-            no_gpu_adapter();
-            return;
-        };
-        if let Some(dump) = std::env::var_os("KETTLE_CPU_PARITY_DUMP") {
-            let dump = std::path::Path::new(&dump);
-            cpu.save(dump.join(format!("capture-{name}-cpu.png")))
-                .expect("dump");
-            gpu.save(dump.join(format!("capture-{name}-gpu.png")))
-                .expect("dump");
+        let gpu = shot(RendererPreference::Gpu);
+        let cpu = shot(RendererPreference::Cpu);
+        if !crate::visual_parity_tests::compare(name, 1, &gpu, &cpu) {
+            failed.push(name);
         }
-        // The menu's shadows stack translucent layers over text, where each
-        // backend rounds every layer to 8 bits and lavapipe's sRGB encode is
-        // up to 0.65 of a code off (A2's deep-stack finding): a few channels
-        // may reach 3 or 4. Everything else stays within 2.
-        let (worst, over) = difference(&cpu, &gpu);
-        let channels = cpu.as_raw().len();
-        assert!(
-            worst <= 4 && over * 10_000 <= channels,
-            "capture {name}: {over} of {channels} channels differ by more than 2 (worst {worst})"
-        );
         let first = cpu.get_pixel(0, 0).0;
         assert!(cpu.pixels().any(|p| p.0 != first), "{name}: an empty frame");
     }
+    assert!(failed.is_empty(), "screenshot parity failed: {failed:?}");
 }

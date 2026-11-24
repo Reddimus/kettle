@@ -5,6 +5,7 @@
 use crate::builtin_glyphs::{bands, pixel_edge};
 use crate::gpu_tests::{gpu_test_config, gpu_test_guard};
 use crate::headless_tests::{capture, focused, pane, snapshot_of};
+use crate::visual_parity_tests::parity_scene;
 use crate::*;
 
 /// Hidden cursor, white text on black, so a pixel's red channel is the
@@ -25,7 +26,7 @@ struct Frame {
 fn render(mut cfg: Config, scale: f32, text: &str) -> Option<Frame> {
     cfg.theme.background = Rgb::new(0, 0, 0);
     let (w, h) = ((320.0 * scale) as u32, (120.0 * scale) as u32);
-    let mut renderer = Renderer::headless_for_tests_with(&cfg, w, h, scale, false)
+    let mut renderer = crate::visual_parity_tests::renderer_with(&cfg, w, h, scale, false)
         .expect("headless renderer builds")?;
     let snap = snapshot_of(20, 4, text.as_bytes());
     let image = capture(&mut renderer, &cfg, &[pane(&snap, w, h)], &focused(false));
@@ -105,11 +106,11 @@ macro_rules! frame_or_skip {
     };
 }
 
+parity_scene! {
 /// A run of `─` is one line: every pixel column across the run, including
 /// the ones either side of each cell boundary, shows the same solid stroke,
 /// so no join is brighter, darker or broken. At 1x, at 2x, at a fractional
 /// cell width, and on the Legacy text renderer.
-#[test]
 fn a_run_of_light_lines_is_one_even_line_across_cell_boundaries() {
     let _serialized = gpu_test_guard();
     let fractional = Config {
@@ -150,11 +151,12 @@ fn a_run_of_light_lines_is_one_even_line_across_cell_boundaries() {
         }
     }
 }
+}
 
+parity_scene! {
 /// `┼` continues the `│` above and below it and the `─` either side of it on
 /// exactly their pixels: one straight vertical line and one straight
 /// horizontal line through the crossing.
-#[test]
 fn a_crossing_meets_its_neighbouring_lines_exactly() {
     let _serialized = gpu_test_guard();
     for scale in [1.0, 2.0] {
@@ -221,9 +223,10 @@ fn a_crossing_meets_its_neighbouring_lines_exactly() {
         }
     }
 }
+}
 
+parity_scene! {
 /// `█` fills exactly its cell's pixels: all of them solid, none beyond.
-#[test]
 fn a_full_block_fills_its_whole_cell() {
     let _serialized = gpu_test_guard();
     for (cfg, scale) in [(gpu_test_config(), 1.0), (gpu_test_config(), 2.0)] {
@@ -244,11 +247,12 @@ fn a_full_block_fills_its_whole_cell() {
         }
     }
 }
+}
 
+parity_scene! {
 /// Use a real white background quad as the coverage oracle, independently
 /// of the CPU mask bounds. Probe both ends of a cell on either side of the
 /// rasterizer's half-pixel boundary, including its subpixel snap band.
-#[test]
 fn builtin_masks_and_cursor_match_backgrounds_at_half_pixel_edges() {
     let _serialized = gpu_test_guard();
     fn view(snap: &PaneSnapshot, pane_offset: f32) -> PaneView<'_> {
@@ -273,13 +277,15 @@ fn builtin_masks_and_cursor_match_backgrounds_at_half_pixel_edges() {
             };
             cfg.theme.background = Rgb::new(0, 0, 0);
             let mut renderer = frame_or_skip!(
-                Renderer::headless_for_tests_with(&cfg, 320, 120, scale, false)
+                crate::visual_parity_tests::renderer_with(&cfg, 320, 120, scale, false)
                     .expect("headless renderer builds")
             );
-            eprintln!(
+            if renderer.backend() == RendererBackend::Gpu {
+                eprintln!(
                 "PIXEL_EDGE_GPU: {mode:?}, scale={scale}, width={width}, {:?}",
                 renderer.gpu().adapter_info()
             );
+            }
             let (cw, ch) = (renderer.cell_w, renderer.cell_h);
             for end in [false, true] {
                 for delta in [-0.004, -0.0001, 0.0, 0.0001, 0.004] {
@@ -363,6 +369,9 @@ fn builtin_masks_and_cursor_match_backgrounds_at_half_pixel_edges() {
                         } else {
                             cursor_reference = Some(image);
                         }
+                        if renderer.backend() == RendererBackend::Cpu {
+                            continue;
+                        }
                         let whole = PatchRect {
                             x: 0,
                             y: 0,
@@ -431,8 +440,9 @@ fn builtin_masks_and_cursor_match_backgrounds_at_half_pixel_edges() {
         failures.len()
     );
 }
+}
 
-#[test]
+parity_scene! {
 fn builtin_cursor_excludes_neighboring_ink_at_half_pixel_edges() {
     let _serialized = gpu_test_guard();
     let mut failures = Vec::new();
@@ -446,13 +456,15 @@ fn builtin_cursor_excludes_neighboring_ink_at_half_pixel_edges() {
             };
             cfg.theme.background = Rgb::new(0, 0, 0);
             let mut renderer = frame_or_skip!(
-                Renderer::headless_for_tests_with(&cfg, 320, 120, scale, false)
+                crate::visual_parity_tests::renderer_with(&cfg, 320, 120, scale, false)
                     .expect("headless renderer builds")
             );
-            eprintln!(
+            if renderer.backend() == RendererBackend::Gpu {
+                eprintln!(
                 "PIXEL_EDGE_NEIGHBOR_GPU: {mode:?}, scale={scale}, {:?}",
                 renderer.gpu().adapter_info()
             );
+            }
             for delta in [-0.0001, 0.0, 0.0001] {
                 cfg.padding_x = 12.5 + delta - renderer.cell_w;
                 let reference =
@@ -517,9 +529,10 @@ fn builtin_cursor_excludes_neighboring_ink_at_half_pixel_edges() {
         failures.len()
     );
 }
+}
 
+parity_scene! {
 /// `░ ▒ ▓` are three even tones, light to dark, not the font's dither.
-#[test]
 fn shades_are_three_distinct_even_tones() {
     let _serialized = gpu_test_guard();
     let frame = frame_or_skip!(render(gpu_test_config(), 1.0, &format!("{INK}░▒▓")));
@@ -539,12 +552,13 @@ fn shades_are_three_distinct_even_tones() {
         "{levels:?}"
     );
 }
+}
 
+parity_scene! {
 /// A Powerline separator spans the whole cell height, and its flat side is
 /// solid against the neighbouring segment's background, with no column of
 /// its own background between them: `` after a segment and `` before
 /// one. Run with a taller row too, where a font glyph falls short.
-#[test]
 fn powerline_separators_fill_the_cell_height_and_meet_their_neighbours() {
     let _serialized = gpu_test_guard();
     const BLUE: [u8; 3] = [0, 0, 255];
@@ -597,10 +611,11 @@ fn powerline_separators_fill_the_cell_height_and_meet_their_neighbours() {
         }
     }
 }
+}
 
+parity_scene! {
 /// `╭` curves from the `│` below it into the `─` beside it: at each edge it
 /// leaves on exactly that line's pixels, solid, and its corner is round.
-#[test]
 fn an_arc_joins_the_lines_beside_and_below_it() {
     let _serialized = gpu_test_guard();
     for scale in [1.0, 2.0] {
@@ -634,12 +649,13 @@ fn an_arc_joins_the_lines_beside_and_below_it() {
         );
     }
 }
+}
 
+parity_scene! {
 /// With `builtin-box-drawing = false` the font draws these characters again:
 /// they are in the shaped text, Kettle records no cells of its own, and the
 /// font's shade is not an even tone. The switch reloads live, both ways, on
 /// one renderer.
-#[test]
 fn turning_builtin_box_drawing_off_returns_the_font_glyphs_live() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = crate::headless_tests::renderer(320, 120) else {
@@ -674,11 +690,12 @@ fn turning_builtin_box_drawing_off_returns_the_font_glyphs_live() {
         }
     }
 }
+}
 
+parity_scene! {
 /// Under a focused block cursor the glyph is drawn in the cursor's text
 /// colour on the block, from the same mask; in the blink's off phase it is
 /// the cell's own colour again.
-#[test]
 fn a_block_cursor_draws_the_glyph_in_the_cursor_text_colour() {
     let _serialized = gpu_test_guard();
     let cfg = gpu_test_config();
@@ -732,11 +749,12 @@ fn a_block_cursor_draws_the_glyph_in_the_cursor_text_colour() {
         }
     }
 }
+}
 
+parity_scene! {
 /// A shade under a focused block cursor is the cursor's two colours mixed,
 /// whatever colour the cell's own text has: the pane's copy, drawn in the
 /// cell's colour first, must not show through the partly covered pixels.
-#[test]
 fn a_shade_under_the_cursor_shows_only_the_cursor_colours() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = crate::headless_tests::renderer(320, 120) else {
@@ -774,6 +792,7 @@ fn a_shade_under_the_cursor_shows_only_the_cursor_colours() {
     assert_eq!(cells[0], cells[1], "the cell's own colour shows through");
     assert_ne!(cells[0], [block.r, block.g, block.b], "the shade is drawn");
 }
+}
 
 #[test]
 fn a_builtin_block_cursor_excludes_neighboring_text_overhang() {
@@ -806,11 +825,13 @@ fn a_builtin_block_cursor_excludes_neighboring_text_overhang() {
                 )
                 .expect("headless renderer builds")
             );
-            eprintln!(
-                "OVERHANG_GPU: {mode:?}, allow_mapping={allow_mapping}, mapped={}, {:?}",
-                renderer.gpu().mapped_uploads(),
-                renderer.gpu().adapter_info()
-            );
+            if renderer.backend() == RendererBackend::Gpu {
+                eprintln!(
+                    "OVERHANG_GPU: {mode:?}, allow_mapping={allow_mapping}, mapped={}, {:?}",
+                    renderer.gpu().mapped_uploads(),
+                    renderer.gpu().adapter_info()
+                );
+            }
             let mut reference = Vec::new();
             for prefix in [" ", "W"] {
                 let mut snap = snapshot_of(
@@ -936,7 +957,7 @@ fn a_builtin_block_cursor_excludes_neighboring_text_overhang() {
     }
 }
 
-#[test]
+parity_scene! {
 fn a_builtin_block_cursor_preserves_highlight_decorations() {
     use alacritty_terminal::selection::SelectionRange;
     use kettle_core::{Column, Line, Point};
@@ -948,7 +969,7 @@ fn a_builtin_block_cursor_preserves_highlight_decorations() {
             ..gpu_test_config()
         };
         let mut renderer = frame_or_skip!(
-            Renderer::headless_for_tests(&cfg, 320, 120).expect("headless renderer builds")
+            crate::visual_parity_tests::renderer(&cfg, 320, 120).expect("headless renderer builds")
         );
         for search in [false, true] {
             for style in ["4", "9", "0"] {
@@ -1004,6 +1025,9 @@ fn a_builtin_block_cursor_preserves_highlight_decorations() {
                             expected,
                             "{mode:?}, search={search}, SGR={style}, col={col}, phase={phase}"
                         );
+                        if renderer.backend() == RendererBackend::Cpu {
+                            continue;
+                        }
                         let rect = PatchRect {
                             x: x0,
                             y: y0,
@@ -1029,8 +1053,9 @@ fn a_builtin_block_cursor_preserves_highlight_decorations() {
         }
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn a_builtin_block_cursor_preserves_inline_images_and_pane_outlines() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = crate::headless_tests::renderer(320, 120) else {
@@ -1063,6 +1088,9 @@ fn a_builtin_block_cursor_preserves_inline_images_and_pane_outlines() {
         let image = capture(&mut renderer, &cfg, &[view], &focused(true));
         let frame = Frame::of(image, &renderer, &cfg);
         let [x0, y0, x1, y1] = frame.cell(0, 0);
+        if renderer.backend() == RendererBackend::Cpu {
+            continue;
+        }
         if outline {
             // Exercise the actual outline pipeline over the cursor cell,
             // independently of native window corner and split layout policy.
@@ -1094,13 +1122,14 @@ fn a_builtin_block_cursor_preserves_inline_images_and_pane_outlines() {
         }
     }
 }
+}
 
+parity_scene! {
 /// The cursor's built-in glyph reuses the slot the pane resolved for the
 /// same cell and never allocates one itself: it is resolved after the pane
 /// instances are uploaded, and an allocation then could evict a slot they
 /// still draw from. With no resident slot it draws nothing and writes
 /// nothing to the atlas.
-#[test]
 fn the_cursor_glyph_never_allocates_atlas_space() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = crate::headless_tests::renderer(320, 120) else {
@@ -1123,10 +1152,11 @@ fn the_cursor_glyph_never_allocates_atlas_space() {
     );
     assert!(renderer.glyph_pipeline.cursor_clip.is_none());
 }
+}
 
+parity_scene! {
 /// In a right-to-left row a built-in glyph moves with its cell to its
 /// visual column.
-#[test]
 fn a_reordered_row_draws_the_glyph_at_its_visual_column() {
     let _serialized = gpu_test_guard();
     // Logical א│בג is drawn ג ב │ א: the line moves from column 1 to 2.
@@ -1138,6 +1168,7 @@ fn a_reordered_row_draws_the_glyph_at_its_visual_column() {
         let inked: Vec<u32> = (x0..x1).filter(|&x| frame.red(x, row) == 255).collect();
         assert_eq!(inked == line, expect, "column {col}: {inked:?}");
     }
+}
 }
 
 /// Stroke widths come from the face's own underline: the bundled JetBrains

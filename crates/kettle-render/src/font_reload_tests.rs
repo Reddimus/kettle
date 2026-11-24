@@ -1,6 +1,6 @@
 use super::production_source;
 
-#[test]
+crate::visual_parity_tests::parity_scene! {
 fn unchanged_tooltip_reshapes_in_the_reloaded_font_family() {
     use super::*;
 
@@ -8,15 +8,14 @@ fn unchanged_tooltip_reshapes_in_the_reloaded_font_family() {
     let mut cfg = gpu_tests::gpu_test_config();
     cfg.font_family = kettle_config::font::FAMILY.into();
     let Some(mut renderer) =
-        Renderer::headless_for_tests(&cfg, 480, 160).expect("headless renderer builds")
+        visual_parity_tests::renderer(&cfg, 480, 160).expect("headless renderer builds")
     else {
         eprintln!("TOOLTIP_FONT_RELOAD_GPU_SKIP: no GPU adapter");
         return;
     };
-    eprintln!(
-        "TOOLTIP_FONT_RELOAD_ADAPTER: {:?}",
-        renderer.gpu().adapter.get_info()
-    );
+    if renderer.backend() == RendererBackend::Gpu {
+        eprintln!("TOOLTIP_FONT_RELOAD_ADAPTER: {:?}", renderer.gpu().adapter.get_info());
+    }
     // An isolated database makes both the requested and resolved faces
     // independent of fonts installed on the host.
     renderer.font_system =
@@ -43,13 +42,9 @@ fn unchanged_tooltip_reshapes_in_the_reloaded_font_family() {
         cfg.font_family = family.into();
         renderer.set_font_family(family.into());
         if closed {
-            let _ = renderer
-                .render_frame(&[], &TabBar::hidden(), &cfg, &overlay)
-                .expect("closed tooltip frame");
+            headless_tests::capture(&mut renderer, &cfg, &[], &overlay);
         }
-        let _ = renderer
-            .render_frame(&[], &tabs, &cfg, &overlay)
-            .expect("tooltip frame");
+        headless_tests::capture_with_tabs(&mut renderer, &cfg, &[], &overlay, &tabs);
         assert_eq!(renderer.tab_tooltip_text, label);
         assert_eq!(renderer.tab_tooltip_buffer.lines[0].text(), label);
         assert_eq!(
@@ -86,6 +81,7 @@ fn unchanged_tooltip_reshapes_in_the_reloaded_font_family() {
         }
     }
     eprintln!("TOOLTIP_FONT_RELOAD_PASS: unchanged label, bundled faces, open and closed reloads");
+}
 }
 
 /// A font-family reload must invalidate the quick-select hint cache too:

@@ -383,6 +383,11 @@ fn compare(case: &str, w: u32, h: u32, gpu: &[u8], cpu: &CpuFramebuffer) -> Stat
             &cpu[p..p + 4]
         )
     });
+    let counts = crate::visual_parity_tests::pixel_counts(gpu, &cpu);
+    eprintln!(
+        "RASTER_PARITY {case} {w}x{h} max={} mean={:.8} pixels1={} pixels2={} pixels_over2={}",
+        stats.max, stats.mean, counts[1], counts[2], counts[3]
+    );
     eprintln!(
         "cpu-parity {case}: max {} mean {:.5} differing {}/{} channels{}",
         stats.max,

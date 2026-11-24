@@ -2,6 +2,7 @@
 use crate::geometry::GridGlyphCell;
 use crate::gpu_tests::gpu_test_guard;
 use crate::headless_tests::{capture, focused, pane, renderer, snapshot_of};
+use crate::visual_parity_tests::parity_scene;
 use crate::*;
 use glyphon::cosmic_text::{Attrs, AttrsList, BufferLine, Family, LineEnding, Shaping};
 
@@ -22,7 +23,7 @@ fn drawn_columns(renderer: &Renderer) -> Vec<(char, usize)> {
         .collect()
 }
 
-#[test]
+parity_scene! {
 fn a_right_to_left_word_is_drawn_in_visual_cells() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 120) else {
@@ -52,8 +53,9 @@ fn a_right_to_left_word_is_drawn_in_visual_cells() {
         );
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn arabic_joins_and_brackets_mirror_only_in_right_to_left_text() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 120) else {
@@ -145,8 +147,9 @@ fn arabic_joins_and_brackets_mirror_only_in_right_to_left_text() {
         "column 0 opens and column 2 closes"
     );
 }
+}
 
-#[test]
+parity_scene! {
 fn a_selection_over_reordered_text_fills_its_visual_cells() {
     use alacritty_terminal::selection::SelectionRange;
     use kettle_core::{Column, Line, Point};
@@ -217,8 +220,9 @@ fn a_selection_over_reordered_text_fills_its_visual_cells() {
         assert!(filled(col) < 0.1, "visual {col} is not: {}", filled(col));
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn the_alternate_screen_and_bidi_off_keep_logical_order() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
@@ -247,8 +251,9 @@ fn the_alternate_screen_and_bidi_off_keep_logical_order() {
     assert!(drawn_columns(&renderer).is_empty());
     assert!(!renderer.pane_bidi[0].any());
 }
+}
 
-#[test]
+parity_scene! {
 fn the_block_cursor_draws_the_cells_joined_form() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 120) else {
@@ -265,6 +270,7 @@ fn the_block_cursor_draws_the_cells_joined_form() {
         &focused(true),
     );
     assert_eq!(renderer.cursor_glyph_buffer.lines[0].text(), "\u{FE92}");
+}
 }
 
 /// The first glyph's id and every span's level for `text` shaped as one line.
@@ -369,7 +375,7 @@ fn band_has_ink(frame: &image::RgbaImage, x: u32, band: &[u32], bg: Rgb) -> bool
     })
 }
 
-#[test]
+parity_scene! {
 fn flat_arabic_joins_are_one_unbroken_stroke() {
     let _serial = gpu_test_guard();
     for family in crate::arabic_join_tests::ARABIC_FACES {
@@ -416,8 +422,9 @@ fn flat_arabic_joins_are_one_unbroken_stroke() {
         }
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn joined_word_edges_are_inked_and_a_nonjoining_seam_keeps_its_hole() {
     let _serial = gpu_test_guard();
     for family in crate::arabic_join_tests::ARABIC_FACES {
@@ -465,8 +472,9 @@ fn joined_word_edges_are_inked_and_a_nonjoining_seam_keeps_its_hole() {
         }
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn arabic_style_and_selection_boundaries_keep_bridge_colour_inside_its_cell() {
     use alacritty_terminal::selection::SelectionRange;
     use kettle_core::{Column, Line, Point};
@@ -535,8 +543,9 @@ fn arabic_style_and_selection_boundaries_keep_bridge_colour_inside_its_cell() {
         }
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn block_cursor_keeps_arabic_initial_and_its_bridge_in_the_panes_position() {
     let _serial = gpu_test_guard();
     for family in crate::arabic_join_tests::ARABIC_FACES {
@@ -594,8 +603,9 @@ fn block_cursor_keeps_arabic_initial_and_its_bridge_in_the_panes_position() {
         }
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn joined_arabic_leaves_latin_and_hebrew_rows_pixel_identical() {
     let _serial = gpu_test_guard();
     for family in crate::arabic_join_tests::ARABIC_FACES {
@@ -642,8 +652,9 @@ fn joined_arabic_leaves_latin_and_hebrew_rows_pixel_identical() {
         }
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn arabic_hidden_cells_and_row_ends_have_no_outward_seam() {
     let _serial = gpu_test_guard();
     for family in crate::arabic_join_tests::ARABIC_FACES {
@@ -684,6 +695,7 @@ fn arabic_hidden_cells_and_row_ends_have_no_outward_seam() {
             }
         }
     }
+}
 }
 
 /// The four fills a pane paints under highlighted cells.
@@ -826,11 +838,11 @@ fn dominant(
     Rgb::new(r, g, b)
 }
 
+parity_scene! {
 /// A highlighted Arabic word's fill spans exactly the pixels its letters are
 /// drawn over. A final wider than its cell overhangs on its open side, into
 /// the padding or the cells before it, and an isolated letter overhangs to
 /// its right; the fill reaches as far, and no further.
-#[test]
 fn highlights_cover_the_drawn_width_of_arabic_words() {
     let _serial = gpu_test_guard();
     // The text, its highlighted logical columns, the visual columns those
@@ -905,10 +917,11 @@ fn highlights_cover_the_drawn_width_of_arabic_words() {
         }
     }
 }
+}
 
+parity_scene! {
 /// Without bidi, and in rows without right-to-left text, every highlight
 /// fill stays on the cell grid as before.
-#[test]
 fn highlights_off_bidi_rows_stay_on_the_grid() {
     let _serial = gpu_test_guard();
     for family in crate::arabic_join_tests::ARABIC_FACES {
@@ -956,10 +969,11 @@ fn highlights_off_bidi_rows_stay_on_the_grid() {
         }
     }
 }
+}
 
+parity_scene! {
 /// A selection's outline traces its fill, widened over a final's overhang,
 /// not the cell edge inside it.
-#[test]
 fn a_selection_outline_follows_the_arabic_overhang() {
     let _serial = gpu_test_guard();
     let Some(theme) = kettle_config::Theme::list().iter().find_map(|name| {
@@ -1038,4 +1052,5 @@ fn a_selection_outline_follows_the_arabic_overhang() {
             assert_eq!(sides.len(), 2, "{context}: {sides:?}");
         }
     }
+}
 }
