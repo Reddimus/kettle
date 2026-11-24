@@ -412,6 +412,20 @@ impl CpuPresenter {
         }
     }
 
+    /// While the last commit's frame callback is out, when it stops holding
+    /// frames back ([`FRAME_CALLBACK_TIMEOUT`] after that commit). `None`
+    /// when a frame presented now would be committed, as far as the events
+    /// already dispatched say, and always on softbuffer. A caller that holds
+    /// off drawing while [`Self::frame_pending`] arms
+    /// `ControlFlow::WaitUntil` with it, so the callback's wake runs
+    /// `about_to_wait` (see the module docs) and the timeout bounds the wait.
+    pub fn frame_deadline(&self) -> Option<Instant> {
+        match &self.inner {
+            Inner::Shm(p) => p.frame_deadline(),
+            Inner::Soft(_) => None,
+        }
+    }
+
     /// The last commit's frame callback has not arrived: a frame presented
     /// now would be deferred.
     pub fn frame_pending(&mut self) -> bool {

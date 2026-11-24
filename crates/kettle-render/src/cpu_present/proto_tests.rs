@@ -284,6 +284,46 @@ fn a_deferred_frame_has_a_deadline_until_it_is_flushed() {
 }
 
 #[test]
+fn a_frame_callback_out_has_a_deadline_until_it_arrives() {
+    let Some((server, mut client, mut p)) = fixture(Config::default()) else {
+        return;
+    };
+    let mut scene = Scene::new();
+    assert_eq!(p.frame_deadline(), None, "nothing committed, nothing out");
+    let before = Instant::now();
+    scene.present(&mut p, r(0, 0, W, H), 1);
+    client.roundtrip();
+    assert!(p.frame_pending(), "the first commit's callback is out");
+    let deadline = p
+        .frame_deadline()
+        .expect("a caller holding off a frame needs a wake");
+    assert!(deadline > Instant::now(), "the deadline must not spin");
+    assert!(deadline <= before + FRAME_CALLBACK_TIMEOUT + Duration::from_millis(500));
+    assert_eq!(p.pending_deadline(), None, "nothing is deferred");
+    server.fire_frames(&mut client);
+    assert!(!p.frame_pending(), "the callback came");
+    assert_eq!(p.frame_deadline(), None);
+}
+
+#[test]
+fn a_frame_callback_past_its_timeout_has_no_deadline() {
+    let Some((_server, mut client, mut p)) = fixture(Config::default()) else {
+        return;
+    };
+    p.frame_timeout = Duration::from_millis(30);
+    let mut scene = Scene::new();
+    scene.present(&mut p, r(0, 0, W, H), 1);
+    client.roundtrip();
+    assert!(p.frame_deadline().is_some());
+    std::thread::sleep(Duration::from_millis(40));
+    assert!(
+        !p.frame_pending(),
+        "the timeout lets the next frame through"
+    );
+    assert_eq!(p.frame_deadline(), None);
+}
+
+#[test]
 fn a_frame_deferred_past_its_timeout_is_due_at_once() {
     let Some((_server, mut client, mut p)) = fixture(Config::default()) else {
         return;

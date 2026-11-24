@@ -14,7 +14,7 @@ use alacritty_terminal::selection::SelectionRange;
 use kettle_core::{Column, Line, Point};
 
 use super::RendererBackend;
-use super::cpu::{CpuPresentOutcome, CpuSurface};
+use super::cpu::{CpuPresentOutcome, CpuSurface, HeldFrameFlush};
 use crate::cpu_raster::pixels_to_rgba8;
 use crate::gpu_tests::{gpu_test_config, gpu_test_guard};
 use crate::headless_tests::{
@@ -199,22 +199,46 @@ fn opaque() -> kettle_config::Config {
     }
 }
 
-/// What the fake window surface saw.
+/// What the next frames on the fake surface do.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum FakeMode {
+    /// Commit each frame at once.
+    #[default]
+    Commit,
+    /// Draw each frame and hold it, as a frame presented while the
+    /// compositor's frame callback is out would be held.
+    Defer,
+    /// Draw each frame and report no change and no commit.
+    Unchanged,
+}
+
+/// What the fake window surface saw, and how it behaves.
 #[derive(Default)]
 struct SurfaceLog {
     sizes: Vec<(u32, u32)>,
+    scales: Vec<f64>,
     translucent: Vec<bool>,
     /// Each committed frame, as RGBA8.
     frames: Vec<Vec<u8>>,
+    /// How many frames were drawn, committed or not.
+    draws: usize,
     /// How many times the pre-commit hook ran, and whether every run came
     /// after its frame was drawn.
     pre_commits: usize,
     committed_after_draw: bool,
     occluded: Vec<bool>,
     released: usize,
+    mode: FakeMode,
+    /// The last commit's frame callback has not come.
+    callback_out: bool,
+    /// A drawn frame waits for a commit.
+    held: bool,
+    /// Buffers are this many pixels larger than the window on each axis,
+    /// as an integer-scale Wayland buffer is rounded up.
+    pad: u32,
 }
 
-/// A window surface in memory: one buffer, committed at once.
+/// A window surface in memory: one buffer.
 struct FakeSurface {
     log: Arc<Mutex<SurfaceLog>>,
     size: (u32, u32),
@@ -222,10 +246,34 @@ struct FakeSurface {
     translucency: bool,
 }
 
+impl FakeSurface {
+    fn extent(&self) -> (u32, u32) {
+        let pad = self.log.lock().unwrap().pad;
+        (self.size.0 + pad, self.size.1 + pad)
+    }
+
+    fn commit(&mut self, pre_commit: &mut dyn FnMut()) {
+        let drawn = !self.buffer.contains(&0xdead_beef);
+        pre_commit();
+        let mut log = self.log.lock().unwrap();
+        log.pre_commits += 1;
+        log.committed_after_draw = drawn;
+        log.frames.push(pixels_to_rgba8(&self.buffer));
+        log.held = false;
+        log.callback_out = true;
+    }
+}
+
 impl CpuSurface for FakeSurface {
-    fn resize(&mut self, width: u32, height: u32, _scale: f64) {
+    fn resize(&mut self, width: u32, height: u32, scale: f64) {
         self.size = (width, height);
-        self.log.lock().unwrap().sizes.push(self.size);
+        let mut log = self.log.lock().unwrap();
+        log.sizes.push(self.size);
+        log.scales.push(scale);
+    }
+
+    fn buffer_size(&self) -> (u32, u32) {
+        self.extent()
     }
 
     fn supports_translucency(&self) -> bool {
@@ -243,27 +291,67 @@ impl CpuSurface for FakeSurface {
         draw: &mut dyn FnMut(&mut [u32], u32, u32) -> bool,
         pre_commit: &mut dyn FnMut(),
     ) -> CpuPresentOutcome {
-        let (w, h) = self.size;
+        if self.log.lock().unwrap().callback_out {
+            return CpuPresentOutcome::Paced;
+        }
+        let (w, h) = self.extent();
         // A recycled buffer's old contents must not show through.
         self.buffer = vec![0xdead_beef; w as usize * h as usize];
         if !draw(&mut self.buffer, w, h) {
+            self.log.lock().unwrap().held = false;
             return CpuPresentOutcome::NotDrawn;
         }
-        let drawn = !self.buffer.contains(&0xdead_beef);
-        pre_commit();
-        let mut log = self.log.lock().unwrap();
-        log.pre_commits += 1;
-        log.committed_after_draw = drawn;
-        log.frames.push(pixels_to_rgba8(&self.buffer));
-        CpuPresentOutcome::Presented
+        let mode = {
+            let mut log = self.log.lock().unwrap();
+            log.draws += 1;
+            log.mode
+        };
+        match mode {
+            FakeMode::Commit => {
+                self.commit(pre_commit);
+                CpuPresentOutcome::Presented
+            }
+            FakeMode::Defer => {
+                self.log.lock().unwrap().held = true;
+                CpuPresentOutcome::Deferred
+            }
+            FakeMode::Unchanged => CpuPresentOutcome::Unchanged,
+        }
     }
 
-    fn flush(&mut self, _pre_commit: &mut dyn FnMut()) -> bool {
-        false
+    fn flush(&mut self, pre_commit: &mut dyn FnMut()) -> HeldFrameFlush {
+        let (held, callback_out) = {
+            let log = self.log.lock().unwrap();
+            (log.held, log.callback_out)
+        };
+        if !held {
+            return HeldFrameFlush::Nothing;
+        }
+        if callback_out {
+            return HeldFrameFlush::StillHeld;
+        }
+        self.commit(pre_commit);
+        HeldFrameFlush::Presented
     }
 
     fn has_deferred(&self) -> bool {
-        false
+        self.log.lock().unwrap().held
+    }
+
+    fn pending_deadline(&self) -> Option<Instant> {
+        let log = self.log.lock().unwrap();
+        log.held
+            .then(|| Instant::now() + std::time::Duration::from_secs(1))
+    }
+
+    fn frame_pending(&mut self) -> bool {
+        self.log.lock().unwrap().callback_out
+    }
+
+    fn frame_deadline(&self) -> Option<Instant> {
+        let log = self.log.lock().unwrap();
+        log.callback_out
+            .then(|| Instant::now() + std::time::Duration::from_secs(1))
     }
 
     fn release_idle_buffers(&mut self) -> usize {
@@ -408,6 +496,7 @@ fn idle_release_occlusion_and_resize_reach_a_cpu_window() {
     assert_eq!(log.released, 1);
     assert_eq!(log.occluded, [true, false]);
     assert_eq!(log.sizes, [(200, 80), (120, 60)]);
+    assert_eq!(log.scales, [1.0, 1.0], "the presenter is given the scale");
 }
 
 #[test]
@@ -421,5 +510,266 @@ fn a_gpu_or_offscreen_renderer_has_no_cpu_presenter() {
     assert_eq!(renderer.idle_release_deadline(), None);
     assert_eq!(renderer.release_idle_buffers(), 0);
     assert!(!renderer.has_held_frame());
-    assert!(!renderer.flush_held_frame(|| panic!("nothing to commit")));
+    assert_eq!(
+        renderer.flush_held_frame(|| panic!("nothing to commit")),
+        HeldFrameFlush::Nothing
+    );
+    assert!(!renderer.cpu_frame_ready());
+    assert_eq!(renderer.cpu_wake_deadline(), None);
+}
+
+/// Render one `w` x `h` frame of `views` and return its outcome.
+fn frame_of(
+    renderer: &mut Renderer,
+    cfg: &kettle_config::Config,
+    views: &[crate::PaneView<'_>],
+    pre_present: impl FnOnce(),
+) -> FrameOutcome {
+    renderer
+        .render_frame_with_status_and_pre_present(
+            views,
+            &TabBar::hidden(),
+            cfg,
+            &focused(true),
+            &StatusBar::hidden(),
+            pre_present,
+        )
+        .expect("a CPU window frame renders")
+}
+
+#[test]
+fn a_held_frame_runs_pre_present_only_when_it_is_committed() {
+    let cfg = opaque();
+    let (mut renderer, log) = window(&cfg, false);
+    log.lock().unwrap().mode = FakeMode::Defer;
+    let notified = Arc::new(Mutex::new(0));
+    let snap = snapshot_of(20, 4, b"hello");
+    let counter = notified.clone();
+    let outcome = frame_of(&mut renderer, &cfg, &[pane(&snap, 200, 80)], move || {
+        *counter.lock().unwrap() += 1;
+    });
+    assert_eq!(
+        outcome,
+        FrameOutcome::Presented,
+        "a held frame is drawn: its output is consumed"
+    );
+    assert_eq!(*notified.lock().unwrap(), 0, "nothing was committed");
+    assert!(renderer.has_held_frame());
+    assert!(
+        renderer.cpu_wake_deadline().is_some(),
+        "a held frame needs the loop to wake"
+    );
+    // The compositor has not taken the last frame: the frame stays held.
+    log.lock().unwrap().callback_out = true;
+    let counter = notified.clone();
+    assert_eq!(
+        renderer.flush_held_frame(move || *counter.lock().unwrap() += 1),
+        HeldFrameFlush::StillHeld
+    );
+    assert_eq!(*notified.lock().unwrap(), 0);
+    // The callback came: the flush commits it, running the hook once.
+    log.lock().unwrap().callback_out = false;
+    let counter = notified.clone();
+    assert_eq!(
+        renderer.flush_held_frame(move || *counter.lock().unwrap() += 1),
+        HeldFrameFlush::Presented
+    );
+    assert_eq!(*notified.lock().unwrap(), 1);
+    assert!(!renderer.has_held_frame());
+    assert_eq!(
+        renderer.flush_held_frame(|| panic!("nothing is held")),
+        HeldFrameFlush::Nothing
+    );
+    let log = log.lock().unwrap();
+    assert_eq!((log.draws, log.frames.len(), log.pre_commits), (1, 1, 1));
+    assert!(log.committed_after_draw);
+}
+
+#[test]
+fn painted_cards_move_only_when_a_frame_is_committed() {
+    let cfg = opaque();
+    let (mut renderer, log) = window(&cfg, false);
+    renderer.resize(1200, 400);
+    let (cards, snap, nonce) = crate::inline_cards::tests::fixture();
+    let mut view = pane(&snap, 1200, 400);
+    view.inline_cards = Some(&cards);
+    let painted = |renderer: &Renderer| {
+        renderer
+            .painted_cards()
+            .iter()
+            .map(|card| card.nonce)
+            .collect::<Vec<_>>()
+    };
+    // Unchanged: nothing reached the screen, so nothing is painted.
+    log.lock().unwrap().mode = FakeMode::Unchanged;
+    assert_eq!(
+        frame_of(&mut renderer, &cfg, &[view], || panic!("no commit")),
+        FrameOutcome::Presented
+    );
+    assert!(
+        painted(&renderer).is_empty(),
+        "an unchanged frame paints nothing"
+    );
+    // Deferred: drawn, but on screen only from the flush on.
+    log.lock().unwrap().mode = FakeMode::Defer;
+    let mut view = pane(&snap, 1200, 400);
+    view.inline_cards = Some(&cards);
+    assert_eq!(
+        frame_of(&mut renderer, &cfg, &[view], || panic!("no commit")),
+        FrameOutcome::Presented
+    );
+    assert!(
+        painted(&renderer).is_empty(),
+        "a held frame's card is not on screen yet"
+    );
+    // A frame built while the compositor holds the last one is not drawn,
+    // and does not stand in for the held one.
+    log.lock().unwrap().callback_out = true;
+    let empty = snapshot_of(20, 4, b"no card");
+    assert_eq!(
+        frame_of(&mut renderer, &cfg, &[pane(&empty, 1200, 400)], || {
+            panic!("no commit")
+        }),
+        FrameOutcome::Paced
+    );
+    log.lock().unwrap().callback_out = false;
+    assert_eq!(renderer.flush_held_frame(|| {}), HeldFrameFlush::Presented);
+    assert_eq!(
+        painted(&renderer),
+        [nonce],
+        "the held frame's card is on screen once it is committed"
+    );
+    // Presented: what the frame painted is on screen at once.
+    {
+        let mut log = log.lock().unwrap();
+        log.mode = FakeMode::Commit;
+        log.callback_out = false;
+    }
+    assert_eq!(
+        frame_of(&mut renderer, &cfg, &[pane(&empty, 1200, 400)], || {}),
+        FrameOutcome::Presented
+    );
+    assert!(painted(&renderer).is_empty());
+}
+
+#[test]
+fn a_frame_is_not_drawn_until_the_compositor_takes_the_last_one() {
+    let cfg = opaque();
+    let (mut renderer, log) = window(&cfg, false);
+    let snap = snapshot_of(20, 4, b"first");
+    assert_eq!(
+        frame_of(&mut renderer, &cfg, &[pane(&snap, 200, 80)], || {}),
+        FrameOutcome::Presented
+    );
+    assert!(log.lock().unwrap().callback_out);
+    assert!(
+        !renderer.cpu_frame_ready(),
+        "nothing is waiting to be drawn"
+    );
+    assert_eq!(renderer.cpu_wake_deadline(), None);
+    let snap = snapshot_of(20, 4, b"second");
+    assert_eq!(
+        frame_of(&mut renderer, &cfg, &[pane(&snap, 200, 80)], || {
+            panic!("a paced frame is never committed")
+        }),
+        FrameOutcome::Paced
+    );
+    assert_eq!(
+        log.lock().unwrap().draws,
+        1,
+        "the paced frame was not drawn"
+    );
+    assert!(!renderer.cpu_frame_ready(), "the callback has not come");
+    assert!(
+        renderer.cpu_wake_deadline().is_some(),
+        "the loop must wake for the callback"
+    );
+    log.lock().unwrap().callback_out = false;
+    assert!(renderer.cpu_frame_ready(), "the window should redraw now");
+    let snap = snapshot_of(20, 4, b"third");
+    assert_eq!(
+        frame_of(&mut renderer, &cfg, &[pane(&snap, 200, 80)], || {}),
+        FrameOutcome::Presented
+    );
+    assert!(!renderer.cpu_frame_ready());
+    let log = log.lock().unwrap();
+    assert_eq!((log.draws, log.frames.len()), (2, 2));
+}
+
+#[test]
+fn a_screenshot_waits_for_the_frame_that_is_drawn() {
+    let cfg = opaque();
+    let (mut renderer, log) = window(&cfg, false);
+    log.lock().unwrap().callback_out = true;
+    let dir = kettle_test_support::private_tempdir("kettle-cpu-paced-");
+    let (tx, rx) = std::sync::mpsc::channel();
+    renderer
+        .set_pending_screenshot(crate::ScreenshotRequest {
+            out_path: dir.path().join("shot.png"),
+            output_policy: crate::ScreenshotOutputPolicy::UserSelected,
+            crop: None,
+            completion: Some(tx),
+            cancellation: None,
+            recovery_wake: None,
+        })
+        .unwrap_or_else(|_| panic!("no capture pending"));
+    let snap = snapshot_of(20, 4, b"hello");
+    assert_eq!(
+        frame_of(&mut renderer, &cfg, &[pane(&snap, 200, 80)], || {}),
+        FrameOutcome::Paced
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "a paced frame neither takes nor fails it"
+    );
+    assert!(renderer.pending_screenshot.is_some());
+    log.lock().unwrap().callback_out = false;
+    assert_eq!(
+        frame_of(&mut renderer, &cfg, &[pane(&snap, 200, 80)], || {}),
+        FrameOutcome::Presented
+    );
+    let written = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the capture completes")
+        .expect("the capture succeeds");
+    assert_eq!(
+        image::GenericImageView::dimensions(&image::open(written).expect("a PNG")),
+        (200, 80)
+    );
+}
+
+#[test]
+fn a_buffer_rounded_past_the_window_repeats_its_edge() {
+    let cfg = opaque();
+    let (mut renderer, log) = window(&cfg, false);
+    log.lock().unwrap().pad = 2;
+    let snap = snapshot_of(20, 4, b"hello");
+    assert_eq!(
+        frame_of(&mut renderer, &cfg, &[pane(&snap, 200, 80)], || {}),
+        FrameOutcome::Presented
+    );
+    let log = log.lock().unwrap();
+    let frame = log.frames.last().expect("a frame");
+    let (bw, bh) = (202usize, 82usize);
+    assert_eq!(frame.len(), bw * bh * 4);
+    let px = |x: usize, y: usize| &frame[(y * bw + x) * 4..][..4];
+    for y in 0..bh {
+        let row = y.min(79);
+        for x in 200..bw {
+            assert_eq!(px(x, y), px(199, row), "column {x}, row {y}");
+        }
+    }
+    for x in 0..200 {
+        assert_eq!(px(x, 81), px(x, 79), "row 81, column {x}");
+    }
+}
+
+#[test]
+fn a_scale_change_reaches_the_cpu_presenter() {
+    let cfg = opaque();
+    let (mut renderer, log) = window(&cfg, false);
+    renderer.set_scale(2.0);
+    let log = log.lock().unwrap();
+    assert_eq!(log.sizes, [(200, 80), (200, 80)]);
+    assert_eq!(log.scales, [1.0, 2.0]);
 }

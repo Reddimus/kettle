@@ -6,11 +6,12 @@ use std::time::Instant;
 use anyhow::{Result, anyhow};
 use kettle_config::Config;
 
-use super::cpu::{CpuBackend, CpuPass, CpuPresentOutcome, CpuSurface};
+use super::cpu::{CpuBackend, CpuPass, CpuPresentOutcome, CpuSurface, HeldFrameFlush};
 use super::{RenderDevice, ScenePass};
 use crate::cpu_raster::{CpuFramebuffer, CpuTarget};
 use crate::cursor_patch::SceneFacts;
 use crate::{FrameOutcome, Renderer, ScreenshotRequest, StartupFonts};
+use kettle_core::{GraphicsBudget, GraphicsReservation};
 
 /// What the frame built for its submission.
 pub(crate) struct CpuFrameRequest {
@@ -180,34 +181,44 @@ impl Renderer {
             mut screenshot,
         } = request;
         let [width, height] = target_size;
+        if cpu.surface.is_some() {
+            cpu.note_present_thread();
+        }
         let CpuBackend {
             scene,
+            scene_reservation,
             presented,
             converted,
             raster,
             surface,
+            held,
+            paced,
             draws,
+            ..
         } = cpu;
         let windowed = surface.is_some();
         let outcome = match surface.as_mut() {
             Some(surface) => {
                 // A window's frame is drawn where the compositor reads it. Its
                 // surface offers no `PostMultiplied` mode, so the scene is
-                // never converted.
+                // never converted: the premultiplied scene is what a GPU
+                // window's `PreMultiplied` surface is handed.
                 debug_assert!(!needs_presentation, "a CPU window presents premultiplied");
                 *converted = false;
                 let mut drawn = Ok(());
                 let mut pre_present = Some(pre_present);
                 let outcome = surface.present_frame(
                     &mut |pixels, buffer_w, buffer_h| {
-                        // The scene is drawn 1:1 from the buffer's origin. A
-                        // buffer that lags a resize shows its top-left part.
+                        // The buffer's contents are undefined; the clear is the
+                        // GPU pass's `LoadOp::Clear(TRANSPARENT)`.
                         pixels.fill(0);
                         let Some(mut target) = CpuTarget::from_pixels(pixels, buffer_w, buffer_h)
                         else {
                             drawn = Err(anyhow!("a {buffer_w}x{buffer_h} CPU buffer is malformed"));
                             return false;
                         };
+                        // The scene is drawn 1:1 from the buffer's origin. A
+                        // buffer that lags a resize shows its top-left part.
                         target.set_viewport(crate::cpu_raster::Viewport {
                             x: 0.0,
                             y: 0.0,
@@ -224,6 +235,9 @@ impl Renderer {
                             cursor_on,
                             &mut screenshot,
                         );
+                        if drawn.is_ok() {
+                            extend_edges(pixels, [buffer_w, buffer_h], target_size);
+                        }
                         drawn.is_ok()
                     },
                     &mut || {
@@ -233,32 +247,45 @@ impl Renderer {
                     },
                 );
                 if let Some(screenshot) = screenshot.take() {
-                    Self::complete_screenshot_error(
-                        screenshot,
-                        "the window had no buffer to draw the screenshot into".to_string(),
-                    );
+                    if outcome == CpuPresentOutcome::Paced && self.pending_screenshot.is_none() {
+                        // Not drawn yet: the frame that is drawn captures it.
+                        self.pending_screenshot = Some(screenshot);
+                    } else {
+                        Self::complete_screenshot_error(
+                            screenshot,
+                            "the window had no buffer to draw the screenshot into".to_string(),
+                        );
+                    }
                 }
                 drawn?;
                 outcome
             }
             None => {
-                // `resize` also clears.
-                if !scene
-                    .as_mut()
-                    .is_some_and(|scene| scene.resize(width, height))
-                {
-                    *scene = CpuFramebuffer::new(width, height);
-                }
-                let Some(scene) = scene.as_mut() else {
+                if !size_offscreen_frame(
+                    scene,
+                    scene_reservation,
+                    &self.graphics_budget,
+                    width,
+                    height,
+                ) {
                     if let Some(screenshot) = screenshot {
                         Self::complete_screenshot_error(
                             screenshot,
-                            "CPU frame size overflow".to_string(),
+                            "CPU frame too large for the graphics budget".to_string(),
                         );
                     }
+                    if need_prepare {
+                        self.atlas.trim();
+                    }
+                    return Err(anyhow!(
+                        "graphics budget exhausted while creating a {width}x{height} CPU frame"
+                    ));
+                }
+                let Some(scene) = scene.as_mut() else {
                     return Err(anyhow!("a {width}x{height} CPU frame is too large"));
                 };
-                // The clear is the GPU pass's `LoadOp::Clear(TRANSPARENT)`.
+                // The clear is the GPU pass's `LoadOp::Clear(TRANSPARENT)`,
+                // which sizing the frame did.
                 self.draw_cpu_scene(
                     raster.as_mut(),
                     draws,
@@ -271,10 +298,13 @@ impl Renderer {
                 )?;
                 *converted = false;
                 if needs_presentation {
+                    // The budget is charged before the conversion buffer is
+                    // allocated, and both go when a frame no longer needs them.
                     if !self
                         .presentation
                         .ensure_target(super::DeviceRef::Cpu, width, height)
                     {
+                        *presented = None;
                         if need_prepare {
                             self.atlas.trim();
                         }
@@ -286,9 +316,11 @@ impl Renderer {
                         .as_mut()
                         .is_some_and(|presented| presented.resize(width, height))
                     {
+                        *presented = None;
                         *presented = CpuFramebuffer::new(width, height);
                     }
                     let Some(presented) = presented.as_mut() else {
+                        self.presentation.discard_target();
                         return Err(anyhow!("a {width}x{height} CPU frame is too large"));
                     };
                     raster.present(scene, presented);
@@ -304,13 +336,29 @@ impl Renderer {
         if need_prepare {
             self.atlas.trim();
         }
+        *paced = outcome == CpuPresentOutcome::Paced;
         match outcome {
             CpuPresentOutcome::Presented => {
+                // This frame replaced any held one on screen.
+                *held = None;
                 self.frames_presented += 1;
                 self.last_scene = Some(scene_facts);
                 self.commit_painted_cards();
                 Ok(FrameOutcome::Presented)
             }
+            CpuPresentOutcome::Deferred => {
+                // Drawn, and on screen once the loop flushes it: the output
+                // it shows is consumed, but what it painted is not on screen
+                // until the commit (`flush_held_frame`).
+                *held = Some(self.hold_painted(scene_facts));
+                Ok(FrameOutcome::Presented)
+            }
+            CpuPresentOutcome::Unchanged => {
+                // Nothing new to show and nothing committed: the screen
+                // already holds this frame, and the painted state stays.
+                Ok(FrameOutcome::Presented)
+            }
+            CpuPresentOutcome::Paced => Ok(FrameOutcome::Paced),
             CpuPresentOutcome::Occluded => {
                 if !windowed {
                     // Test-only, as for a headless GPU renderer: the frame in
@@ -320,10 +368,16 @@ impl Renderer {
                 }
                 Ok(FrameOutcome::Occluded)
             }
-            CpuPresentOutcome::RetryLater | CpuPresentOutcome::NotDrawn => {
+            CpuPresentOutcome::RetryLater => Ok(FrameOutcome::RetryLater),
+            CpuPresentOutcome::NotDrawn => {
+                // Dropping the frame dropped any held one with it.
+                *held = None;
                 Ok(FrameOutcome::RetryLater)
             }
-            CpuPresentOutcome::Lost => Ok(FrameOutcome::SurfaceLost),
+            CpuPresentOutcome::Lost => {
+                *held = None;
+                Ok(FrameOutcome::SurfaceLost)
+            }
         }
     }
 
@@ -341,21 +395,42 @@ impl Renderer {
         }
     }
 
+    /// Give a CPU window's presenter the surface size and scale. The
+    /// presenter may round the buffer up (an integer-scale Wayland buffer is
+    /// a multiple of the scale); frames are drawn at the surface size and
+    /// repeat their edge into the rest.
+    pub(crate) fn resize_cpu_surface(&mut self) {
+        let (width, height, scale) = (self.config.width, self.config.height, self.scale);
+        if let Some(surface) = self.cpu_surface_mut() {
+            surface.resize(width, height, f64::from(scale));
+            let extent = surface.buffer_size();
+            if extent != (width, height) {
+                log::debug!(
+                    "renderer: CPU buffer {}x{} for a {width}x{height} surface at scale {scale}",
+                    extent.0,
+                    extent.1
+                );
+            }
+        }
+    }
+
     /// The CPU presenter's name (`wl_shm (Wayland)`, ...), or `None` for a
     /// GPU or offscreen renderer.
     pub fn cpu_presenter_name(&self) -> Option<&'static str> {
         self.cpu_surface().map(CpuSurface::describe)
     }
 
-    /// When the window's spare shared-memory buffer has been idle long
-    /// enough to release. A window with nothing to draw wakes then and calls
-    /// [`Self::release_idle_buffers`]. Always `None` on the GPU backend.
+    /// When to call [`Self::release_idle_buffers`] next: possibly now or
+    /// in the past (a spare that is due), else a time the presenter keeps
+    /// until the release runs, so a loop that recomputes it on each wake
+    /// neither spins nor misses it. Always `None` on the GPU backend.
     pub fn idle_release_deadline(&self) -> Option<Instant> {
         self.cpu_surface()?.idle_release_deadline()
     }
 
     /// Release the window's spare shared-memory buffers, keeping the one on
-    /// screen. Returns how many went; 0 on the GPU backend.
+    /// screen (none while occluded). Returns how many went; 0 on the GPU
+    /// backend.
     pub fn release_idle_buffers(&mut self) -> usize {
         self.cpu_surface_mut()
             .map_or(0, CpuSurface::release_idle_buffers)
@@ -371,24 +446,79 @@ impl Renderer {
     }
 
     /// Whether a drawn frame is held for the compositor's frame callback.
-    /// The caller then calls [`Self::flush_held_frame`] when its loop wakes.
+    /// The loop then calls [`Self::flush_held_frame`] each time it wakes.
     pub fn has_held_frame(&self) -> bool {
         self.cpu_surface().is_some_and(CpuSurface::has_deferred)
     }
 
     /// Commit a frame held for the compositor's frame callback, once the
     /// compositor is ready for it, running `pre_present` (winit's
-    /// `pre_present_notify`) just before the commit. Returns whether a frame
-    /// was committed.
-    pub fn flush_held_frame(&mut self, pre_present: impl FnOnce()) -> bool {
+    /// `pre_present_notify`) only for, and just before, the commit. What the
+    /// frame painted ([`Self::painted_cards`]) is on screen from a
+    /// [`HeldFrameFlush::Presented`] on. Call it on the event-loop thread.
+    pub fn flush_held_frame(&mut self, pre_present: impl FnOnce()) -> HeldFrameFlush {
+        let RenderDevice::Cpu(Some(cpu)) = &mut self.device else {
+            return HeldFrameFlush::Nothing;
+        };
+        if cpu.surface.is_none() {
+            return HeldFrameFlush::Nothing;
+        }
+        cpu.note_present_thread();
+        let Some(surface) = cpu.surface.as_mut() else {
+            return HeldFrameFlush::Nothing;
+        };
         let mut pre_present = Some(pre_present);
-        self.cpu_surface_mut().is_some_and(|surface| {
-            surface.flush(&mut || {
-                if let Some(pre_present) = pre_present.take() {
-                    pre_present();
-                }
-            })
-        })
+        let flushed = surface.flush(&mut || {
+            if let Some(pre_present) = pre_present.take() {
+                pre_present();
+            }
+        });
+        let held = match flushed {
+            HeldFrameFlush::Presented | HeldFrameFlush::Failed => cpu.held.take(),
+            HeldFrameFlush::Nothing | HeldFrameFlush::StillHeld => None,
+        };
+        if flushed == HeldFrameFlush::Presented
+            && let Some(held) = held
+        {
+            self.commit_held_paint(held);
+        }
+        flushed
+    }
+
+    /// A frame came back [`FrameOutcome::Paced`] and the presenter can now
+    /// take one: the window should redraw. Checks the events already read,
+    /// so call it when the loop wakes.
+    pub fn cpu_frame_ready(&mut self) -> bool {
+        let RenderDevice::Cpu(Some(cpu)) = &mut self.device else {
+            return false;
+        };
+        let paced = cpu.paced;
+        paced
+            && cpu
+                .surface
+                .as_mut()
+                .is_some_and(|surface| !surface.frame_pending())
+    }
+
+    /// The latest time the loop must wake for this window's presenter: a
+    /// held frame's flush deadline, or, while a paced frame waits, the time
+    /// the compositor's frame callback stops holding frames back. Arm
+    /// `ControlFlow::WaitUntil` with it (or an earlier time). Under
+    /// `ControlFlow::Wait`, winit 0.30's Wayland loop does not run
+    /// `about_to_wait` for a wake that brought only the presenter's frame
+    /// callback; with any `WaitUntil` armed it does, so the held or paced
+    /// frame goes out when the callback arrives. `None` on the GPU backend.
+    pub fn cpu_wake_deadline(&self) -> Option<Instant> {
+        let RenderDevice::Cpu(Some(cpu)) = &self.device else {
+            return None;
+        };
+        let surface = cpu.surface.as_deref()?;
+        let held = surface.pending_deadline();
+        let paced = cpu.paced.then(|| surface.frame_deadline()).flatten();
+        match (held, paced) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// A headless renderer on `backend`, for tests that render one scene
@@ -491,4 +621,172 @@ fn capture_pixels(
         out[y * width as usize..][..w].copy_from_slice(src);
     }
     out
+}
+
+/// Size an offscreen frame to `width` x `height`, cleared to transparent
+/// black. The graphics budget is charged before any allocation, the old
+/// frame and its charge go before a new size is taken, and growth is
+/// fallible ([`CpuFramebuffer::new`]), so a large resize fails cleanly
+/// instead of aborting. `false` leaves no frame.
+fn size_offscreen_frame(
+    frame: &mut Option<CpuFramebuffer>,
+    reservation: &mut Option<GraphicsReservation>,
+    budget: &GraphicsBudget,
+    width: u32,
+    height: u32,
+) -> bool {
+    if let Some(current) = frame.as_mut()
+        && reservation.is_some()
+        && [current.width(), current.height()] == [width, height]
+    {
+        current.pixels_mut().fill(0);
+        return true;
+    }
+    *frame = None;
+    *reservation = None;
+    let Some(bytes) = CpuFramebuffer::bytes_for(width, height) else {
+        return false;
+    };
+    let Some(charge) = crate::present::reserve_scene_target(budget, bytes) else {
+        return false;
+    };
+    let Some(new) = CpuFramebuffer::new(width, height) else {
+        return false;
+    };
+    *frame = Some(new);
+    *reservation = Some(charge);
+    true
+}
+
+/// A buffer larger than the scene (an integer-scale Wayland buffer is
+/// rounded up to a multiple of the scale) repeats the scene's last column
+/// and row into the extra pixels, so its edge shows no seam.
+fn extend_edges(pixels: &mut [u32], [buffer_w, buffer_h]: [u32; 2], [width, height]: [u32; 2]) {
+    let (bw, bh) = (buffer_w as usize, buffer_h as usize);
+    let (w, h) = ((width as usize).min(bw), (height as usize).min(bh));
+    if w == 0 || h == 0 || pixels.len() < bw * bh {
+        return;
+    }
+    if w < bw {
+        for row in pixels[..h * bw].chunks_exact_mut(bw) {
+            let edge = row[w - 1];
+            row[w..].fill(edge);
+        }
+    }
+    if h < bh {
+        let (top, rest) = pixels.split_at_mut(h * bw);
+        let last = &top[(h - 1) * bw..];
+        for row in rest[..(bh - h) * bw].chunks_exact_mut(bw) {
+            row.copy_from_slice(last);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kettle_core::GraphicsLimits;
+
+    const MIB: usize = 1024 * 1024;
+
+    fn one_mib_budget() -> GraphicsBudget {
+        GraphicsBudget::independent(GraphicsLimits {
+            image_bytes: MIB,
+            retained_bytes: MIB,
+            process_gpu_bytes: MIB,
+            ..GraphicsLimits::default()
+        })
+        .expect("valid limits")
+    }
+
+    #[test]
+    fn an_offscreen_frame_is_charged_before_it_is_allocated() {
+        let budget = one_mib_budget();
+        let (mut frame, mut charge) = (None, None);
+        // 400x400 is 640,000 bytes: it fits.
+        assert!(size_offscreen_frame(
+            &mut frame,
+            &mut charge,
+            &budget,
+            400,
+            400
+        ));
+        assert_eq!(frame.as_ref().map(CpuFramebuffer::width), Some(400));
+        // 600x600 does not: nothing is allocated, and the old frame and its
+        // charge are gone.
+        assert!(!size_offscreen_frame(
+            &mut frame,
+            &mut charge,
+            &budget,
+            600,
+            600
+        ));
+        assert!(frame.is_none() && charge.is_none());
+        assert!(size_offscreen_frame(
+            &mut frame,
+            &mut charge,
+            &budget,
+            100,
+            100
+        ));
+        // Only the 40,000-byte frame is charged now.
+        let rest = budget.reserve_retained_gpu(MIB - 40_000);
+        assert!(rest.is_some(), "a shrink gives its charge back");
+        drop(rest);
+        // Two sides at the texture limit are 1 GiB: refused before any
+        // allocation, under any budget.
+        let big = GraphicsBudget::default();
+        assert!(!size_offscreen_frame(
+            &mut frame,
+            &mut charge,
+            &big,
+            crate::cpu_raster::MAX_SIDE,
+            crate::cpu_raster::MAX_SIDE
+        ));
+        assert!(frame.is_none() && charge.is_none());
+    }
+
+    #[test]
+    fn the_same_size_is_cleared_and_kept() {
+        let budget = one_mib_budget();
+        let (mut frame, mut charge) = (None, None);
+        assert!(size_offscreen_frame(&mut frame, &mut charge, &budget, 8, 4));
+        frame.as_mut().expect("a frame").pixels_mut().fill(7);
+        assert!(size_offscreen_frame(&mut frame, &mut charge, &budget, 8, 4));
+        assert!(frame.expect("kept").pixels().iter().all(|&p| p == 0));
+    }
+
+    #[test]
+    fn a_huge_offscreen_resize_fails_the_frame_instead_of_allocating() {
+        let cfg = kettle_config::Config::default();
+        let mut renderer =
+            Renderer::new_cpu_offscreen(64, 32, 1.0, &cfg, None).expect("CPU renderer");
+        renderer.resize(crate::cpu_raster::MAX_SIDE, crate::cpu_raster::MAX_SIDE);
+        let snap = crate::headless_tests::snapshot_of(8, 2, b"x");
+        let result = renderer.render_frame_with_status_and_pre_present(
+            &[crate::headless_tests::pane(&snap, 64, 32)],
+            &crate::TabBar::hidden(),
+            &cfg,
+            &crate::headless_tests::focused(true),
+            &crate::StatusBar::hidden(),
+            || {},
+        );
+        assert!(result.is_err(), "a 1 GiB frame is refused");
+        let cpu = renderer.cpu_backend_for_tests().expect("CPU backend");
+        assert!(cpu.scene.is_none() && cpu.scene_reservation.is_none());
+    }
+
+    #[test]
+    fn edges_repeat_into_a_rounded_buffer() {
+        // A 2x2 scene in a 3x3 buffer.
+        let mut pixels = vec![1, 2, 0, 3, 4, 0, 0, 0, 0];
+        extend_edges(&mut pixels, [3, 3], [2, 2]);
+        assert_eq!(pixels, [1, 2, 2, 3, 4, 4, 3, 4, 4]);
+        // Equal sizes, or a buffer smaller than the scene, change nothing.
+        let mut same = vec![5, 6, 7, 8];
+        extend_edges(&mut same, [2, 2], [2, 2]);
+        assert_eq!(same, [5, 6, 7, 8]);
+        extend_edges(&mut same, [2, 2], [3, 3]);
+        assert_eq!(same, [5, 6, 7, 8]);
+    }
 }

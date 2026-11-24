@@ -273,6 +273,17 @@ impl OutputPaintPacer {
         }
     }
 
+    /// A CPU window's frame was not drawn because the compositor had not
+    /// taken the last one (`FrameOutcome::Paced`). The output stays dirty,
+    /// and the presenter tick (`App::tick_cpu_presenter`) asks winit for the
+    /// redraw once a frame can be drawn, so the redraw counts as queued and
+    /// the pacer does not ask again meanwhile.
+    pub(crate) fn paced(&mut self) {
+        if self.phase == OutputPaintPhase::Presenting {
+            self.phase = OutputPaintPhase::Queued;
+        }
+    }
+
     pub(crate) fn reset(&mut self) {
         self.phase = OutputPaintPhase::Idle;
     }
@@ -2523,6 +2534,28 @@ mod tests {
         assert!(pacer.begin_frame());
         pacer.presented();
         assert!(!pacer.is_deferred());
+    }
+
+    #[test]
+    fn a_paced_frame_keeps_its_output_dirty_and_its_redraw_queued() {
+        let mut pacer = OutputPaintPacer::default();
+        pacer.defer();
+        assert!(pacer.queue_deferred_redraw());
+        assert!(pacer.begin_frame());
+        pacer.paced();
+        assert!(pacer.is_deferred(), "the output was not drawn");
+        assert!(
+            pacer.redraw_queued(),
+            "the presenter tick asks for the redraw; the pacer does not"
+        );
+        assert!(!pacer.queue_deferred_redraw());
+        assert!(pacer.begin_frame(), "the redraw flushes the output");
+        pacer.presented();
+        assert!(!pacer.is_deferred());
+        // A paced frame that drew no output leaves the pacer alone.
+        let mut idle = OutputPaintPacer::default();
+        idle.paced();
+        assert!(!idle.is_deferred());
     }
 
     #[test]

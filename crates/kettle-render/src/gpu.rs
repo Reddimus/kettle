@@ -94,6 +94,13 @@ pub struct GpuFault {
 #[must_use]
 pub enum FrameOutcome {
     /// Queue submission completed and the surface texture was presented.
+    /// A CPU window's frame may instead be drawn and held for the
+    /// compositor's frame callback
+    /// ([`Renderer::has_held_frame`](crate::Renderer::has_held_frame)); the
+    /// loop commits it with
+    /// [`Renderer::flush_held_frame`](crate::Renderer::flush_held_frame), and
+    /// [`Renderer::painted_cards`](crate::Renderer::painted_cards) moves to
+    /// it only then.
     Presented,
     /// Nothing was presented, but the configured surface remains usable.
     /// Retain damage and retry through the caller's deadline-driven backoff.
@@ -105,6 +112,14 @@ pub enum FrameOutcome {
     /// [`Instance::create_surface`](wgpu::Instance::create_surface) before
     /// another frame is attempted. The shared device can remain healthy.
     SurfaceLost,
+    /// A CPU window's compositor has not taken the last frame yet, so this
+    /// one was not drawn: it would only have been held, then drawn over.
+    /// Retain damage. The frame is drawn once
+    /// [`Renderer::cpu_frame_ready`](crate::Renderer::cpu_frame_ready)
+    /// says so, which the loop checks when it wakes; arm
+    /// [`Renderer::cpu_wake_deadline`](crate::Renderer::cpu_wake_deadline)
+    /// so that it does.
+    Paced,
 }
 
 impl GpuContext {
@@ -1476,11 +1491,7 @@ impl Renderer {
             live_surface_dimensions(width, height, self.device.max_texture_dimension_2d());
         self.config.width = width;
         self.config.height = height;
-        if let RenderDevice::Cpu(Some(cpu)) = &mut self.device
-            && let Some(surface) = cpu.surface.as_mut()
-        {
-            surface.resize(width, height, f64::from(self.scale));
-        }
+        self.resize_cpu_surface();
         self.configure_surface();
     }
 
@@ -1497,10 +1508,15 @@ impl Renderer {
         }
         self.last_scene = None;
         self.config.alpha_mode = alpha_mode;
-        if let RenderDevice::Cpu(Some(cpu)) = &mut self.device
-            && let Some(surface) = cpu.surface.as_mut()
-        {
-            surface.set_translucent(alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied);
+        if let RenderDevice::Cpu(Some(cpu)) = &mut self.device {
+            // An offscreen conversion buffer serves only PostMultiplied.
+            if alpha_mode != wgpu::CompositeAlphaMode::PostMultiplied {
+                cpu.presented = None;
+                self.presentation.discard_target();
+            }
+            if let Some(surface) = cpu.surface.as_mut() {
+                surface.set_translucent(alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied);
+            }
         }
         self.configure_surface();
     }

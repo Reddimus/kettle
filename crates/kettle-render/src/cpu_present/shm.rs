@@ -26,7 +26,8 @@ use super::{
 
 /// A frame callback that has not come after this stops holding frames back.
 /// Compositors withhold callbacks from hidden surfaces; a window that is
-/// visible again commits at once through [`ShmPresenter::set_occluded`], and
+/// visible again commits at once through
+/// [`CpuPresenter::set_occluded`](super::CpuPresenter::set_occluded), and
 /// this bounds the wait when nothing reports occlusion. While the callback
 /// is still out, the presenter commits at most once per this interval and
 /// asks for no further callback, so a hidden surface never piles them up.
@@ -426,6 +427,14 @@ impl ShmPresenter {
             return Some(now);
         }
         Some(self.last_commit.map_or(now, |at| at + self.frame_timeout))
+    }
+
+    pub(super) fn frame_deadline(&self) -> Option<Instant> {
+        let now = Instant::now();
+        if self.gate_open(now) {
+            return None;
+        }
+        self.last_commit.map(|at| at + self.frame_timeout)
     }
 
     fn remove(&mut self, ids: Vec<u64>) -> usize {

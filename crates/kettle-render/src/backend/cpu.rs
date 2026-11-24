@@ -236,9 +236,17 @@ pub(crate) fn instance_slice<T>(all: &[T], range: Range<u32>) -> &[T] {
 /// What a presenter reports for one frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CpuPresentOutcome {
-    /// The frame is on screen, or drawn and held for the compositor's next
-    /// frame callback (see [`CpuSurface::flush`]).
+    /// The frame was committed: it is on its way to the screen.
     Presented,
+    /// The frame was drawn but is held for the compositor's frame callback;
+    /// [`CpuSurface::flush`] commits it. Its damage is not lost.
+    Deferred,
+    /// Nothing changed and nothing was pending: no commit.
+    Unchanged,
+    /// The compositor has not taken the last frame yet, so the frame was
+    /// not drawn: drawing it now would only be held, and drawn over by the
+    /// next one. Draw again once [`CpuSurface::frame_pending`] clears.
+    Paced,
     /// The window cannot show it now; keep damage and try later.
     Occluded,
     /// The compositor holds every buffer; draw again later.
@@ -249,11 +257,33 @@ pub(crate) enum CpuPresentOutcome {
     NotDrawn,
 }
 
+/// What flushing a held frame did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeldFrameFlush {
+    /// No frame was held.
+    Nothing,
+    /// The held frame was committed.
+    Presented,
+    /// The compositor is still showing the last frame; the frame stays held
+    /// until [`crate::Renderer::cpu_wake_deadline`].
+    StillHeld,
+    /// The presenter failed; the frame is gone.
+    Failed,
+}
+
 /// A window's shared-memory buffers, as the CPU backend draws into them:
 /// `cpu_present::CpuPresenter` on Linux, a fake in tests.
+///
+/// Frames are presented and flushed on the event loop's thread only: a
+/// Wayland commit applies everything staged on the surface, which the
+/// window system's own code also commits from that thread.
 pub(crate) trait CpuSurface: Send {
     /// The window is now `width` x `height` physical pixels at `scale`.
     fn resize(&mut self, width: u32, height: u32, scale: f64);
+
+    /// The size the next buffer gets, which may round the window's size up
+    /// (an integer-scale Wayland buffer is a multiple of the scale).
+    fn buffer_size(&self) -> (u32, u32);
 
     /// Whether the window can show premultiplied alpha.
     fn supports_translucency(&self) -> bool;
@@ -263,8 +293,10 @@ pub(crate) trait CpuSurface: Send {
     fn set_translucent(&mut self, translucent: bool) -> bool;
 
     /// Draw the next buffer with `draw` (its pixels, width and height,
-    /// whose contents are undefined) and present it with `pre_commit` run
-    /// just before the commit. `draw` returns `false` to drop the frame.
+    /// whose contents are undefined) and present it, running `pre_commit`
+    /// only if, and just before, the frame is committed. `draw` returns
+    /// `false` to drop the frame. While [`Self::frame_pending`] holds, the
+    /// frame is not drawn at all ([`CpuPresentOutcome::Paced`]).
     fn present_frame(
         &mut self,
         draw: &mut dyn FnMut(&mut [u32], u32, u32) -> bool,
@@ -272,16 +304,26 @@ pub(crate) trait CpuSurface: Send {
     ) -> CpuPresentOutcome;
 
     /// Commit a frame held for the compositor's frame callback, if it is
-    /// ready for it. Returns whether something was committed.
-    fn flush(&mut self, pre_commit: &mut dyn FnMut()) -> bool;
+    /// ready for it, running `pre_commit` only for a commit.
+    fn flush(&mut self, pre_commit: &mut dyn FnMut()) -> HeldFrameFlush;
 
     /// A frame is drawn but not yet committed.
     fn has_deferred(&self) -> bool;
 
+    /// While a frame is held, the latest time to flush it.
+    fn pending_deadline(&self) -> Option<Instant>;
+
+    /// The compositor has not taken the last frame: a frame presented now
+    /// would be held.
+    fn frame_pending(&mut self) -> bool;
+
+    /// While [`Self::frame_pending`], when it stops holding frames back.
+    fn frame_deadline(&self) -> Option<Instant>;
+
     /// Release spare buffers now; returns how many went.
     fn release_idle_buffers(&mut self) -> usize;
 
-    /// When a spare buffer becomes idle enough to release.
+    /// When to call [`Self::release_idle_buffers`] next (possibly now).
     fn idle_release_deadline(&self) -> Option<Instant>;
 
     /// The window is hidden, or visible again.
@@ -297,6 +339,9 @@ pub(crate) struct CpuBackend {
     /// draws into. A windowed renderer draws into its surface's buffer
     /// instead, and keeps none.
     pub(crate) scene: Option<CpuFramebuffer>,
+    /// The graphics budget's charge for `scene`, taken before it is
+    /// allocated and released with it.
+    pub(crate) scene_reservation: Option<kettle_core::GraphicsReservation>,
     /// The scene's straight-alpha conversion, for a translucent
     /// `PostMultiplied` offscreen surface.
     pub(crate) presented: Option<CpuFramebuffer>,
@@ -305,6 +350,14 @@ pub(crate) struct CpuBackend {
     pub(crate) raster: Box<dyn CpuRaster>,
     /// `None` for an offscreen renderer.
     pub(crate) surface: Option<Box<dyn CpuSurface>>,
+    /// What the frame held for the compositor's frame callback painted,
+    /// committed with it.
+    pub(crate) held: Option<crate::terminal::HeldPaint>,
+    /// A frame was not drawn because the compositor had not taken the last
+    /// one ([`CpuPresentOutcome::Paced`]); it is drawn once it can be.
+    pub(crate) paced: bool,
+    /// The thread that presents, which must stay the event loop's.
+    pub(crate) present_thread: Option<std::thread::ThreadId>,
     /// The draws of the last scene pass.
     pub(crate) draws: Vec<CpuDrawRecord>,
 }
@@ -313,11 +366,41 @@ impl CpuBackend {
     pub(crate) fn new(surface: Option<Box<dyn CpuSurface>>) -> Self {
         Self {
             scene: None,
+            scene_reservation: None,
             presented: None,
             converted: false,
             raster: Box::new(super::cpu_draw::SoftRaster::new()),
             surface,
+            held: None,
+            paced: false,
+            present_thread: None,
             draws: Vec::new(),
+        }
+    }
+
+    /// Note that the window's frames are presented from this thread. Every
+    /// present and flush must come from the same one, winit's event-loop
+    /// thread (see `cpu_present`'s module docs): a debug build panics on a
+    /// second thread, a release build logs it once.
+    pub(crate) fn note_present_thread(&mut self) {
+        let current = std::thread::current().id();
+        match self.present_thread {
+            None => self.present_thread = Some(current),
+            Some(thread) if thread == current => {}
+            Some(thread) => {
+                debug_assert!(
+                    false,
+                    "a CPU window presented from {current:?} after {thread:?}: \
+                     present only on the event-loop thread"
+                );
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| {
+                    log::error!(
+                        "renderer: a CPU window was presented from a second thread; \
+                         present only on the event-loop thread"
+                    );
+                });
+            }
         }
     }
 }
@@ -388,6 +471,25 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn presenting_from_a_second_thread_is_refused() {
+        let mut backend = CpuBackend::new(None);
+        backend.note_present_thread();
+        backend.note_present_thread();
+        let second = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        backend.note_present_thread();
+                    }))
+                })
+                .join()
+                .expect("the thread finishes")
+        });
+        assert!(second.is_err(), "a second presenting thread is a bug");
     }
 
     #[test]

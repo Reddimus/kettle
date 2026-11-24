@@ -12,8 +12,9 @@ use super::PixelFormat;
 /// holds it a frame longer, so drawing never waits for a release.
 pub const MAX_BUFFERS: usize = 3;
 
-/// A spare buffer unused for this long is released by
-/// [`SlotBook::idle_spares`], so an idle window holds one buffer.
+/// A spare buffer unused for this long is released (see
+/// [`CpuPresenter::idle_release_deadline`](super::CpuPresenter::idle_release_deadline)),
+/// so an idle window holds one buffer.
 pub const IDLE_RELEASE: Duration = Duration::from_secs(1);
 
 /// How long after its last use a spare the compositor still holds keeps

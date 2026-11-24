@@ -57,6 +57,10 @@ use srgb::unorm8;
 pub(crate) const MAX_SIDE: u32 = 16_384;
 /// The largest texture this module will hold or borrow, in bytes.
 pub(crate) const MAX_TEXTURE_BYTES: usize = 512 * 1024 * 1024;
+/// The largest framebuffer, in bytes: the scene-target cap
+/// (`present::reserve_scene_target`) and the window presenter's buffer cap.
+/// An 8K frame fits; two sides at [`MAX_SIDE`] (1 GiB) do not.
+pub(crate) const MAX_FRAMEBUFFER_BYTES: usize = 256 * 1024 * 1024;
 
 /// Pack sRGB-encoded RGB and linear alpha bytes.
 #[inline(always)]
@@ -120,14 +124,18 @@ pub(crate) struct CpuFramebuffer {
 }
 
 impl CpuFramebuffer {
-    /// A transparent-black framebuffer, `None` when a side is zero or past
-    /// [`MAX_SIDE`].
+    /// A transparent-black framebuffer. `None` when a side is zero or past
+    /// [`MAX_SIDE`], the frame is past [`MAX_FRAMEBUFFER_BYTES`], or the
+    /// allocation fails: growth is fallible, never an abort.
     pub(crate) fn new(width: u32, height: u32) -> Option<Self> {
         let len = Self::len_for(width, height)?;
+        let mut pixels = Vec::new();
+        pixels.try_reserve_exact(len).ok()?;
+        pixels.resize(len, 0);
         Some(Self {
             width,
             height,
-            pixels: vec![0; len],
+            pixels,
         })
     }
 
@@ -150,11 +158,18 @@ impl CpuFramebuffer {
         })
     }
 
+    /// The bytes a `width` x `height` framebuffer takes, or `None` past the
+    /// side or byte caps.
+    pub(crate) fn bytes_for(width: u32, height: u32) -> Option<usize> {
+        Self::len_for(width, height)?.checked_mul(4)
+    }
+
     fn len_for(width: u32, height: u32) -> Option<usize> {
         if width == 0 || height == 0 || width > MAX_SIDE || height > MAX_SIDE {
             return None;
         }
-        usize::try_from(u64::from(width) * u64::from(height)).ok()
+        let len = usize::try_from(u64::from(width) * u64::from(height)).ok()?;
+        (len.checked_mul(4)? <= MAX_FRAMEBUFFER_BYTES).then_some(len)
     }
 
     pub(crate) fn width(&self) -> u32 {
@@ -175,16 +190,35 @@ impl CpuFramebuffer {
     }
 
     /// Change the size, keeping the allocation where it fits. The contents
-    /// become transparent black. `false` leaves it unchanged.
+    /// become transparent black. Growth is fallible, and a frame less than
+    /// half its allocation gives the rest back. `false` leaves the size
+    /// unchanged (past the caps, or out of memory), with the contents
+    /// cleared.
     pub(crate) fn resize(&mut self, width: u32, height: u32) -> bool {
+        self.pixels.clear();
         let Some(len) = Self::len_for(width, height) else {
+            self.pixels
+                .resize(self.width as usize * self.height as usize, 0);
             return false;
         };
-        self.pixels.clear();
+        if self.pixels.try_reserve_exact(len).is_err() {
+            self.pixels
+                .resize(self.width as usize * self.height as usize, 0);
+            return false;
+        }
+        if len < self.pixels.capacity() / 2 {
+            self.pixels.shrink_to(len);
+        }
         self.pixels.resize(len, 0);
         self.width = width;
         self.height = height;
         true
+    }
+
+    /// The bytes this framebuffer holds allocated.
+    #[cfg(test)]
+    pub(crate) fn allocated_bytes(&self) -> usize {
+        self.pixels.capacity() * 4
     }
 
     #[cfg(test)]
@@ -1006,6 +1040,36 @@ mod tests {
             many.draw_banded(bands, draw);
             assert_eq!(many, one, "{bands} bands");
         }
+    }
+
+    #[test]
+    fn framebuffers_are_capped_and_give_memory_back() {
+        // Two sides at the limit are 1 GiB: refused before any allocation.
+        assert!(CpuFramebuffer::new(MAX_SIDE, MAX_SIDE).is_none());
+        assert_eq!(CpuFramebuffer::bytes_for(MAX_SIDE, MAX_SIDE), None);
+        // 8192x8192 is exactly the cap.
+        assert_eq!(
+            CpuFramebuffer::bytes_for(8192, 8192),
+            Some(MAX_FRAMEBUFFER_BYTES)
+        );
+        assert_eq!(CpuFramebuffer::bytes_for(8192, 8193), None);
+        let mut fb = CpuFramebuffer::new(1000, 1000).expect("4 MB");
+        assert!(
+            !fb.resize(MAX_SIDE, MAX_SIDE),
+            "a resize past the cap fails"
+        );
+        assert_eq!(
+            (fb.width(), fb.height()),
+            (1000, 1000),
+            "and keeps the size"
+        );
+        assert!(fb.resize(100, 100));
+        assert!(
+            fb.allocated_bytes() < 1000 * 1000 * 4 / 2,
+            "a shrink gives most of the memory back: {} bytes",
+            fb.allocated_bytes()
+        );
+        assert!(fb.pixels().iter().all(|&p| p == 0));
     }
 
     #[test]

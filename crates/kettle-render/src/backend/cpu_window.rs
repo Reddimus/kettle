@@ -3,7 +3,7 @@
 
 use std::time::Instant;
 
-use super::cpu::{CpuPresentOutcome, CpuSurface};
+use super::cpu::{CpuPresentOutcome, CpuSurface, HeldFrameFlush};
 use crate::cpu_present::{
     CpuPresenter, FrameError, PixelFormat, PresentOutcome, PresenterKind, Rect,
 };
@@ -11,6 +11,10 @@ use crate::cpu_present::{
 impl CpuSurface for CpuPresenter {
     fn resize(&mut self, width: u32, height: u32, scale: f64) {
         CpuPresenter::resize(self, width, height, scale);
+    }
+
+    fn buffer_size(&self) -> (u32, u32) {
+        self.size()
     }
 
     fn supports_translucency(&self) -> bool {
@@ -31,6 +35,12 @@ impl CpuSurface for CpuPresenter {
         draw: &mut dyn FnMut(&mut [u32], u32, u32) -> bool,
         pre_commit: &mut dyn FnMut(),
     ) -> CpuPresentOutcome {
+        // A frame drawn now would only be held until the compositor's frame
+        // callback, then drawn over by the next one: draw the latest state
+        // once the callback has come instead.
+        if self.frame_pending() {
+            return CpuPresentOutcome::Paced;
+        }
         let mut frame = match self.buffer_mut() {
             Ok(frame) => frame,
             Err(FrameError::Busy) => return CpuPresentOutcome::RetryLater,
@@ -48,9 +58,9 @@ impl CpuSurface for CpuPresenter {
             return CpuPresentOutcome::NotDrawn;
         }
         match frame.present_with(&damage, pre_commit) {
-            Ok(
-                PresentOutcome::Presented | PresentOutcome::Deferred | PresentOutcome::Unchanged,
-            ) => CpuPresentOutcome::Presented,
+            Ok(PresentOutcome::Presented) => CpuPresentOutcome::Presented,
+            Ok(PresentOutcome::Deferred) => CpuPresentOutcome::Deferred,
+            Ok(PresentOutcome::Unchanged) => CpuPresentOutcome::Unchanged,
             Err(error) => {
                 log::warn!("CPU present failed: {error:#}");
                 CpuPresentOutcome::Lost
@@ -58,18 +68,36 @@ impl CpuSurface for CpuPresenter {
         }
     }
 
-    fn flush(&mut self, pre_commit: &mut dyn FnMut()) -> bool {
+    fn flush(&mut self, pre_commit: &mut dyn FnMut()) -> HeldFrameFlush {
+        if !self.has_deferred() {
+            return HeldFrameFlush::Nothing;
+        }
         match self.flush_with(pre_commit) {
-            Ok(outcome) => outcome == PresentOutcome::Presented,
+            Ok(PresentOutcome::Presented) => HeldFrameFlush::Presented,
+            Ok(PresentOutcome::Deferred) => HeldFrameFlush::StillHeld,
+            // The held frame went with an abandoned draw: nothing to commit.
+            Ok(PresentOutcome::Unchanged) => HeldFrameFlush::Nothing,
             Err(error) => {
                 log::warn!("CPU present: flushing a held frame failed: {error:#}");
-                false
+                HeldFrameFlush::Failed
             }
         }
     }
 
     fn has_deferred(&self) -> bool {
         CpuPresenter::has_deferred(self)
+    }
+
+    fn pending_deadline(&self) -> Option<Instant> {
+        CpuPresenter::pending_deadline(self)
+    }
+
+    fn frame_pending(&mut self) -> bool {
+        CpuPresenter::frame_pending(self)
+    }
+
+    fn frame_deadline(&self) -> Option<Instant> {
+        CpuPresenter::frame_deadline(self)
     }
 
     fn release_idle_buffers(&mut self) -> usize {

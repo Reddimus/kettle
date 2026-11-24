@@ -27,6 +27,7 @@ mod cpu_window;
 pub(crate) mod layers;
 pub(crate) mod text;
 
+pub use cpu::HeldFrameFlush;
 pub(crate) use cpu_renderer::CpuFrameRequest;
 
 #[cfg(test)]

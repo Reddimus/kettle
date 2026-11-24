@@ -625,6 +625,30 @@ impl Renderer {
         self.painted_bidi.clone_from(&self.drawn_bidi);
     }
 
+    /// What this frame painted, kept aside while the frame is held for the
+    /// compositor (a CPU window's deferred frame): it reaches
+    /// [`Self::commit_painted_cards`]'s state only when the frame is
+    /// committed, so a frame built meanwhile and not drawn cannot stand in
+    /// for it.
+    pub(crate) fn hold_painted(&self, scene: crate::cursor_patch::SceneFacts) -> HeldPaint {
+        debug_assert_eq!(self.drawn_cards.len(), self.card_scene.shown.len());
+        HeldPaint {
+            cards: self.drawn_cards.clone(),
+            shown: self.card_scene.shown.clone(),
+            bidi: self.drawn_bidi.clone(),
+            scene,
+        }
+    }
+
+    /// A held frame reached the screen: what it painted is now on screen.
+    pub(crate) fn commit_held_paint(&mut self, held: HeldPaint) {
+        self.painted_cards = held.cards;
+        self.painted_shown = held.shown;
+        self.painted_bidi = held.bidi;
+        self.last_scene = Some(held.scene);
+        self.frames_presented += 1;
+    }
+
     /// The bidi layout of viewport row `row` in the pane drawn at `terminal`
     /// on screen, or `None` when that row is shown in logical order.
     pub fn painted_row_bidi(
@@ -2592,4 +2616,12 @@ fn push_gapped_line(
         }
         sx += pitch;
     }
+}
+
+/// A held frame's painted state; see [`Renderer::hold_painted`].
+pub(crate) struct HeldPaint {
+    cards: Vec<PaintedCard>,
+    shown: Vec<bool>,
+    bidi: Vec<crate::PaintedBidi>,
+    scene: crate::cursor_patch::SceneFacts,
 }

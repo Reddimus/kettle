@@ -1216,6 +1216,14 @@ impl App {
                         ws.frame_recovery
                             .schedule_transient_retry(std::time::Instant::now());
                     }
+                    FrameOutcome::Paced => {
+                        debug_assert!(!presented);
+                        // A CPU window's compositor still shows the last
+                        // frame, so nothing was drawn and the damage stays.
+                        // The presenter tick asks for the redraw once the
+                        // frame callback comes (`tick_cpu_presenter`).
+                        ws.output_pacer.paced();
+                    }
                     FrameOutcome::Occluded => {
                         debug_assert!(!presented);
                         ws.output_pacer.presentation_failed();

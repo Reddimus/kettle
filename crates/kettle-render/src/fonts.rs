@@ -629,6 +629,9 @@ impl Renderer {
         self.scale = s;
         self.metrics = metrics_for(self.font_size, s);
         self.remeasure_cell();
+        // A CPU window's buffer extent depends on the scale (an integer
+        // scale rounds it up to a multiple), even at an unchanged size.
+        self.resize_cpu_surface();
     }
 
     /// Update the primary font family and re-measure the cell. Called by

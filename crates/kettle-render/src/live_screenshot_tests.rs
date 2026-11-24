@@ -64,8 +64,17 @@ fn cards_reach_the_screen_only_with_a_presented_frame() {
         present < commits[1],
         "only a presented frame shows its cards"
     );
+    // A CPU window's held frame puts what it painted on screen when the loop
+    // commits it, and only there.
+    let held = src
+        .split("pub(crate) fn commit_held_paint(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    }\n").next())
+        .expect("commit_held_paint");
     for field in ["painted_cards", "painted_shown"] {
-        assert_eq!(src.matches(&format!("self.{field} =")).count(), 0);
+        let assigned = format!("self.{field} = held.");
+        assert_eq!(src.matches(&format!("self.{field} =")).count(), 1);
+        assert!(held.contains(&assigned), "{assigned} in commit_held_paint");
         assert_eq!(src.matches(&format!("{field}.extend(")).count(), 0);
         assert_eq!(src.matches(&format!("{field}.push(")).count(), 0);
         assert_eq!(

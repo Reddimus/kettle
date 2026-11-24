@@ -4,28 +4,35 @@
 //! (`kettle_render::preferred_backend`); every later window follows it. A
 //! CPU window has no GPU context, so the app's `gpu` stays `None` and
 //! `cpu_rendering` records that windows can still be opened. Its presenter
-//! needs three things from the event loop:
+//! needs four things from the event loop, all on the loop's own thread:
 //!
 //! - a frame held for the compositor's frame callback is committed when the
 //!   loop wakes ([`Renderer::flush_held_frame`]);
+//! - a frame that was not drawn because the compositor had not taken the
+//!   last one (`FrameOutcome::Paced`) is redrawn, from the latest state, once
+//!   it can be ([`Renderer::cpu_frame_ready`]);
+//! - for both, the loop waits with `ControlFlow::WaitUntil`
+//!   ([`Renderer::cpu_wake_deadline`]): under plain `Wait`, winit 0.30 does
+//!   not run `about_to_wait` for a wake that brought only the presenter's
+//!   frame callback, and the frame would stay off screen until some other
+//!   event;
 //! - a spare buffer is released once it has been idle
-//!   ([`Renderer::idle_release_deadline`]);
-//! - occlusion is forwarded, so a hidden window keeps no buffer.
+//!   ([`Renderer::idle_release_deadline`], recomputed on every wake), and
+//!   occlusion is forwarded, so a hidden window keeps no buffer.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use kettle_render::{Renderer, RendererBackend};
+use kettle_render::{HeldFrameFlush, Renderer, RendererBackend};
 use winit::window::Window;
 
 use super::App;
 use crate::window_state::WindowState;
 
-/// How long a held frame may wait before the loop tries it again when no
-/// frame callback has woken it: the presenter's own callback timeout.
-const HELD_FRAME_RETRY: Duration = Duration::from_secs(1);
-/// The soonest the loop looks at an idle spare buffer again.
-const IDLE_RECHECK: Duration = Duration::from_millis(250);
+/// The wake a presenter deadline gets when it is not in the future, which
+/// the presenter's contract rules out: a floor, so a broken one cannot spin
+/// the loop.
+const PAST_DEADLINE_FLOOR: Duration = Duration::from_millis(16);
 
 impl App {
     /// Whether window 1's renderer is up, so later windows, the quick
@@ -42,12 +49,38 @@ impl App {
         if renderer.backend() != RendererBackend::Cpu {
             return None;
         }
-        cpu_presenter_tick(renderer, now, || {
+        let tick = cpu_presenter_tick(renderer, now, || {
             if let Some(window) = &window {
                 window.pre_present_notify();
             }
-        })
+        });
+        if tick.committed
+            && ws
+                .card_sightings
+                .note(renderer.painted_cards(), Instant::now())
+        {
+            // The held frame put its cards on screen.
+            ws.accessibility_pending = true;
+            ws.card_hover_stale = true;
+        }
+        if tick.redraw
+            && let Some(window) = &window
+        {
+            window.request_redraw();
+        }
+        tick.wake
     }
+}
+
+/// What one presenter tick did.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PresenterTick {
+    /// A held frame was committed.
+    committed: bool,
+    /// A paced frame can be drawn now: the window should redraw.
+    redraw: bool,
+    /// When the loop must wake for the presenter next.
+    wake: Option<Instant>,
 }
 
 /// The presenter half of [`App::tick_cpu_presenter`], for any renderer.
@@ -55,10 +88,12 @@ fn cpu_presenter_tick(
     renderer: &mut Renderer,
     now: Instant,
     pre_present: impl FnOnce(),
-) -> Option<Instant> {
+) -> PresenterTick {
+    let mut tick = PresenterTick::default();
     if renderer.has_held_frame() {
-        renderer.flush_held_frame(pre_present);
+        tick.committed = renderer.flush_held_frame(pre_present) == HeldFrameFlush::Presented;
     }
+    tick.redraw = renderer.cpu_frame_ready();
     if renderer
         .idle_release_deadline()
         .is_some_and(|deadline| deadline <= now)
@@ -66,23 +101,25 @@ fn cpu_presenter_tick(
         let released = renderer.release_idle_buffers();
         log::debug!("renderer: released {released} idle CPU buffer(s)");
     }
-    next_presenter_wake(
-        renderer.idle_release_deadline(),
-        renderer.has_held_frame(),
-        now,
-    )
+    // Recomputed after the release: the presenter keeps a spare it could
+    // not release on a deadline that stays put until it comes due.
+    let idle = renderer.idle_release_deadline();
+    let frame = renderer.cpu_wake_deadline();
+    tick.wake = [idle, frame]
+        .into_iter()
+        .flatten()
+        .map(|deadline| future_or_floor(deadline, now))
+        .min();
+    tick
 }
 
-/// When the loop must next service a presenter: its idle deadline, at least
-/// [`IDLE_RECHECK`] away (a spare the compositor still holds cannot go yet,
-/// and a deadline in the past would spin the loop), and a retry for a held
-/// frame.
-fn next_presenter_wake(idle: Option<Instant>, held: bool, now: Instant) -> Option<Instant> {
-    let idle = idle.map(|deadline| deadline.max(now + IDLE_RECHECK));
-    let held = held.then_some(now + HELD_FRAME_RETRY);
-    match (idle, held) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
+/// `deadline`, or [`PAST_DEADLINE_FLOOR`] from `now` when it is not in the
+/// future.
+fn future_or_floor(deadline: Instant, now: Instant) -> Instant {
+    if deadline > now {
+        deadline
+    } else {
+        now + PAST_DEADLINE_FLOOR
     }
 }
 
@@ -163,32 +200,25 @@ mod tests {
     #[test]
     fn a_renderer_without_a_presenter_needs_no_wake() {
         let mut renderer = cpu_renderer();
-        let wake = cpu_presenter_tick(&mut renderer, Instant::now(), || {
+        let tick = cpu_presenter_tick(&mut renderer, Instant::now(), || {
             panic!("nothing is held, so nothing is committed")
         });
-        assert_eq!(wake, None);
+        assert_eq!(tick, PresenterTick::default());
     }
 
     #[test]
-    fn a_presenter_never_asks_for_a_wake_in_the_past() {
+    fn a_presenter_deadline_is_kept_unless_it_has_passed() {
         let now = Instant::now();
-        assert_eq!(next_presenter_wake(None, false, now), None);
-        let past = now - Duration::from_secs(5);
-        assert_eq!(
-            next_presenter_wake(Some(past), false, now),
-            Some(now + IDLE_RECHECK),
-            "a spare that could not be released is looked at again later"
-        );
         let later = now + Duration::from_secs(3);
-        assert_eq!(next_presenter_wake(Some(later), false, now), Some(later));
+        assert_eq!(future_or_floor(later, now), later, "never clamped later");
         assert_eq!(
-            next_presenter_wake(Some(later), true, now),
-            Some(now + HELD_FRAME_RETRY),
-            "a held frame is retried first"
+            future_or_floor(now, now),
+            now + PAST_DEADLINE_FLOOR,
+            "a deadline that is due cannot spin the loop"
         );
         assert_eq!(
-            next_presenter_wake(None, true, now),
-            Some(now + HELD_FRAME_RETRY)
+            future_or_floor(now - Duration::from_secs(5), now),
+            now + PAST_DEADLINE_FLOOR
         );
     }
 
@@ -225,9 +255,15 @@ mod tests {
             .split_once("fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {")
             .expect("about_to_wait")
             .1;
+        let serviced = tick
+            .find("Self::tick_cpu_presenter(&mut ws, now)")
+            .expect("about_to_wait services each CPU window's presenter");
+        let armed = tick[serviced..]
+            .find("ControlFlow::WaitUntil(deadline)")
+            .expect("the presenter's wake reaches the control flow");
         assert!(
-            tick.contains("Self::tick_cpu_presenter(&mut ws, now)"),
-            "about_to_wait services each CPU window's presenter"
+            tick[serviced..serviced + armed].contains("earliest_deadline"),
+            "the presenter's deadline is merged into the loop's wait"
         );
         let events = include_str!("window_events.rs");
         let occluded = events
