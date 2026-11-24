@@ -585,6 +585,23 @@ Linux the `--screenshot` integration tests (`bell_visual`, `menu_visual`,
 `backend::cpu_draw::tests` checks that banding and the wallpaper cache leave
 pixels unchanged.
 
+`backend::cpu_damage_tests` (Linux) is the damage-tracking equivalence
+harness. It drives a real CPU window renderer through seeded random
+sessions of typing, cursor moves and blinks, selection drags, scrolling,
+resizes, themes, opacity, Settings, tab switches, splits, toasts, the
+search bar, small and large translucent image placements, the starfield,
+font size and HiDPI scale. Frames go to a fake surface of up to three
+buffers that a model compositor holds and releases, with the presenter's
+own buffer-age history, and every pixel the renderer must repaint is filled
+with garbage first. After every frame the presented buffer must equal a full
+repaint of the same frame by a second rasterizer, byte for byte.
+`KETTLE_DAMAGE_SEEDS` and `KETTLE_DAMAGE_STEPS` (default 3 and 70) lengthen
+the run. The module also checks that typing and a blink repaint a few cells
+at scale 1 and 2, and that `KETTLE_CPU_FULL_REPAINT`'s switch repaints every
+frame whole. `damage_frame_cost` (ignored) times a typed character and a blink
+at 1600x1000 and 3840x2160 with and without damage tracking; run it with
+`--ignored --nocapture` in an optimized build.
+
 `cpu_present::tests` and `cpu_present::proto_tests` test the Linux presenter.
 The protocol tests run it against an in-process Wayland compositor
 (`cpu_present::test_wl`, wayland-server) that records each commit's pixels

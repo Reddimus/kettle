@@ -3922,6 +3922,32 @@ text areas for glyphon. Its `RendererBackend` decides what executes them.
   parallelism); the result is bit-identical. A large image drawn unchanged
   two frames running (the wallpaper) is cached at its drawn size and copied
   after that, since its four-tap filter costs 30–40 ms a full-screen frame.
+- **Damage tracking (`backend::cpu_damage`).** A window frame repaints only
+  what changed since the frame its buffer holds.
+  - Before drawing, the scene pass runs once more as a *signing* pass
+    (`CpuPass::signing`): every instance of every draw is hashed with what its
+    pipeline reads (its bytes, the pipeline, screen size and scissor, the
+    glyph atlas's dimensions and reuse epoch, an image's allocation, a glyphon
+    raster's id, and the rasterizer's choice of path from `CpuRaster::plan`,
+    such as drawing a wallpaper from its cache), and folded in draw order into
+    every 32x32 tile its footprint (`cpu_raster::rasterize`) touches.
+  - Tiles whose hash differs from the last drawn frame's are the damage,
+    reduced to at most 12 rectangles. The presenter widens it by the buffer's
+    age (`repaint_region`); the raster pass clears those rectangles, made
+    disjoint, and draws each draw once per rectangle with its scissor
+    intersected (`CpuRaster::draw_clipped`); the frame's own damage is
+    presented. A frame with no damage commits nothing.
+  - A frame is repainted in full when no frame can be compared (the first, a
+    resize, a format change, a buffer rounded past the scene), for a pending
+    screenshot, and when `KETTLE_CPU_FULL_REPAINT=1` is set, the diagnostic
+    switch. A whole-grid scroll changes every row, so it repaints the pane.
+  - The glyph atlas bumps its epoch (unique across pipelines) when a slot is
+    freed or the packer resets, because a reused slot leaves an instance's
+    bytes unchanged over new texels. Image allocations are pinned weakly
+    for the frame that is compared with, so an address cannot be reused and
+    an edited image moves (as for the GPU image cache).
+  - Per-frame damage, repainted area and the signing and raster times are
+    logged at trace level on the `kettle_render::cpu_damage` target.
 - **Frame tail.** A window frame is drawn straight into the presenter's
   shared-memory buffer (`CpuSurface::present_frame`), with no scene copy, and
   winit's `pre_present_notify` runs as the commit's pre-commit hook. A
