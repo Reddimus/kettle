@@ -570,9 +570,31 @@ by more than 2. It needs a GPU adapter (lavapipe in CI); set
 `KETTLE_CPU_PARITY_DUMP=<dir>` to save each pair as PNGs. The same module
 drives the window path through a fake `CpuSurface`: the frame is drawn into
 the presenter's buffer, `pre_present` runs once at the commit, and opacity,
-idle release, occlusion and resize reach the presenter.
+idle release, occlusion, resize and scale reach the presenter. It also covers
+the presenter's pacing contract: a held (deferred) frame runs `pre_present`
+only when `flush_held_frame` commits it; painted cards move only on a real
+commit, never on an unchanged or held frame; a frame built while the
+compositor still holds the last one is not drawn (`FrameOutcome::Paced`)
+until `cpu_frame_ready`, and a screenshot waits for the frame that is drawn;
+and a buffer rounded up past the window repeats its edge. The chrome scene
+compares a tab title, which only the CPU text compositor draws, and
+`screenshot_scenes_draw_the_same_on_the_cpu_and_the_gpu` renders the four
+`kettle --screenshot` scenes with `renderer = cpu` and `renderer = gpu`. On
+Linux the `--screenshot` integration tests (`bell_visual`, `menu_visual`,
+`scrollbar_visual`) use the default renderer, which is the CPU.
 `backend::cpu_draw::tests` checks that banding and the wallpaper cache leave
 pixels unchanged.
+
+`cpu_present::tests` and `cpu_present::proto_tests` test the Linux presenter.
+The protocol tests run it against an in-process Wayland compositor
+(`cpu_present::test_wl`, wayland-server) that records each commit's pixels
+and damage and holds frame callbacks and buffers until the test lets them
+go. They need libwayland-client at run time and skip without it. One X11
+test checks that opaque frames on a depth-32 window are sent with alpha
+0xff; it needs an X server named by `KETTLE_TEST_X11_DISPLAY` (for example
+`Xvfb :91 -screen 0 640x480x24` and `KETTLE_TEST_X11_DISPLAY=:91`), and
+skips when that is unset. It reads only that variable, never `DISPLAY`, so
+it cannot draw on a desktop session.
 
 ### Host requirements and skipped tests
 

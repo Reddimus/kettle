@@ -3930,11 +3930,36 @@ text areas for glyphon. Its `RendererBackend` decides what executes them.
   `CpuFramebuffer` and converts to straight alpha for a `PostMultiplied`
   surface. A pending screenshot is copied from either through the same
   persistence pool.
-- **The window loop.** kettle-ui commits a frame the presenter held for the
-  compositor's frame callback when the loop wakes, releases an idle spare
-  buffer at `idle_release_deadline`, and forwards `Occluded` to
-  `set_occluded`. GPU device recovery never runs for CPU windows; a lost
-  presenter rebuilds the window's CPU renderer.
+- **The window loop.** All of it runs on winit's event-loop thread, the
+  only thread that presents (a debug build panics on a second one).
+  - A frame is not drawn while the compositor still holds the last one:
+    the renderer returns `FrameOutcome::Paced`, the output stays dirty, and
+    `about_to_wait` asks for the redraw once `cpu_frame_ready` says the
+    frame can be drawn, so it is drawn from the latest state instead of
+    being drawn, held and drawn over.
+  - A frame the presenter did hold (`has_held_frame`, a race with the
+    callback) is committed by `flush_held_frame` when the loop wakes. The
+    pre-present hook runs only for a real commit, and painted cards move to
+    a frame only when it is committed: a held frame's at its flush, never an
+    unchanged frame's.
+  - For both, `about_to_wait` merges `cpu_wake_deadline` into its
+    `ControlFlow::WaitUntil`, so the wake that brings only the presenter's
+    frame callback runs an iteration (see below).
+  - The idle-release deadline is recomputed on every wake and released
+    when due; it is never clamped later. A deadline that is not in the
+    future gets a 16 ms floor, only as a guard against spinning.
+  - `Occluded` is forwarded to `set_occluded`. GPU device recovery never
+    runs for CPU windows; a lost presenter rebuilds the window's CPU
+    renderer.
+- **Sizes and memory.** The presenter gets the scale with every resize and
+  scale change. A buffer it rounds up (an integer-scale Wayland buffer is a
+  multiple of the scale) repeats the frame's last column and row. Offscreen
+  frames are capped at 256 MiB, charged to the graphics budget before they
+  are allocated and grown fallibly; a shrink or an alpha-mode change gives
+  the memory back.
+- **Screenshots.** `kettle --screenshot` draws its synthetic scenes on the
+  configured backend through `backend::offscreen`: on the CPU by default on
+  Linux, with no adapter, and on the GPU exactly as before elsewhere.
 - **GPU-only.** The macOS cursor patch: a CPU renderer never attaches a
   cursor layer. `--gpu-info` names the renderer first and still describes the
   adapter `renderer = gpu` would use.
