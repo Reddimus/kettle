@@ -6,6 +6,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Added
+
+- On Linux, Kettle now draws on the CPU by default and presents through
+  shared memory (`wl_shm` on Wayland, MIT-SHM on X11), with no GPU driver
+  loaded into the process. The new `renderer` key (`auto`, `cpu`, `gpu`; also
+  in Settings > Graphics) chooses; `auto` keeps the GPU on macOS and Windows.
+  On Linux `gpu-force-software = true` now means the CPU renderer, and a
+  machine whose only GPU adapter is llvmpipe or lavapipe, or which has none,
+  draws on the CPU. If the shared-memory presenter cannot start, Kettle uses
+  the GPU. `kettle --gpu-info` names the renderer in use.
+
 ## [6.0.0] — 2026-11-08
 
 ### Added

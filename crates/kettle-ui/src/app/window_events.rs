@@ -1630,6 +1630,10 @@ impl App {
             WindowEvent::Occluded(occluded) => {
                 // Suppress animation wakes while occluded; repaint on return.
                 ws.window_occluded = occluded;
+                // A CPU window gives back its buffers while hidden.
+                if let Some(renderer) = ws.renderer.as_mut() {
+                    renderer.set_occluded(occluded);
+                }
                 if occluded {
                     Self::hide_cursor_layer(ws);
                 }

@@ -20,12 +20,17 @@
 //!   matching path for each call.
 
 pub(crate) mod cpu;
+mod cpu_draw;
 mod cpu_renderer;
+#[cfg(target_os = "linux")]
+mod cpu_window;
 pub(crate) mod layers;
 pub(crate) mod text;
 
 pub(crate) use cpu_renderer::CpuFrameRequest;
 
+#[cfg(test)]
+mod cpu_parity_tests;
 #[cfg(test)]
 mod cpu_tests;
 
@@ -33,12 +38,11 @@ use crate::GpuContext;
 
 /// Which backend draws a renderer's frames.
 ///
-/// [`RendererBackend::Gpu`] is the default everywhere, and the backend of
-/// every windowed renderer. [`RendererBackend::Cpu`] is not selectable from
-/// configuration yet, and only [`Renderer::new_cpu_offscreen`] builds one:
-/// until its rasterizer and presenter land it draws only its clear, and
-/// records every other draw.
+/// The `renderer` key chooses ([`preferred_backend`]): the CPU on Linux by
+/// default, the GPU elsewhere. [`Renderer::new_cpu_window`] builds a CPU
+/// window renderer and [`Renderer::new_cpu_offscreen`] an offscreen one.
 ///
+/// [`Renderer::new_cpu_window`]: crate::Renderer
 /// [`Renderer::new_cpu_offscreen`]: crate::Renderer::new_cpu_offscreen
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum RendererBackend {
@@ -50,12 +54,152 @@ pub enum RendererBackend {
 }
 
 impl RendererBackend {
-    /// The stable lower-case name, as logs and a future `renderer` key use it.
+    /// The stable lower-case name, as logs and the `renderer` key use it.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Gpu => "gpu",
             Self::Cpu => "cpu",
         }
+    }
+}
+
+/// The backend a new window starts on, with the reason for any request the
+/// platform cannot honour, which the caller logs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BackendChoice {
+    pub backend: RendererBackend,
+    pub note: Option<&'static str>,
+}
+
+/// The backend `cfg` asks for on this platform (see
+/// [`kettle_config::RendererPreference`]).
+///
+/// - Linux: `auto` and `cpu` draw on the CPU; so does `gpu-force-software`,
+///   which means "no GPU driver" there. `gpu` uses wgpu.
+/// - Elsewhere: always the GPU. `renderer = cpu` is noted and ignored, since
+///   the CPU renderer presents only through Linux shared memory.
+///
+/// The caller still falls back: to the GPU when the CPU presenter cannot
+/// start, and to the CPU when no GPU adapter works.
+pub fn preferred_backend(cfg: &kettle_config::Config) -> BackendChoice {
+    backend_for(
+        cfg.renderer,
+        cfg.gpu_force_software,
+        cfg!(target_os = "linux"),
+    )
+}
+
+pub(crate) fn backend_for(
+    preference: kettle_config::RendererPreference,
+    force_software: bool,
+    linux: bool,
+) -> BackendChoice {
+    use kettle_config::RendererPreference as Pref;
+    let (backend, note) = match (linux, preference) {
+        (true, Pref::Auto | Pref::Cpu) => (RendererBackend::Cpu, None),
+        (true, Pref::Gpu) if force_software => (
+            RendererBackend::Cpu,
+            Some("gpu-force-software = true selects the CPU renderer on Linux"),
+        ),
+        (true, Pref::Gpu) | (false, Pref::Auto | Pref::Gpu) => (RendererBackend::Gpu, None),
+        (false, Pref::Cpu) => (
+            RendererBackend::Gpu,
+            Some("renderer = cpu is available on Linux only; using the GPU"),
+        ),
+    };
+    BackendChoice { backend, note }
+}
+
+#[cfg(test)]
+mod choice_tests {
+    use super::*;
+    use kettle_config::RendererPreference as Pref;
+
+    #[test]
+    fn linux_draws_on_the_cpu_unless_the_gpu_is_asked_for() {
+        assert_eq!(
+            backend_for(Pref::Auto, false, true).backend,
+            RendererBackend::Cpu
+        );
+        assert_eq!(
+            backend_for(Pref::Cpu, false, true).backend,
+            RendererBackend::Cpu
+        );
+        assert_eq!(
+            backend_for(Pref::Gpu, false, true).backend,
+            RendererBackend::Gpu
+        );
+        assert_eq!(backend_for(Pref::Auto, false, true).note, None);
+    }
+
+    #[test]
+    fn force_software_means_the_cpu_renderer_on_linux() {
+        let choice = backend_for(Pref::Gpu, true, true);
+        assert_eq!(choice.backend, RendererBackend::Cpu);
+        assert!(choice.note.is_some());
+        assert_eq!(
+            backend_for(Pref::Auto, true, true).backend,
+            RendererBackend::Cpu
+        );
+        // Elsewhere it keeps its meaning: wgpu's fallback adapter.
+        assert_eq!(
+            backend_for(Pref::Auto, true, false).backend,
+            RendererBackend::Gpu
+        );
+    }
+
+    #[test]
+    fn gpu_info_reports_the_cpu_renderer_and_survives_a_missing_adapter() {
+        let cfg = kettle_config::Config::default();
+        let missing = || Err(anyhow::anyhow!("no adapter"));
+        let cpu =
+            crate::gpu::renderer_info_text(&cfg, backend_for(Pref::Auto, false, true), missing())
+                .expect("the CPU renderer needs no adapter");
+        assert!(
+            cpu.starts_with("Renderer:       CPU (renderer = auto)"),
+            "{cpu}"
+        );
+        assert!(
+            cpu.contains("GPU adapter:    none usable (no adapter)"),
+            "{cpu}"
+        );
+        let with_adapter = crate::gpu::renderer_info_text(
+            &cfg,
+            backend_for(Pref::Auto, false, true),
+            Ok("Backend:        Vulkan".into()),
+        )
+        .expect("text");
+        assert!(with_adapter.ends_with("Backend:        Vulkan"));
+        let gpu = kettle_config::Config {
+            renderer: Pref::Gpu,
+            ..cfg.clone()
+        };
+        assert!(
+            crate::gpu::renderer_info_text(&gpu, backend_for(Pref::Gpu, false, true), missing())
+                .is_err(),
+            "the GPU renderer still fails without an adapter"
+        );
+        let mac = crate::gpu::renderer_info_text(
+            &cfg,
+            backend_for(Pref::Cpu, false, false),
+            Ok(String::new()),
+        )
+        .expect("text");
+        assert!(mac.contains("Renderer note:  renderer = cpu is available on Linux only"));
+    }
+
+    #[test]
+    fn other_platforms_draw_on_the_gpu_and_note_a_cpu_request() {
+        assert_eq!(
+            backend_for(Pref::Auto, false, false),
+            BackendChoice {
+                backend: RendererBackend::Gpu,
+                note: None,
+            }
+        );
+        let cpu = backend_for(Pref::Cpu, false, false);
+        assert_eq!(cpu.backend, RendererBackend::Gpu);
+        assert!(cpu.note.is_some_and(|note| note.contains("Linux only")));
     }
 }
 

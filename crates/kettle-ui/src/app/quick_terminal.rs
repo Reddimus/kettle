@@ -208,7 +208,7 @@ impl App {
         self.quick_terminal
             .portal_wake_pending
             .store(false, std::sync::atomic::Ordering::Release);
-        if self.gpu.is_none() {
+        if !self.renderers_ready() {
             return;
         }
         #[cfg(target_os = "linux")]
@@ -281,7 +281,7 @@ impl App {
     }
 
     pub(super) fn toggle_quick_terminal(&mut self, el: &ActiveEventLoop) -> bool {
-        if self.gpu.is_none() {
+        if !self.renderers_ready() {
             return false;
         }
         if !self.quick_terminal.model.visible {

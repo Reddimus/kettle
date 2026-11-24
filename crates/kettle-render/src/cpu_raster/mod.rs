@@ -28,9 +28,9 @@
 //! Pixels are packed `u32` `0xAARRGGBB`: on a little-endian host that is the
 //! B, G, R, A byte order of Wayland's `wl_shm` ARGB8888 and XRGB8888.
 
-// The CPU backend that calls these is not wired in yet; the tests are.
-#![cfg_attr(not(test), allow(dead_code))]
-
+// The cursor patch is a macOS Core Animation hand-off a CPU renderer never
+// makes; its CPU combine pass is kept for its parity test.
+#[cfg(test)]
 pub(crate) mod cursor_patch;
 pub(crate) mod glyphpipe;
 pub(crate) mod imgpipe;
@@ -46,7 +46,9 @@ mod bench_tests;
 #[cfg(test)]
 mod parity_tests;
 
-use srgb::{tables, unorm8};
+#[cfg(test)]
+use srgb::tables;
+use srgb::unorm8;
 
 /// The largest framebuffer or texture side, the same cap wgpu's default
 /// limits put on a 2D texture.
@@ -127,6 +129,7 @@ impl CpuFramebuffer {
         })
     }
 
+    #[cfg(test)]
     /// A framebuffer holding `rgba`, RGBA8 bytes as a GPU readback returns
     /// them for an `Rgba8UnormSrgb` target.
     pub(crate) fn from_rgba8(width: u32, height: u32, rgba: &[u8]) -> Option<Self> {
@@ -182,16 +185,18 @@ impl CpuFramebuffer {
         true
     }
 
+    #[cfg(test)]
     /// `LoadOp::Clear` with a `wgpu::Color`, whose components are linear and
     /// which the attachment encodes on store.
     pub(crate) fn clear(&mut self, color: [f64; 4]) {
         self.pixels.fill(clear_pixel(color));
     }
 
+    #[cfg(test)]
     /// RGBA8 bytes, the order a GPU readback of an `Rgba8UnormSrgb` target
     /// returns.
     pub(crate) fn to_rgba8(&self) -> Vec<u8> {
-        self.pixels.iter().flat_map(|&p| unpack(p)).collect()
+        pixels_to_rgba8(&self.pixels)
     }
 
     /// The whole framebuffer as a target, with the viewport that covers it.
@@ -225,6 +230,13 @@ impl CpuFramebuffer {
     }
 }
 
+/// RGBA8 bytes of packed pixels, the order a GPU readback of an
+/// `Rgba8UnormSrgb` target returns.
+pub(crate) fn pixels_to_rgba8(pixels: &[u32]) -> Vec<u8> {
+    pixels.iter().flat_map(|&p| unpack(p)).collect()
+}
+
+#[cfg(test)]
 /// The packed pixel a `LoadOp::Clear(color)` stores.
 pub(crate) fn clear_pixel(color: [f64; 4]) -> u32 {
     let t = tables();
@@ -249,6 +261,42 @@ pub(crate) struct CpuTarget<'a> {
 }
 
 impl<'a> CpuTarget<'a> {
+    /// A whole `width` x `height` target over `pixels`, rows packed, such as
+    /// a presenter's shared-memory buffer, so a frame is drawn where it is
+    /// shown. `None` when a side is zero or past [`MAX_SIDE`], or `pixels`
+    /// is not exactly `width * height` long.
+    pub(crate) fn from_pixels(pixels: &'a mut [u32], width: u32, height: u32) -> Option<Self> {
+        if CpuFramebuffer::len_for(width, height)? != pixels.len() {
+            return None;
+        }
+        Some(CpuTarget {
+            pixels,
+            width,
+            rows: 0..height,
+            viewport: Viewport {
+                x: 0.0,
+                y: 0.0,
+                w: width as f32,
+                h: height as f32,
+            },
+        })
+    }
+
+    /// The same rows and viewport, borrowed again.
+    pub(crate) fn reborrow(&mut self) -> CpuTarget<'_> {
+        CpuTarget {
+            pixels: &mut *self.pixels,
+            width: self.width,
+            rows: self.rows.clone(),
+            viewport: self.viewport,
+        }
+    }
+
+    /// The band's pixels, rows packed.
+    pub(crate) fn pixels(&self) -> &[u32] {
+        self.pixels
+    }
+
     /// The framebuffer's width, which is also this band's.
     pub(crate) fn width(&self) -> u32 {
         self.width
@@ -318,20 +366,29 @@ impl<'a> CpuTarget<'a> {
     }
 }
 
+#[cfg(test)]
 impl CpuFramebuffer {
-    /// Run `draw` on `bands` horizontal bands of the framebuffer at once,
-    /// one scoped thread each. Every band sees every instance and keeps only
-    /// its own rows; coordinates and derivative quads stay the whole
-    /// framebuffer's, so the result is the single-threaded one. Bands start
-    /// on even rows.
+    /// [`CpuTarget::draw_banded`] over the whole framebuffer.
     pub(crate) fn draw_banded(&mut self, bands: u32, draw: impl Fn(&mut CpuTarget<'_>) + Sync) {
-        let bands = bands.clamp(1, self.height.div_ceil(2).max(1));
+        self.target().draw_banded(bands, draw);
+    }
+}
+
+impl CpuTarget<'_> {
+    /// Run `draw` on `bands` horizontal bands of this target at once, one
+    /// scoped thread each. Every band sees every instance and keeps only its
+    /// own rows; coordinates and derivative quads stay the whole
+    /// framebuffer's, so the result is the single-threaded one. Bands start
+    /// on even framebuffer rows when this target does.
+    pub(crate) fn draw_banded(&mut self, bands: u32, draw: impl Fn(&mut CpuTarget<'_>) + Sync) {
+        let height = self.rows.end - self.rows.start;
+        let bands = bands.clamp(1, height.div_ceil(2).max(1));
         if bands == 1 {
-            draw(&mut self.target());
+            draw(self);
             return;
         }
-        let rows = (self.height.div_ceil(bands) + 1) & !1;
-        let mut rest = self.target();
+        let rows = (height.div_ceil(bands) + 1) & !1;
+        let mut rest = self.reborrow();
         std::thread::scope(|scope| {
             let draw = &draw;
             for _ in 1..bands {
@@ -426,6 +483,7 @@ fn texture_bytes(width: u32, height: u32, format: CpuTextureFormat) -> Option<us
         .filter(|&b| b <= MAX_TEXTURE_BYTES)
 }
 
+#[cfg(test)]
 /// An owned texture with sub-rectangle uploads and height growth, for the
 /// glyph atlases.
 #[derive(Clone, Debug)]
@@ -436,6 +494,7 @@ pub(crate) struct CpuTexture {
     data: Vec<u8>,
 }
 
+#[cfg(test)]
 impl CpuTexture {
     /// A zeroed texture; `None` past [`MAX_SIDE`] or [`MAX_TEXTURE_BYTES`].
     pub(crate) fn new(width: u32, height: u32, format: CpuTextureFormat) -> Option<Self> {

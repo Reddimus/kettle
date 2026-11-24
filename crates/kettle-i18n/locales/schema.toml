@@ -1371,6 +1371,10 @@ args = [{ name = "name", type = "str" }, { name = "kind", type = "str" }, { name
 [messages.settings_active_gpu_initializing]
 context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: Graphics note before the GPU is ready."
 
+[messages.settings_active_renderer_cpu]
+context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: Graphics note when windows are drawn on the CPU (Linux) and no GPU is in use. presenter is the window-system path, verbatim and untranslated, such as 'wl_shm (Wayland)' or 'softbuffer (X11 SHM)'."
+args = [{ name = "presenter", type = "str" }]
+
 [messages.settings_category_agents]
 context = "crates/kettle-ui/src/settings.rs categories(): Settings category tab name. Settings for AI agents that use Kettle."
 
@@ -1457,6 +1461,9 @@ context = "crates/kettle-ui/src/settings.rs categories(): Settings row label. Gr
 
 [messages.settings_field_gpu_device]
 context = "crates/kettle-ui/src/settings.rs categories(): Settings row label."
+
+[messages.settings_field_renderer]
+context = "crates/kettle-ui/src/settings.rs categories(): Settings row label for the `renderer` key: whether frames are drawn by the CPU or the GPU. Values are Automatic, CPU and GPU."
 
 [messages.settings_field_gpu_force_software]
 context = "crates/kettle-ui/src/settings.rs categories(): Settings row label."
@@ -2383,6 +2390,9 @@ context = "crates/kettle-ui/src/settings.rs: One-line factual Settings descripti
 
 [messages.settings_description_field_gpu_device]
 context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_description_field_renderer]
+context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under the Renderer label; English budget 70 characters. Ellipsized in narrow panels. The change applies when Kettle next starts."
 
 [messages.settings_description_field_gpu_force_software]
 context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."

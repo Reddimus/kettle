@@ -1217,14 +1217,15 @@ impl Renderer {
         }
     }
 
-    /// Save the CPU backend's `scene` for `request`: the bytes a GPU capture
-    /// target would hold after the same scene pass, read back without a GPU.
+    /// Save the CPU backend's scene, `size` packed pixels, for `request`:
+    /// the bytes a GPU capture target would hold after the same scene pass,
+    /// read back without a GPU.
     pub(crate) fn dispatch_cpu_screenshot(
         &self,
         request: ScreenshotRequest,
-        scene: &crate::backend::cpu::CpuFrame,
+        [width, height]: [u32; 2],
+        scene: &[u32],
     ) {
-        let (width, height) = (scene.width(), scene.height());
         let Some(bytes) = screenshot_target_bytes(width, height) else {
             Self::complete_screenshot_error(
                 request,
@@ -1241,7 +1242,7 @@ impl Renderer {
             );
             return;
         };
-        let rgba = scene.pixels().to_vec();
+        let rgba = crate::cpu_raster::pixels_to_rgba8(scene);
         drop(copy);
         let job = ScreenshotPersistenceJob {
             request,

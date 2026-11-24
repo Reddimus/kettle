@@ -1,4 +1,4 @@
-use super::backend::cpu::{CpuBackend, CpuPresenter};
+use super::backend::cpu::{CpuBackend, CpuSurface};
 use super::backend::layers::{
     ImageLayer, ImageSharedLayer, OutlineLayer, PresentLayer, QuadLayer, RoundedSurfaceLayer,
     StarfieldLayer,
@@ -964,8 +964,8 @@ impl Renderer {
 
     /// A CPU-backend renderer: the GPU constructors' renderer, with every
     /// layer a CPU twin and no wgpu instance, adapter, device or surface.
-    /// `supported_alpha_modes` are those `presenter` can show; with no
-    /// presenter the renderer draws only into its own frame.
+    /// `supported_alpha_modes` are those `surface` can show; with no
+    /// surface the renderer draws only into its own frame.
     pub(crate) fn with_cpu(
         width: u32,
         height: u32,
@@ -973,9 +973,9 @@ impl Renderer {
         cfg: &Config,
         fonts: Option<StartupFonts>,
         supported_alpha_modes: Vec<wgpu::CompositeAlphaMode>,
-        presenter: Option<Box<dyn CpuPresenter>>,
+        surface: Option<Box<dyn CpuSurface>>,
     ) -> Result<Renderer> {
-        // What a CPU frame holds (see `CpuFrame`).
+        // What a CPU frame holds (see `backend::cpu`).
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let alpha_mode = desired_alpha_mode(cfg, &supported_alpha_modes);
         let (width, height) =
@@ -991,9 +991,10 @@ impl Renderer {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
-        let mut presenter = presenter;
-        if let Some(presenter) = presenter.as_mut() {
-            presenter.resize(width, height);
+        let mut surface = surface;
+        if let Some(surface) = surface.as_mut() {
+            surface.resize(width, height, f64::from(scale));
+            surface.set_translucent(alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied);
         }
         let graphics_budget = kettle_core::GraphicsBudget::default();
         let fonts = take_over_fonts(fonts, cfg, scale);
@@ -1052,7 +1053,7 @@ impl Renderer {
             glyph_pipeline,
         };
         Ok(Self::with_layers(
-            RenderDevice::Cpu(Some(Box::new(CpuBackend::new(presenter)))),
+            RenderDevice::Cpu(Some(Box::new(CpuBackend::new(surface)))),
             None,
             config,
             supported_alpha_modes,
@@ -1476,9 +1477,9 @@ impl Renderer {
         self.config.width = width;
         self.config.height = height;
         if let RenderDevice::Cpu(Some(cpu)) = &mut self.device
-            && let Some(presenter) = cpu.presenter.as_mut()
+            && let Some(surface) = cpu.surface.as_mut()
         {
-            presenter.resize(width, height);
+            surface.resize(width, height, f64::from(self.scale));
         }
         self.configure_surface();
     }
@@ -1496,6 +1497,11 @@ impl Renderer {
         }
         self.last_scene = None;
         self.config.alpha_mode = alpha_mode;
+        if let RenderDevice::Cpu(Some(cpu)) = &mut self.device
+            && let Some(surface) = cpu.surface.as_mut()
+        {
+            surface.set_translucent(alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied);
+        }
         self.configure_surface();
     }
 
@@ -2780,7 +2786,54 @@ async fn resolve_adapter_candidates(
 /// driver / texture-limit details without a windowed run. The same
 /// answer would otherwise require launching the binary, hitting the
 /// failure mode, and digging through `RUST_LOG=info` output.
+///
+/// The first line says which renderer windows use (`renderer`). On the CPU
+/// renderer the GPU section describes what `renderer = gpu`, or the fallback,
+/// would use, and a host with no adapter is reported rather than an error.
 pub fn gpu_info(cfg: &Config) -> Result<String> {
+    let choice = crate::backend::preferred_backend(cfg);
+    let adapter = adapter_info_text(cfg);
+    renderer_info_text(cfg, choice, adapter)
+}
+
+/// `--gpu-info`'s text: the renderer, then the GPU adapter's details.
+pub(crate) fn renderer_info_text(
+    cfg: &Config,
+    choice: crate::BackendChoice,
+    adapter: Result<String>,
+) -> Result<String> {
+    let mut out = match choice.backend {
+        crate::RendererBackend::Cpu => format!(
+            "Renderer:       CPU (renderer = {}): frames are drawn on the CPU and presented \
+             through shared memory (wl_shm on Wayland, MIT-SHM on X11). Windows load no GPU \
+             driver; if the presenter cannot start they use the GPU below.\n",
+            cfg.renderer.as_str()
+        ),
+        crate::RendererBackend::Gpu if cfg!(target_os = "linux") => format!(
+            "Renderer:       GPU (renderer = {}). If no GPU adapter works, windows draw on \
+             the CPU.\n",
+            cfg.renderer.as_str()
+        ),
+        crate::RendererBackend::Gpu => format!(
+            "Renderer:       GPU (renderer = {})\n",
+            cfg.renderer.as_str()
+        ),
+    };
+    if let Some(note) = choice.note {
+        out.push_str(&format!("Renderer note:  {note}\n"));
+    }
+    match adapter {
+        Ok(adapter) => out.push_str(&adapter),
+        Err(error) if choice.backend == crate::RendererBackend::Cpu => {
+            out.push_str(&format!("GPU adapter:    none usable ({error:#})"));
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(out)
+}
+
+/// The adapter the GPU renderer would select, as `--gpu-info` prints it.
+fn adapter_info_text(cfg: &Config) -> Result<String> {
     pollster::block_on(async {
         let (_instance, adapter) = resolve_headless_adapter(cfg, "gpu_info").await?;
         let info = adapter.get_info();

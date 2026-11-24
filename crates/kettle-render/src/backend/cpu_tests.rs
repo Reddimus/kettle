@@ -2,17 +2,23 @@
 
 use std::sync::{Arc, Mutex};
 
-use super::cpu::{CpuDraw, CpuFrame, CpuPipeline, CpuRaster};
+use super::cpu::{CpuDraw, CpuPipeline, CpuRaster};
 use super::layers::QuadLayer;
 use super::{DeviceRef, RendererBackend, ScenePass};
+use crate::cpu_raster::{CpuFramebuffer, CpuTarget, PixelRect, pack};
 use crate::glyphpipe::{GlyphPipeline, RasterGlyph};
 use crate::gpu_tests::gpu_test_config;
 use crate::headless_tests::{capture, focused, pane, snapshot_of};
 use crate::quad::QuadInstance;
 use crate::{FrameOutcome, Renderer, StatusBar, TabBar};
 
+/// An offscreen CPU renderer with an opaque background (the default is
+/// slightly translucent).
 fn cpu_renderer(width: u32, height: u32) -> (Renderer, kettle_config::Config) {
-    let cfg = gpu_test_config();
+    let cfg = kettle_config::Config {
+        background_opacity: 1.0,
+        ..gpu_test_config()
+    };
     let renderer =
         Renderer::headless_for_tests_on(RendererBackend::Cpu, &cfg, width, height, 1.0, false)
             .expect("a CPU renderer builds")
@@ -33,15 +39,21 @@ struct Seen {
 struct RecordingRaster(Arc<Mutex<Seen>>);
 
 impl CpuRaster for RecordingRaster {
-    fn draw(&mut self, _target: &mut CpuFrame, scissor: [u32; 4], draw: &CpuDraw<'_>) {
+    fn draw(
+        &mut self,
+        _target: &mut CpuTarget<'_>,
+        _screen: [f32; 2],
+        scissor: PixelRect,
+        draw: &CpuDraw<'_>,
+    ) {
         let mut seen = self.0.lock().expect("unpoisoned");
-        seen.draws.push((draw.pipeline(), draw.len(), scissor));
+        let PixelRect { x, y, w, h } = scissor;
+        seen.draws.push((draw.pipeline(), draw.len(), [x, y, w, h]));
     }
 
-    fn present(&mut self, scene: &CpuFrame, output: &mut CpuFrame) {
+    fn present(&mut self, _scene: &CpuFramebuffer, output: &mut CpuFramebuffer) {
         self.0.lock().expect("unpoisoned").presents += 1;
-        output.copy_from(scene);
-        output.clear([1, 2, 3, 4]);
+        output.pixels_mut().fill(pack(1, 2, 3, 4));
     }
 }
 
@@ -65,7 +77,7 @@ fn render(renderer: &mut Renderer, cfg: &kettle_config::Config, text: &[u8]) {
 }
 
 #[test]
-fn a_cpu_renderer_has_no_gpu_context_and_presents_its_clear_to_a_buffer() {
+fn a_cpu_renderer_has_no_gpu_context_and_draws_its_frame_into_a_buffer() {
     let (mut renderer, cfg) = cpu_renderer(320, 120);
     assert_eq!(renderer.backend(), RendererBackend::Cpu);
     assert!(renderer.gpu_context().is_none());
@@ -74,9 +86,11 @@ fn a_cpu_renderer_has_no_gpu_context_and_presents_its_clear_to_a_buffer() {
     render(&mut renderer, &cfg, b"hello");
     let frame = renderer.cpu_presented_for_tests().expect("a CPU frame");
     assert_eq!((frame.width(), frame.height()), (320, 120));
+    let background = frame.pixels()[frame.pixels().len() / 2];
+    assert_eq!(background >> 24, 0xff, "the pane's background is opaque");
     assert!(
-        frame.pixels().iter().all(|&byte| byte == 0),
-        "until the rasterizer lands, a CPU frame is its transparent clear"
+        frame.pixels().iter().any(|&pixel| pixel != background),
+        "the grid text is drawn over the background"
     );
     assert!(renderer.last_scene.is_some(), "the frame is recorded");
 }
@@ -157,8 +171,8 @@ fn a_translucent_postmultiplied_cpu_frame_presents_its_conversion() {
     assert_eq!(seen.lock().expect("unpoisoned").presents, 1);
     let presented = renderer.cpu_presented_for_tests().expect("a CPU frame");
     assert_eq!(
-        &presented.pixels()[..4],
-        &[1, 2, 3, 4],
+        presented.pixels()[0],
+        pack(1, 2, 3, 4),
         "the converted frame is presented"
     );
 }
@@ -170,8 +184,13 @@ fn a_cpu_screenshot_saves_the_scene_without_a_gpu() {
     let frame = capture(&mut renderer, &cfg, &[pane(&snap, 96, 48)], &focused(true));
     assert_eq!(frame.dimensions(), (96, 48));
     assert!(
-        frame.pixels().all(|pixel| pixel.0 == [0, 0, 0, 0]),
-        "the capture is the cleared scene, in straight alpha"
+        frame.pixels().all(|pixel| pixel.0[3] == 255),
+        "the capture is the drawn, opaque scene"
+    );
+    let first = frame.get_pixel(0, 0).0;
+    assert!(
+        frame.pixels().any(|pixel| pixel.0 != first),
+        "the capture holds the pane's text"
     );
 }
 
@@ -225,8 +244,8 @@ fn a_cpu_glyph_atlas_keeps_each_raster_at_its_slot() {
     let atlas = pipeline.mask_texture_for_tests().expect("a CPU atlas copy");
     let (x, y) = (slot.atlas_x as usize, slot.atlas_y as usize);
     let row = |line: usize| {
-        let start = (y + line) * atlas.width as usize + x;
-        &atlas.pixels[start..start + 3]
+        let start = (y + line) * atlas.width() as usize + x;
+        &atlas.data()[start..start + 3]
     };
     assert_eq!((row(0), row(1)), (&mask[..3], &mask[3..]));
     assert!(pipeline.upload(DeviceRef::Cpu, [64.0, 64.0], &[]));
@@ -247,11 +266,11 @@ fn cpu_quad_layers_draw_what_they_were_given_minus_the_hidden_cursor() {
     );
     assert_eq!(layer.count(), 3);
     assert_eq!(layer.uploaded().map(Iterator::count), Some(3));
-    let mut frame = CpuFrame::new(8, 8).expect("small frame");
+    let mut frame = CpuFramebuffer::new(8, 8).expect("small frame");
     let mut raster = super::cpu::NoRaster;
     let mut records = Vec::new();
     {
-        let mut pass = super::cpu::CpuPass::new(&mut frame, &mut raster, &mut records);
+        let mut pass = super::cpu::CpuPass::new(frame.target(), [8, 8], &mut raster, &mut records);
         let mut pass = ScenePass::Cpu(&mut pass);
         layer.draw_hiding(&mut pass, Some(1..2));
         layer.draw_range(&mut pass, 1..2);

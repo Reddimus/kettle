@@ -345,7 +345,11 @@ impl App {
     /// Open the in-app Settings overlay on its first row, over nothing else.
     pub(super) fn open_settings(&mut self, ws: &mut WindowState) {
         self.close_all_modals(ws);
-        if let Some(choices) = crate::gpu_discovery::GPU_DISCOVERY.cached() {
+        if self.cpu_rendering {
+            // Listing adapters would load a GPU driver into a process that
+            // draws on the CPU; the GPU rows keep their configured values.
+            self.gpu_discovery_pending = false;
+        } else if let Some(choices) = crate::gpu_discovery::GPU_DISCOVERY.cached() {
             self.gpu_choices = choices.clone();
             self.gpu_discovery_pending = false;
         } else {

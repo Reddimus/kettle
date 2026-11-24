@@ -32,9 +32,10 @@ use bytemuck::{Pod, Zeroable};
 use glyphon::cosmic_text::{CacheKey, SwashContent, SwashImage};
 use kettle_core::{GraphicsBudget, GraphicsReservation};
 
-use crate::backend::cpu::{CpuDraw, CpuPass, CpuTexture, instance_slice};
+use crate::backend::cpu::{CpuDraw, CpuPass, instance_slice};
 use crate::backend::{DeviceRef, ScenePass};
 use crate::builtin_glyphs::BuiltinKey;
+use crate::cpu_raster::{CpuTextureFormat, CpuTextureView};
 
 use crate::upload::{
     MappedRing, RetainedBytes, UploadCounters, UploadCounts, mapped_uploads, write_buffer_counted,
@@ -600,16 +601,17 @@ impl Atlas {
     }
 
     /// The CPU copy of the atlas; `None` on the GPU backend.
-    fn cpu_texture(&self) -> Option<CpuTexture<'_>> {
+    fn cpu_texture(&self) -> Option<CpuTextureView<'_>> {
         match &self.store {
             AtlasStore::Gpu { .. } => None,
-            AtlasStore::Cpu(pixels) => Some(CpuTexture {
-                width: self.width,
-                height: self.height,
-                bytes_per_pixel: self.bpp,
-                srgb: self.format.is_srgb(),
-                pixels,
-            }),
+            AtlasStore::Cpu(pixels) => {
+                let format = match (self.bpp, self.format.is_srgb()) {
+                    (1, _) => CpuTextureFormat::R8Unorm,
+                    (_, true) => CpuTextureFormat::Rgba8UnormSrgb,
+                    (_, false) => CpuTextureFormat::Rgba8Unorm,
+                };
+                CpuTextureView::new(self.width, self.height, format, pixels)
+            }
         }
     }
 
@@ -1508,7 +1510,7 @@ impl GlyphPipeline {
 
     /// The mask atlas's CPU copy, on the CPU backend.
     #[cfg(test)]
-    pub(crate) fn mask_texture_for_tests(&self) -> Option<CpuTexture<'_>> {
+    pub(crate) fn mask_texture_for_tests(&self) -> Option<CpuTextureView<'_>> {
         self.mask.cpu_texture()
     }
 

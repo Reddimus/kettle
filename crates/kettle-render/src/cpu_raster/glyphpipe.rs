@@ -30,6 +30,7 @@ pub(crate) struct GlyphAtlases<'a> {
     pub(crate) mask: CpuTextureView<'a>,
 }
 
+#[cfg(test)]
 /// The scissor `GlyphPipeline::draw` sets for a pane `rect` (`[x, y, w, h]`)
 /// on a `target_size` surface: the pane clamped to the surface and truncated
 /// to whole pixels. `None` when nothing of it is on the surface.

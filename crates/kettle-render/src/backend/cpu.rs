@@ -1,4 +1,4 @@
-//! The CPU backend: its frame, its draw list, and the two seams the software
+//! The CPU backend: its draw list, and the two seams the software
 //! rasterizer and the shared-memory presenter plug into.
 //!
 //! A CPU-backend renderer builds each frame exactly as a GPU one does. Its
@@ -6,13 +6,21 @@
 //! pass ([`Renderer::encode_scene_pass`](crate::Renderer)) replays each draw
 //! here as one [`CpuDraw`], in the order and under the scissor a wgpu pass
 //! would execute it. [`CpuPass`] records every draw and hands it to the
-//! renderer's [`CpuRaster`]. Until the software rasterizer lands, that is
-//! [`NoRaster`], which draws nothing, so a CPU frame is its clear.
+//! renderer's [`CpuRaster`], by default [`SoftRaster`](super::cpu_draw::SoftRaster),
+//! which draws it into a [`CpuTarget`]: the window's shared-memory buffer,
+//! or for an offscreen renderer its own [`CpuFramebuffer`].
+//!
+//! Pixels are `cpu_raster`'s packed `0xAARRGGBB`: sRGB-encoded colour,
+//! premultiplied by alpha in linear light. That is what an `Rgba8UnormSrgb`
+//! scene target holds after the same draws, so a GPU readback and a CPU frame
+//! compare directly, and it is the byte order of `wl_shm`'s ARGB8888.
 
 use std::ops::Range;
+use std::time::Instant;
 
 use kettle_core::ImageData;
 
+use crate::cpu_raster::{CpuFramebuffer, CpuTarget, CpuTextureView, PixelRect};
 use crate::glyphpipe::GlyphInstance;
 use crate::imgpipe::ImageInstance;
 use crate::outline::OutlineInstance;
@@ -21,100 +29,6 @@ use crate::rounded_surface::RoundedSurface;
 use crate::starfield::StarfieldUniforms;
 
 use super::text::{CpuTextAtlas, CpuTextGlyph};
-
-/// A CPU render target.
-///
-/// RGBA8, top-left origin, rows packed. Each pixel holds what an
-/// `Rgba8UnormSrgb` scene target holds after the same draws: sRGB-encoded
-/// colour, premultiplied by alpha in linear light. A frame read back from the
-/// GPU and one drawn here therefore compare byte for byte.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct CpuFrame {
-    width: u32,
-    height: u32,
-    pixels: Vec<u8>,
-}
-
-impl CpuFrame {
-    /// Bytes per pixel.
-    pub(crate) const BPP: usize = 4;
-
-    /// A transparent `width` x `height` frame, or `None` when its size
-    /// overflows.
-    #[cfg(test)]
-    pub(crate) fn new(width: u32, height: u32) -> Option<Self> {
-        let mut frame = Self::default();
-        frame.resize(width, height).then_some(frame)
-    }
-
-    /// Make the frame `width` x `height` pixels. Its pixels are unspecified
-    /// until the next [`Self::clear`]. Returns false, leaving the frame
-    /// empty, when the size overflows.
-    pub(crate) fn resize(&mut self, width: u32, height: u32) -> bool {
-        let Some(bytes) = frame_bytes(width, height) else {
-            *self = Self::default();
-            return false;
-        };
-        self.width = width;
-        self.height = height;
-        self.pixels.resize(bytes, 0);
-        true
-    }
-
-    /// Fill every pixel with `rgba`, as a render pass's clear load does.
-    pub(crate) fn clear(&mut self, rgba: [u8; 4]) {
-        for pixel in self.pixels.as_chunks_mut::<{ Self::BPP }>().0 {
-            *pixel = rgba;
-        }
-    }
-
-    pub(crate) fn width(&self) -> u32 {
-        self.width
-    }
-
-    pub(crate) fn height(&self) -> u32 {
-        self.height
-    }
-
-    pub(crate) fn pixels(&self) -> &[u8] {
-        &self.pixels
-    }
-
-    #[expect(dead_code, reason = "the software rasterizer writes here")]
-    pub(crate) fn pixels_mut(&mut self) -> &mut [u8] {
-        &mut self.pixels
-    }
-
-    /// Copy `other` into this frame, resizing it to match.
-    pub(crate) fn copy_from(&mut self, other: &Self) {
-        self.width = other.width;
-        self.height = other.height;
-        self.pixels.clear();
-        self.pixels.extend_from_slice(&other.pixels);
-    }
-}
-
-fn frame_bytes(width: u32, height: u32) -> Option<usize> {
-    usize::try_from(width)
-        .ok()?
-        .checked_mul(usize::try_from(height).ok()?)?
-        .checked_mul(CpuFrame::BPP)
-}
-
-/// A CPU copy of a texture a pipeline was given, as the draw that samples
-/// it sees it.
-#[expect(dead_code, reason = "the software rasterizer samples these")]
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct CpuTexture<'a> {
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    /// 1 for a coverage mask (`R8Unorm`), 4 for colour (`Rgba8Unorm[Srgb]`).
-    pub(crate) bytes_per_pixel: u32,
-    /// Whether sampling decodes sRGB, as an `*Srgb` texture format does.
-    pub(crate) srgb: bool,
-    /// `width * height * bytes_per_pixel` bytes, rows packed.
-    pub(crate) pixels: &'a [u8],
-}
 
 /// The pipelines a scene pass draws with. The cursor patch is not among
 /// them: it re-encodes the scene for a macOS Core Animation layer, which a
@@ -140,7 +54,6 @@ pub(crate) enum CpuPipeline {
 }
 
 /// One draw, with everything the matching WGSL shader would read.
-#[expect(dead_code, reason = "the software rasterizer reads every field")]
 pub(crate) enum CpuDraw<'a> {
     /// `quad.wgsl`: flat fills in straight sRGB colour.
     Quads {
@@ -150,8 +63,8 @@ pub(crate) enum CpuDraw<'a> {
     /// `glyphpipe.rs`'s shader over its two atlases.
     Glyphs {
         instances: &'a [GlyphInstance],
-        color_atlas: CpuTexture<'a>,
-        mask_atlas: CpuTexture<'a>,
+        color_atlas: CpuTextureView<'a>,
+        mask_atlas: CpuTextureView<'a>,
     },
     /// `imgpipe.rs`'s four-tap shader over one image, clamped or repeating.
     Images {
@@ -173,6 +86,7 @@ pub(crate) enum CpuDraw<'a> {
     /// (see `text.rs`).
     Text {
         glyphs: &'a [CpuTextGlyph],
+        #[allow(dead_code, reason = "glyph rasters carry their own pixels")]
         atlas: &'a CpuTextAtlas,
     },
 }
@@ -216,56 +130,72 @@ pub(crate) struct CpuDrawRecord {
 
 /// The software rasterizer: executes each draw as its WGSL shader would.
 ///
-/// `scissor` is `[x, y, width, height]`, already inside `target`, and never
-/// empty. Instance positions are in scene pixels, as the shaders take them;
-/// the scene's origin is the target's.
+/// `screen` is the scene's size, the screen uniform every GPU pipeline is
+/// given; the target's viewport maps it 1:1 from the target's origin.
+/// `scissor` is already inside the target, and never empty.
 pub(crate) trait CpuRaster: Send {
-    fn draw(&mut self, target: &mut CpuFrame, scissor: [u32; 4], draw: &CpuDraw<'_>);
+    fn draw(
+        &mut self,
+        target: &mut CpuTarget<'_>,
+        screen: [f32; 2],
+        scissor: PixelRect,
+        draw: &CpuDraw<'_>,
+    );
 
     /// The presentation pass (`present.rs`): `scene` converted to straight
     /// alpha into `output`, for a translucent `PostMultiplied` surface.
-    fn present(&mut self, scene: &CpuFrame, output: &mut CpuFrame);
+    /// `output` already has `scene`'s size.
+    fn present(&mut self, scene: &CpuFramebuffer, output: &mut CpuFramebuffer);
+
+    /// A new frame begins: per-frame caches may age out what the last frame
+    /// did not use.
+    fn begin_frame(&mut self) {}
 }
 
-/// The placeholder rasterizer: draws nothing and presents the scene as is.
+/// A rasterizer that draws nothing and presents the scene as is, for tests
+/// that look only at the draw list.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct NoRaster;
 
+#[cfg(test)]
 impl CpuRaster for NoRaster {
-    fn draw(&mut self, _target: &mut CpuFrame, _scissor: [u32; 4], _draw: &CpuDraw<'_>) {}
+    fn draw(&mut self, _: &mut CpuTarget<'_>, _: [f32; 2], _: PixelRect, _: &CpuDraw<'_>) {}
 
-    fn present(&mut self, scene: &CpuFrame, output: &mut CpuFrame) {
-        output.copy_from(scene);
+    fn present(&mut self, scene: &CpuFramebuffer, output: &mut CpuFramebuffer) {
+        output.pixels_mut().copy_from_slice(scene.pixels());
     }
 }
 
 /// A scene pass on the CPU: the stand-in for a `wgpu::RenderPass`.
 pub(crate) struct CpuPass<'e> {
-    target: &'e mut CpuFrame,
+    target: CpuTarget<'e>,
+    size: [u32; 2],
     raster: &'e mut dyn CpuRaster,
     records: &'e mut Vec<CpuDrawRecord>,
     scissor: [u32; 4],
 }
 
 impl<'e> CpuPass<'e> {
-    /// A pass over `target`, which the caller has already cleared, as the
-    /// GPU pass's `LoadOp::Clear` does.
+    /// A pass over `target`, a whole `size` frame the caller has already
+    /// cleared, as the GPU pass's `LoadOp::Clear` does.
     pub(crate) fn new(
-        target: &'e mut CpuFrame,
+        target: CpuTarget<'e>,
+        size: [u32; 2],
         raster: &'e mut dyn CpuRaster,
         records: &'e mut Vec<CpuDrawRecord>,
     ) -> Self {
-        let scissor = [0, 0, target.width(), target.height()];
         Self {
             target,
+            size,
             raster,
             records,
-            scissor,
+            scissor: [0, 0, size[0], size[1]],
         }
     }
 
     pub(crate) fn set_scissor_rect(&mut self, x: u32, y: u32, width: u32, height: u32) {
-        let (target_w, target_h) = (self.target.width(), self.target.height());
+        let [target_w, target_h] = self.size;
         let x = x.min(target_w);
         let y = y.min(target_h);
         self.scissor = [x, y, width.min(target_w - x), height.min(target_h - y)];
@@ -287,8 +217,11 @@ impl<'e> CpuPass<'e> {
             instances: draw.len(),
             scissor: self.scissor,
         });
-        if self.scissor[2] > 0 && self.scissor[3] > 0 {
-            self.raster.draw(self.target, self.scissor, &draw);
+        let [x, y, w, h] = self.scissor;
+        if w > 0 && h > 0 {
+            let screen = [self.size[0] as f32, self.size[1] as f32];
+            self.raster
+                .draw(&mut self.target, screen, PixelRect::new(x, y, w, h), &draw);
         }
     }
 }
@@ -302,55 +235,89 @@ pub(crate) fn instance_slice<T>(all: &[T], range: Range<u32>) -> &[T] {
 }
 
 /// What a presenter reports for one frame.
-#[expect(dead_code, reason = "the window presenter returns these")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CpuPresentOutcome {
-    /// The frame is on screen.
+    /// The frame is on screen, or drawn and held for the compositor's next
+    /// frame callback (see [`CpuSurface::flush`]).
     Presented,
     /// The window cannot show it now; keep damage and try later.
     Occluded,
-    /// The compositor is not ready for another buffer yet.
+    /// The compositor holds every buffer; draw again later.
     RetryLater,
     /// The window's buffers are gone; rebuild the presenter.
     Lost,
+    /// The draw callback refused the frame, and nothing was presented.
+    NotDrawn,
 }
 
-/// Shows CPU frames in a window: shared-memory buffers on Wayland and X11.
-pub(crate) trait CpuPresenter: Send {
-    /// The window's buffers now have `width` x `height` pixels.
-    fn resize(&mut self, width: u32, height: u32);
+/// A window's shared-memory buffers, as the CPU backend draws into them:
+/// `cpu_present::CpuPresenter` on Linux, a fake in tests.
+pub(crate) trait CpuSurface: Send {
+    /// The window is now `width` x `height` physical pixels at `scale`.
+    fn resize(&mut self, width: u32, height: u32, scale: f64);
 
-    /// Show `frame`, whose pixels are straight or premultiplied as the
-    /// surface's alpha mode asks (see `Renderer::render_frame`).
-    fn present(&mut self, frame: &CpuFrame) -> CpuPresentOutcome;
+    /// Whether the window can show premultiplied alpha.
+    fn supports_translucency(&self) -> bool;
+
+    /// Ask for premultiplied (`true`) or opaque buffers. Returns whether
+    /// frames are premultiplied now.
+    fn set_translucent(&mut self, translucent: bool) -> bool;
+
+    /// Draw the next buffer with `draw` (its pixels, width and height,
+    /// whose contents are undefined) and present it with `pre_commit` run
+    /// just before the commit. `draw` returns `false` to drop the frame.
+    fn present_frame(
+        &mut self,
+        draw: &mut dyn FnMut(&mut [u32], u32, u32) -> bool,
+        pre_commit: &mut dyn FnMut(),
+    ) -> CpuPresentOutcome;
+
+    /// Commit a frame held for the compositor's frame callback, if it is
+    /// ready for it. Returns whether something was committed.
+    fn flush(&mut self, pre_commit: &mut dyn FnMut()) -> bool;
+
+    /// A frame is drawn but not yet committed.
+    fn has_deferred(&self) -> bool;
+
+    /// Release spare buffers now; returns how many went.
+    fn release_idle_buffers(&mut self) -> usize;
+
+    /// When a spare buffer becomes idle enough to release.
+    fn idle_release_deadline(&self) -> Option<Instant>;
+
+    /// The window is hidden, or visible again.
+    fn set_occluded(&mut self, occluded: bool);
+
+    /// The presenter's name, for logs and `--gpu-info`.
+    fn describe(&self) -> &'static str;
 }
 
 /// A CPU renderer's frame state.
 pub(crate) struct CpuBackend {
-    /// The scene target every frame clears and draws into.
-    pub(crate) scene: CpuFrame,
+    /// An offscreen renderer's scene target, which every frame clears and
+    /// draws into. A windowed renderer draws into its surface's buffer
+    /// instead, and keeps none.
+    pub(crate) scene: Option<CpuFramebuffer>,
     /// The scene's straight-alpha conversion, for a translucent
-    /// `PostMultiplied` surface.
-    pub(crate) presented: CpuFrame,
+    /// `PostMultiplied` offscreen surface.
+    pub(crate) presented: Option<CpuFramebuffer>,
     /// Whether the last frame presented `presented` rather than `scene`.
-    /// With no presenter, that frame stays here: an offscreen renderer
-    /// presents to this buffer.
     pub(crate) converted: bool,
     pub(crate) raster: Box<dyn CpuRaster>,
     /// `None` for an offscreen renderer.
-    pub(crate) presenter: Option<Box<dyn CpuPresenter>>,
+    pub(crate) surface: Option<Box<dyn CpuSurface>>,
     /// The draws of the last scene pass.
     pub(crate) draws: Vec<CpuDrawRecord>,
 }
 
 impl CpuBackend {
-    pub(crate) fn new(presenter: Option<Box<dyn CpuPresenter>>) -> Self {
+    pub(crate) fn new(surface: Option<Box<dyn CpuSurface>>) -> Self {
         Self {
-            scene: CpuFrame::default(),
-            presented: CpuFrame::default(),
+            scene: None,
+            presented: None,
             converted: false,
-            raster: Box::new(NoRaster),
-            presenter,
+            raster: Box::new(super::cpu_draw::SoftRaster::new()),
+            surface,
             draws: Vec::new(),
         }
     }
@@ -360,37 +327,21 @@ impl CpuBackend {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_frame_clears_every_pixel() {
-        let mut frame = CpuFrame::new(3, 2).expect("small frame");
-        frame.clear([1, 2, 3, 4]);
-        assert_eq!(frame.pixels().len(), 3 * 2 * 4);
-        assert!(
-            frame
-                .pixels()
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .all(|p| *p == [1, 2, 3, 4])
-        );
-        assert!(frame.resize(1, 1));
-        assert_eq!(frame.pixels().len(), 4);
-    }
-
-    #[test]
-    fn an_overflowing_frame_is_refused_and_left_empty() {
-        let mut frame = CpuFrame::new(2, 2).expect("small frame");
-        assert!(!frame.resize(u32::MAX, u32::MAX));
-        assert_eq!((frame.width(), frame.height()), (0, 0));
-        assert!(frame.pixels().is_empty());
+    fn pass_over<'e>(
+        frame: &'e mut CpuFramebuffer,
+        raster: &'e mut dyn CpuRaster,
+        records: &'e mut Vec<CpuDrawRecord>,
+    ) -> CpuPass<'e> {
+        let size = [frame.width(), frame.height()];
+        CpuPass::new(frame.target(), size, raster, records)
     }
 
     #[test]
     fn scissors_are_clamped_to_the_target() {
-        let mut frame = CpuFrame::new(10, 8).expect("small frame");
+        let mut frame = CpuFramebuffer::new(10, 8).expect("small frame");
         let mut raster = NoRaster;
         let mut records = Vec::new();
-        let mut pass = CpuPass::new(&mut frame, &mut raster, &mut records);
+        let mut pass = pass_over(&mut frame, &mut raster, &mut records);
         pass.set_scissor_rect(6, 2, 100, 100);
         assert_eq!(pass.scissor, [6, 2, 4, 6]);
         pass.set_scissor_rect(20, 20, 5, 5);
@@ -399,7 +350,7 @@ mod tests {
 
     #[test]
     fn a_pass_records_each_non_empty_draw_under_its_scissor() {
-        let mut frame = CpuFrame::new(10, 8).expect("small frame");
+        let mut frame = CpuFramebuffer::new(10, 8).expect("small frame");
         let mut raster = NoRaster;
         let mut records = Vec::new();
         let quad = QuadInstance {
@@ -408,7 +359,7 @@ mod tests {
             color: [1.0; 4],
         };
         {
-            let mut pass = CpuPass::new(&mut frame, &mut raster, &mut records);
+            let mut pass = pass_over(&mut frame, &mut raster, &mut records);
             pass.draw(CpuDraw::Quads {
                 replace: true,
                 instances: &[quad, quad],

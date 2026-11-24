@@ -933,7 +933,14 @@ impl App {
                 .unwrap_or_default(),
             footer_note: {
                 let graphics = active.name == kettle_i18n::Text::SettingsCategoryGraphics;
+                let cpu_presenter = ws
+                    .renderer
+                    .as_ref()
+                    .and_then(kettle_render::Renderer::cpu_presenter_name);
                 let active_gpu = graphics.then(|| {
+                    if let Some(presenter) = cpu_presenter {
+                        return tr.settings_active_renderer_cpu(presenter);
+                    }
                     self.gpu
                         .as_ref()
                         .map(|g| {
@@ -2451,12 +2458,12 @@ impl App {
                     .text(kettle_i18n::Text::NotifyBodyPaddingPartial),
             );
         }
-        // The remaining GPU policy keys (power preference / backend /
-        // force-software) also only take effect on restart.
+        // The renderer and the remaining GPU policy keys (power preference /
+        // backend / force-software) also only take effect on restart.
         if saved
             && matches!(
                 key_str,
-                "gpu-power-preference" | "gpu-backend" | "gpu-force-software"
+                "renderer" | "gpu-power-preference" | "gpu-backend" | "gpu-force-software"
             )
         {
             ws.settings_restart_pending = true;

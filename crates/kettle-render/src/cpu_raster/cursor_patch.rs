@@ -10,6 +10,7 @@
 
 use super::CpuFramebuffer;
 
+#[cfg(test)]
 /// Write the patch of `on` over `off` into `out`. `false`, writing nothing,
 /// when the three sizes differ.
 pub(crate) fn combine_patch(
