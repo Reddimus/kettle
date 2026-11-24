@@ -41,7 +41,9 @@ pub(crate) fn draw_outlines(
         let band = stroke.band();
         for y in stroke.r.rows.clone() {
             let skip = band.and_then(|[bx0, bx1, by0, by1]| {
-                (y >= by0 && y < by1 && bx1 > bx0).then_some(bx0..bx1)
+                let lo = bx0.max(stroke.r.cols.start);
+                let hi = bx1.min(stroke.r.cols.end);
+                (y >= by0 && y < by1 && lo < hi).then_some(lo..hi)
             });
             let skip = skip.unwrap_or(stroke.r.cols.end..stroke.r.cols.end);
             for x in (stroke.r.cols.start..skip.start).chain(skip.end..stroke.r.cols.end) {
@@ -243,6 +245,35 @@ mod tests {
             for x in x0..x1 {
                 assert!(stroke.fragment(x, y).is_none(), "({x}, {y})");
             }
+        }
+    }
+
+    #[test]
+    fn interior_skip_respects_scissors_on_both_sides() {
+        let o = outline([32.0, 32.0], 4.0, 0.0, 0);
+        for x in [0, 30] {
+            let mut fb = CpuFramebuffer::new(32, 32).unwrap();
+            draw_outlines(
+                &mut fb.target(),
+                o.size,
+                &[o],
+                Some(PixelRect::new(x, 0, 2, 32)),
+            );
+            for (i, &pixel) in fb.pixels().iter().enumerate() {
+                assert_eq!(pixel != 0, (x as usize..x as usize + 2).contains(&(i % 32)));
+            }
+        }
+    }
+
+    #[test]
+    fn interior_skip_respects_the_framebuffer_edge() {
+        let mut o = outline([32.0, 32.0], 4.0, 0.0, 0);
+        o.pos = [14.0, 0.0];
+        let mut fb = CpuFramebuffer::new(16, 16).unwrap();
+        draw_outlines(&mut fb.target(), [16.0; 2], &[o], None);
+        for row in fb.pixels().as_chunks::<16>().0 {
+            assert!(row[..14].iter().all(|&p| p == 0));
+            assert!(row[14..].iter().all(|&p| p != 0));
         }
     }
 

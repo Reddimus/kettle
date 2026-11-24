@@ -1,7 +1,7 @@
 //! Timing of a full-screen glyph grid, run by hand:
 //!
 //! ```sh
-//! cargo test -p kettle-render --release cpu_raster::bench_tests -- --ignored --nocapture
+//! CARGO_PROFILE_DEV_OPT_LEVEL=3 cargo test -p kettle-render --lib cpu_raster::bench_tests -- --ignored --nocapture
 //! ```
 //!
 //! Each frame is what a terminal repaint draws: the base fill, a few cell
@@ -168,20 +168,20 @@ fn time_frames(w: u32, h: u32) {
 }
 
 #[test]
-#[ignore = "timing; run by hand in release"]
+#[ignore = "timing; run by hand with opt-level 3"]
 fn bench_full_screen_glyph_grid_1600x1000() {
     time_frames(1600, 1000);
 }
 
 #[test]
-#[ignore = "timing; run by hand in release"]
+#[ignore = "timing; run by hand with opt-level 3"]
 fn bench_full_screen_glyph_grid_3840x2160() {
     time_frames(3840, 2160);
 }
 
 /// The other full-screen costs a frame can carry at 1600x1000.
 #[test]
-#[ignore = "timing; run by hand in release"]
+#[ignore = "timing; run by hand with opt-level 3"]
 fn bench_other_pipelines_1600x1000() {
     use super::imgpipe::draw_image;
     use super::present::present_straight;
