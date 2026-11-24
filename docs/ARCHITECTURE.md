@@ -3948,9 +3948,11 @@ text areas for glyphon. Its `RendererBackend` decides what executes them.
   - The idle-release deadline is recomputed on every wake and released
     when due; it is never clamped later. A deadline that is not in the
     future gets a 16 ms floor, only as a guard against spinning.
-  - `Occluded` is forwarded to `set_occluded`. GPU device recovery never
-    runs for CPU windows; a lost presenter rebuilds the window's CPU
-    renderer.
+  - `Occluded` is forwarded to `set_occluded`. CPU window initialization
+    acquires and presents a buffer before the renderer is accepted. X11 without
+    MIT-SHM requires the full image request to fit the negotiated limit.
+    An unusable presenter or a repeated failure after a CPU rebuild switches
+    the affected window to wgpu.
 - **Sizes and memory.** The presenter gets the scale with every resize and
   scale change. A buffer it rounds up (an integer-scale Wayland buffer is a
   multiple of the scale) repeats the frame's last column and row. Offscreen
@@ -3961,8 +3963,8 @@ text areas for glyphon. Its `RendererBackend` decides what executes them.
   configured backend through `backend::offscreen`: on the CPU by default on
   Linux, with no adapter, and on the GPU exactly as before elsewhere.
 - **GPU-only.** The macOS cursor patch: a CPU renderer never attaches a
-  cursor layer. `--gpu-info` names the renderer first and still describes the
-  adapter `renderer = gpu` would use.
+  cursor layer. `--gpu-info` reports the configured renderer preference and
+  the result of a headless wgpu adapter probe.
 
 ### CPU presentation (Linux)
 

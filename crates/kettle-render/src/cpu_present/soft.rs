@@ -21,6 +21,7 @@ pub(super) struct SoftPresenter {
     /// X11 only: the window has a depth-32 visual, so the alpha byte reaches
     /// the compositing manager.
     alpha: bool,
+    x11_put_image_limit: Option<usize>,
     /// The size frames get, as asked; the surface is sized to it at the
     /// next `buffer_mut`, which refuses a size past the limits.
     width: u32,
@@ -89,8 +90,12 @@ impl SoftPresenter {
             RawDisplayHandle::Wayland(_) => PresenterKind::SoftbufferWayland,
             _ => PresenterKind::SoftbufferX11,
         };
-        let alpha = kind == PresenterKind::SoftbufferX11
-            && x11_window_depth(raw_display, raw_window) == Some(32);
+        let (alpha, x11_put_image_limit) = if kind == PresenterKind::SoftbufferX11 {
+            x11_window_properties(raw_display, raw_window)
+                .ok_or_else(|| anyhow!("could not query the X11 CPU presentation transport"))?
+        } else {
+            (false, None)
+        };
         let context =
             softbuffer::Context::new(display).map_err(|e| anyhow!("softbuffer context: {e}"))?;
         let surface =
@@ -101,6 +106,7 @@ impl SoftPresenter {
             history: DamageHistory::default(),
             kind,
             alpha,
+            x11_put_image_limit,
             width: 0,
             height: 0,
             surface_size: (0, 0),
@@ -144,6 +150,9 @@ impl SoftPresenter {
     fn apply_size(&mut self) -> Result<(), FrameError> {
         let (w, h) = (self.width, self.height);
         check_extent(w, h)?;
+        if let Some(limit) = self.x11_put_image_limit {
+            check_put_image(w, h, limit)?;
+        }
         if self.surface_size == (w, h) {
             return Ok(());
         }
@@ -343,11 +352,26 @@ pub(super) fn force_opaque(pixels: &mut [u32], width: u32, rects: &[Rect]) {
     }
 }
 
-/// The depth of an X11 window's visual, asked on the window's own
-/// connection (the display handle softbuffer is given), since `$DISPLAY`
-/// may name another server and softbuffer keeps the depth it reads private.
-fn x11_window_depth(display: RawDisplayHandle, window: RawWindowHandle) -> Option<u8> {
+/// softbuffer sends the entire 32-bit image in one request without MIT-SHM.
+fn check_put_image(width: u32, height: u32, maximum_bytes: usize) -> Result<(), FrameError> {
+    let bytes = 24 + u64::from(width) * u64::from(height) * 4;
+    let wire_bytes = bytes + 4 * u64::from(bytes / 4 > u64::from(u16::MAX));
+    if wire_bytes > maximum_bytes as u64 {
+        return Err(FrameError::Backend(anyhow!(
+            "X11 MIT-SHM is unavailable and a {width}x{height} PutImage needs \
+             {wire_bytes} bytes (server limit: {maximum_bytes} bytes)"
+        )));
+    }
+    Ok(())
+}
+
+/// Use the same connection as softbuffer; `$DISPLAY` may name a different server.
+fn x11_window_properties(
+    display: RawDisplayHandle,
+    window: RawWindowHandle,
+) -> Option<(bool, Option<usize>)> {
     use as_raw_xcb_connection::AsRawXcbConnection as _;
+    use x11rb::connection::RequestConnection as _;
     use x11rb::protocol::xproto::ConnectionExt as _;
     use x11rb::xcb_ffi::XCBConnection;
     let id = match window {
@@ -369,5 +393,44 @@ fn x11_window_depth(display: RawDisplayHandle, window: RawWindowHandle) -> Optio
     // SAFETY: `raw` is the live XCB connection under the window's display,
     // open for this call; `false`: x11rb does not disconnect it on drop.
     let conn = unsafe { XCBConnection::from_raw_xcb_connection(raw, false) }.ok()?;
-    Some(conn.get_geometry(id).ok()?.reply().ok()?.depth)
+    let depth = conn.get_geometry(id).ok()?.reply().ok()?.depth;
+    let put_image_limit = (!x11_shm_available(&conn)).then(|| conn.maximum_request_bytes());
+    Some((depth == 32, put_image_limit))
+}
+
+// Querying the extension alone does not prove fd attachment is supported
+// (e.g. a forwarded X connection). Match softbuffer's attach/detach probe.
+fn x11_shm_available(conn: &x11rb::xcb_ffi::XCBConnection) -> bool {
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::shm::ConnectionExt as _;
+
+    fn attach_and_detach(conn: &x11rb::xcb_ffi::XCBConnection) -> anyhow::Result<()> {
+        let fd =
+            rustix::fs::memfd_create(c"kettle-x11-shm-probe", rustix::fs::MemfdFlags::CLOEXEC)?;
+        rustix::fs::ftruncate(&fd, 4096)?;
+        let id = conn.generate_id()?;
+        let attach = conn.shm_attach_fd(id, fd, false)?;
+        let detach = conn.shm_detach(id)?;
+        let attached = attach.check();
+        let detached = detach.check();
+        attached?;
+        detached?;
+        Ok(())
+    }
+    attach_and_detach(conn).is_ok()
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+
+    #[test]
+    fn x11_wire_frames_must_fit_one_request_including_the_big_request_header() {
+        let core_limit = usize::from(u16::MAX) * 4;
+        assert!(check_put_image(128, 128, core_limit).is_ok());
+        assert!(check_put_image(1920, 1080, core_limit).is_err());
+        let normal_bytes = 24 + 1920 * 1080 * 4;
+        assert!(check_put_image(1920, 1080, normal_bytes).is_err());
+        assert!(check_put_image(1920, 1080, normal_bytes + 4).is_ok());
+    }
 }

@@ -151,14 +151,14 @@ mod choice_tests {
     }
 
     #[test]
-    fn gpu_info_reports_the_cpu_renderer_and_survives_a_missing_adapter() {
+    fn gpu_info_labels_the_preference_and_reports_a_software_adapter_fallback() {
         let cfg = kettle_config::Config::default();
         let missing = || Err(anyhow::anyhow!("no adapter"));
         let cpu =
             crate::gpu::renderer_info_text(&cfg, backend_for(Pref::Auto, false, true), missing())
                 .expect("the CPU renderer needs no adapter");
         assert!(
-            cpu.starts_with("Renderer:       CPU (renderer = auto)"),
+            cpu.starts_with("Renderer preference: auto\nPreferred window renderer: CPU"),
             "{cpu}"
         );
         assert!(
@@ -168,9 +168,11 @@ mod choice_tests {
         let with_adapter = crate::gpu::renderer_info_text(
             &cfg,
             backend_for(Pref::Auto, false, true),
-            Ok("Backend:        Vulkan".into()),
+            Ok(("Backend:        Vulkan".into(), true)),
         )
         .expect("text");
+        assert!(with_adapter.contains("Window fallback: wgpu if CPU presentation"));
+        assert!(with_adapter.contains("Software adapter fallback: yes"));
         assert!(with_adapter.ends_with("Backend:        Vulkan"));
         let gpu = kettle_config::Config {
             renderer: Pref::Gpu,
@@ -184,7 +186,7 @@ mod choice_tests {
         let mac = crate::gpu::renderer_info_text(
             &cfg,
             backend_for(Pref::Cpu, false, false),
-            Ok(String::new()),
+            Ok((String::new(), false)),
         )
         .expect("text");
         assert!(mac.contains("Renderer note:  renderer = cpu is available on Linux only"));

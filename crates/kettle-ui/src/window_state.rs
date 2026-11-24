@@ -167,6 +167,10 @@ impl FrameRecoveryState {
         self.pending.is_some()
     }
 
+    pub(crate) fn first_renderer_rebuild(&self) -> bool {
+        self.renderer_attempts == 1
+    }
+
     pub(crate) fn renderer_rebuild_pending(&self) -> bool {
         self.pending
             .is_some_and(|pending| pending.action == FrameRecoveryAction::RebuildRenderer)

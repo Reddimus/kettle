@@ -1357,8 +1357,7 @@ impl App {
         // a quick failure — so only a true never-returns hang trips it.
         // `renderer` picks the backend: the CPU on Linux by default. A CPU
         // presenter that cannot start falls back to the GPU, and on Linux a
-        // GPU that cannot start, or is only a software adapter, falls back to
-        // the CPU.
+        // GPU renderer that cannot start falls back to the CPU.
         let choice = kettle_render::preferred_backend(&self.cfg);
         if let Some(note) = choice.note {
             log::info!("renderer: {note}");
@@ -1442,17 +1441,10 @@ impl App {
         );
         // Cache the shared GPU context for open_window (windows 2..N), or
         // remember that every window draws on the CPU.
-        match renderer.gpu_context() {
-            Some(gpu) => {
-                let gpu = gpu.clone();
-                let recovery_proxy = self.proxy.clone();
-                gpu.set_recovery_wake(kettle_render::ScreenshotRecoveryWake::new(move || {
-                    let _ = recovery_proxy.send_event(UserEvent::Wakeup);
-                }));
-                log::info!("renderer: GPU");
-                self.gpu = Some(gpu);
-            }
-            None => self.cpu_rendering = true,
+        if renderer.backend() == kettle_render::RendererBackend::Cpu {
+            self.cpu_rendering = true;
+        } else {
+            self.install_shared_gpu(&renderer);
         }
         ws.renderer = Some(renderer);
         ws.startup_cell = None;
