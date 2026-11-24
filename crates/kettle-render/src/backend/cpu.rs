@@ -308,8 +308,8 @@ impl<'e> CpuPass<'e> {
         let screen = [self.size[0] as f32, self.size[1] as f32];
         match &mut self.sink {
             PassSink::Sign { tiles, raster } => {
-                let salt = raster.plan(screen, scissor, &draw);
-                tiles.draw(screen, scissor, salt, &draw);
+                let plan = raster.plan(screen, scissor, &draw);
+                tiles.draw(screen, scissor, plan, &draw);
             }
             PassSink::Raster {
                 target,

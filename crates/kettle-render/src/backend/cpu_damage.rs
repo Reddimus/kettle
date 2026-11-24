@@ -208,13 +208,13 @@ impl TileHashes {
         }
     }
 
-    /// Record `draw` under `scissor` on a `screen`-sized scene. `salt` is
+    /// Record `draw` under `scissor` on a `screen`-sized scene. `plan` is
     /// the rasterizer's path for it ([`super::cpu::CpuRaster::plan`]).
     pub(crate) fn draw(
         &mut self,
         screen: [f32; 2],
         scissor: PixelRect,
-        salt: u64,
+        plan: u64,
         draw: &CpuDraw<'_>,
     ) {
         let area = Area {
@@ -234,8 +234,8 @@ impl TileHashes {
         );
         state = mix(state, u64::from(scissor.x) | (u64::from(scissor.y) << 32));
         state = mix(state, u64::from(scissor.w) | (u64::from(scissor.h) << 32));
-        state = mix(state, salt);
-        self.planned += u32::from(salt != 0);
+        state = mix(state, plan);
+        self.planned += u32::from(plan != 0);
         match *draw {
             CpuDraw::Quads { replace, instances } => {
                 let state = mix(state, u64::from(replace));
