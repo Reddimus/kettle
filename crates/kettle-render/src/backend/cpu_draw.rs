@@ -343,12 +343,21 @@ struct CachedImage {
 /// one. An image is cached the second frame in a row it is drawn
 /// unchanged, so a video's frames, which change every time, are never
 /// cached, and an entry no frame used is dropped.
+///
+/// Each draw's choice is settled once a frame ([`Self::plan`]) and holds for
+/// the whole frame: damage tracking hashes it in the signing pass and the
+/// drawing pass draws by it, possibly long after later draws were planned.
+/// So an entry a draw of this frame relies on is never replaced in the same
+/// frame, and a draw planned twice gets its first answer.
 #[derive(Default)]
 struct ImageCache {
     entry: Option<CachedImage>,
+    /// A draw of this frame is drawn from `entry`.
     used: bool,
     candidate: Option<ImageKey>,
     candidate_seen: bool,
+    /// This frame's choices, by draw.
+    decided: Vec<(ImageKey, bool)>,
 }
 
 impl ImageCache {
@@ -359,6 +368,7 @@ impl ImageCache {
         if !std::mem::take(&mut self.candidate_seen) {
             self.candidate = None;
         }
+        self.decided.clear();
     }
 
     /// Settle whether this frame draws the image from the cache, caching it
@@ -375,14 +385,44 @@ impl ImageCache {
         max_bands: u32,
     ) -> bool {
         let key = ImageKey::new(image, repeat, screen, scissor, instances);
-        if self.entry.as_ref().is_none_or(|entry| entry.key != key) {
-            if self.candidate.as_ref() != Some(&key) {
-                self.candidate = Some(key);
+        if let Some(&(_, cached)) = self.decided.iter().find(|(k, _)| *k == key) {
+            return cached;
+        }
+        let cached = self.decide(&key, screen, scissor, instances, image, texture, max_bands);
+        self.decided.push((key, cached));
+        cached
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn decide(
+        &mut self,
+        key: &ImageKey,
+        screen: [f32; 2],
+        scissor: PixelRect,
+        instances: &[ImageInstance],
+        image: &kettle_core::ImageData,
+        texture: CpuTextureView<'_>,
+        max_bands: u32,
+    ) -> bool {
+        if self.entry.as_ref().is_none_or(|entry| entry.key != *key) {
+            if self.candidate.as_ref() != Some(key) || self.used {
+                // Seen for the first time, or seen again while an earlier
+                // draw of this frame is drawn from the entry, which must stay
+                // until the frame ends: a candidate for a later frame.
+                self.candidate = Some(key.clone());
                 self.candidate_seen = true;
                 return false;
             }
             self.candidate = None;
-            self.entry = cache_image(key, screen, scissor, instances, image, texture, max_bands);
+            self.entry = cache_image(
+                key.clone(),
+                screen,
+                scissor,
+                instances,
+                image,
+                texture,
+                max_bands,
+            );
         }
         if self.entry.is_none() {
             return false;
@@ -400,8 +440,14 @@ impl ImageCache {
         image: &kettle_core::ImageData,
         repeat: bool,
     ) -> Option<&CachedImage> {
-        let entry = self.entry.as_ref().filter(|_| self.used)?;
-        (entry.key == ImageKey::new(image, repeat, screen, scissor, instances)).then_some(entry)
+        let key = ImageKey::new(image, repeat, screen, scissor, instances);
+        let cached = self.decided.iter().any(|(k, cached)| *cached && *k == key);
+        let entry = self.entry.as_ref().filter(|_| cached)?;
+        debug_assert!(
+            entry.key == key,
+            "a draw planned from the cache lost its entry"
+        );
+        (entry.key == key).then_some(entry)
     }
 }
 
@@ -601,6 +647,58 @@ mod tests {
             raster.images.entry.is_none(),
             "a frame without the image frees its cache"
         );
+    }
+
+    /// A second large image drawn after a cached one: when it repeats, it
+    /// must not take the cache from the first, which this frame's plan (the
+    /// damage signature's) has already drawn from it, or the drawing pass
+    /// would draw the first image directly in the tiles it repaints and leave
+    /// the cached draw's pixels in the rest.
+    #[test]
+    fn a_later_image_never_takes_the_cache_from_a_draw_already_planned_from_it() {
+        let (w, h) = (640u32, 400u32);
+        let screen = [w as f32, h as f32];
+        let scissor = PixelRect::new(0, 0, w, h);
+        let a = wallpaper(64, 40);
+        let b = wallpaper(32, 20);
+        let (ia, ib) = ([stretched(screen, &a)], [stretched(screen, &b)]);
+        let da = CpuDraw::Images {
+            instances: &ia,
+            image: &a,
+            repeat: false,
+        };
+        let db = CpuDraw::Images {
+            instances: &ib,
+            image: &b,
+            repeat: false,
+        };
+        let mut raster = SoftRaster::with_max_bands(1);
+        for frame in 0..6 {
+            raster.begin_frame();
+            let a_cached = raster.plan(screen, scissor, &da) != 0;
+            if frame >= 2 {
+                raster.plan(screen, scissor, &db);
+            }
+            // The drawing pass finds what the signing pass settled.
+            assert_eq!(
+                raster.plan(screen, scissor, &da) != 0,
+                a_cached,
+                "frame {frame}"
+            );
+            assert_eq!(
+                raster
+                    .images
+                    .planned(screen, scissor, &ia, &a, false)
+                    .is_some(),
+                a_cached,
+                "frame {frame}: the plan and the draw disagree"
+            );
+            assert_eq!(
+                a_cached,
+                frame >= 1,
+                "frame {frame}: A is cached from its second frame"
+            );
+        }
     }
 
     /// A busy scene of every shape pipeline and a cached translucent image,
