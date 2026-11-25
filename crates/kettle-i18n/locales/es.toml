@@ -666,7 +666,7 @@ settings_a11y_fields = "Campos de configuración"
 settings_a11y_title = "Configuración"
 settings_active_gpu = "GPU activa: {name} ({kind}, {backend})"
 settings_active_gpu_initializing = "GPU activa: iniciando"
-settings_active_renderer_cpu = "Renderizador activo: CPU, presentado mediante {presenter}"
+settings_active_renderer_cpu = "Renderizador activo: CPU, presentando mediante {presenter}"
 settings_category_agents = "Agentes"
 settings_category_appearance = "Apariencia"
 settings_category_background = "Fondo"
@@ -1002,8 +1002,8 @@ menu_broadcast_window = "Paneles de esta ventana"
 
 menu_broadcast_group = "Paneles de este grupo"
 
-menu_profiles_pending = "Los perfiles no estaban listos. Volver a abrir para actualizar."
-picker_profiles_pending = "Perfiles no estaban listos."
+menu_profiles_pending = "Los perfiles no estaban listos. Vuelve a abrir para actualizar."
+picker_profiles_pending = "Los perfiles no estaban listos."
 
 menu_no_profiles = "Aún no hay perfiles — Crear perfil…"
 

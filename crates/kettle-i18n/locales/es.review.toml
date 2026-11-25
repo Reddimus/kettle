@@ -43,10 +43,28 @@
 # has a primary selection too; the remaining words are the accepted text.
 # 2026-11-16: shortened Settings descriptions and the capture prompt return
 # to draft pending review of the revised text in rendered UI.
+# 2026-11-24: the nine drafts new on release PR #823 (the Renderer row, its
+# description and the Graphics notes for the Linux CPU renderer, the Shift
+# menu hint, and the profile-discovery pending and busy messages) were
+# reviewed by the designated reviewer, agy Gemini 4 Hydrogen high, with no
+# fallback model. The text pass changed two: "presentando" in the active
+# renderer note, and the article restored in the compact palette status. A
+# debug build of this tree ran with `language = es` and the CPU renderer in
+# a private headless GNOME Shell on Linux: screenshots, the AT-SPI tree and
+# the notification Kettle sent. An unreadable profiles directory kept
+# discovery pending; the busy notice came from a second launch while the
+# first was held in profile enumeration under a debugger. The second pass
+# (the Shift hint, and the pending status screen readers also hear) moved
+# the pending status from the infinitive to tú, "Vuelve a abrir para
+# actualizar.", so that as a submenu's only item it does not read as a
+# command; it was shown again, in context and to the second pass, and
+# accepted. The reviewer kept tú in the busy notice, as in the accepted busy
+# and retry notices, and the article-less compact status was rejected as
+# ungrammatical. All nine are accepted.
 
 [status]
-menu_profiles_pending = "draft"
-picker_profiles_pending = "draft"
+menu_profiles_pending = "accepted"
+picker_profiles_pending = "accepted"
 settings_group_colors_text = "draft"
 settings_group_window = "draft"
 settings_group_cursor = "draft"
@@ -65,7 +83,7 @@ a11y_window_close = "accepted"
 
 tab_new_options = "accepted"
 
-notify_profile_launch_busy = "draft"
+notify_profile_launch_busy = "accepted"
 notify_profile_launch_failed_body = "accepted"
 notify_profile_launch_failed = "accepted"
 notify_profiles_failed_body = "accepted"
@@ -267,7 +285,7 @@ settings_description_field_gpu_device = "accepted"
 settings_description_field_gpu_force_software = "accepted"
 settings_description_field_gpu_power_preference = "accepted"
 settings_description_field_invert_search = "accepted"
-settings_description_field_renderer = "draft"
+settings_description_field_renderer = "accepted"
 settings_description_field_language = "accepted"
 settings_description_field_mouse_hide_while_typing = "accepted"
 settings_description_field_scroll_tabbar = "accepted"
@@ -870,7 +888,7 @@ settings_a11y_fields = "accepted"
 settings_a11y_title = "accepted"
 settings_active_gpu = "accepted"
 settings_active_gpu_initializing = "accepted"
-settings_active_renderer_cpu = "draft"
+settings_active_renderer_cpu = "accepted"
 settings_category_agents = "accepted"
 settings_category_appearance = "accepted"
 settings_category_background = "accepted"
@@ -904,7 +922,7 @@ settings_field_gpu_device = "accepted"
 settings_field_gpu_force_software = "accepted"
 settings_field_gpu_power_preference = "accepted"
 settings_field_invert_search = "accepted"
-settings_field_renderer = "draft"
+settings_field_renderer = "accepted"
 settings_field_language = "accepted"
 settings_field_mouse_hide_while_typing = "accepted"
 settings_field_scroll_tabbar = "accepted"
@@ -967,8 +985,8 @@ settings_note_codex_unsupported = "accepted"
 settings_note_language = "accepted"
 settings_note_language_pending = "accepted"
 settings_note_new_shells = "accepted"
-settings_note_graphics_restart = "draft"
-settings_note_gpu_discovery_skipped = "draft"
+settings_note_graphics_restart = "accepted"
+settings_note_gpu_discovery_skipped = "accepted"
 settings_note_restart = "accepted"
 settings_press_chord = "draft"
 settings_value_always = "accepted"
@@ -1057,7 +1075,7 @@ settings_hint_reset = "accepted"
 a11y_output_lines = "accepted"
 a11y_main_menu = "accepted"
 mouse_override_hint = "accepted"
-mouse_override_menu_hint = "draft"
+mouse_override_menu_hint = "accepted"
 font_size_chip = "accepted"
 menu_a11y_submenu = "accepted"
 
