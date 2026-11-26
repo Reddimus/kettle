@@ -42,6 +42,17 @@ pub(super) fn read_config_for_reload_or_prepared(
     read_config_for_reload(path, trust)
 }
 
+/// What a Settings Reset did to the config file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ResetSaved {
+    /// The file already gave the default; nothing was written.
+    Unchanged,
+    Saved,
+    /// Saved and in place, so it reloads, but its directory could not be
+    /// synced: a power loss could bring back the old file.
+    NotDurable,
+}
+
 impl App {
     /// Reconcile the live theme with the theme picker after every event (see
     /// `theme_preview_change`).
@@ -91,15 +102,14 @@ impl App {
 
     /// Reset a setting in the config file in one atomic edit
     /// (`kettle_config::reset_config_setting`): remove `keys`, and add
-    /// `fallback` where that alone does not satisfy `restores`. `Ok(false)`
-    /// when the file already gave the default and nothing was written; on
-    /// `Err` the file is as it was.
+    /// `fallback` where that alone does not satisfy `restores`. On `Err` the
+    /// file is as it was.
     pub(super) fn reset_pref(
         &self,
         keys: &[&str],
         fallback: &[(&str, &str)],
         restores: impl Fn(&kettle_config::Config) -> bool,
-    ) -> Result<bool, ()> {
+    ) -> Result<ResetSaved, ()> {
         let Some(path) = self
             .config_path
             .clone()
@@ -109,11 +119,19 @@ impl App {
             return Err(());
         };
         match kettle_config::reset_config_setting(&path, keys, fallback, restores) {
-            Ok(backup) => {
-                if backup.is_some() {
-                    log::info!("reset_pref: reset {keys:?} in {}", path.display());
-                }
-                Ok(backup.is_some())
+            Ok(None) => Ok(ResetSaved::Unchanged),
+            Ok(Some(saved)) => {
+                log::info!("reset_pref: reset {keys:?} in {}", path.display());
+                Ok(match saved.not_durable {
+                    None => ResetSaved::Saved,
+                    Some(error) => {
+                        log::warn!(
+                            "reset_pref: {} is saved but its directory did not sync: {error}",
+                            path.display()
+                        );
+                        ResetSaved::NotDurable
+                    }
+                })
             }
             Err(e) => {
                 log::warn!(

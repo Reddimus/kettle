@@ -1489,12 +1489,40 @@ fn settings_reset_is_one_edit_then_a_reload() {
     let flat: String = reset.split_whitespace().collect();
     assert!(
         flat.contains(
-            "matchself.reset_pref(&crate::settings::reset_keys(field),&fallback,|cfg|{crate::settings::holds_default(cfg,field)}){Ok(true)=>self.reload_config(ws),Ok(false)=>{}Err(())=>fire_notify("
+            "matchself.reset_pref(&crate::settings::reset_keys(field),&fallback,|cfg|{crate::settings::holds_default(cfg,field)}){Ok(ResetSaved::Unchanged)=>{}"
+        ),
+        "{flat}"
+    );
+    // A file in place whose directory did not sync is saved: it reloads,
+    // with a warning, rather than failing as a write that never happened.
+    assert!(
+        flat.contains(
+            "Ok(saved)=>{self.reload_config(ws);ifsaved==ResetSaved::NotDurable{fire_notify(self.ui_text.text(kettle_i18n::Text::NotifyTitleSettingNotDurable),self.ui_text.text(kettle_i18n::Text::NotifyBodySettingNotDurable),);}}Err(())=>fire_notify("
         ),
         "{flat}"
     );
     assert_eq!(flat.matches("settings_store(").count(), 0);
     assert_eq!(flat.matches("reload_config(").count(), 1);
+    let reset_pref: String = src
+        .split("fn reset_pref(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap()
+        .split_whitespace()
+        .collect();
+    assert!(reset_pref.contains("Ok(Some(saved))=>{"));
+    assert!(reset_pref.contains("Some(error)=>{"));
+    assert!(reset_pref.contains("ResetSaved::NotDurable"));
+    for (language, title) in [
+        (kettle_i18n::Language::En, "kettle: setting may not be kept"),
+        (kettle_i18n::Language::Es, "kettle: puede que el ajuste no se conserve"),
+    ] {
+        assert_eq!(
+            kettle_i18n::Translator::new(language)
+                .text(kettle_i18n::Text::NotifyTitleSettingNotDurable),
+            title
+        );
+    }
 }
 
 /// The pointer's hover shows in Settings only where a click acts: not

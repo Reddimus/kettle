@@ -2754,15 +2754,48 @@ pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io
 /// Kettle reads it), each `fallback` line is added as
 /// [`persist_config_toggle`] adds a key it does not find. The candidate
 /// must then restore the default and add no malformed value, and it is
-/// committed once, under the edit's lock: on any failure the file keeps
-/// its bytes, and its value. Returns the backup path, or `None` when the
-/// file already gave the default and nothing was written.
+/// committed once, under the edit's lock: on an error the file keeps its
+/// bytes, and its value. Returns what was saved, or `None` when the file
+/// already gave the default and nothing was written. A saved file whose
+/// directory could not be synced is saved, with
+/// [`ConfigSaved::not_durable`] set.
 pub fn reset_config_setting(
     path: &Path,
     keys: &[&str],
     fallback: &[(&str, &str)],
     restores: impl Fn(&Config) -> bool,
-) -> std::io::Result<Option<PathBuf>> {
+) -> std::io::Result<Option<ConfigSaved>> {
+    reset_config_setting_with(
+        path,
+        keys,
+        fallback,
+        restores,
+        kettle_state::atomic_replace_reporting,
+    )
+}
+
+/// A config edit that reached the file.
+#[derive(Debug)]
+pub struct ConfigSaved {
+    /// The first-write backup of the file.
+    pub backup: PathBuf,
+    /// Set when the new file is in place, so every read sees it, but its
+    /// directory could not be synced: a power loss could bring back the old
+    /// file.
+    pub not_durable: Option<std::io::Error>,
+}
+
+/// How a config edit replaces the file: `kettle_state::atomic_replace_reporting`.
+type ReplaceFile =
+    fn(&Path, &[u8], kettle_state::AtomicWriteOptions) -> std::io::Result<kettle_state::Replaced>;
+
+fn reset_config_setting_with(
+    path: &Path,
+    keys: &[&str],
+    fallback: &[(&str, &str)],
+    restores: impl Fn(&Config) -> bool,
+    replace: ReplaceFile,
+) -> std::io::Result<Option<ConfigSaved>> {
     for key in keys {
         validate_single_line("config key", key)?;
     }
@@ -2810,7 +2843,7 @@ pub fn reset_config_setting(
             format!("refusing to reset {keys:?}: it would introduce a malformed config value"),
         ));
     }
-    edit.commit(&out).map(Some)
+    edit.commit_with(&out, replace).map(Some)
 }
 
 /// The keys besides `key` whose lines also decide its value: an older
@@ -3305,6 +3338,16 @@ impl ConfigEdit {
     }
 
     fn commit(self, text: &str) -> std::io::Result<PathBuf> {
+        let saved = self.commit_with(text, kettle_state::atomic_replace_reporting)?;
+        match saved.not_durable {
+            None => Ok(saved.backup),
+            Some(error) => Err(error),
+        }
+    }
+
+    /// Commit `text` through `replace`. An error leaves the file as it was;
+    /// a replacement in place whose directory could not be synced is saved.
+    fn commit_with(self, text: &str, replace: ReplaceFile) -> std::io::Result<ConfigSaved> {
         // Editors outside Kettle do not honor our advisory lock. Refuse to
         // overwrite a change made since this edit began.
         let current = match read_config_bytes(&self.path) {
@@ -3330,12 +3373,18 @@ impl ConfigEdit {
             &self.document.bytes,
             kettle_state::AtomicWriteOptions::PRIVATE,
         )?;
-        kettle_state::atomic_replace(
+        let replaced = replace(
             &self.path,
             &encoded,
             kettle_state::AtomicWriteOptions::PRESERVE_PERMISSIONS,
         )?;
-        Ok(self.backup)
+        Ok(ConfigSaved {
+            backup: self.backup,
+            not_durable: match replaced {
+                kettle_state::Replaced::Durable => None,
+                kettle_state::Replaced::NotDurable(error) => Some(error),
+            },
+        })
     }
 }
 
@@ -13043,7 +13092,7 @@ split_horiz = <Control><Shift>j
     fn remove(
         path: &std::path::Path,
         keys: &[&str],
-    ) -> std::io::Result<Option<std::path::PathBuf>> {
+    ) -> std::io::Result<Option<super::ConfigSaved>> {
         super::reset_config_setting(path, keys, &[], |_| true)
     }
 
@@ -13543,6 +13592,48 @@ split_horiz = <Control><Shift>j
         })
         .unwrap();
         assert_eq!(Config::load_from(&path).osc52, Osc52::Copy);
+    }
+
+    /// Once the reset file is in place, failing to sync its directory does
+    /// not make the Reset a failure: it reports the file saved, warned that
+    /// it may not survive a power loss, so Settings reloads it. A failure
+    /// before the file is in place is an error, the file as it was.
+    #[test]
+    fn reset_config_setting_reports_a_saved_file_it_could_not_sync() {
+        let dir = tempdir_for("reset-not-durable");
+        let path = dir.join("config");
+        write_private_fixture(&path, "font-size = 18\n");
+        let saved = super::reset_config_setting_with(
+            &path,
+            &["font-size"],
+            &[],
+            |_| true,
+            |path, bytes, options| {
+                kettle_state::atomic_replace(path, bytes, options)?;
+                Ok(kettle_state::Replaced::NotDurable(std::io::Error::other(
+                    "injected EIO",
+                )))
+            },
+        )
+        .unwrap()
+        .expect("the file changed");
+        assert_eq!(
+            saved.not_durable.map(|error| error.to_string()).as_deref(),
+            Some("injected EIO")
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        write_private_fixture(&path, "font-size = 18\n");
+        assert!(
+            super::reset_config_setting_with(
+                &path,
+                &["font-size"],
+                &[],
+                |_| true,
+                |_, _, _| { Err(std::io::Error::other("rename failed")) }
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "font-size = 18\n");
     }
 
     /// Writing a new key into an empty config appends it.

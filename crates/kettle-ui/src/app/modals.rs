@@ -2338,8 +2338,20 @@ impl App {
         match self.reset_pref(&crate::settings::reset_keys(field), &fallback, |cfg| {
             crate::settings::holds_default(cfg, field)
         }) {
-            Ok(true) => self.reload_config(ws),
-            Ok(false) => {}
+            Ok(ResetSaved::Unchanged) => {}
+            // The file changed, so the reset applies, whether or not its
+            // directory could be synced.
+            Ok(saved) => {
+                self.reload_config(ws);
+                if saved == ResetSaved::NotDurable {
+                    fire_notify(
+                        self.ui_text
+                            .text(kettle_i18n::Text::NotifyTitleSettingNotDurable),
+                        self.ui_text
+                            .text(kettle_i18n::Text::NotifyBodySettingNotDurable),
+                    );
+                }
+            }
             Err(()) => fire_notify(
                 self.ui_text
                     .text(kettle_i18n::Text::NotifyTitleSettingNotSaved),
