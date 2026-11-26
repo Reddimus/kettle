@@ -2065,17 +2065,19 @@ impl App {
                 .is_some_and(|playback| playback.serves(item.id, item.generation))
         });
         match action {
-            K::Exit if ws.preview_overlay.is_some_and(|open| open.fullscreen) => {
-                if let Some(open) = &mut ws.preview_overlay {
-                    open.fullscreen = false;
+            K::Exit => match preview_exit(LaneKeys::of(ws.preview_overlay)) {
+                PreviewExit::LeaveFullscreen => {
+                    if let Some(open) = &mut ws.preview_overlay {
+                        open.fullscreen = false;
+                    }
+                    if let Some(window) = &ws.window {
+                        window.set_fullscreen(None);
+                    }
+                    self.lanes_changed(ws, false);
                 }
-                if let Some(window) = &ws.window {
-                    window.set_fullscreen(None);
-                }
-                self.lanes_changed(ws, false);
-            }
-            K::Exit if ws.preview_overlay.is_some() => self.close_preview(ws, pane),
-            K::Exit => self.exit_preview_focus(ws),
+                PreviewExit::CloseViewer => self.close_preview(ws, pane),
+                PreviewExit::ReturnKeyboard => self.exit_preview_focus(ws),
+            },
             K::Move(right, 0) if playing && !source => {
                 let step = LANE_SEEK_STEP.as_millis() as u64;
                 if let Some(playback) = ws.lane_playbacks.get_mut(&pane) {
@@ -3225,11 +3227,8 @@ impl App {
         }
         let (lane, button, hit) = self.hovered_lane_button(ws)?;
         let label = self.lane_control_label(ws, &lane, hit)?;
-        let viewer = ws
-            .preview_overlay
-            .is_some_and(|open| open.pane == lane.pane);
         let shortcut = if self.preview_holds_keyboard(ws, lane.pane) {
-            lane_control_key(hit, viewer).map(|key| {
+            lane_control_key(hit, LaneKeys::of(ws.preview_overlay)).map(|key| {
                 kettle_config::Trigger::new(kettle_config::Mods::empty(), key)
                     .ui_label(cfg!(target_os = "macos"))
             })

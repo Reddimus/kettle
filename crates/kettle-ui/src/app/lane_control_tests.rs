@@ -2444,7 +2444,7 @@ fn run_command_respects_preview_keyboard_ownership_in_each_window() {
 /// something else.
 #[test]
 fn lane_button_tooltips_name_the_keys_the_lane_acts_on() {
-    use super::{lane_action_hit, lane_control_action, lane_control_key};
+    use super::{LaneKeys, lane_action_hit, lane_control_action, lane_control_key};
     use crate::media::{PageStep, PreviewKey as K, ViewerKey};
     use kettle_config::Action;
     use kettle_render::MediaLaneHit as Hit;
@@ -2469,19 +2469,19 @@ fn lane_button_tooltips_name_the_keys_the_lane_acts_on() {
         (Hit::PreviousPage, K::Page(PageStep::By(-1))),
         (Hit::NextPage, K::Page(PageStep::By(1))),
     ] {
-        for viewer in [false, true] {
-            let key = winit_key(lane_control_key(hit, viewer).expect("a lane key"));
+        for keys in [LaneKeys::Lane, LaneKeys::Viewer, LaneKeys::FullscreenViewer] {
+            let key = winit_key(lane_control_key(hit, keys).expect("a lane key"));
             assert_eq!(crate::media::preview_key(&key, none), expected, "{hit:?}");
             assert_eq!(crate::media::viewer_key(&key, none), None, "{hit:?}");
         }
     }
     // The viewer pins with P and closes with Esc; a lane does neither.
-    let pin = winit_key(lane_control_key(Hit::Pin, true).unwrap());
+    let pin = winit_key(lane_control_key(Hit::Pin, LaneKeys::Viewer).unwrap());
     assert_eq!(crate::media::viewer_key(&pin, none), Some(ViewerKey::Pin));
-    let close = winit_key(lane_control_key(Hit::Close, true).unwrap());
+    let close = winit_key(lane_control_key(Hit::Close, LaneKeys::Viewer).unwrap());
     assert_eq!(crate::media::preview_key(&close, none), K::Exit);
     for hit in [Hit::Pin, Hit::Close, Hit::Toggle, Hit::Mode, Hit::Reload] {
-        assert_eq!(lane_control_key(hit, false), None, "{hit:?}");
+        assert_eq!(lane_control_key(hit, LaneKeys::Lane), None, "{hit:?}");
     }
     // Outside the lane's keyboard, a bound action's shortcut: the inverse of
     // the actions a lane runs as its buttons.
@@ -2550,4 +2550,48 @@ fn panes_lay_lanes_out_with_room_for_their_buttons() {
     assert!(
         source.contains(".unwrap_or_else(LayoutStyle::fallback) .with_lane_header(lane_header)")
     );
+}
+
+/// Defect 6 of the 6.0 final review: in the fullscreen viewer the Close
+/// tooltip named Esc, which there leaves fullscreen and keeps the viewer
+/// open. A tooltip names Esc for Close only where Esc closes the viewer,
+/// asked of the same rule the key's dispatch follows; P still pins.
+#[test]
+fn the_fullscreen_viewer_names_no_key_that_does_something_else() {
+    use super::{LaneKeys, PreviewExit, lane_control_key, preview_exit};
+    use kettle_config::Key;
+    use kettle_render::MediaLaneHit as Hit;
+    let open = |fullscreen| crate::media::Overlay {
+        pane: 1,
+        origin: None,
+        control: None,
+        theater: false,
+        fullscreen,
+    };
+    assert_eq!(LaneKeys::of(None), LaneKeys::Lane);
+    assert_eq!(LaneKeys::of(Some(open(false))), LaneKeys::Viewer);
+    assert_eq!(LaneKeys::of(Some(open(true))), LaneKeys::FullscreenViewer);
+    assert_eq!(
+        preview_exit(LaneKeys::FullscreenViewer),
+        PreviewExit::LeaveFullscreen
+    );
+    assert_eq!(
+        lane_control_key(Hit::Close, LaneKeys::FullscreenViewer),
+        None,
+        "Esc leaves fullscreen there"
+    );
+    assert_eq!(
+        lane_control_key(Hit::Close, LaneKeys::Viewer),
+        Some(Key::Escape)
+    );
+    assert_eq!(
+        lane_control_key(Hit::Pin, LaneKeys::FullscreenViewer),
+        Some(Key::Char('p'))
+    );
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(source.contains("K::Exit => match preview_exit(LaneKeys::of(ws.preview_overlay)) {"));
+    assert!(source.contains("lane_control_key(hit, LaneKeys::of(ws.preview_overlay))"));
 }

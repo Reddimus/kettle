@@ -177,7 +177,8 @@ lane buttons' WCAG 2.5.8 targets and hover fill.
 `lane_button_tooltips_name_the_keys_the_lane_acts_on` checks every key a lane
 button's tooltip names against the lane's own key handling, and
 `lane_button_tooltips_share_the_clock_and_the_screen_reader_name` guards their
-timing and names. `the_toast_button_under_the_pointer_lights_alone`
+timing and names; `the_fullscreen_viewer_names_no_key_that_does_something_else`
+ties the Esc a tooltip names to Esc's dispatch. `the_toast_button_under_the_pointer_lights_alone`
 (`kettle-render`) and `toast_and_notice_buttons_light_under_the_pointer`
 (`kettle-ui`) cover the toast and notice buttons' hover.
 `a_tab_drag_resting_on_an_overflow_arrow_scrolls_the_strip` covers the
