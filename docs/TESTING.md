@@ -4045,7 +4045,11 @@ private-bus tests cover color-scheme snapshots,
 SettingChanged and owner loss using the shared reduced-motion transport, and
 the fallback to GNOME's `enable-animations` for a portal without
 `reduced-motion`. Portable tests pin that a desktop with neither allows motion
-and that only a pending first answer holds it back.
+and that only a pending first answer holds it back. Unix tests drive the local
+GNOME read with `/bin/sh` stand-ins for `gsettings`: its parsing and output
+cap, an overrunning and a stopped read killed and reaped, a watch that follows
+a change and is dropped mid-read without leaving a child or thread, and a
+switch only GNOME itself reports holding motion back.
 Native acceptance still requires light/dark switching on macOS and Linux
 (Wayland and X11), including multiple windows, open overlays, custom side
 palettes, material/titlebar contrast, IME, and OSC 996/2031 subscribers.

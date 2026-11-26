@@ -1,15 +1,29 @@
 //! System motion preferences and explicit user overrides.
 
-/// A desktop setting as the Settings portal last reported it.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+mod gnome_local;
+
+/// A desktop setting as its watch last read it.
 #[cfg(any(target_os = "linux", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Reading<T> {
     /// No answer yet: the watcher is still connecting or reading.
     Pending,
-    /// No answer to be had: no portal, a portal without the key, a value of
-    /// the wrong type, or a portal that went away.
+    /// No answer to be had: no portal or `gsettings`, one without the key,
+    /// a value of the wrong type, or a portal that went away.
     Unavailable,
     Value(T),
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl<T> Reading<T> {
+    /// This reading, or where it is unavailable, `other`'s.
+    pub(crate) fn or_else(self, other: impl FnOnce() -> Self) -> Self {
+        match self {
+            Self::Unavailable => other(),
+            reading => reading,
+        }
+    }
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -50,6 +64,18 @@ impl Preference {
         }
     }
 
+    /// The Linux preference: the portal's `reduced-motion`; where it has
+    /// none, GNOME's `enable-animations` through the portal; and where the
+    /// portal has neither, GNOME's own (`gnome_local`), so a session with no
+    /// portal still follows GNOME.
+    pub(crate) fn linux(
+        portal: Reading<u32>,
+        gnome_portal: impl FnOnce() -> Reading<bool>,
+        gnome_local: impl FnOnce() -> Reading<bool>,
+    ) -> Self {
+        Self::resolve(portal, || gnome_portal().or_else(gnome_local))
+    }
+
     fn allows(self) -> bool {
         matches!(self, Self::Normal | Self::Unknown)
     }
@@ -72,6 +98,10 @@ pub(crate) struct SystemMotion {
     /// have no `reduced-motion`.
     #[cfg(target_os = "linux")]
     animations: std::sync::OnceLock<crate::portal_settings::AnimationsWatch>,
+    /// GNOME's `enable-animations` read with `gsettings`, once neither
+    /// portal watch has an answer.
+    #[cfg(target_os = "linux")]
+    local: std::sync::OnceLock<gnome_local::LocalWatch>,
     #[cfg(target_os = "linux")]
     wake: kettle_core::Waker,
 }
@@ -88,6 +118,7 @@ impl SystemMotion {
                     "button-layout",
                 ),
                 animations: std::sync::OnceLock::new(),
+                local: std::sync::OnceLock::new(),
                 wake,
             }
         }
@@ -98,14 +129,35 @@ impl SystemMotion {
         }
     }
 
-    /// Start watching what `allows` will read: GNOME's setting, as soon as
-    /// the portal has said it has no `reduced-motion`, so the first motion
-    /// after that does not wait for GNOME's answer.
+    /// Start watching what `allows` will read: GNOME's setting through the
+    /// portal as soon as the portal has said it has no `reduced-motion`, and
+    /// GNOME's own once the portal has neither, so the first motion after
+    /// that does not wait for GNOME's answer.
     pub(crate) fn prepare(&self) {
         #[cfg(target_os = "linux")]
-        if self.watch.reading() == Reading::Unavailable {
-            self.animations();
+        if self.watch.reading() == Reading::Unavailable
+            && self.animations().reading() == Reading::Unavailable
+        {
+            self.local();
         }
+    }
+
+    /// GNOME's own switch, read only in a GNOME session, with the first
+    /// `gsettings` on `PATH`, which the reader's thread looks for.
+    #[cfg(target_os = "linux")]
+    fn local(&self) -> &gnome_local::LocalWatch {
+        self.local.get_or_init(|| {
+            if !gnome_local::gnome_like(std::env::var_os("XDG_CURRENT_DESKTOP").as_deref()) {
+                return gnome_local::LocalWatch::unavailable();
+            }
+            let path = std::env::var_os("PATH");
+            gnome_local::LocalWatch::start(
+                move || {
+                    gnome_local::find_gsettings(path.as_deref()).map(gnome_local::gsettings_get)
+                },
+                self.wake.clone(),
+            )
+        })
     }
 
     #[cfg(target_os = "linux")]
@@ -144,7 +196,12 @@ impl SystemMotion {
         }
         #[cfg(target_os = "linux")]
         {
-            Preference::resolve(self.watch.reading(), || self.animations().reading()).allows()
+            Preference::linux(
+                self.watch.reading(),
+                || self.animations().reading(),
+                || self.local().reading(),
+            )
+            .allows()
         }
         #[cfg(windows)]
         {

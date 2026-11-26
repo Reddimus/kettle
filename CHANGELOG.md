@@ -1563,7 +1563,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - A toast you hover, or focus with a screen reader, while it fades now shows
   at full strength, and afterwards stays at least three seconds more.
 - On Linux, `reduce-motion = auto` now allows motion when the desktop has no
-  reduced-motion setting, and follows GNOME's animations setting otherwise.
+  reduced-motion setting, and follows GNOME's animations setting otherwise,
+  also in a GNOME session without a Settings portal.
 - With `reduce-motion = off`, the quick terminal slides in even when the
   system's Reduce Motion is on or cannot be read.
 - The resize chip no longer redraws an unchanged window about 30 times a
