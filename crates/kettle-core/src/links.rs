@@ -343,9 +343,17 @@ fn path_match_to_file_uri_with_home(
         return None;
     }
     let normalized = path.replace('\\', "/");
+    // A `%` is encoded below, so a name's `%2e` stays text in the URL
+    // (`100%2e.pdf`). A segment that would climb once decoded (`%2e%2e`,
+    // `.%2E`, `..%20`) is refused all the same, for a handler that decodes
+    // twice.
+    let climbs_decoded = |segment: &str| {
+        let lowered = segment.to_ascii_lowercase();
+        climbs(&lowered.replace("%2e", ".").replace("%20", " "))
+    };
     if normalized.starts_with("//")
         || has_parent_component(&normalized)
-        || normalized.to_ascii_lowercase().contains("%2e")
+        || normalized.split('/').any(climbs_decoded)
     {
         return None;
     }
@@ -1610,6 +1618,43 @@ mod tests {
         assert!(path_match_to_file_uri("../secret/file.txt", Some("/home/me/kettle")).is_none());
         assert!(path_match_to_file_uri("//evil/share/file.txt", None).is_none());
         assert!(path_match_to_file_uri("src/%2e%2e/secret.txt", Some("/home/me/kettle")).is_none());
+        assert!(path_match_to_file_uri("src/.%2E/secret.txt", Some("/home/me/kettle")).is_none());
+        assert!(path_match_to_file_uri("src/%2E./secret.txt", Some("/home/me/kettle")).is_none());
+        assert!(path_match_to_file_uri("src/..%20/secret.txt", Some("/home/me/kettle")).is_none());
         assert!(path_match_to_file_uri("src/main.rs", Some("//evil/share")).is_none());
+    }
+
+    /// A detected name holding a literal `%2e` links to that name, encoded
+    /// so it reads back the same: the converter agrees with
+    /// `file_url_for_path` about the file.
+    #[test]
+    fn a_literal_percent_2e_in_a_name_is_text() {
+        use super::file_url_for_path;
+        use std::path::Path;
+        for (path, uri) in [
+            ("/tmp/100%2e.pdf", "file:///tmp/100%252e.pdf"),
+            ("/tmp/a%2E/b.txt", "file:///tmp/a%252E/b.txt"),
+            ("/tmp/%2e/x.txt", "file:///tmp/%252e/x.txt"),
+        ] {
+            assert_eq!(
+                path_match_to_file_uri(path, Some("/work")).as_deref(),
+                Some(uri),
+                "{path}"
+            );
+            assert_eq!(
+                file_url_for_path(Path::new(path)).as_deref(),
+                Some(uri),
+                "{path}"
+            );
+            #[cfg(unix)]
+            assert_eq!(
+                super::local_file_path(uri),
+                Some(std::path::PathBuf::from(path))
+            );
+        }
+        let term = term_with(24, &["see /tmp/100%2e.pdf here"], &[]);
+        let found = links_with_cwd(&term, Some("/work"));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].uri, "file:///tmp/100%252e.pdf");
     }
 }

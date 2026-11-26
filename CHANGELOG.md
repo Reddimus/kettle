@@ -1647,6 +1647,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - A detected link keeps a closing bracket that closes one opened in it, even after a stray closing bracket earlier in the link.
 - A detected path ending in three or more dots, such as `/tmp/...`, now links the folder before them instead of its parent folder `/tmp/..`.
 - Local file links whose names hold two dots in a row, such as `a..b.pdf` or a folder named `...`, open; only a `..` that names the parent folder is refused.
+- A path on screen whose name holds a literal `%2e`, such as `/tmp/100%2e.pdf`, is a link.
 - Sessions: session files are checked for trust before restoring commands,
   sessions that restore would reject are not autosaved, and repeated restore
   failures no longer turn off saving.
