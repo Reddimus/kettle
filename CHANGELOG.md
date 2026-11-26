@@ -1566,6 +1566,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   reduced-motion setting, and follows GNOME's animations setting otherwise.
 - With `reduce-motion = off`, the quick terminal slides in even when the
   system's Reduce Motion is on or cannot be read.
+- The resize chip no longer redraws an unchanged window about 30 times a
+  second while it shows.
 
 ## Older releases
 

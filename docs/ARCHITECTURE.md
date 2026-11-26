@@ -6102,6 +6102,9 @@ for both size-chip text preparation and drawing, suppressing it under Settings
 or a picker card. After a font-size action kettle-ui sets
 `Overlay::resize_overlay_text` to the translated size and grid; the chip is
 sized from the shaped text, and the same string is a polite live region.
+The chip is static: the resize or font change that shows it draws it, and
+`about_to_wait_inner` wakes once at its expiry (`resize_chip_wait`) for the
+frame that erases it, rather than redrawing it at the ~30 fps animation tick.
 
 ### Paste consent and context-menu nesting
 
