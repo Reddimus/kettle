@@ -2748,48 +2748,73 @@ pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io
 
 /// Atomically remove every line that sets one of `keys`, so each takes its
 /// default again: what a Settings row's Reset does. Lines match as they do
-/// for [`persist_config_toggle`], in the sections Kettle reads; comments,
-/// blank lines, ordering and every other line are preserved, except that
-/// blank lines the removal leaves at the very end of the file go too (the
-/// one an appended key took before it). Returns the backup path, or `None`
-/// when no line set a key and nothing was written.
+/// for [`persist_config_toggle`], in the sections Kettle reads; see
+/// [`without_config_keys`] for what else stays. Returns the backup path, or
+/// `None` when no line set a key and nothing was written.
 pub fn remove_config_keys(path: &Path, keys: &[&str]) -> std::io::Result<Option<PathBuf>> {
     for key in keys {
         validate_single_line("config key", key)?;
     }
-    let needles: Vec<String> = keys.iter().map(|key| normalize_key(key)).collect();
     let edit = ConfigEdit::begin(path)?;
-    let existing = &edit.document.text;
-    let mut out = String::with_capacity(existing.len());
-    let mut removed = false;
+    match without_config_keys(&edit.document.text, keys) {
+        Some(out) => edit.commit(&out).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// `text` without the lines that set one of `keys` in the sections Kettle
+/// reads, or `None` when no line does. Every other line keeps its bytes,
+/// line ending included, except blank lines left between the rest of the
+/// file and a removed last line: the gap [`persist_config_toggle`] leaves
+/// before a key it appends goes with that key. Blank lines the file ends
+/// with after other content stay.
+fn without_config_keys(text: &str, keys: &[&str]) -> Option<String> {
+    #[derive(PartialEq)]
+    enum Line {
+        Kept,
+        Blank,
+        Removed,
+    }
+    let needles: Vec<String> = keys.iter().map(|key| normalize_key(key)).collect();
     let mut section = parse::Section::default();
-    for segment in existing.split_inclusive('\n') {
-        let (line, _) = split_line_ending(segment);
-        if line.trim().starts_with('[') {
-            section.enter(parse::section_header(line.trim()));
-            out.push_str(segment);
-            continue;
-        }
-        if section.applies()
-            && parse_line_key(line).is_some_and(|key| needles.contains(&normalize_key(key)))
-        {
-            removed = true;
-            continue;
-        }
-        out.push_str(segment);
+    let mut lines: Vec<(&str, Line)> = text
+        .split_inclusive('\n')
+        .map(|segment| {
+            let (line, _) = split_line_ending(segment);
+            let kind = if line.trim().starts_with('[') {
+                section.enter(parse::section_header(line.trim()));
+                Line::Kept
+            } else if section.applies()
+                && parse_line_key(line).is_some_and(|key| needles.contains(&normalize_key(key)))
+            {
+                Line::Removed
+            } else if line.trim().is_empty() {
+                Line::Blank
+            } else {
+                Line::Kept
+            };
+            (segment, kind)
+        })
+        .collect();
+    if !lines.iter().any(|(_, kind)| *kind == Line::Removed) {
+        return None;
     }
-    if !removed {
-        return Ok(None);
-    }
-    let content = out.trim_end_matches(['\n', '\r']).len();
-    if content < out.len() {
-        let line_ending = preferred_line_ending(existing);
-        out.truncate(content);
-        if !out.is_empty() {
-            out.push_str(line_ending);
+    let mut removed_after = false;
+    for (_, kind) in lines.iter_mut().rev() {
+        match kind {
+            Line::Removed => removed_after = true,
+            Line::Blank if removed_after => *kind = Line::Removed,
+            Line::Blank => {}
+            Line::Kept => break,
         }
     }
-    edit.commit(&out).map(Some)
+    Some(
+        lines
+            .into_iter()
+            .filter(|(_, kind)| *kind != Line::Removed)
+            .map(|(segment, _)| segment)
+            .collect(),
+    )
 }
 
 /// Append a `keybind = <trigger>=<action>` line to the user's config
@@ -13243,6 +13268,31 @@ split_horiz = <Control><Shift>j
             "[profiles]\n[[default]]\n[[work]]\nfont-size = 20\n"
         );
         assert!(super::remove_config_keys(&path, &["bad\nkey"]).is_err());
+    }
+
+    /// Removing a key leaves every unrelated byte as it was: blank lines the
+    /// file ends with after a comment, and each line's own ending in a file
+    /// that mixes them. Only the gap an appended key took before it goes.
+    #[test]
+    fn remove_config_keys_keeps_unrelated_bytes() {
+        let dir = tempdir_for("remove-keys-bytes");
+        let path = dir.join("config");
+        for (original, expected) in [
+            ("font-size = 18\n# EOF comment\n\n\n", "# EOF comment\n\n\n"),
+            ("a = 1\r\nfont-size = 18\nb = 2\r\n", "a = 1\r\nb = 2\r\n"),
+            ("a = 1\r\nb = 2\nfont-size = 18\r\n", "a = 1\r\nb = 2\n"),
+            ("font-size = 18\na = 1", "a = 1"),
+            ("a = 1\n\nfont-size = 18\n", "a = 1\n"),
+            ("a = 1\n\nfont-size = 18\n\n", "a = 1\n\n"),
+        ] {
+            write_private_fixture(&path, original);
+            super::remove_config_keys(&path, &["font-size"]).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                expected,
+                "{original:?}"
+            );
+        }
     }
 
     /// Writing a new key into an empty config appends it.
