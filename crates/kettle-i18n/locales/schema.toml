@@ -2970,6 +2970,9 @@ args = [{ name = "plain", type = "str" }, { name = "alternate", type = "str" }]
 context = "crates/kettle-ui/src/app/hints.rs or links.rs: Hint-mode instructions when Shift does not change the action."
 args = [{ name = "plain", type = "str" }]
 
+[messages.hint_none]
+context = "crates/kettle-ui/src/app/hints.rs no_hints_status: brief pane status, shown for three seconds along the bottom of the pane, when quick select (palette_hint_mode) found nothing on screen to label: no URL, path, git hash or IP address. The hints are the labels quick select puts on those (etiquetas in Spanish, as in palette_hint_mode). Also a polite screen-reader Status."
+
 [messages.settings_category_sessions]
 context = "crates/kettle-ui/src/settings.rs, session_content.rs: Settings category for saved workspace and terminal output."
 
@@ -3518,6 +3521,9 @@ plural = "count"
 
 [messages.scrollback_a11y_viewing]
 context = "crates/kettle-ui/src/app/accessibility.rs scrollback_accessibility_nodes: polite status a screen reader speaks once when the focused pane is scrolled back into its history, away from live output. It carries no line count on purpose, so further scrolling is not announced again."
+
+[messages.vi_mode_chip]
+context = "crates/kettle-render/src/scrollback.rs vi_mode_chip: small chip at the top right of a pane (or its bottom right) while vi mode is on, the keyboard mode that moves a cursor through the pane's text and history to select it (the palette's palette_toggle_vi_mode). It shows only where the cells under it are blank. vi is the name of the text editor whose keys the mode uses; keep it lowercase. Not read by screen readers."
 
 [messages.quick_portal_unset]
 context = "crates/kettle-ui/src/quick_terminal/portal.rs: Wayland shortcut status, value or platform note in Settings. Enter and Delete name keys; kettle quick-terminal is a literal command."

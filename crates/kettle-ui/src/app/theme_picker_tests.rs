@@ -401,7 +401,7 @@ fn regression_picker_scroll_strips_have_pointer_and_wheel_routes() {
 
 #[test]
 fn picker_rows_and_wheel_scroll_all_four_modal_projections() {
-    use super::{PickerPointer, apply_picker_pointer, open_picker_list, picker_context_menu};
+    use super::{PickerPointer, apply_picker_pointer, open_picker_list, open_picker_menu};
     let cfg = kettle_config::Config {
         ssh_hosts: (0..40)
             .map(|i| (format!("host-{i}"), format!("me@host-{i}")))
@@ -410,15 +410,9 @@ fn picker_rows_and_wheel_scroll_all_four_modal_projections() {
     };
     let surface = (320.0, 160.0);
     let cell = (8.0, 16.0);
+    // The list as the window draws it, scrolled where the wheel left it.
     let project = |ws: &WindowState| {
-        picker_context_menu(
-            open_picker_list(ws, &cfg, "dark-theme", &ES, None).unwrap(),
-            surface,
-            cell,
-            cell,
-            0.0,
-        )
-        .unwrap()
+        open_picker_menu(ws, &cfg, "dark-theme", &ES, None, surface, cell, cell, 0.0).unwrap()
     };
     for kind in 0..4 {
         let mut ws = WindowState::new(0, Mux::new());

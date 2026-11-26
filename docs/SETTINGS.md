@@ -317,7 +317,11 @@ these config-only options; edits still reload immediately for every open pane.
 ### Theme picker
 
 The theme picker lists every bundled theme. Type part of a name to filter them,
-or move with ↑/↓; the window wears the selected theme while you browse. Enter
+or move with ↑/↓; the window wears the selected theme while you browse. Moving
+the pointer onto a row selects it too, and the window wears that theme once
+the pointer rests there for a moment, so sweeping across the list does not
+flash every theme (moving off the row first leaves the window's theme as it
+was); a still pointer never takes the selection from the keys. Enter
 keeps it and writes it to your config file, and Esc puts back the theme you
 started with, or, if the system or the schedule switched sides while the
 picker was open, that side's theme. The prompt names the side a pick saves

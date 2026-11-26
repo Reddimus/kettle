@@ -208,6 +208,15 @@ impl App {
                     kettle_render::avoid_hint_labels(&mut status, pane, &hint_bounds);
                     pane_statuses.push(status);
                 }
+            } else if let Some(status) = no_hints_status(
+                &ws.no_hints_notice,
+                ws.mux.active_focus(),
+                pane,
+                status_cell,
+                std::time::Instant::now(),
+                tr,
+            ) {
+                pane_statuses.push(status);
             } else if let Some(status) =
                 self.selection_hint_status(ws, pane, status_cell, std::time::Instant::now())
             {
@@ -802,6 +811,7 @@ impl App {
             return;
         }
         let overlay = self.overlay(ws, reuse_pane_snapshots);
+        remember_picker_scroll(ws, overlay.context_menu.as_ref());
         // Search and completion state are semantic accessibility state. Reuse
         // the exact projection this frame will draw instead of rebuilding the
         // full overlay twice for the accessibility key and tree. Snapshot reuse

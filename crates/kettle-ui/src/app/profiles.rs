@@ -15,6 +15,7 @@ impl App {
 pub(super) fn open_profile_palette(ws: &mut WindowState, profiles: Option<&[String]>) {
     ws.palette_profiles = profiles.map(<[String]>::to_vec);
     ws.palette_input = Some((Default::default(), 0));
+    reset_picker_view(ws);
 }
 
 pub(super) fn palette_profile_status(

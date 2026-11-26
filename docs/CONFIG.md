@@ -1173,7 +1173,9 @@ from the bottom of the viewport. Blank cells before a match hold its label;
 at column zero blank cells after it are used when available. Without space the
 label overlays the match start. A translated legend explains the available
 plain-label and Shift-label actions and Esc cancellation. Explicit OSC 8 captions
-use their stored destination. Quick-select hints is also available in the
+use their stored destination. When nothing on screen can be labelled,
+**No hints here** shows along the bottom of the pane for three seconds
+instead. Quick-select hints is also available in the
 macOS Edit menu, the palette (with its current binding), and the terminal context
 menu when a link or path is visible. This adds no configuration keys.
 
@@ -1208,7 +1210,11 @@ copy/navigation mode (default `Ctrl+Shift+Space`): `h`/`j`/`k`/`l` move,
 `0`/`$`/`g`/`G`/`H`/`M`/`L` jump, `v` starts a visual selection, `V` a
 line selection and `Ctrl+v` a block selection (pressing another of the three
 switches the selection to that kind, the same one again ends it), `y` yanks it
-to the clipboard, `Esc` exits. See `man kettle` for the full keymap.
+to the clipboard, `Esc` exits. See `man kettle` for the full keymap. While it
+is on, a small **Vi mode** chip sits at the pane's top right (under the
+"Start of kept history" label when that shows), or at its bottom right above
+the jump-to-bottom button when text or the cursor is at the top; it only ever
+sits over blank, unselected cells, so with text in both places it stays hidden.
 
 **Misc**: `reset` (RIS — full terminal reset including engine state;
 like `clear_history`, it acts on Kettle's terminal, not the program in it,
