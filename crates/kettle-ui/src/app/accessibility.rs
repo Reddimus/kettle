@@ -640,16 +640,10 @@ impl App {
                 }
                 nodes.push((id, node));
             }
-            search_children.push(ACCESSIBILITY_SEARCH_COUNT_ID);
-            let mut count = Node::new(Role::Status);
-            count.set_label(ws.search.count_label(&self.ui_text));
-            count.set_live(accesskit::Live::Polite);
-            count.set_bounds(bounds(geometry.count));
-            nodes.push((ACCESSIBILITY_SEARCH_COUNT_ID, count));
-            search_children.push(ACCESSIBILITY_SEARCH_STATUS_ID);
-            let mut status = Node::new(Role::Status);
             let state = effective_search_status(&ws.search);
-            status.set_label(
+            let status = search_status_nodes(
+                &ws.search.count_label(&self.ui_text),
+                // The count already says whether anything matched.
                 if matches!(
                     state,
                     kettle_render::SearchStatus::Match | kettle_render::SearchStatus::NoMatch
@@ -658,10 +652,11 @@ impl App {
                 } else {
                     state.label(&self.ui_text)
                 },
+                geometry.count,
+                geometry.status,
             );
-            status.set_live(accesskit::Live::Polite);
-            status.set_bounds(bounds(geometry.status));
-            nodes.push((ACCESSIBILITY_SEARCH_STATUS_ID, status));
+            search_children.extend(status.iter().map(|(id, _)| *id));
+            nodes.extend(status);
 
             let mut search = Node::new(Role::Search);
             search.set_label(self.ui_text.text(kettle_i18n::Text::SearchA11yRegion));
@@ -1930,7 +1925,8 @@ const ACCESSIBILITY_TERMINAL_ROW_ID_MASK: u64 = 1 << 55;
 const ACCESSIBILITY_SEARCH_ID_MASK: u64 = 1 << 61;
 pub(super) const ACCESSIBILITY_SEARCH_CONTAINER_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK);
 const ACCESSIBILITY_SEARCH_TEXT_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 16);
-const ACCESSIBILITY_SEARCH_STATUS_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 17);
+/// The find bar's one status: its count and its search status. (17 was a
+/// second status node, unnamed while the count spoke for it.)
 const ACCESSIBILITY_SEARCH_COUNT_ID: NodeId = NodeId(ACCESSIBILITY_SEARCH_ID_MASK | 18);
 const ACCESSIBILITY_COMPLETION_ID_MASK: u64 = 1 << 60;
 pub(super) const ACCESSIBILITY_COMPLETION_CONTAINER_ID: NodeId =
@@ -2101,6 +2097,51 @@ pub(super) fn terminal_accessibility_runs(
             (id, node)
         })
         .collect()
+}
+
+/// The find bar's status for assistive technology: one polite live region
+/// that says the match count (`count`) and the search's own status (`status`,
+/// such as Wrapped or Invalid pattern), whichever of them the bar shows, in
+/// that order. It covers both where they are painted, and a bar that shows
+/// neither has none, so the region is never left without a name.
+pub(super) fn search_status_nodes(
+    count: &str,
+    status: &str,
+    count_rect: kettle_render::Rect4,
+    status_rect: kettle_render::Rect4,
+) -> Vec<(NodeId, Node)> {
+    let parts: Vec<(&str, kettle_render::Rect4)> = [(count, count_rect), (status, status_rect)]
+        .into_iter()
+        .filter(|(text, _)| !text.is_empty())
+        .collect();
+    let Some(&(_, first)) = parts.first() else {
+        return Vec::new();
+    };
+    let label = parts
+        .iter()
+        .map(|(text, _)| *text)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rect = |(x, y, width, height): kettle_render::Rect4| {
+        accesskit::Rect::new(
+            f64::from(x),
+            f64::from(y),
+            f64::from(x + width),
+            f64::from(y + height),
+        )
+    };
+    let bounds = parts
+        .iter()
+        .map(|&(_, at)| at)
+        .filter(|at| at.2 > 0.0 && at.3 > 0.0)
+        .map(rect)
+        .reduce(|all, part| all.union(part))
+        .unwrap_or_else(|| rect(first));
+    let mut node = Node::new(Role::Status);
+    node.set_label(label);
+    node.set_live(accesskit::Live::Polite);
+    node.set_bounds(bounds);
+    vec![(ACCESSIBILITY_SEARCH_COUNT_ID, node)]
 }
 
 pub(super) fn completion_accessibility_row(

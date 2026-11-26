@@ -3507,6 +3507,9 @@ speech:
   tab list's children are tabs only. New tab, the new-tab menu, the gear and
   the GNOME header's Find, main menu and window buttons sit in a "Tab bar
   controls" toolbar beside it, in screen order, in English and Spanish.
+- `the_find_bar_has_one_named_status`: the find bar's count and status are one
+  named polite status, in English and Spanish, bounded over both painted
+  rects, and absent when the bar shows neither.
 
 VoiceOver and Orca have not yet been run against these changes.
 

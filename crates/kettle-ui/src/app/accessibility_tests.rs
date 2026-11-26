@@ -3275,3 +3275,61 @@ fn the_tab_list_holds_only_tabs_beside_a_toolbar_of_the_strips_buttons() {
         .to_string();
     assert!(tree.contains("children.extend(tab_strip_roots(&tabs));"));
 }
+
+/// The find bar has one status for screen readers, always named: the match
+/// count and, when the bar shows one, the search's own status after it, in
+/// the UI's language, as one polite live region over where both are painted.
+/// The count speaks for Match and No matches, and a bar showing neither
+/// count nor status has no status node at all.
+#[test]
+fn the_find_bar_has_one_named_status() {
+    use kettle_render::SearchStatus;
+    let count_rect = (600.0, 4.0, 60.0, 20.0);
+    let status_rect = (670.0, 4.0, 90.0, 20.0);
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        let count = kettle_render::search_match_label(&tr, 3, Some(12), false);
+        let none = kettle_render::search_match_label(&tr, 0, Some(0), false);
+        let wrapped = SearchStatus::Wrapped.label(&tr);
+        for (count, status, heard, rect) in [
+            (count.as_str(), "", count.clone(), count_rect),
+            (none.as_str(), "", none.clone(), count_rect),
+            (count.as_str(), wrapped, format!("{count}, {wrapped}"), (600.0, 4.0, 160.0, 20.0)),
+            ("", SearchStatus::Typing.label(&tr), SearchStatus::Typing.label(&tr).to_string(), status_rect),
+            ("", SearchStatus::Invalid.label(&tr), SearchStatus::Invalid.label(&tr).to_string(), status_rect),
+        ] {
+            let nodes = super::search_status_nodes(count, status, count_rect, status_rect);
+            assert_eq!(nodes.len(), 1, "{language:?} {heard:?}");
+            let node = &nodes[0].1;
+            assert_eq!(node.role(), accesskit::Role::Status);
+            assert_eq!(node.label(), Some(heard.as_str()), "{language:?}");
+            assert_eq!(node.live(), Some(accesskit::Live::Polite));
+            let (x, y, w, h) = rect;
+            assert_eq!(
+                node.bounds(),
+                Some(accesskit::Rect::new(x as f64, y as f64, (x + w) as f64, (y + h) as f64)),
+                "{heard:?}"
+            );
+        }
+        assert!(super::search_status_nodes("", "", count_rect, status_rect).is_empty());
+    }
+    let tree = production_source()
+        .split_once("fn accessibility_tree(&self, ws: &WindowState, overlay: &Overlay)")
+        .unwrap()
+        .1
+        .split("fn accessibility_key(")
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .collect::<String>();
+    let search = tree
+        .split_once("children.push(ACCESSIBILITY_SEARCH_CONTAINER_ID);")
+        .unwrap()
+        .1
+        .split("letmutsearch=Node::new(Role::Search);")
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(search.contains("search_status_nodes("));
+    assert!(!search.contains("Role::Status"), "the find bar builds its status in one place");
+}

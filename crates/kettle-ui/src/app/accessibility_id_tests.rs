@@ -120,7 +120,6 @@ fn accessibility_ids_do_not_collide() {
             ACCESSIBILITY_NOTIFICATION_DISMISS_ID,
         ),
         ("search text", ACCESSIBILITY_SEARCH_TEXT_ID),
-        ("search status", ACCESSIBILITY_SEARCH_STATUS_ID),
         ("search count", ACCESSIBILITY_SEARCH_COUNT_ID),
         ("update status", ACCESSIBILITY_UPDATE_STATUS_ID),
         ("font size", ACCESSIBILITY_FONT_SIZE_ID),

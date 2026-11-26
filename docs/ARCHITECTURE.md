@@ -1954,6 +1954,11 @@ so lines above the lane stay put. A focused result's pane takes back no more
 than it is scrolled up, keeping its first visible row. The right-click menu is
 the one modal allowed to coexist with the bar; keys go to the menu while it is
 up because its arm precedes search in the key handler.
+The bar's AccessKit `Search` region has one polite `Status`
+(`search_status_nodes`): the match count, then the search's own status when
+the bar paints one (Wrapped, Invalid pattern), over both painted rects. Match
+and No matches are left to the count, and a bar that shows neither has no
+status node, so the live region always has a name.
 
 Modal text fields and search share `kettle-ui::text_editor::TextEditor`: one
 bounded UTF-8 string, a caret and an optional selection anchor on extended
