@@ -398,6 +398,16 @@ impl App {
         }
     }
 
+    /// Where a press reaches the open modal text field to place its caret
+    /// (`modal_text_pointer`), the rect that takes the I-beam.
+    pub(super) fn modal_text_press_rect(&self, ws: &WindowState) -> Option<Rect> {
+        let field = self.modal_text_projection(ws)?;
+        Some(text_field_press_rect(
+            &field,
+            self.modal_field_cell_width(ws, &field),
+        ))
+    }
+
     pub(super) fn modal_text_pointer(&self, ws: &mut WindowState, press: bool) -> bool {
         if !press && !ws.dragging_modal_editor {
             return false;
@@ -407,19 +417,8 @@ impl App {
             return false;
         };
         let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
-        let slot =
-            kettle_render::text_field_rects(&field, self.modal_field_cell_width(ws, &field))[1];
-        if press
-            && !rect_contains(
-                if field.picker_header {
-                    field.rect
-                } else {
-                    slot
-                },
-                x,
-                y,
-            )
-        {
+        let reach = text_field_press_rect(&field, self.modal_field_cell_width(ws, &field));
+        if press && !rect_contains(reach, x, y) {
             return false;
         }
         if ws.ime_preedit.is_some() {
@@ -4132,6 +4131,50 @@ pub(super) fn picker_placeholder(ws: &WindowState, tr: &kettle_i18n::Translator)
         .to_string()
     } else {
         String::new()
+    }
+}
+
+/// Where a press reaches `field` to place its caret: anywhere on a picker's
+/// header, else only the editor slot between its prefix and its hint. `cw` is
+/// the field's own cell width (`text_field_cell_width`).
+pub(super) fn text_field_press_rect(field: &kettle_render::TextFieldOverlay, cw: f32) -> Rect {
+    if field.picker_header {
+        field.rect
+    } else {
+        kettle_render::text_field_rects(field, cw)[1]
+    }
+}
+
+#[cfg(test)]
+mod text_field_press_tests {
+    use super::text_field_press_rect;
+
+    /// A picker's whole header places the caret; title edit and a Settings
+    /// value take a press only between their prefix and hint.
+    #[test]
+    fn a_press_reaches_a_picker_header_whole_and_a_field_between_its_labels() {
+        let mut field = kettle_render::TextFieldOverlay {
+            picker_header: false,
+            placeholder: String::new(),
+            text: "query".into(),
+            cursor_byte: 0,
+            selection: None,
+            horizontal_scroll: 0,
+            rect: (100.0, 20.0, 400.0, 24.0),
+            prefix: "Tab: ".into(),
+            hint: "Esc".into(),
+            accent_palette: 3,
+        };
+        assert_eq!(
+            text_field_press_rect(&field, 10.0),
+            kettle_render::text_field_rects(&field, 10.0)[1]
+        );
+        assert_eq!(
+            text_field_press_rect(&field, 10.0),
+            (150.0, 20.0, 320.0, 24.0)
+        );
+        field.picker_header = true;
+        assert_eq!(text_field_press_rect(&field, 10.0), field.rect);
     }
 }
 

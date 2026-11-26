@@ -1819,6 +1819,48 @@ impl App {
         Some(Self::resize_cursor_for(seams[i].dir))
     }
 
+    /// The I-beam over a modal's text field: the palette's, a picker's, title
+    /// edit's or a Settings value's, wherever a press places its caret, and
+    /// open Settings' search box, which a press focuses. The find bar's
+    /// editor has its own (`search_hover`).
+    fn modal_text_hover_icon(&self, ws: &WindowState) -> Option<CursorIcon> {
+        let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        let field = self
+            .modal_text_press_rect(ws)
+            .is_some_and(|rect| rect_contains(rect, x, y));
+        // Only Settings itself takes the press: not a dialog or a menu over
+        // it, and not while it edits a value or captures a key.
+        let search = matches!(
+            top_modal(ws),
+            Some(KeyModal::Settings | KeyModal::SettingsSearch)
+        ) && self.settings_pointer_hit(ws, (x, y))
+            == Some(kettle_render::SettingsHit::Search);
+        (field || search).then_some(CursorIcon::Text)
+    }
+
+    /// What of open Settings is at `(x, y)`, as `settings_mouse` finds it.
+    fn settings_pointer_hit(
+        &self,
+        ws: &WindowState,
+        (x, y): (f32, f32),
+    ) -> Option<kettle_render::SettingsHit> {
+        let set = self.settings_overlay_projection(ws)?;
+        let surface = ws.renderer.as_ref().map_or((800.0, 600.0), |r| {
+            let (w, h) = r.surface_size();
+            (w as f32, h as f32)
+        });
+        let layout = kettle_render::settings_layout(
+            &set,
+            (self.menu_cell(ws).0, self.overlay_text_line_height(ws)),
+            surface,
+            self.overlay_text_cell_width(ws),
+            ws.window
+                .as_ref()
+                .map_or(1.0, |window| window.scale_factor() as f32),
+        );
+        Some(layout.pointer_hit((x, y), None))
+    }
+
     /// Set the OS mouse-cursor icon, deduped against the last value pushed
     /// to the window. Called on CursorMoved (position changes the
     /// hit-test) and on ModifiersChanged (the modifier state gates the
@@ -1888,6 +1930,7 @@ impl App {
         } else {
             None
         };
+        let modal_text_hover = self.modal_text_hover_icon(ws);
         let search_hover = self.search_geometry(ws).and_then(|geometry| {
             let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
             geometry
@@ -1943,6 +1986,7 @@ impl App {
             .or(close_hover)
             .or(new_tab_hover_icon)
             .or(confirm_hover)
+            .or(modal_text_hover)
             .or(search_hover)
             .or(media_receipt_hover);
         // The jump button under the pointer, where a press would reach it:

@@ -1989,7 +1989,10 @@ the suffix, and commits through the same editor. IME candidate placement shapes
 the exact same projection, including preedit, rather than estimating text widths.
 Native and control pointer routes both place the caret and extend drag selections
 from those shaped stops. A pointer press ends composition before mapping into
-committed text.
+committed text. `text_field_press_rect` says where a press reaches a field (a
+picker's whole header, else the slot between prefix and hint), and the cursor
+shows the I-beam over that same rect, as it does over open Settings' search box
+and the find bar's editor.
 
 The SSH launcher's rows come from one model, `SshRow` in
 `kettle-ui::app::pickers`. A host whose name or alias equals the trimmed query
