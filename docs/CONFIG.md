@@ -1328,7 +1328,8 @@ looks like a path keeps its end. Any other title keeps both ends when at least
 16 columns of it show, and only its start in a narrower tab, so tabs whose
 titles differ near the start still read apart. Resting the pointer on a
 shortened tab shows its whole title, or its whole working directory, in a
-tooltip.
+tooltip. A tooltip with more lines than fit beside the control it names, in
+the window, keeps the lines that fit and ends with an ellipsis.
 
 When a window loses focus on macOS or Linux, tab text and controls dim toward
 their backgrounds while retaining at least 3:1 contrast, and the active accent

@@ -1329,6 +1329,7 @@ impl Renderer {
             new_tab_arrow_buffer,
             tab_tooltip_buffer,
             tab_tooltip_text: String::new(),
+            tab_tooltip_fit: (0, 0, 0),
             settings_gear_mask: Default::default(),
             header_icon_masks: Default::default(),
             header_title_face: None,

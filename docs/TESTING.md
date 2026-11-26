@@ -163,7 +163,8 @@ tooltip until the pointer leaves, and a single scheduler wake per deadline;
 the arrows' hover, hand cursor, translated tooltips and anchor.
 `a_cut_tab_title_shows_whole_in_a_tooltip` (`kettle-ui`) and
 `a_tab_label_is_cut_only_when_the_strip_shortens_it` (`kettle-render`) cover
-the full-title tooltip, and `narrow_tab_titles_keep_the_start_that_tells_them_apart`
+the full-title tooltip, `a_long_tooltip_ends_in_an_ellipsis_beside_its_control`
+its line cap, and `narrow_tab_titles_keep_the_start_that_tells_them_apart`
 the end ellipsis below 16 columns.
 `every_lane_button_is_a_24_pixel_target`,
 `a_viewer_that_fitted_before_still_fits_with_full_targets`,
