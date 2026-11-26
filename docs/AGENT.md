@@ -483,7 +483,7 @@ The pinned lane takes about 40% of its pane and resizes the terminal; keys
 still go to the terminal unless the user focuses the lane.
 The lane shows one item fitted, with still images never enlarged past their pixels, on white for
 SVG and a checkerboard for raster, with its title, kind, size and sender,
-and `‹ ›` to browse, `▾` to collapse the lane to a one-row strip and `×` to
+and `‹ ›` to browse, `▾` to collapse the lane to a strip and `×` to
 close it. Where this platform permits an image viewer and the item still
 holds its pixels, the header also has `↗`, which opens it there (Preview on
 macOS, Loupe or Eye of GNOME on Linux), the same hand-off as a card menu's row. A
@@ -493,7 +493,9 @@ or not, and a PDF's a private copy of the PDF in the permitted document
 viewer (Preview on macOS, Papers or Evince on Linux), never a picture of its
 page. The
 terminal keeps at least 20 columns and 5 rows: with less room the lane is
-the strip, along the pane's bottom whichever side it opened on; opening one
+the strip, along the pane's bottom whichever side it opened on, in whole
+terminal rows tall enough for 24-point buttons (one row where the terminal
+would lose its 5 rows to that); opening one
 in a pane too small even for that shows a notice and leaves the item unseen,
 and a lane that loses its room later waits as the titlebar's shelf badge. Each pane
 has its own lane; `ui_geometry` reports the centered viewer as
