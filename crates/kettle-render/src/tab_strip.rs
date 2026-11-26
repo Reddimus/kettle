@@ -326,7 +326,8 @@ pub(crate) fn tooltip_rect(
     let w = (text.0 + 16.0 * scale).min(surface.0);
     let h = (text.1 + 8.0 * scale).min(surface.1);
     let x = (band.0 + band.2 - w - 8.0 * scale).clamp(0.0, (surface.0 - w).max(0.0));
-    let y = if band.1 < surface.1 * 0.5 {
+    let (below, _) = tooltip_side(band, surface, scale);
+    let y = if below {
         band.1 + band.3 + 4.0 * scale
     } else {
         band.1 - h - 4.0 * scale
@@ -334,21 +335,31 @@ pub(crate) fn tooltip_rect(
     (x, y.clamp(0.0, (surface.1 - h).max(0.0)), w, h)
 }
 
+/// The side of `anchor` a tooltip goes on, the one with more room in the
+/// window (below on a tie), and the height it has there.
+pub(crate) fn tooltip_side(anchor: Rect4, surface: (f32, f32), scale: f32) -> (bool, f32) {
+    let gap = 4.0 * scale;
+    let below = surface.1 - (anchor.1 + anchor.3) - gap;
+    let above = anchor.1 - gap;
+    if below >= above {
+        (true, below)
+    } else {
+        (false, above)
+    }
+}
+
 /// The most lines of `line_height` a tooltip hung from `anchor` shows: what
-/// fits on the side [`tooltip_rect`] puts it, so it never leaves the window
-/// or covers the control it names. At least one.
+/// fits on the side [`tooltip_rect`] puts it, the one with more room, so it
+/// never leaves the window or covers the control it names. At least one.
+/// The renderer wraps it at the window's width, less its padding, first, so
+/// this cap is the last resort of a text the window cannot hold.
 pub(crate) fn tooltip_max_lines(
     anchor: Rect4,
     surface: (f32, f32),
     line_height: f32,
     scale: f32,
 ) -> usize {
-    let gap = 4.0 * scale;
-    let room = if anchor.1 < surface.1 * 0.5 {
-        surface.1 - (anchor.1 + anchor.3) - gap
-    } else {
-        anchor.1 - gap
-    };
+    let (_, room) = tooltip_side(anchor, surface, scale);
     ((room - 8.0 * scale) / line_height.max(1.0))
         .floor()
         .max(1.0) as usize
@@ -2984,5 +2995,48 @@ mod scroll_arrow_tests {
         assert!(src.contains(
             "tab_strip::shape_tooltip(&mutself.font_system,&mutself.tab_tooltip_buffer,"
         ));
+    }
+
+    /// Finding 5 of the second 6.0 review: a long title's tooltip should use
+    /// as much of the window as it can before its ellipsis. It wraps at the
+    /// window's width, less its padding, and goes on the side of its control
+    /// with more room, which for a control in the window's top half need not
+    /// be below; the whole title shows where the window can hold it, and the
+    /// ellipsis is left for a window that cannot.
+    #[test]
+    fn a_long_tooltip_takes_the_side_with_more_room_and_the_whole_width() {
+        // A tall control whose top is in the top half but with more room
+        // above it than below.
+        let surface = (420.0, 300.0);
+        let tall = (100.0, 100.0, 120.0, 120.0);
+        let (below, room) = tooltip_side(tall, surface, 1.0);
+        assert!(!below && room == 96.0, "{below} {room}");
+        assert_eq!(tooltip_max_lines(tall, surface, 17.5, 1.0), 5);
+        let (_, y, _, h) = tooltip_rect(tall, surface, (300.0, 5.0 * 17.5), 1.0);
+        assert!(y >= 0.0 && y + h <= tall.1, "above, clear of it: {y} {h}");
+        // The tab strip's tab, at the top: below, as before.
+        let tab = (100.0, 0.0, 120.0, 28.0);
+        assert!(tooltip_side(tab, surface, 1.0).0);
+        // A window wide and tall enough holds the whole long title: no
+        // ellipsis.
+        let mut fonts = glyphon::FontSystem::new();
+        let line = 17.5;
+        let mut buffer = glyphon::Buffer::new(&mut fonts, glyphon::Metrics::new(13.0, line));
+        let title: String = "WWWWWW ".repeat(80).chars().take(511).collect();
+        let window = (1280.0, 800.0);
+        buffer.set_size(Some(window.0 - 16.0), None);
+        let max = tooltip_max_lines(tab, window, line, 1.0);
+        shape_tooltip(
+            &mut fonts,
+            &mut buffer,
+            &title,
+            &glyphon::Attrs::new(),
+            None,
+            max,
+        );
+        let shown: String = buffer.lines.iter().map(|line| line.text()).collect();
+        assert_eq!(shown, title, "the whole title");
+        let src: String = crate::production_source().split_whitespace().collect();
+        assert!(src.contains("letwrap_width=(sw-16.0*self.scale).max(1.0);"));
     }
 }
