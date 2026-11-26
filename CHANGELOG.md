@@ -1132,6 +1132,65 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - A program that tracks the mouse no longer hears the pointer moving over the tab bar, the status bar or another split as motion at its edge.
 
+- Settings answers the pointer: options and categories light up under it,
+  and Reset and choice controls react like dialog buttons, without moving
+  the keyboard highlight.
+
+- In light themes the highlighted Settings option and the open category now
+  have a tint you can see (at least 1.3:1 against the panel); before, only
+  the bar at their edge showed which was highlighted.
+
+- A long value scrolled in a text field, such as a path in Settings' Image
+  file prompt, no longer shows a cut-off sliver of a letter at the left edge
+  that looked like a second caret.
+
+- While you search Settings, its title reads "Search results" and no
+  category is marked as open, since the results come from every category.
+
+- Reset in Settings removes the option from your config file instead of
+  writing today's default into it, so the option follows the platform's
+  default (and later ones) and the file no longer gains a line with each
+  reset.
+
+- In Settings search, Tab leaves a search with no matches, and clearing a
+  search you didn't move into puts the highlight back on the option it was
+  on, rather than on a match of something typed on the way.
+
+- On macOS the Settings Window blur switch is as wide as the other switches;
+  it kept room for an Unavailable state that macOS never shows.
+
+- The Settings guide and Getting started now give Cmd+, as the macOS
+  shortcut for Settings; they said Ctrl+, on every platform.
+
+- The Settings Language row no longer repeats "Applies when Kettle restarts"
+  in the footer while the choice is the running language; the footer speaks
+  up once a restart is needed, as documented.
+
+- On macOS, the Settings Keybinds page shows each action's Cmd shortcut, as
+  the menus do; Previous tab read Ctrl+PageUp beside Next tab's Shift+Cmd+].
+
+- When Settings refuses a shortcut key pressed without a modifier, the row
+  now says "Add a modifier, Esc to cancel" instead of only sending a desktop
+  notification.
+
+- On macOS, choosing Settings… (Cmd+,) while Settings is open no longer
+  sends it back to its first page and drops your search; it stays where it
+  is.
+
+- Settings keeps saying "Restart Kettle to apply graphics changes" after you
+  close and reopen it, for as long as a renderer or GPU change is still
+  waiting for a restart.
+
+- In Settings, ← now turns a switch off and → turns it on, instead of both
+  flipping it, and Space or Enter no longer steps a number up with no way
+  back down.
+
+- Settings takes Home, End, Page Up and Page Down to move through options
+  and search results, and Shift+←/→ changes a number ten steps at a time.
+
+- In Settings, `G`, `Ctrl+D` and `Ctrl+U` no longer land on a dimmed option
+  that doesn't apply; like the arrows, they skip it.
+
 - `tab-min-width` is measured in logical pixels, as documented. On a display
   with a scale above 100% tabs could shrink to a fraction of the width set
   (half on a Retina display) before the tab bar started to scroll.

@@ -866,8 +866,14 @@ impl App {
                     } else if editing {
                         String::new()
                     } else if category == cat && i == fld && nav.capturing {
-                        // Capture prompt on the focused keybind row.
-                        tr.text(kettle_i18n::Text::SettingsPressChord).to_string()
+                        // Capture prompt on the focused keybind row, or why
+                        // its last key was refused.
+                        tr.text(if nav.capture_refused {
+                            kettle_i18n::Text::SettingsCaptureNeedsModifier
+                        } else {
+                            kettle_i18n::Text::SettingsPressChord
+                        })
+                        .to_string()
                     } else {
                         crate::settings::row_value(f, context.clone(), &self.cfg, tr)
                     };
@@ -919,9 +925,11 @@ impl App {
                 .iter()
                 .position(|&identity| identity == (cat, fld))
                 .unwrap_or(0),
-            title: tr.text(active.name).to_string(),
+            title: settings_title(tr, active.name, nav.query.text()),
             hints: settings_hints(tr, self.cfg.vim_menu_nav),
             reset_label: tr.text(kettle_i18n::Text::SettingsResetButton).to_string(),
+            // Only the painter shows hover (`settings_hover`).
+            hover: None,
             reset_name: active
                 .fields
                 .get(fld)
@@ -962,7 +970,11 @@ impl App {
                     active_gpu.as_deref(),
                     active.fields.get(fld).map(|f| f.key),
                     blur_unavailable,
-                    ws.settings_restart_pending,
+                    crate::settings::pending_apply(
+                        self.running_graphics.as_ref(),
+                        &self.cfg,
+                        ws.surface_caps.lacks_for(&self.cfg),
+                    ),
                     self.language_change_pending(),
                     match active.fields.get(fld).map(|f| f.key) {
                         Some("agent-display-claude-code") => Some(claude_code_note(
@@ -978,6 +990,60 @@ impl App {
                 )
             },
         })
+    }
+
+    /// The Settings layout this window paints and hit-tests.
+    fn settings_layout_for(
+        &self,
+        ws: &WindowState,
+        set: &kettle_render::SettingsOverlay,
+    ) -> kettle_render::SettingsLayout {
+        let (cw, _) = self.menu_cell(ws);
+        let (sw, sh) = ws
+            .renderer
+            .as_ref()
+            .map(|r| {
+                let (w, h) = r.surface_size();
+                (w as f32, h as f32)
+            })
+            .unwrap_or((800.0, 600.0));
+        kettle_render::settings_layout(
+            set,
+            (cw, self.overlay_text_line_height(ws)),
+            (sw, sh),
+            self.overlay_text_cell_width(ws),
+            ws.window
+                .as_ref()
+                .map_or(1.0, |window| window.scale_factor() as f32),
+        )
+    }
+
+    /// What the window's own pointer is over in Settings, for its hover
+    /// feedback alone: the keyboard focus never follows it. `None` while
+    /// [`settings_hover_shows`] says no, and for a pointer outside the
+    /// window or one a control client moves.
+    pub(super) fn settings_hover(
+        &self,
+        ws: &WindowState,
+        set: &kettle_render::SettingsOverlay,
+    ) -> Option<kettle_render::SettingsHover> {
+        let pointer = ws.native_pointer.filter(|_| settings_hover_shows(ws))?;
+        self.settings_layout_for(ws, set)
+            .hover_at(set, (pointer.x as f32, pointer.y as f32))
+    }
+
+    /// Repaint Settings when the pointer moves onto or off a row, choice,
+    /// Reset or category. Only the paint changes.
+    pub(super) fn track_settings_hover(&mut self, ws: &mut WindowState) {
+        let hover = self
+            .settings_overlay_projection(ws)
+            .and_then(|set| self.settings_hover(ws, &set));
+        if hover != ws.settings_hover {
+            ws.settings_hover = hover;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
     }
 
     /// Handle a mouse interaction with the settings overlay. `dir` is
@@ -1006,25 +1072,8 @@ impl App {
         let Some(set) = self.settings_overlay_projection(ws) else {
             return false;
         };
-        let (cw, _) = self.menu_cell(ws);
-        let (sw, sh) = ws
-            .renderer
-            .as_ref()
-            .map(|r| {
-                let (w, h) = r.surface_size();
-                (w as f32, h as f32)
-            })
-            .unwrap_or((800.0, 600.0));
         let (mx, my) = (ws.cursor.x as f32, ws.cursor.y as f32);
-        let layout = kettle_render::settings_layout(
-            &set,
-            (cw, self.overlay_text_line_height(ws)),
-            (sw, sh),
-            self.overlay_text_cell_width(ws),
-            ws.window
-                .as_ref()
-                .map_or(1.0, |window| window.scale_factor() as f32),
-        );
+        let layout = self.settings_layout_for(ws, &set);
         // Off a primary click, the Reset chip is part of its row.
         let hit = match layout.pointer_hit((mx, my), (!is_click).then_some(dir)) {
             kettle_render::SettingsHit::Reset(index)
@@ -1943,6 +1992,10 @@ impl App {
             use crate::settings::HotkeyCapture;
             match capture_global_hotkey(key, unmodified_key, held_modifiers(ws), ws.mods) {
                 HotkeyCapture::Pending => return,
+                HotkeyCapture::Refused => {
+                    self.refuse_settings_chord(ws);
+                    return;
+                }
                 HotkeyCapture::Cancel => {}
                 HotkeyCapture::Value(trigger) => {
                     let value =
@@ -1972,12 +2025,7 @@ impl App {
                 // everywhere, persisted, with no in-overlay unbind. Stay in
                 // capture mode and tell the user instead of soft-bricking.
                 if !keybind_chord_is_safe(mods, kk) {
-                    fire_notify(
-                        self.ui_text
-                            .text(kettle_i18n::Text::NotifyTitleKeybindNeedsModifier),
-                        self.ui_text
-                            .text(kettle_i18n::Text::NotifyBodyKeybindModifier),
-                    );
+                    self.refuse_settings_chord(ws);
                     return;
                 }
                 if let Some(action) = crate::settings::keybind_action(&cats[cat].fields[fld])
@@ -2046,94 +2094,60 @@ impl App {
             return;
         }
 
-        match key {
-            Key::Named(NamedKey::Escape) => {
+        // Chord-capture mode (handled above) already consumed the key, so
+        // capturing a chord like bare `j` (refused anyway) or `Ctrl+d` still
+        // reaches the capture branch. Search may have moved the row.
+        let Some(nav) = ws.settings_nav.as_mut() else {
+            return;
+        };
+        cat = nav.category.min(cats.len() - 1);
+        fld = nav.field.min(cats[cat].fields.len().saturating_sub(1));
+        (nav.category, nav.field) = (cat, fld);
+        use crate::settings::RowCommand;
+        // `dispatch_ui_key` sends Space as a character.
+        let command = if confirmation_space_key(key) {
+            Some(RowCommand::Value(crate::settings::ValueKey::Activate))
+        } else {
+            crate::settings::row_command(key, ws.mods, self.cfg.vim_menu_nav)
+        };
+        match command {
+            Some(RowCommand::Close) => {
                 ws.settings_nav = None;
                 self.reset_blink_phase(ws);
-                return;
             }
-            Key::Named(NamedKey::ArrowDown) => {
-                fld = crate::settings::next_enabled_field(&self.cfg, &cats[cat].fields, fld, 1)
-            }
-            Key::Named(NamedKey::ArrowUp) => {
-                fld = crate::settings::next_enabled_field(&self.cfg, &cats[cat].fields, fld, -1)
-            }
-            Key::Named(NamedKey::Tab) => {
-                if let Some(nav) = ws.settings_nav.as_mut() {
-                    nav.query = Default::default();
-                }
-                let n = cats.len();
-                cat = if ws.mods.shift_key() {
-                    (cat + n - 1) % n
-                } else {
-                    (cat + 1) % n
-                };
-                fld = 0;
-            }
-            key if confirmation_space_key(key)
-                || matches!(
-                    key,
-                    Key::Named(NamedKey::ArrowRight | NamedKey::ArrowLeft | NamedKey::Enter)
-                ) =>
-            {
-                let dir = match key {
-                    Key::Named(NamedKey::ArrowRight) => 1,
-                    Key::Named(NamedKey::ArrowLeft) => -1,
-                    _ => 0, // Space / Enter = activate (cycle forward / toggle)
-                };
-                self.settings_adjust(ws, &cats, cat, fld, dir);
-            }
-            Key::Named(NamedKey::Delete | NamedKey::Backspace) => {
-                self.settings_reset(ws, &cats, cat, fld);
-            }
-            // `vim-menu-nav`: j/k mirror ↓/↑, h/l mirror ←/→, g/G jump to the
-            // first/last field, Ctrl+d / Ctrl+u move half a page. Chord-capture
-            // mode (handled before this match) already consumed the key, so
-            // capturing a chord like bare `j` (refused anyway) or `Ctrl+d`
-            // still reaches the capture branch.
-            Key::Character(s)
-                if self.cfg.vim_menu_nav && !ws.mods.alt_key() && !ws.mods.super_key() =>
-            {
-                let half = (field_count / 2).max(1);
-                // Case-fold so CapsLock can't kill the nav layer; g-vs-G
-                // derives from the physical Shift state.
-                let folded = s.to_ascii_lowercase();
-                match (folded.as_str(), ws.mods.control_key()) {
-                    ("j", false) => {
-                        fld = crate::settings::next_enabled_field(
-                            &self.cfg,
-                            &cats[cat].fields,
-                            fld,
-                            1,
-                        )
-                    }
-                    ("k", false) => {
-                        fld = crate::settings::next_enabled_field(
-                            &self.cfg,
-                            &cats[cat].fields,
-                            fld,
-                            -1,
-                        )
-                    }
-                    ("g", false) => {
-                        fld = if ws.mods.shift_key() {
-                            field_count - 1
-                        } else {
-                            0
-                        };
-                    }
-                    ("h", false) => self.settings_adjust(ws, &cats, cat, fld, -1),
-                    ("l", false) => self.settings_adjust(ws, &cats, cat, fld, 1),
-                    ("d", true) => fld = (fld + half).min(field_count - 1),
-                    ("u", true) => fld = fld.saturating_sub(half),
-                    _ => {}
+            Some(RowCommand::Move(to)) => nav.move_focus(&cats, &self.cfg, to),
+            Some(RowCommand::Category(next)) => nav.switch_category(&cats, &self.cfg, next),
+            Some(RowCommand::Value(value)) => {
+                if let Some(dir) =
+                    crate::settings::value_key_dir(&self.cfg, &cats[cat].fields[fld], value)
+                {
+                    self.settings_adjust(ws, &cats, cat, fld, dir);
                 }
             }
-            _ => {}
+            Some(RowCommand::Reset) => self.settings_reset(ws, &cats, cat, fld),
+            None => {}
         }
-        if let Some(n) = ws.settings_nav.as_mut() {
-            n.category = cat;
-            n.field = fld;
+    }
+
+    /// A chord capture refused a key without a modifier and goes on
+    /// waiting. The row says so, and assistive technology reads it from the
+    /// row's value; a window not in front, where nobody sees the row, also
+    /// gets a desktop notification.
+    fn refuse_settings_chord(&mut self, ws: &mut WindowState) {
+        if let Some(nav) = ws.settings_nav.as_mut() {
+            nav.capture_refused = true;
+        }
+        if !ws.window_focused {
+            fire_notify(
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyTitleKeybindNeedsModifier),
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyBodyKeybindModifier),
+            );
+        }
+        ws.accessibility_pending = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
         }
     }
 
@@ -2215,6 +2229,7 @@ impl App {
                 n.category = cat;
                 n.field = fld;
                 n.capturing = true;
+                n.capture_refused = false;
             }
             return;
         }
@@ -2289,7 +2304,10 @@ impl App {
     }
 
     /// Reset the focused Settings row to the value a config that does not set
-    /// it would give, through the same write and reload as a change.
+    /// it would give: its lines leave the config file, so the row follows the
+    /// default from then on, as it changes between releases and platforms.
+    /// Where the default still does not show (the key is also set where
+    /// Kettle does not edit), the default is written as a change would be.
     pub(super) fn settings_reset(
         &mut self,
         ws: &mut WindowState,
@@ -2306,9 +2324,16 @@ impl App {
         {
             return;
         }
-        if let Some(value) = crate::settings::default_value(field) {
-            self.settings_store(ws, field.key, value);
+        let Some(value) = crate::settings::default_value(field) else {
+            return;
+        };
+        if self.unset_prefs(&crate::settings::reset_keys(field)) == Ok(true) {
+            self.reload_config(ws);
+            if crate::settings::holds_default(&self.cfg, field) {
+                return;
+            }
         }
+        self.settings_store(ws, field.key, value);
     }
 
     /// Reset the selected Settings row, as Delete does: what the Reset
@@ -2399,8 +2424,9 @@ impl App {
         // The GPU device picker is one row but persists THREE keys
         // (vendor/device/name). "auto" clears the pin; "<vendor>:<device>:<name>"
         // sets it. GPU changes apply on the NEXT launch (the wgpu device/surface
-        // graph can't hot-swap and every window shares one adapter), so we flag
-        // a restart affordance instead of rebuilding the renderer live.
+        // graph can't hot-swap and every window shares one adapter), so the
+        // footer asks for a restart (`settings::pending_apply`) instead of the
+        // renderer being rebuilt live.
         if key_str == "gpu" {
             // Fold all three `persist_pref` results together (false on an
             // unexpected `new_val` shape). A partial or total write failure
@@ -2422,9 +2448,7 @@ impl App {
             } else {
                 false
             };
-            if saved {
-                ws.settings_restart_pending = crate::settings::SettingsApply::Restart;
-            } else {
+            if !saved {
                 fire_notify(
                     self.ui_text
                         .text(kettle_i18n::Text::NotifyTitleSettingNotSaved),
@@ -2462,31 +2486,13 @@ impl App {
             );
         }
         // The renderer and the remaining GPU policy keys (power preference /
-        // backend / force-software) also only take effect on restart.
-        if saved
-            && matches!(
-                key_str,
-                "renderer" | "gpu-power-preference" | "gpu-backend" | "gpu-force-software"
-            )
-        {
-            ws.settings_restart_pending = crate::settings::SettingsApply::Restart;
-        }
-        let surface_setting = matches!(
-            key_str,
-            "background-opacity" | "background-type" | "window-blur"
-        );
+        // backend / force-software) also only take effect on restart. Winit's
+        // alpha-capable window attribute is fixed at creation: renderer colors
+        // and the surface's alpha mode reload immediately, so only a change
+        // this window was not created able to show (an opaque window turning
+        // translucent, or blur turned on) needs a new window. The footer works
+        // both out from the reloaded config (`settings::pending_apply`).
         self.reload_config(ws);
-        // Winit's alpha-capable window attribute is fixed at creation.
-        // Renderer colors and the surface's alpha mode reload immediately, so
-        // only a change this window was not created able to show (an opaque
-        // window turning translucent, or blur turned on) needs a new window.
-        if saved
-            && surface_setting
-            && ws.surface_caps.lacks_for(&self.cfg)
-            && ws.settings_restart_pending == crate::settings::SettingsApply::None
-        {
-            ws.settings_restart_pending = crate::settings::SettingsApply::NewWindow;
-        }
         // A theme pick needs no `save_session()`. `persist_pref` above durably
         // writes the config `theme =` line, the single source of truth on restart.
     }
@@ -2948,6 +2954,17 @@ pub enum ConfirmKeyResult {
     /// Key wasn't a nav key for the modal — caller can pass through
     /// or ignore (we suppress non-nav input while a modal is open).
     Ignore,
+}
+
+/// Whether the pointer's hover shows in Settings: not while a chord capture
+/// or an inline edit holds the input, where a click does nothing, nor under
+/// a dialog, a menu or the theme picker.
+pub(super) fn settings_hover_shows(ws: &WindowState) -> bool {
+    ws.settings_nav.as_ref().is_some_and(|nav| !nav.capturing)
+        && ws.settings_text_edit.is_none()
+        && ws.confirm_dialog.is_none()
+        && ws.context_menu.is_none()
+        && ws.theme_picker_input.is_none()
 }
 
 /// How much a close of the tab at `idx` would take: `(panes, busy)`.

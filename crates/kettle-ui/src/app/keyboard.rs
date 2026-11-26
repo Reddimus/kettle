@@ -406,6 +406,8 @@ pub(super) fn parse_ui_key(token: &str) -> Option<(ModifiersState, Key)> {
                 | NamedKey::ArrowRight
                 | NamedKey::Home
                 | NamedKey::End
+                | NamedKey::PageUp
+                | NamedKey::PageDown
                 | NamedKey::F3
         ) | Key::Character(_)
     ) {

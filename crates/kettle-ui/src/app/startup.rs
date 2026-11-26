@@ -814,6 +814,7 @@ impl App {
             next_window_seq: 2,
             gpu: None,
             cpu_rendering: false,
+            running_graphics: None,
             font_preload: Some(font_preload),
             early_gpu_instance,
             launch_override: plan.launch_override,
@@ -1447,6 +1448,8 @@ impl App {
             self.install_shared_gpu(&renderer);
         }
         ws.renderer = Some(renderer);
+        self.running_graphics
+            .get_or_insert_with(|| crate::settings::GraphicsSettings::of(&self.cfg));
         ws.startup_cell = None;
         ws.startup_surface = None;
         ws.accessibility = Some(accessibility);

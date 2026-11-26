@@ -89,6 +89,34 @@ impl App {
         }
     }
 
+    /// Remove `keys` from the config file, so each takes its default again.
+    /// `Ok(false)` when no line set them and nothing was written.
+    pub(super) fn unset_prefs(&self, keys: &[&str]) -> Result<bool, ()> {
+        let Some(path) = self
+            .config_path
+            .clone()
+            .or_else(kettle_config::Config::default_path)
+        else {
+            log::warn!("unset_prefs: no config path resolved");
+            return Err(());
+        };
+        match kettle_config::remove_config_keys(&path, keys) {
+            Ok(backup) => {
+                if backup.is_some() {
+                    log::info!("unset_prefs: removed {keys:?} from {}", path.display());
+                }
+                Ok(backup.is_some())
+            }
+            Err(e) => {
+                log::warn!(
+                    "unset_prefs: failed to remove {keys:?} from {}: {e}",
+                    path.display()
+                );
+                Err(())
+            }
+        }
+    }
+
     /// Whether the configured theme schedule calls for the dark theme now,
     /// or `None` without a schedule.
     pub(super) fn theme_schedule_is_dark(&self) -> Option<bool> {

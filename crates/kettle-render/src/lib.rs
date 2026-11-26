@@ -195,7 +195,7 @@ use search::{search_bar_text, search_editor_label, search_focused_label};
 use settings::SettingsTextKind;
 use settings::settings_text_items;
 pub use settings::{
-    SettingsControl, SettingsHintLine, SettingsHit, SettingsLayout, SettingsOverlay,
+    SettingsControl, SettingsHintLine, SettingsHit, SettingsHover, SettingsLayout, SettingsOverlay,
     SettingsPanelGeometry, SettingsResetChip, SettingsRow, SettingsRowGeometry,
     settings_control_height, settings_hit_test, settings_hit_test_with_text_width, settings_layout,
     settings_panel_geometry, settings_value_rect,
@@ -5418,6 +5418,7 @@ impl Renderer {
                 border,
                 control,
                 focus,
+                hover,
                 ..
             } = palette;
             // Ink on a switched-on toggle: whichever theme end stands out more
@@ -5472,7 +5473,10 @@ impl Renderer {
             }
             // Focus shows as a bar, not only as the light fill.
             let bar = settings::settings_focus_bar_width(line / self.scale) * self.scale;
-            if let Some(Some(r)) = layout.category_rects.get(set.active_category) {
+            if let Some(Some(r)) = set
+                .highlighted_category()
+                .and_then(|index| layout.category_rects.get(index))
+            {
                 shape(*r, selected, 1.0, selected, 0.0, 4.0);
                 shape(
                     settings::settings_focus_bar(*r, bar, self.scale),
@@ -5483,11 +5487,24 @@ impl Renderer {
                     0.0,
                 );
             }
-            for (_, rect) in [layout.category_previous, layout.category_next]
-                .into_iter()
-                .flatten()
+            // The pointer's prelight: no bar, and never the open category.
+            if let Some(SettingsHover::Category(index)) = set.hover
+                && let Some(Some(r)) = layout.category_rects.get(index)
             {
-                shape(rect, theme.background, 1.0, control, 1.0, 4.0);
+                shape(*r, hover, 1.0, hover, 0.0, 4.0);
+            }
+            for (next, arrow) in [
+                (false, layout.category_previous),
+                (true, layout.category_next),
+            ] {
+                if let Some((_, rect)) = arrow {
+                    let fill = if set.hover == Some(SettingsHover::Arrow(next)) {
+                        settings::settings_pressable(theme.background)
+                    } else {
+                        theme.background
+                    };
+                    shape(rect, fill, 1.0, control, 1.0, 4.0);
+                }
             }
             shape(
                 layout.search_rect,
@@ -5498,17 +5515,23 @@ impl Renderer {
                 4.0,
             );
             for row in &layout.rows {
-                let row_selected = row.index == set.focused_row && !set.search_focused;
-                if row_selected {
-                    shape(row.rect, selected, 1.0, selected, 0.0, 4.0);
-                    shape(
-                        settings::settings_focus_bar(row.rect, bar, self.scale),
-                        focus,
-                        1.0,
-                        focus,
-                        0.0,
-                        0.0,
-                    );
+                let row_fill = settings::settings_row_fill(set, row.index);
+                match row_fill {
+                    settings::SettingsRowFill::Focused => {
+                        shape(row.rect, selected, 1.0, selected, 0.0, 4.0);
+                        shape(
+                            settings::settings_focus_bar(row.rect, bar, self.scale),
+                            focus,
+                            1.0,
+                            focus,
+                            0.0,
+                            0.0,
+                        );
+                    }
+                    settings::SettingsRowFill::Hovered => {
+                        shape(row.rect, hover, 1.0, hover, 0.0, 4.0);
+                    }
+                    settings::SettingsRowFill::Panel => {}
                 }
                 let data = &set.rows[row.index];
                 for surface in settings::settings_row_surfaces(
@@ -5516,7 +5539,7 @@ impl Renderer {
                     data,
                     &palette,
                     (theme.background, acc, on_ink),
-                    row_selected,
+                    (row_fill, set.hover),
                     self.scale,
                 ) {
                     shape(
@@ -5531,11 +5554,16 @@ impl Renderer {
                 if let Some(reset) = row.reset
                     && reset.icon
                 {
+                    let chip = if set.hover == Some(SettingsHover::Reset(row.index)) {
+                        settings::settings_pressable(theme.background)
+                    } else {
+                        theme.background
+                    };
                     header_icons::push_header_icon(
                         &mut menu_q,
                         header_icons::HeaderIcon::Reset,
                         reset.rect,
-                        self.chrome_colors.text(theme.foreground, theme.background),
+                        self.chrome_colors.text(theme.foreground, chip),
                         self.scale,
                         &mut self.header_icon_masks,
                     );
@@ -6984,3 +7012,6 @@ mod scrollback_pill_tests;
 
 #[cfg(test)]
 mod settings_hierarchy_tests;
+
+#[cfg(test)]
+mod settings_state_tests;

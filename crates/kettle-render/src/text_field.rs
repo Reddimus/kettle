@@ -213,7 +213,20 @@ fn layout_text_field(
     let max_scroll = (clusters.iter().map(|c| c.right).fold(0.0_f32, f32::max) - width).max(0.0);
     let desired = stop_x(stops, scroll_byte).clamp(0.0, max_scroll);
     let scroll = desired.clamp((cursor_x - width).max(0.0), cursor_x.max(0.0));
-    let text_left = editor.0 + 2.0 - scroll;
+    let mut text_left = editor.0 + 2.0 - scroll;
+    // Scrolled text starts on a whole grapheme. A cluster cut by the
+    // field's left edge (where painting clips, at a whole pixel) would leave
+    // a sliver there that reads as a second caret, so it goes out of sight
+    // with the caret still in view.
+    let clip = editor.0.floor();
+    if scroll > 0.0
+        && let Some(cut) = clusters
+            .iter()
+            .find(|c| text_left + c.left < clip - 0.01 && text_left + c.right > clip + 0.01)
+        && cut.right <= cursor_x
+    {
+        text_left = clip - cut.right;
+    }
     let clamp = |x: f32| x.clamp(editor.0, editor.0 + editor.2);
     let selection = field.selection.map_or_else(Vec::new, |(a, b)| {
         cluster_spans(clusters, a.min(b), a.max(b))
@@ -354,6 +367,85 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A long value scrolled to its end, as Settings' Image file prompt is
+    /// while typing a path, starts on a whole grapheme: no glyph is cut by
+    /// the field's left edge, where its leftover stroke read as a second
+    /// caret. The caret stays in the field.
+    #[test]
+    fn scrolled_text_starts_on_a_whole_grapheme() {
+        let mut fonts = FontSystem::new();
+        for face in kettle_config::font::all() {
+            crate::load_bundled_font(&mut fonts, face);
+        }
+        let metrics = Metrics::new(13.0, 26.0);
+        let mut buffer = TextBuffer::new(&mut fonts, metrics);
+        buffer.set_wrap(glyphon::cosmic_text::Wrap::None);
+        let mut checked = 0;
+        for text in [
+            "/Users/someone/Pictures/Wallpapers/a-very-long-file-name.png",
+            "\u{65e5}\u{672c}\u{8a9e}".repeat(12).as_str(),
+        ] {
+            let ends: Vec<usize> = text
+                .grapheme_indices(true)
+                .map(|(i, _)| i)
+                .chain([text.len()])
+                .collect();
+            for width in 90..140 {
+                for (cursor, horizontal_scroll) in [(text.len(), 0), (ends[ends.len() / 2], 9)] {
+                    let field = TextFieldOverlay {
+                        picker_header: false,
+                        placeholder: String::new(),
+                        text: text.into(),
+                        cursor_byte: cursor,
+                        selection: None,
+                        horizontal_scroll,
+                        rect: (20.5, 30.0, width as f32, 26.0),
+                        prefix: String::new(),
+                        hint: String::new(),
+                        accent_palette: 5,
+                    };
+                    let layout = prepare_text_field(
+                        &mut fonts,
+                        &mut buffer,
+                        &field,
+                        8.0,
+                        metrics,
+                        "JetBrains Mono",
+                    );
+                    let clip = layout.editor.0.floor();
+                    let clusters = segment_clusters(
+                        &buffer,
+                        &SearchBarSegment {
+                            control: Some(SearchControl::Editor),
+                            rect: layout.editor,
+                            left: layout.editor.0,
+                            text: text.into(),
+                            rtl: false,
+                        },
+                    );
+                    assert!(
+                        layout.text_left < layout.editor.0,
+                        "{text} {width}: scrolled"
+                    );
+                    for cluster in &clusters {
+                        let (left, right) = (
+                            layout.text_left + cluster.left,
+                            layout.text_left + cluster.right,
+                        );
+                        assert!(
+                            !(left < clip - 0.01 && right > clip + 0.01),
+                            "{text} {width}: a cluster spans the edge at {clip}: {left}..{right}"
+                        );
+                    }
+                    assert!(layout.caret.0 >= layout.editor.0);
+                    assert!(layout.caret.0 + layout.caret.2 <= layout.editor.0 + layout.editor.2);
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 200);
     }
 
     #[test]

@@ -2749,6 +2749,52 @@ pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io
     edit.commit(&out)
 }
 
+/// Atomically remove every line that sets one of `keys`, so each takes its
+/// default again: what a Settings row's Reset does. Lines match as they do
+/// for [`persist_config_toggle`], in the sections Kettle reads; comments,
+/// blank lines, ordering and every other line are preserved, except that
+/// blank lines the removal leaves at the very end of the file go too (the
+/// one an appended key took before it). Returns the backup path, or `None`
+/// when no line set a key and nothing was written.
+pub fn remove_config_keys(path: &Path, keys: &[&str]) -> std::io::Result<Option<PathBuf>> {
+    for key in keys {
+        validate_single_line("config key", key)?;
+    }
+    let needles: Vec<String> = keys.iter().map(|key| normalize_key(key)).collect();
+    let edit = ConfigEdit::begin(path)?;
+    let existing = &edit.document.text;
+    let mut out = String::with_capacity(existing.len());
+    let mut removed = false;
+    let mut section = parse::Section::default();
+    for segment in existing.split_inclusive('\n') {
+        let (line, _) = split_line_ending(segment);
+        if line.trim().starts_with('[') {
+            section.enter(parse::section_header(line.trim()));
+            out.push_str(segment);
+            continue;
+        }
+        if section.applies()
+            && parse_line_key(line).is_some_and(|key| needles.contains(&normalize_key(key)))
+        {
+            removed = true;
+            continue;
+        }
+        out.push_str(segment);
+    }
+    if !removed {
+        return Ok(None);
+    }
+    let content = out.trim_end_matches(['\n', '\r']).len();
+    if content < out.len() {
+        let line_ending = preferred_line_ending(existing);
+        out.truncate(content);
+        if !out.is_empty() {
+            out.push_str(line_ending);
+        }
+    }
+    edit.commit(&out).map(Some)
+}
+
 /// Append a `keybind = <trigger>=<action>` line to the user's config
 /// file, atomically and with the same first-write `.bak` backup as
 /// `persist_config_toggle`. `keybind` is *repeatable* (unlike the single-valued
@@ -13145,6 +13191,61 @@ split_horiz = <Control><Shift>j
                 assert!(text.ends_with("[[work]]\nscrollback_infinite = True\n"));
             }
         }
+    }
+
+    /// Reset removes a key's lines, aliases spelled with underscores or a
+    /// different case included, from the sections Kettle reads, and leaves
+    /// the rest of the file as it was: no explicit default, and no blank
+    /// line left behind from the append that added it.
+    #[test]
+    fn remove_config_keys_drops_the_lines_and_nothing_else() {
+        let dir = tempdir_for("remove-keys");
+        let path = dir.join("config");
+        let original =
+            "# my config\nfont-size = 18\ntheme = Dracula\n\n# padding\nwindow_padding_x = 9\n";
+        write_private_fixture(&path, original);
+        super::persist_config_toggle(&path, "tab-bar-position", "bottom").unwrap();
+        super::persist_config_toggle(&path, "window-padding-y", "9").unwrap();
+        assert!(
+            super::remove_config_keys(
+                &path,
+                &["tab-bar-position", "Window-Padding-X", "window-padding-y"]
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# my config\nfont-size = 18\ntheme = Dracula\n\n# padding\n"
+        );
+        super::remove_config_keys(&path, &["font-size"]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, "# my config\ntheme = Dracula\n\n# padding\n");
+        assert_eq!(
+            Config::parse_text(&text).font_size,
+            Config::default().font_size
+        );
+        // Nothing to remove: the file is not written.
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(
+            super::remove_config_keys(&path, &["font-size"])
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before
+        );
+        // A profile Kettle does not read keeps its line.
+        let profiles =
+            "font-size = 18\n[profiles]\n[[default]]\nfont-size = 16\n[[work]]\nfont-size = 20\n";
+        write_private_fixture(&path, profiles);
+        super::remove_config_keys(&path, &["font-size"]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[profiles]\n[[default]]\n[[work]]\nfont-size = 20\n"
+        );
+        assert!(super::remove_config_keys(&path, &["bad\nkey"]).is_err());
     }
 
     /// Writing a new key into an empty config appends it.

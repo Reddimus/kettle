@@ -1313,14 +1313,12 @@ pub(crate) struct WindowState {
     /// over the settings panel; keystrokes route to it until Enter (persist) or
     /// Esc (cancel). Only meaningful while `settings_nav` is also `Some`.
     pub(crate) settings_text_edit: Option<crate::settings::SettingsTextEdit>,
-    /// Set when a persisted Settings change needs a restart or a new window to
-    /// take effect. Renderer and GPU policy changes need the next launch.
-    /// Background opacity, background type, and blur need a new window when
-    /// `surface_caps` lacks what the new config asks for. Opening Settings
-    /// clears the pending notice.
-    pub(crate) settings_restart_pending: crate::settings::SettingsApply,
-    /// What this window's OS surface was created able to show. A Settings
-    /// change asks for a new window only when it needs more than this.
+    /// What the pointer was over in Settings when it last moved, so a move
+    /// repaints only when that changes. Painting works it out afresh.
+    pub(crate) settings_hover: Option<kettle_render::SettingsHover>,
+    /// What this window's OS surface was created able to show. Settings asks
+    /// for a new window while the config needs more than this
+    /// (`settings::pending_apply`).
     pub(crate) surface_caps: SurfaceCaps,
     /// The animated-background frame index last requested for paint.
     /// The event loop requests a bg redraw only when the live frame index
@@ -2017,7 +2015,7 @@ impl WindowState {
             palette_bound_only: false,
             settings_nav: None,
             settings_text_edit: None,
-            settings_restart_pending: Default::default(),
+            settings_hover: None,
             surface_caps: SurfaceCaps::default(),
             last_bg_frame: None,
             layout_picker_input: None,

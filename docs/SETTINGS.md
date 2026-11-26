@@ -1,18 +1,22 @@
 # Settings overlay
 
 kettle has a built-in **Settings** panel so you can change the common options
-without editing a config file. Open it with **`Ctrl + ,`** or
-**right-click → Settings…**.
+without editing a config file. Open it with **Cmd+,** on macOS or **Ctrl+,**
+elsewhere, or **right-click → Settings…**. Opening it again while it is open
+leaves it as it is, on the same option and search.
 
 The centered window has a category sidebar and a search field. The right pane
 shows the category title, a short description under each option, and a value
 control. On/Off switches show their state with a knob as well as the label,
 choices have arrows, and quantities
 show their units. A control keeps one width while its value changes. The
-highlighted option has a bar at its left edge as well as a tint. An option
+highlighted option has a bar at its left edge as well as a tint, which stands
+out from the panel (at least 1.3:1) in light and dark themes alike. An option
 you have changed shows a **Reset** button beside its value; the highlighted
-option shows it dimmed when it already holds its default. Where a row is
-too narrow for the word, Reset shows as an anticlockwise-arrow icon, and on
+option shows it dimmed when it already holds its default. Reset removes the
+option's line from your config file, so the option follows Kettle's default
+from then on, including one that differs by platform, such as the font size.
+Where a row is too narrow for the word, Reset shows as an anticlockwise-arrow icon, and on
 the narrowest rows it is left out (Delete still resets). Below a panel width
 of 640 pixels, categories become a
 horizontal strip above the options. When categories overflow, click the left
@@ -25,10 +29,15 @@ and values shorten with an ellipsis.
 Click **Search settings**, or press **Cmd+F** on macOS or **Ctrl+F** elsewhere.
 With `vim-menu-nav` enabled, **/** also focuses the search field. Type to match
 labels, descriptions or config keys across every category. Matching ignores
-case and Spanish accents. Results stay grouped by category; **Enter** or
+case and Spanish accents. While a query is typed the title reads **Search
+results** and no category is marked as open. Results stay grouped by category; **Enter** or
 **Down** moves from the search field into the results. Normal navigation and
-value editing work there too. A search with no matches shows **No settings
-match**. **Esc** clears the query; another **Esc** closes Settings. Clicking a
+value editing work there too; Home, End and the page keys stop at the first
+and last results. A search with no matches shows **No settings
+match**; **Tab** then leaves the search for the next category. **Esc** clears
+the query; another **Esc** closes Settings. A search cleared from its field,
+without moving into a result, leaves the highlight where it was before the
+search. Clicking a
 category clears the search and opens that category. Focusing Search through
 assistive technology cancels any pending keybinding capture.
 
@@ -37,13 +46,20 @@ assistive technology cancels any pending keybinding capture.
 | Key | Action |
 |---|---|
 | ↑ / ↓ | Move between options (skips options that don't apply) |
-| ← / → | Change the highlighted option |
+| Home / End | First / last option |
+| Page Up / Page Down | Move half a page |
+| ← / → | Change the highlighted option; ← turns a switch off and → turns it on |
+| Shift+← / Shift+→ | Change a number ten steps at a time |
 | Delete / Backspace | Reset the highlighted setting to its default, as its Reset button does (not the theme, GPU, shortcut or text rows) |
-| Space / Enter | Toggle / cycle the highlighted option; on the Theme row, open the theme picker |
+| Space / Enter | Toggle / cycle the highlighted option; on the Theme row, open the theme picker. Numbers change with the arrows only |
 | Tab / Shift+Tab | Next / previous category |
 | Esc | Clear a search query, or close if the query is empty |
 
-The panel is also fully **mouse-driven**: **left-click** a row to cycle its
+The panel is also fully **mouse-driven**. Under the pointer, an option or a
+category lights up with a faint tint of the theme's selection colour, without
+the bar that marks the highlighted option, and Reset and a choice's ‹ › control
+darken or lighten like a dialog button; the highlight itself stays where the
+keyboard put it. **Left-click** a row to cycle its
 value forward, **right-click** to cycle back, **scroll-wheel** over a row to
 adjust it, **left-click Reset** to restore a changed row's default, **click
 a category** to switch pages, and **click outside** the panel to close. A
@@ -62,7 +78,10 @@ an inline text prompt, and the Theme row opens the theme picker.)
 
 With **`vim-menu-nav`** on (the default), the panel also takes vim keys:
 `j`/`k` move between options, `h`/`l` change the highlighted option, `g`/`G`
-jump to the first/last option, and `Ctrl+d`/`Ctrl+u` move half a page. The
+jump to the first/last option, `Ctrl+d`/`Ctrl+u` move half a page, and
+Shift+`h`/`l` change a number ten steps at a time. Like
+the arrows, these jumps skip options that don't apply, as does a new category
+opened with Tab or a click. The
 same scheme works in the right-click context menu and the new-tab dropdown,
 where `h` closes or pops a submenu and `l` drills in or activates. `y`/`n`
 answer confirm dialogs. In the Confirm paste dialog `y` only takes Paste
@@ -132,7 +151,7 @@ four-logical-pixel gap. Free text and shortcut fields have no Reset.
 | Option | Config key | Notes |
 |---|---|---|
 | Background opacity | `background-opacity` | 20–100% (stored as 0.0–1.0) |
-| Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window. Where the session cannot blur (GNOME and other Wayland compositors without KWin's blur protocol, X11 including KDE Plasma on X11, and Windows without its system backdrop, such as Windows 10), the switch reads **Unavailable** instead of On, unfilled with a hollow knob, the row says "This session cannot blur; saved setting: On. Opacity still applies.", the footer drops its blur hint on this row and Background opacity, and background opacity still works. The switch still turns blur off. On Wayland, for the moment (at most half a second) while Kettle asks the compositor, it reads **Checking…** rather than On |
+| Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window. Where the session cannot blur (GNOME and other Wayland compositors without KWin's blur protocol, X11 including KDE Plasma on X11, and Windows without its system backdrop, such as Windows 10), the switch reads **Unavailable** instead of On, unfilled with a hollow knob, the row says "This session cannot blur; saved setting: On. Opacity still applies.", the footer drops its blur hint on this row and Background opacity, and background opacity still works. The switch still turns blur off. On Wayland, for the moment (at most half a second) while Kettle asks the compositor, it reads **Checking…** rather than On. The switch is as wide as the others on macOS, where neither state occurs |
 | Window padding | `window-padding-x` | 0–40 px |
 | Show pane titlebars | `show-titlebar` | On / Off |
 
@@ -247,12 +266,14 @@ history-scan bounds, and TUI behavior.
 A footer line shows the **Active GPU** in use right now, or, for windows drawn
 on the CPU, **Active renderer: CPU** with its presenter. On the CPU renderer the
 GPU device list holds only **Automatic**: listing adapters would load a GPU
-driver into the process. GPU changes take effect
-on the **next launch** (the GPU/surface graph can't hot-swap), so the panel shows
-"Restart Kettle or open a new window to apply pending changes." after an edit
-that requires a restart or new window. The pending flag does not record the
-cause, so selecting Graphics does not change that wording. GPU edits require a
-full restart. The GPU picker persists the selection per application.
+driver into the process. Renderer and GPU changes take effect on the **next
+launch** (the GPU/surface graph can't hot-swap). While a saved graphics setting
+differs from the one Kettle started with, the footer says "Restart Kettle to
+apply graphics changes.", however the change was made and however often
+Settings is reopened, until Kettle restarts or the setting is put back. A
+background opacity, type or blur change that this window was not opened able
+to show says "Restart Kettle or open a new window to apply pending changes."
+instead. The GPU picker persists the selection per application.
 
 **Agents**
 
@@ -279,9 +300,13 @@ launch.
 ### Keybinds
 
 Rebind common actions interactively. Each row shows the chord
-currently bound to that action; press **Enter** on a row, then press the new
+currently bound to that action, the one the menus and the command palette
+show (on macOS the Cmd chord where the action has one); press **Enter** on a row, then press the new
 chord you want (any modifier combination). It binds immediately (replacing the
-action's previous chord) and is saved to your config as a `keybind = …` line. Press **Esc** to cancel a capture. Covered
+action's previous chord) and is saved to your config as a `keybind = …` line. Press **Esc** to cancel a capture.
+A key pressed without a modifier is refused (a Keybinds row takes a bare F-key
+or Menu key): the row reads **Add a modifier, Esc to cancel** and keeps
+waiting. Covered
 actions are grouped in this order:
 
 #### Panes

@@ -1671,9 +1671,6 @@ context = "crates/kettle-ui/src/app.rs codex_note: Settings footer under the Cod
 [messages.settings_note_codex_unsupported]
 context = "crates/kettle-ui/src/app.rs codex_note: Settings footer under the Codex previews row on a system where the integration cannot run."
 
-[messages.settings_note_language]
-context = "crates/kettle-ui/src/app.rs settings_footer_note: footer note while the Language row is focused. A new window keeps the current language; only a restart changes it."
-
 [messages.settings_note_language_pending]
 context = "crates/kettle-ui/src/app.rs settings_footer_note: footer note after the saved language differs from the one Kettle is running in. Infinitive in Spanish, like the other notes."
 
@@ -1691,6 +1688,9 @@ context = "crates/kettle-ui/src/app.rs settings_footer_note: a change needs a ne
 
 [messages.settings_press_chord]
 context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: shown in a Keybinds row while it waits for a key combination. Keep Esc."
+
+[messages.settings_capture_needs_modifier]
+context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: replaces settings_press_chord in a Keybinds or global hotkey row after a key pressed without Ctrl, Alt, Shift or Cmd was refused; the row still waits for a combination. A modifier is a key held with another, such as Ctrl. Keep Esc. Fits about 38 columns."
 
 [messages.settings_value_always]
 context = "crates/kettle-ui/src/settings.rs read(): Settings value."
@@ -2516,6 +2516,9 @@ context = "crates/kettle-ui/src/settings.rs: One-line factual Settings descripti
 
 [messages.settings_description_keybind_toggle_zoom]
 context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
+
+[messages.settings_search_results]
+context = "crates/kettle-ui/src/app/settings_text.rs settings_title: the Settings panel's title while the search field holds a query, in place of the open category's name; the results below come from every category. A heading."
 
 [messages.settings_search_placeholder]
 context = "crates/kettle-ui/src/settings.rs: Settings search input placeholder and accessible name."

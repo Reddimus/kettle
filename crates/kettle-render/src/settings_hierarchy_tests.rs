@@ -322,7 +322,7 @@ fn settings_reset_segments_share_an_outline_and_switches_keep_four_logical_pixel
                     &set.rows[0],
                     &palette,
                     (theme.background, theme.accent, theme.foreground),
-                    true,
+                    (settings::SettingsRowFill::Focused, None),
                     scale,
                 );
                 if !matches!(control, SettingsControl::Toggle(_)) {
@@ -355,27 +355,31 @@ fn settings_new_control_surfaces_and_inks_meet_their_adjacent_backgrounds() {
                         "{name} {linear} unavailable"
                     );
                 }
-                for (ink, outside) in [
-                    (palette.well_control, theme.background),
-                    (palette.selected_well_control, palette.selected),
+                // A well's outline meets the well and the surface around it;
+                // on the focused row a joined Reset also shows the panel
+                // inside the outline.
+                for (ink, surfaces) in [
+                    (palette.well_control, vec![palette.well, theme.background]),
+                    (
+                        palette.selected_well_control,
+                        vec![palette.well, palette.selected, theme.background],
+                    ),
                 ] {
+                    let weakest = |ink: Rgb| {
+                        surfaces
+                            .iter()
+                            .map(|surface| color::contrast_ratio(ink, *surface))
+                            .fold(f64::INFINITY, f64::min)
+                    };
                     let floor = if [Rgb::new(0, 0, 0), Rgb::new(255, 255, 255)]
-                        .iter()
-                        .any(|ink| {
-                            color::contrast_ratio(*ink, palette.well)
-                                .min(color::contrast_ratio(*ink, outside))
-                                >= 4.5
-                        }) {
+                        .into_iter()
+                        .any(|ink| weakest(ink) >= 4.5)
+                    {
                         4.5
                     } else {
                         3.0
                     };
-                    assert!(
-                        color::contrast_ratio(ink, palette.well)
-                            .min(color::contrast_ratio(ink, outside))
-                            >= floor,
-                        "{name} {linear} well"
-                    );
+                    assert!(weakest(ink) >= floor, "{name} {linear} well");
                 }
                 assert!(
                     color::contrast_ratio(palette.selected_well_control, theme.background) >= 3.0,
@@ -414,7 +418,7 @@ fn settings_new_control_surfaces_and_inks_meet_their_adjacent_backgrounds() {
                             &set.rows[0],
                             &palette,
                             (theme.background, accent, theme.foreground),
-                            true,
+                            (settings::SettingsRowFill::Focused, None),
                             1.0,
                         );
                         assert_eq!(

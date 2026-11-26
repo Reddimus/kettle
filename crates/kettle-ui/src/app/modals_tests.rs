@@ -266,37 +266,31 @@ fn window_padding_setting_writes_both_axes() {
     );
 }
 
+/// The footer's restart and new-window notes are worked out from the
+/// running and the saved values whenever Settings draws, rather than
+/// remembered from the last edit: reopening Settings, or the app menu's
+/// Settings… on an open panel, cannot drop a change still waiting for a
+/// restart. A failed write leaves the saved values as they were, so it never
+/// asks for either.
 #[test]
-fn surface_restart_hint_requires_a_successful_write_and_a_missing_capability() {
+fn settings_pending_notes_follow_the_running_and_saved_values() {
     let src = production_source();
-    let normalized = src
-        .split("let saved = self.persist_pref(key_str, &new_val);")
-        .nth(1)
-        .expect("settings persistence arm")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    // Up to the end of `settings_store`: the next item starts with `fn`.
-    let arm = normalized
-        .split(" fn ")
-        .next()
-        .expect("settings_store body");
+    let flat: String = src.split_whitespace().collect();
     assert!(
-        arm.contains("\"background-opacity\" | \"background-type\" | \"window-blur\""),
-        "the surface settings are background opacity, type and blur"
+        flat.contains(
+            "crate::settings::pending_apply(self.running_graphics.as_ref(),&self.cfg,ws.surface_caps.lacks_for(&self.cfg),),"
+        ),
+        "the footer derives what is pending"
     );
-    // The hint is decided against the reloaded config, after the reload, and
-    // only when the window was created without what that config needs.
-    let (_, after_reload) = arm
-        .split_once("self.reload_config(ws);")
-        .expect("reload in the persistence arm");
-    assert!(
-        after_reload.contains("&& ws.surface_caps.lacks_for(&self.cfg)")
-            && after_reload.contains("&& ws.settings_restart_pending == crate::settings::SettingsApply::None")
-            && after_reload.contains("ws.settings_restart_pending = crate::settings::SettingsApply::NewWindow;"),
-        "a surface change the window can already show must not ask for a new window, \
-         and a failed write must not promise one"
-    );
+    assert!(flat.contains(
+        "self.running_graphics.get_or_insert_with(||crate::settings::GraphicsSettings::of(&self.cfg));"
+    ));
+    for source in [src.as_str(), include_str!("../window_state.rs")] {
+        assert!(
+            !source.contains("settings_restart_pending"),
+            "no flag remembers a pending change"
+        );
+    }
 }
 
 /// A side-button press reaches the terminal only past every surface that
@@ -1435,4 +1429,133 @@ fn a_modal_field_says_why_clipboard_text_did_not_come() {
         field_paste(Err(arboard::Error::Timeout)),
         Err(Text::NotifyBodyClipboardTimeout)
     );
+}
+
+/// A key refused during chord capture (one without a modifier) is
+/// reported in the Settings row itself, which assistive technology reads
+/// as the row's value, and not only by a desktop notification, which
+/// notifications off, Do Not Disturb or an unbundled macOS binary hide.
+#[test]
+fn a_refused_capture_key_is_reported_in_the_settings_row() {
+    let src = production_source();
+    let flat: String = src.split_whitespace().collect();
+    assert!(flat.contains(
+        "if!keybind_chord_is_safe(mods,kk){self.refuse_settings_chord(ws);return;}"
+    ));
+    assert!(flat.contains(
+        "HotkeyCapture::Refused=>{self.refuse_settings_chord(ws);return;}"
+    ));
+    let refuse = src
+        .split("fn refuse_settings_chord(&mut self, ws: &mut WindowState) {")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("refuse_settings_chord");
+    let refuse: String = refuse.split_whitespace().collect();
+    assert!(refuse.contains("nav.capture_refused=true;"));
+    assert!(
+        refuse.contains("if!ws.window_focused{fire_notify("),
+        "only a window out of sight needs the notification"
+    );
+    assert!(flat.contains(
+        "tr.text(ifnav.capture_refused{kettle_i18n::Text::SettingsCaptureNeedsModifier}else{kettle_i18n::Text::SettingsPressChord})"
+    ));
+    assert!(flat.contains("n.capturing=true;n.capture_refused=false;"));
+    for (language, text) in [
+        (kettle_i18n::Language::En, "Add a modifier, Esc to cancel"),
+        (kettle_i18n::Language::Es, "Agregar modificador; Esc para cancelar"),
+    ] {
+        assert_eq!(
+            kettle_i18n::Translator::new(language)
+                .text(kettle_i18n::Text::SettingsCaptureNeedsModifier),
+            text
+        );
+    }
+}
+
+/// Reset takes the row's keys out of the config file and reloads, instead
+/// of writing the default the running build has (`theme-mode = auto`,
+/// `font-size = 13`), which pinned the row and added a line each time. It
+/// writes the default only when that still does not show, because the key
+/// is set somewhere Kettle does not edit.
+#[test]
+fn settings_reset_removes_the_rows_keys_before_writing_a_default() {
+    let src = production_source();
+    let reset = src
+        .split("fn settings_reset(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("settings_reset");
+    let flat: String = reset.split_whitespace().collect();
+    assert!(
+        flat.contains(
+            "ifself.unset_prefs(&crate::settings::reset_keys(field))==Ok(true){self.reload_config(ws);ifcrate::settings::holds_default(&self.cfg,field){return;}}self.settings_store(ws,field.key,value);"
+        ),
+        "{flat}"
+    );
+    assert_eq!(flat.matches("settings_store(").count(), 1);
+}
+
+/// The pointer's hover shows in Settings only where a click acts: not
+/// while a chord capture or an inline edit holds the input, nor under a
+/// confirmation, a menu or the theme picker.
+#[test]
+fn settings_hover_shows_only_where_a_click_acts() {
+    use super::{ConfirmAction, ConfirmButton, ConfirmDialogState, settings_hover_shows};
+    let mut ws = WindowState::new(0, Mux::new());
+    assert!(!settings_hover_shows(&ws), "no Settings, no hover");
+    ws.settings_nav = Some(crate::settings::SettingsNav::default());
+    assert!(settings_hover_shows(&ws));
+    ws.settings_nav.as_mut().unwrap().capturing = true;
+    assert!(!settings_hover_shows(&ws), "a capture swallows clicks");
+    ws.settings_nav.as_mut().unwrap().capturing = false;
+    ws.settings_text_edit = Some(crate::settings::SettingsTextEdit {
+        key: "background-image",
+        buf: "".into(),
+    });
+    assert!(!settings_hover_shows(&ws), "an inline edit swallows clicks");
+    ws.settings_text_edit = None;
+    ws.confirm_dialog = Some(ConfirmDialogState {
+        heading: String::new(),
+        body: String::new(),
+        buttons: vec![ConfirmButton::Cancel],
+        focus_idx: 0,
+        on_confirm: ConfirmAction::ClosePane(1),
+        scroll: 0,
+        armed_press: None,
+        space_pressed: None,
+        paste: None,
+    });
+    assert!(!settings_hover_shows(&ws), "a dialog covers the panel");
+    ws.confirm_dialog = None;
+    assert!(settings_hover_shows(&ws));
+}
+
+/// Settings paints hover from the window's own pointer, works it out
+/// afresh for every frame (rows move under a still pointer as the keyboard
+/// scrolls), repaints a move only when the target changes, clears it when
+/// the pointer leaves the window, and never moves the keyboard focus.
+#[test]
+fn settings_hover_follows_the_pointer_and_leaves_the_focus_alone() {
+    let src = production_source();
+    let flat: String = src.split_whitespace().collect();
+    for needle in [
+        "letsettings_overlay=self.settings_overlay_projection(ws).map(|mutset|{set.hover=self.settings_hover(ws,&set);set});",
+        "self.update_search_hover(ws);self.track_settings_hover(ws);",
+        "ws.search.hovered_control=None;ws.settings_hover=None;",
+        "letpointer=ws.native_pointer.filter(|_|settings_hover_shows(ws))?;",
+        "ifhover!=ws.settings_hover{ws.settings_hover=hover;",
+    ] {
+        assert!(flat.contains(needle), "missing: {needle}");
+    }
+    for name in ["track_settings_hover", "settings_hover"] {
+        let body = src
+            .split(&format!("fn {name}("))
+            .nth(1)
+            .and_then(|body| body.split("\n    }\n").next())
+            .unwrap();
+        assert!(
+            !body.contains("settings_nav"),
+            "{name} must not touch the keyboard focus"
+        );
+    }
 }
