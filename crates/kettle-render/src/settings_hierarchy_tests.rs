@@ -322,7 +322,7 @@ fn settings_reset_segments_share_an_outline_and_switches_keep_four_logical_pixel
                     &set.rows[0],
                     &palette,
                     (theme.background, theme.accent, theme.foreground),
-                    true,
+                    (settings::SettingsRowFill::Focused, None),
                     scale,
                 );
                 if !matches!(control, SettingsControl::Toggle(_)) {
@@ -418,7 +418,7 @@ fn settings_new_control_surfaces_and_inks_meet_their_adjacent_backgrounds() {
                             &set.rows[0],
                             &palette,
                             (theme.background, accent, theme.foreground),
-                            true,
+                            (settings::SettingsRowFill::Focused, None),
                             1.0,
                         );
                         assert_eq!(

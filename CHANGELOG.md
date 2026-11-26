@@ -1095,6 +1095,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Settings answers the pointer: options and categories light up under it,
+  and Reset and choice controls react like dialog buttons, without moving
+  the keyboard highlight.
+
 - In light themes the highlighted Settings option and the open category now
   have a tint you can see (at least 1.3:1 against the panel); before, only
   the bar at their edge showed which was highlighted.

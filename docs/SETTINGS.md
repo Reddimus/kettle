@@ -15,8 +15,8 @@ out from the panel (at least 1.3:1) in light and dark themes alike. An option
 you have changed shows a **Reset** button beside its value; the highlighted
 option shows it dimmed when it already holds its default. Reset removes the
 option's line from your config file, so the option follows Kettle's default
-from then on, including one that differs by platform, such as the font size. Where a row is
-too narrow for the word, Reset shows as an anticlockwise-arrow icon, and on
+from then on, including one that differs by platform, such as the font size.
+Where a row is too narrow for the word, Reset shows as an anticlockwise-arrow icon, and on
 the narrowest rows it is left out (Delete still resets). Below a panel width
 of 640 pixels, categories become a
 horizontal strip above the options. When categories overflow, click the left
@@ -55,7 +55,11 @@ assistive technology cancels any pending keybinding capture.
 | Tab / Shift+Tab | Next / previous category |
 | Esc | Clear a search query, or close if the query is empty |
 
-The panel is also fully **mouse-driven**: **left-click** a row to cycle its
+The panel is also fully **mouse-driven**. Under the pointer, an option or a
+category lights up with a faint tint of the theme's selection colour, without
+the bar that marks the highlighted option, and Reset and a choice's ‹ › control
+darken or lighten like a dialog button; the highlight itself stays where the
+keyboard put it. **Left-click** a row to cycle its
 value forward, **right-click** to cycle back, **scroll-wheel** over a row to
 adjust it, **left-click Reset** to restore a changed row's default, **click
 a category** to switch pages, and **click outside** the panel to close. A

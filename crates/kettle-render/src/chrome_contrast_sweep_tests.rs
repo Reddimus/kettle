@@ -805,7 +805,7 @@ fn the_painter_uses_the_swept_helpers() {
         "scrollback::scrollback_pill_quads(&mutmenu_q,pill,surface,self.scale);",
         "scrollback::kept_history_label_quads(&mutmenu_q,label,rest.fill);",
         "letpalette=settings::settings_colors(",
-        "settings::settings_row_surfaces(row,data,&palette,(theme.background,acc,on_ink),row_selected,self.scale,)",
+        "settings::settings_row_surfaces(row,data,&palette,(theme.background,acc,on_ink),(row_fill,set.hover),self.scale,)",
         "letcolor=settings::settings_text_color(set,item.kind,&palette,(theme,acc,on_ink),&mutself.chrome_colors,);",
         "settings::settings_focus_bar(row.rect,bar,self.scale),focus,",
         "settings::settings_focus_bar(*r,bar,self.scale),focus,",

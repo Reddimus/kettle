@@ -347,7 +347,10 @@ impl App {
         // Project the settings overlay (independent of search, like
         // the confirm dialog). Values are read from the live Config so the
         // panel reflects the current state (incl. external reloads).
-        let settings_overlay = self.settings_overlay_projection(ws);
+        let settings_overlay = self.settings_overlay_projection(ws).map(|mut set| {
+            set.hover = self.settings_hover(ws, &set);
+            set
+        });
         // Terminator parity: only a LIVE drag with a latched target paints a
         // hint. An armed-but-unmoved press is still a click, and a live drag
         // over a seam has no target to preview.

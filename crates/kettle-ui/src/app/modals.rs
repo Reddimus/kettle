@@ -929,6 +929,8 @@ impl App {
             title: settings_title(tr, active.name, nav.query.text()),
             hints: settings_hints(tr, self.cfg.vim_menu_nav),
             reset_label: tr.text(kettle_i18n::Text::SettingsResetButton).to_string(),
+            // Only the painter shows hover (`settings_hover`).
+            hover: None,
             reset_name: active
                 .fields
                 .get(fld)
@@ -991,6 +993,60 @@ impl App {
         })
     }
 
+    /// The Settings layout this window paints and hit-tests.
+    fn settings_layout_for(
+        &self,
+        ws: &WindowState,
+        set: &kettle_render::SettingsOverlay,
+    ) -> kettle_render::SettingsLayout {
+        let (cw, _) = self.menu_cell(ws);
+        let (sw, sh) = ws
+            .renderer
+            .as_ref()
+            .map(|r| {
+                let (w, h) = r.surface_size();
+                (w as f32, h as f32)
+            })
+            .unwrap_or((800.0, 600.0));
+        kettle_render::settings_layout(
+            set,
+            (cw, self.overlay_text_line_height(ws)),
+            (sw, sh),
+            self.overlay_text_cell_width(ws),
+            ws.window
+                .as_ref()
+                .map_or(1.0, |window| window.scale_factor() as f32),
+        )
+    }
+
+    /// What the window's own pointer is over in Settings, for its hover
+    /// feedback alone: the keyboard focus never follows it. `None` while
+    /// [`settings_hover_shows`] says no, and for a pointer outside the
+    /// window or one a control client moves.
+    pub(super) fn settings_hover(
+        &self,
+        ws: &WindowState,
+        set: &kettle_render::SettingsOverlay,
+    ) -> Option<kettle_render::SettingsHover> {
+        let pointer = ws.native_pointer.filter(|_| settings_hover_shows(ws))?;
+        self.settings_layout_for(ws, set)
+            .hover_at(set, (pointer.x as f32, pointer.y as f32))
+    }
+
+    /// Repaint Settings when the pointer moves onto or off a row, choice,
+    /// Reset or category. Only the paint changes.
+    pub(super) fn track_settings_hover(&mut self, ws: &mut WindowState) {
+        let hover = self
+            .settings_overlay_projection(ws)
+            .and_then(|set| self.settings_hover(ws, &set));
+        if hover != ws.settings_hover {
+            ws.settings_hover = hover;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+    }
+
     /// Handle a mouse interaction with the settings overlay. `dir` is
     /// the adjust direction for a field (left-click `+1`, right-click `-1`,
     /// wheel `±1`); a category-tab hit switches category. `is_click` (vs a wheel)
@@ -1017,25 +1073,8 @@ impl App {
         let Some(set) = self.settings_overlay_projection(ws) else {
             return false;
         };
-        let (cw, _) = self.menu_cell(ws);
-        let (sw, sh) = ws
-            .renderer
-            .as_ref()
-            .map(|r| {
-                let (w, h) = r.surface_size();
-                (w as f32, h as f32)
-            })
-            .unwrap_or((800.0, 600.0));
         let (mx, my) = (ws.cursor.x as f32, ws.cursor.y as f32);
-        let layout = kettle_render::settings_layout(
-            &set,
-            (cw, self.overlay_text_line_height(ws)),
-            (sw, sh),
-            self.overlay_text_cell_width(ws),
-            ws.window
-                .as_ref()
-                .map_or(1.0, |window| window.scale_factor() as f32),
-        );
+        let layout = self.settings_layout_for(ws, &set);
         // Off a primary click, the Reset chip is part of its row.
         let hit = match layout.pointer_hit((mx, my), (!is_click).then_some(dir)) {
             kettle_render::SettingsHit::Reset(index)
@@ -2910,6 +2949,17 @@ pub enum ConfirmKeyResult {
     /// Key wasn't a nav key for the modal — caller can pass through
     /// or ignore (we suppress non-nav input while a modal is open).
     Ignore,
+}
+
+/// Whether the pointer's hover shows in Settings: not while a chord capture
+/// or an inline edit holds the input, where a click does nothing, nor under
+/// a dialog, a menu or the theme picker.
+pub(super) fn settings_hover_shows(ws: &WindowState) -> bool {
+    ws.settings_nav.as_ref().is_some_and(|nav| !nav.capturing)
+        && ws.settings_text_edit.is_none()
+        && ws.confirm_dialog.is_none()
+        && ws.context_menu.is_none()
+        && ws.theme_picker_input.is_none()
 }
 
 /// How much a close of the tab at `idx` would take: `(panes, busy)`.

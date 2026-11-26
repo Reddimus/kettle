@@ -1494,3 +1494,68 @@ fn settings_reset_removes_the_rows_keys_before_writing_a_default() {
     );
     assert_eq!(flat.matches("settings_store(").count(), 1);
 }
+
+/// The pointer's hover shows in Settings only where a click acts: not
+/// while a chord capture or an inline edit holds the input, nor under a
+/// confirmation, a menu or the theme picker.
+#[test]
+fn settings_hover_shows_only_where_a_click_acts() {
+    use super::{ConfirmAction, ConfirmButton, ConfirmDialogState, settings_hover_shows};
+    let mut ws = WindowState::new(0, Mux::new());
+    assert!(!settings_hover_shows(&ws), "no Settings, no hover");
+    ws.settings_nav = Some(crate::settings::SettingsNav::default());
+    assert!(settings_hover_shows(&ws));
+    ws.settings_nav.as_mut().unwrap().capturing = true;
+    assert!(!settings_hover_shows(&ws), "a capture swallows clicks");
+    ws.settings_nav.as_mut().unwrap().capturing = false;
+    ws.settings_text_edit = Some(crate::settings::SettingsTextEdit {
+        key: "background-image",
+        buf: "".into(),
+    });
+    assert!(!settings_hover_shows(&ws), "an inline edit swallows clicks");
+    ws.settings_text_edit = None;
+    ws.confirm_dialog = Some(ConfirmDialogState {
+        heading: String::new(),
+        body: String::new(),
+        buttons: vec![ConfirmButton::Cancel],
+        focus_idx: 0,
+        on_confirm: ConfirmAction::ClosePane(1),
+        scroll: 0,
+        armed_press: None,
+        space_pressed: None,
+        paste: None,
+    });
+    assert!(!settings_hover_shows(&ws), "a dialog covers the panel");
+    ws.confirm_dialog = None;
+    assert!(settings_hover_shows(&ws));
+}
+
+/// Settings paints hover from the window's own pointer, works it out
+/// afresh for every frame (rows move under a still pointer as the keyboard
+/// scrolls), repaints a move only when the target changes, clears it when
+/// the pointer leaves the window, and never moves the keyboard focus.
+#[test]
+fn settings_hover_follows_the_pointer_and_leaves_the_focus_alone() {
+    let src = production_source();
+    let flat: String = src.split_whitespace().collect();
+    for needle in [
+        "letsettings_overlay=self.settings_overlay_projection(ws).map(|mutset|{set.hover=self.settings_hover(ws,&set);set});",
+        "self.update_search_hover(ws);self.track_settings_hover(ws);",
+        "ws.search.hovered_control=None;ws.settings_hover=None;",
+        "letpointer=ws.native_pointer.filter(|_|settings_hover_shows(ws))?;",
+        "ifhover!=ws.settings_hover{ws.settings_hover=hover;",
+    ] {
+        assert!(flat.contains(needle), "missing: {needle}");
+    }
+    for name in ["track_settings_hover", "settings_hover"] {
+        let body = src
+            .split(&format!("fn {name}("))
+            .nth(1)
+            .and_then(|body| body.split("\n    }\n").next())
+            .unwrap();
+        assert!(
+            !body.contains("settings_nav"),
+            "{name} must not touch the keyboard focus"
+        );
+    }
+}
