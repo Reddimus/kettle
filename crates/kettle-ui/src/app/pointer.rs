@@ -255,12 +255,14 @@ impl App {
         )
     }
 
+    /// The structured token under viewport cell (`row`, `col`), as its first
+    /// and last cells in grid coordinates.
     pub(super) fn smart_selection_for_cell(
         &self,
         ws: &WindowState,
         row: usize,
         col: usize,
-    ) -> Option<(usize, usize)> {
+    ) -> Option<(kettle_core::Point, kettle_core::Point)> {
         use kettle_core::Dimensions;
         let pane = ws.mux.panes.get(&ws.mux.active_focus()?)?;
         let term = pane.term.term.lock().ok()?;
@@ -274,8 +276,8 @@ impl App {
         kettle_core::hints::selection_at(term.grid(), point.line.0, col)
     }
 
-    /// Install a `Simple` selection from `(row, start)` to
-    /// `(row, end)` inclusive in the focused pane. Returns true if the
+    /// Install a `Simple` selection from grid point `start` to `end`
+    /// inclusive in the focused pane. Returns true if the
     /// selection was set, false if there's no focused pane or the lock
     /// failed (in which case the caller falls through to its normal
     /// `begin_selection` path).
@@ -283,9 +285,8 @@ impl App {
         &mut self,
         ws: &mut WindowState,
         area: Rect,
-        row: usize,
-        start: usize,
-        end: usize,
+        start: kettle_core::Point,
+        end: kettle_core::Point,
     ) -> bool {
         // `area` is unused but kept in the signature to mirror
         // `begin_selection`'s API; future viewport-aware variants may
@@ -298,24 +299,14 @@ impl App {
         let Ok(mut t) = pane.term.term.lock() else {
             return false;
         };
-        // The click `row` is viewport-relative; convert both ends to
-        // grid-absolute so a double-click word-select while scrolled back
-        // selects (and copies) the row the user actually clicked.
-        let off = t.grid().display_offset();
-        let anchor = viewport_point_to_grid(
-            kettle_core::Point::new(kettle_core::Line(row as i32), kettle_core::Column(start)),
-            off,
-        );
-        let end_pt = viewport_point_to_grid(
-            kettle_core::Point::new(kettle_core::Line(row as i32), kettle_core::Column(end)),
-            off,
-        );
+        // Both ends are grid-absolute already, so a double-click while
+        // scrolled back selects (and copies) the token the user clicked.
         let mut sel = kettle_core::Selection::new(
             kettle_core::SelectionType::Simple,
-            anchor,
+            start,
             kettle_core::Side::Left,
         );
-        sel.update(end_pt, kettle_core::Side::Right);
+        sel.update(end, kettle_core::Side::Right);
         t.selection = Some(sel);
         // Like Semantic, a smart selection resolves on press; the
         // caller treats `selecting=false` so motion doesn't extend it.
@@ -502,7 +493,7 @@ impl App {
             && !held.alt_key()
             && let Some((row, col)) = cell
             && let Some((start, end)) = self.smart_selection_for_cell(ws, row, col)
-            && self.apply_smart_selection(ws, area, row, start, end)
+            && self.apply_smart_selection(ws, area, start, end)
         {
             smart_selected = true;
         }

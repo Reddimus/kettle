@@ -9,6 +9,7 @@ use regex::Regex;
 use std::sync::OnceLock;
 
 use alacritty_terminal::grid::{Dimensions, Grid};
+use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Cell;
 
 /// What a detected hint points at (drives the copy-vs-open action later).
@@ -618,12 +619,18 @@ pub fn detect_rows(grid: &Grid<Cell>, lines: &[i32], cols: usize) -> Vec<HintSpa
     out
 }
 
-/// The complete structured token under one grid cell, including wide spacers.
-pub fn selection_at(grid: &Grid<Cell>, line: i32, col: usize) -> Option<(usize, usize)> {
+/// The complete structured token under one grid cell, as its first and last
+/// cells in grid coordinates (inclusive, wide spacers included).
+pub fn selection_at(grid: &Grid<Cell>, line: i32, col: usize) -> Option<(Point, Point)> {
     detect_rows(grid, &[line], grid.columns())
         .into_iter()
         .find(|span| span.start <= col && col <= span.end)
-        .map(|span| (span.start, span.end))
+        .map(|span| {
+            (
+                Point::new(Line(line), Column(span.start)),
+                Point::new(Line(line), Column(span.end)),
+            )
+        })
 }
 
 /// Default label alphabet — home-row first so the common (few) targets are
@@ -739,6 +746,14 @@ mod tests {
         assert_eq!(labels(3, "aabc"), ["a", "b", "c"]);
     }
 
+    /// The columns of a [`selection_at`] token that starts and ends on `line`.
+    fn selection_columns(grid: &Grid<Cell>, line: i32, col: usize) -> Option<(usize, usize)> {
+        selection_at(grid, line, col).map(|(start, end)| {
+            assert_eq!((start.line.0, end.line.0), (line, line));
+            (start.column.0, end.column.0)
+        })
+    }
+
     #[test]
     fn trailing_dot_components_remain_in_path_hints() {
         for path in ["/tmp/..", "/tmp/."] {
@@ -756,7 +771,7 @@ mod tests {
                 .c = ch;
             }
             assert_eq!(
-                selection_at(&grid, 0, path.len() - 1),
+                selection_columns(&grid, 0, path.len() - 1),
                 Some((0, path.len() - 1))
             );
         }
@@ -795,7 +810,7 @@ mod tests {
             for (column, ch) in text.chars().enumerate() {
                 grid[Point::new(Line(0), Column(column))].c = ch;
             }
-            selection_at(&grid, 0, col)
+            selection_columns(&grid, 0, col)
         };
         let url_line = "see https://example.com/path?x=1 for more";
         // cursor anywhere inside the URL gets the whole URL.
@@ -857,9 +872,13 @@ mod tests {
                 .insert(Flags::WIDE_CHAR_SPACER);
         }
         for col in 0..10 {
-            assert_eq!(selection_at(&grid, 0, col), Some((0, 9)), "column={col}");
+            assert_eq!(
+                selection_columns(&grid, 0, col),
+                Some((0, 9)),
+                "column={col}"
+            );
         }
-        assert_eq!(selection_at(&grid, 0, 10), None);
+        assert_eq!(selection_columns(&grid, 0, 10), None);
     }
 
     #[test]
