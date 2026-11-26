@@ -654,9 +654,12 @@ impl App {
                 if bcode == 0 {
                     ws.card_press = None;
                 }
-                // And a jump button's: a new primary press starts over.
+                // And a jump button's or a title-bar button's: a new primary
+                // press starts over, so an old press's release, which went
+                // elsewhere, is never taken for this one's.
                 if bcode == 0 {
                     ws.scrollback_pill_press = None;
+                    ws.cancel_strip_presses();
                 }
                 // Likewise a program still noted as holding this button gets
                 // the release it missed, and the press is Kettle's own
@@ -1269,10 +1272,11 @@ impl App {
                 }
                 if bcode == 0 {
                     ws.search.dragging_editor = false;
-                    // A drag held the arrow wherever it went; released over
-                    // text the pointer gets the I-beam back now, not on its
-                    // next move.
+                    // A drag held the arrow and the bar's hover wherever it
+                    // went; released over text the pointer gets the I-beam
+                    // back and the bar narrows now, not on its next move.
                     if end_scrollbar_drag(ws) {
+                        self.update_scrollbar_hover(ws);
                         self.sync_cursor_icon(ws);
                     }
                     // End the drag-to-reorder gesture on

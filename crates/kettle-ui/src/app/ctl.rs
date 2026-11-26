@@ -2465,10 +2465,12 @@ impl App {
         event_loop: &ActiveEventLoop,
         bcode: u8,
     ) -> bool {
-        // A new primary press ends a jump button's press whose release never
-        // came.
+        // A new primary press ends a jump button's or a title-bar button's
+        // press whose release never came, so the strip cannot take this
+        // press's release.
         if bcode == 0 {
             ws.scrollback_pill_press = None;
+            ws.cancel_strip_presses();
         }
         // As natively: a card press whose release never came is over, as is
         // a lane's drag, a program still holding this button gets its

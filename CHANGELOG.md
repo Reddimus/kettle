@@ -1134,11 +1134,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - The find bar's match count and status reach screen readers as one named
   status, with no unnamed second one.
 
-- The New Tab button and the GNOME header's Find button act when released over them, like native buttons, so pressing one and dragging off cancels instead of opening a tab or toggling Find.
+- The New Tab button and the GNOME header's Find button act when released over them, like native buttons, so pressing one and dragging off cancels instead of opening a tab or toggling Find. A dialog, menu or picker that opens while one is held cancels it too.
 
 - A scrollbar no longer stays lit and wide after the pointer leaves it for a pane whose program tracks pointer motion.
 
-- The pointer shows the arrow, not the text cursor, over a scrollbar and while dragging it, and the text cursor comes back as soon as a drag ends over text.
+- The pointer shows the arrow, not the text cursor, over a scrollbar and while dragging it, and the text cursor comes back, and the bar narrows, as soon as a drag ends over text.
 
 - The pointer shows the text cursor over the command palette's field, the picker filters, the title editor and the Settings search and value fields, as it already did in Find.
 

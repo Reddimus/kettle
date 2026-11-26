@@ -1754,7 +1754,21 @@ impl WindowState {
 
     pub(crate) fn install_preview_overlay(&mut self, overlay: crate::media::Overlay) {
         self.dragging_split = None;
+        // The viewer takes the pointer: a title-bar button held under it
+        // does not act on its release, even once the viewer has closed.
+        self.cancel_strip_presses();
         self.preview_overlay = Some(overlay);
+    }
+
+    /// End every title-bar button press that would act on its release (`+`,
+    /// Find, the Settings gear, a window control) without acting: a modal
+    /// took the pointer, or a new primary press began, so the release to
+    /// come is not that press's. The `▾` acts on press and is left showing.
+    pub(crate) fn cancel_strip_presses(&mut self) {
+        self.pressed_window_control = None;
+        self.pressed_new_tab = false;
+        self.pressed_settings = false;
+        self.pressed_search = false;
     }
 
     /// On focus loss, drop every title-bar button press and the window
@@ -1762,14 +1776,11 @@ impl WindowState {
     /// gear loses its hover too, so a release elsewhere never opens
     /// Settings and the gear never stays lit.
     pub(crate) fn release_titlebar_buttons(&mut self) {
-        self.pressed_window_control = None;
+        self.cancel_strip_presses();
         self.hovered_window_control = None;
-        self.pressed_new_tab = false;
         self.pressed_new_tab_menu = false;
         self.hovered_settings = false;
-        self.pressed_settings = false;
         self.hovered_search = false;
-        self.pressed_search = false;
     }
 
     /// When the pointer leaves the window no jump button is under it, and a

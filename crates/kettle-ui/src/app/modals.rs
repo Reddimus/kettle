@@ -671,6 +671,7 @@ impl App {
         self.finish_selection_gesture(ws);
         ws.card_press = None;
         ws.scrollback_pill_press = None;
+        ws.cancel_strip_presses();
         ws.dragging_split = None;
         ws.pane_drag = None;
         // The press that opens a question also owns its later release.
@@ -4445,9 +4446,10 @@ impl App {
         // autoscrolling behind Command Palette, Settings, SSH, or title edit.
         self.finish_selection_gesture(ws);
         // A card held under a modal that opened is not clicked, even if the
-        // modal is gone by the release.
+        // modal is gone by the release; nor is a title-bar button.
         ws.card_press = None;
         ws.scrollback_pill_press = None;
+        ws.cancel_strip_presses();
         ws.dragging_split = None;
         ws.pane_drag = None;
         // The modal that opens takes the keyboard from a preview lane, even

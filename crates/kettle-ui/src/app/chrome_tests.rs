@@ -2471,3 +2471,102 @@ fn a_tab_drag_at_the_end_rests_on_nothing() {
         (None, Some((true, later)))
     );
 }
+
+/// A modal that takes the pointer while `+`, Find, the Settings gear or a
+/// window control is held ends that press, so its release does nothing even
+/// once the modal has closed again: hold `+`, open and close the media
+/// viewer, release over `+`, and no tab opens. Every way a modal takes the
+/// pointer ends the press the same way.
+#[test]
+fn a_modal_taking_the_pointer_cancels_a_held_strip_button() {
+    use super::chrome::{
+        NewTabHoverTarget, press_settings_gear, press_strip_button, release_settings_gear,
+        release_strip_button,
+    };
+    let strip = || {
+        let mut bar = macos_titlebar_strip(1280.0, 1.0);
+        bar.search = (200.0, bar.band.1, 28.0, bar.height);
+        bar
+    };
+    let bar = strip();
+    let viewer = crate::media::Overlay {
+        pane: 1,
+        origin: None,
+        control: None,
+        theater: false,
+        fullscreen: false,
+    };
+    for (button, target) in [
+        (centre_of(bar.new_tab), NewTabHoverTarget::Plus),
+        (centre_of(bar.search), NewTabHoverTarget::Search),
+    ] {
+        let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+        ws.held_buttons.pressed(0, None, (0, 0));
+        assert!(press_strip_button(&mut ws, &bar, button), "{target:?}");
+        assert_eq!(
+            (ws.pressed_new_tab, ws.pressed_search),
+            (
+                target == NewTabHoverTarget::Plus,
+                target == NewTabHoverTarget::Search
+            ),
+        );
+        ws.install_preview_overlay(viewer);
+        ws.preview_overlay = None;
+        point_at(&mut ws, button);
+        assert_eq!(
+            release_strip_button(&mut ws, |_| strip()),
+            None,
+            "{target:?}: the press ended when the viewer took the pointer"
+        );
+    }
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    let gear = centre_of(bar.settings);
+    assert!(press_settings_gear(&mut ws, &bar, gear, 0));
+    ws.pressed_window_control = Some(kettle_render::WindowControl::Close);
+    ws.install_preview_overlay(viewer);
+    ws.preview_overlay = None;
+    point_at(&mut ws, gear);
+    assert_eq!(release_settings_gear(&mut ws, |_| strip()), None, "the gear");
+    assert_eq!(ws.pressed_window_control, None, "a window control");
+
+    let src = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for (opener, until) in [
+        ("fn close_all_modals(", "fn pointer_modal_open("),
+        ("fn install_confirm_dialog(", "ws.confirm_dialog = Some(dialog);"),
+        ("fn show_context_menu(", "ws.pane_drag = None;"),
+    ] {
+        let body = src.split(opener).nth(1).unwrap_or_else(|| panic!("{opener}"));
+        let body = &body[..body.find(until).unwrap_or_else(|| panic!("{until}"))];
+        assert!(body.contains("ws.cancel_strip_presses();"), "{opener}");
+    }
+}
+
+/// A primary press whose release never came (a control client's lone
+/// `press` on `+`) must not take a later click's release: then the tab
+/// click's release went to the strip, and the tab drag it armed stayed armed,
+/// so buttonless motion reordered tabs. Every new primary press, native or
+/// ctl, ends any title-bar button press before it is routed anywhere.
+#[test]
+fn a_new_primary_press_ends_an_old_strip_press() {
+    let src = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let native = src
+        .split("WindowEvent::MouseInput { state: ElementState::Pressed,")
+        .nth(1)
+        .expect("native press");
+    let ctl = src.split("fn ctl_mouse_press(").nth(1).expect("ctl press");
+    for (name, press) in [("native", native), ("ctl", ctl)] {
+        let cancel = press
+            .find("if bcode == 0 { ws.scrollback_pill_press = None; ws.cancel_strip_presses(); }")
+            .unwrap_or_else(|| panic!("{name}: a primary press ends old strip presses"));
+        let routed = press
+            .find("if self.confirm_mouse_press(ws, event_loop, bcode) {")
+            .unwrap_or_else(|| panic!("{name}: routing"));
+        assert!(cancel < routed, "{name}: before the press is routed");
+    }
+}
