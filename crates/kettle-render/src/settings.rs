@@ -39,6 +39,8 @@ pub enum SettingsHover {
     Row(usize),
     /// A choice row's ‹ value › control.
     Choice(usize),
+    /// A switch row's switch.
+    Switch(usize),
     /// A row's Reset chip, while it can reset the row.
     Reset(usize),
     /// A category in the sidebar or strip other than the open one.
@@ -51,7 +53,9 @@ impl SettingsHover {
     /// The row the pointer is over, on its body or one of its controls.
     pub fn row(self) -> Option<usize> {
         match self {
-            Self::Row(index) | Self::Choice(index) | Self::Reset(index) => Some(index),
+            Self::Row(index) | Self::Choice(index) | Self::Switch(index) | Self::Reset(index) => {
+                Some(index)
+            }
             Self::Category(_) | Self::Arrow(_) => None,
         }
     }
@@ -579,6 +583,10 @@ impl SettingsLayout {
                 SettingsHover::Reset(row.index)
             } else if data.control == SettingsControl::Choice && contains(row.chip_rect, cursor) {
                 SettingsHover::Choice(row.index)
+            } else if matches!(data.control, SettingsControl::Toggle(_))
+                && contains(row.chip_rect, cursor)
+            {
+                SettingsHover::Switch(row.index)
             } else {
                 SettingsHover::Row(row.index)
             },
@@ -1416,7 +1424,13 @@ pub(crate) fn settings_text_color(
         {
             palette.well
         }
-        SettingsTextKind::Value(_) if set.hover == Some(SettingsHover::Choice(index)) => {
+        SettingsTextKind::Value(_)
+            if matches!(
+                set.hover,
+                Some(SettingsHover::Choice(hovered) | SettingsHover::Switch(hovered))
+                    if hovered == index
+            ) =>
+        {
             settings_pressable(bg)
         }
         SettingsTextKind::Reset(_) if set.hover == Some(SettingsHover::Reset(index)) => {
@@ -1434,7 +1448,14 @@ pub(crate) fn settings_text_color(
     }
     match kind {
         SettingsTextKind::Value(_) if row.unavailable => colors.text(palette.description, surface),
-        SettingsTextKind::Value(_) if settings_knob_on_right(row) => colors.text(on_ink, accent),
+        SettingsTextKind::Value(_) if settings_knob_on_right(row) => colors.text(
+            on_ink,
+            if set.hover == Some(SettingsHover::Switch(index)) {
+                settings_pressable(accent)
+            } else {
+                accent
+            },
+        ),
         SettingsTextKind::Description(_) => match fill {
             SettingsRowFill::Panel => palette.description,
             SettingsRowFill::Focused => palette.description_selected,
@@ -1495,14 +1516,20 @@ pub(crate) fn settings_row_surfaces(
     let switch = matches!(data.control, SettingsControl::Toggle(_));
     let on = settings_knob_on_right(data) && !data.unavailable;
     let well = matches!(data.control, SettingsControl::Value | SettingsControl::Text);
-    let fill = if on {
-        accent
-    } else if well {
-        palette.well
-    } else if hover == Some(SettingsHover::Choice(row.index)) {
-        settings_pressable(bg)
-    } else {
-        bg
+    // A switch or a choice under the pointer moves its own fill, so it
+    // answers the pointer on the focused row too, whose fill stays.
+    let fill = match (on, well, hover) {
+        (true, _, Some(SettingsHover::Switch(index))) if index == row.index => {
+            settings_pressable(accent)
+        }
+        (true, _, _) => accent,
+        (false, true, _) => palette.well,
+        (false, false, Some(SettingsHover::Choice(index) | SettingsHover::Switch(index)))
+            if index == row.index =>
+        {
+            settings_pressable(bg)
+        }
+        (false, false, _) => bg,
     };
     // Reset's own fill, where it is not the joined chip's.
     let reset_fill = if hover == Some(SettingsHover::Reset(row.index)) {

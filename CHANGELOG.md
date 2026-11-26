@@ -1095,6 +1095,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A Settings switch under the pointer now reacts like a button, on the
+  highlighted option too, where the row's highlight hid any hover.
+
 - Turning Window blur on where the session cannot blur, such as X11 without
   a compositor's blur, no longer makes Settings ask for a new window or a
   restart; the switch reads Unavailable.

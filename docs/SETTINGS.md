@@ -64,8 +64,9 @@ assistive technology cancels any pending keybinding capture.
 
 The panel is also fully **mouse-driven**. Under the pointer, an option or a
 category lights up with a faint tint of the theme's selection colour, without
-the bar that marks the highlighted option, and Reset and a choice's ‹ › control
-darken or lighten like a dialog button; the highlight itself stays where the
+the bar that marks the highlighted option, and Reset, a choice's ‹ › control
+and a switch darken or lighten like a dialog button, on the highlighted option
+too; the highlight itself stays where the
 keyboard put it. **Left-click** a row to cycle its
 value forward, **right-click** to cycle back, **scroll-wheel** over a row to
 adjust it, **left-click Reset** to restore a changed row's default, **click
