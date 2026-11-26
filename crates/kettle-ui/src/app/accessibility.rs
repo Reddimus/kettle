@@ -1322,15 +1322,10 @@ impl App {
         }
     }
 
-    /// A screen reader's press on a picker option: the option becomes the
-    /// selection (`accessibility_picker_press`), then the picker's own Enter
-    /// acts on it, as `picker_pointer` does for a click on its row.
-    fn press_picker_option(
-        &mut self,
-        ws: &mut WindowState,
-        selected: usize,
-        event_loop: &ActiveEventLoop,
-    ) {
+    /// A screen reader's request to highlight a picker option: it becomes the
+    /// selection, as the arrow keys make it, and the theme picker previews
+    /// it as they do. Nothing runs.
+    fn select_picker_option(&mut self, ws: &mut WindowState, selected: usize) {
         let selection = if let Some((_, selection)) = ws.palette_input.as_mut() {
             selection
         } else if let Some(state) = ws.theme_picker_input.as_mut() {
@@ -1343,6 +1338,18 @@ impl App {
             return;
         };
         *selection = selected;
+        // Keys get this after every window event; a screen reader's request
+        // arrives as a user event instead.
+        self.sync_theme_preview(ws);
+        ws.accessibility_pending = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
+    /// A press on the picker's Choose button: the picker's own Enter acts on
+    /// its selection, as `picker_pointer` does for a click on a row.
+    fn press_picker_enter(&mut self, ws: &mut WindowState, event_loop: &ActiveEventLoop) {
         end_modal_composition(ws);
         let mods = std::mem::replace(&mut ws.mods, ModifiersState::empty());
         let key = Key::Named(NamedKey::Enter);
@@ -1804,10 +1811,15 @@ impl App {
             return;
         }
         if let Some(menu) = accessibility_picker_kind(ws).and_then(|_| self.picker_menu(ws))
-            && let Some(selected) = accessibility_picker_press(ws, &menu, request.target_node)
+            && let Some(picked) =
+                accessibility_picker_request(ws, &menu, request.target_node, request.action)
         {
-            if request.action == AccessibilityAction::Click {
-                self.press_picker_option(ws, selected, event_loop);
+            match picked {
+                PickerRequest::Select(selected) => self.select_picker_option(ws, selected),
+                PickerRequest::Choose(selected) => {
+                    self.select_picker_option(ws, selected);
+                    self.press_picker_enter(ws, event_loop);
+                }
             }
             return;
         }
@@ -2004,6 +2016,7 @@ pub(super) enum BoundTarget {
     PickerOption = 0,
     Hint = 1,
     Link = 2,
+    PickerChoose = 3,
 }
 
 /// The id of the node of `class` bound to `key`. Different keys share an id
@@ -2047,6 +2060,11 @@ pub(super) fn accessibility_picker_option_ids(
             })
         })
         .collect()
+}
+
+/// The id of the Choose button that acts on the option whose id is `option`.
+pub(super) fn accessibility_picker_choose_id(option: NodeId) -> NodeId {
+    accessibility_bound_id(BoundTarget::PickerChoose, option.0)
 }
 
 /// The node id of a quick-select label: bound to the label, the pane and
@@ -2835,28 +2853,60 @@ pub(super) fn accessibility_picker_kind(ws: &WindowState) -> Option<u64> {
     }
 }
 
-/// What a screen reader's press on `node` selects in the open picker: the
-/// value its selection then holds (the palette's counts commands, every
-/// other picker's rows), or `None` for a node that is not one of its enabled
-/// options in `menu`, as laid out for this frame. An id bound to a result
-/// the picker no longer shows (`accessibility_picker_option_ids`) is `None`.
-pub(super) fn accessibility_picker_press(
+/// What a screen reader's request on a node of the open picker asks for,
+/// with the value the picker's selection then holds (the palette's counts
+/// commands, every other picker's rows).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PickerRequest {
+    /// Focus or Click on an enabled option: highlight it, as the arrow keys
+    /// do. A selection request arrives as this Click too, so it never acts.
+    Select(usize),
+    /// Click on the Choose button: act on the highlighted result, as Enter.
+    Choose(usize),
+}
+
+/// The request `action` on `node` makes of the open picker, as `menu` lays
+/// it out for this frame, or `None` for a node that is not one of its enabled
+/// options or its Choose button. An id bound to a result the picker no longer
+/// shows, or a Choose button bound to another result than the highlighted
+/// one, is `None`.
+pub(super) fn accessibility_picker_request(
     ws: &WindowState,
     menu: &ContextMenu,
     node: NodeId,
-) -> Option<usize> {
+    action: AccessibilityAction,
+) -> Option<PickerRequest> {
     let kind = accessibility_picker_kind(ws)?;
-    let row = accessibility_picker_option_ids(kind, &menu.rows)
-        .iter()
-        .position(|id| *id == Some(node))?;
-    let option = kettle_render::menu_row_option(&menu.rows, row)?;
-    menu.rows[row]
-        .enabled
-        .then_some(if kind == MODAL_KIND_PALETTE {
-            option
-        } else {
-            row
-        })
+    let ids = accessibility_picker_option_ids(kind, &menu.rows);
+    let selection = |row: usize| {
+        let option = kettle_render::menu_row_option(&menu.rows, row)?;
+        menu.rows[row]
+            .enabled
+            .then_some(if kind == MODAL_KIND_PALETTE {
+                option
+            } else {
+                row
+            })
+    };
+    if let Some(row) = ids.iter().position(|id| *id == Some(node)) {
+        return matches!(
+            action,
+            AccessibilityAction::Focus | AccessibilityAction::Click
+        )
+        .then(|| selection(row))
+        .flatten()
+        .map(PickerRequest::Select);
+    }
+    let highlight = menu.highlight;
+    let choose = ids
+        .get(highlight)
+        .copied()
+        .flatten()
+        .map(accessibility_picker_choose_id);
+    (action == AccessibilityAction::Click && choose == Some(node))
+        .then(|| selection(highlight))
+        .flatten()
+        .map(PickerRequest::Choose)
 }
 
 /// Whether `node` is the theme picker's Contrast button.
@@ -2955,7 +3005,12 @@ fn push_picker_accessibility(
                 // Zero-based, unlike ARIA: the AT-SPI adapter adds one.
                 option.set_position_in_set(position);
                 option.set_size_of_set(results);
-                // A press picks the option as a click on its row does.
+                // A press or focus selects the option, as the arrow keys do,
+                // and never acts on it: the adapters also turn selecting it
+                // (macOS AXSelected and AXPick, AT-SPI Selection, UIA
+                // SelectionItem) into this same Click. The Choose button
+                // below acts on it.
+                option.add_action(AccessibilityAction::Focus);
                 option.add_action(AccessibilityAction::Click);
                 position += 1;
             } else {
@@ -2966,7 +3021,7 @@ fn push_picker_accessibility(
             let is_selected = index == menu.highlight && row.enabled;
             option.set_selected(is_selected);
             if is_selected {
-                selected = Some(id);
+                selected = Some((id, index));
             }
             list_children.push(id);
             projection.nodes.push((id, option));
@@ -2984,6 +3039,24 @@ fn push_picker_accessibility(
     projection.nodes.push((list_id, list));
 
     let mut dialog_children = vec![input_id, list_id];
+    // The one node that acts on a result: a button, with no selected state
+    // for an adapter to turn a selection into its press, bound to the
+    // highlighted result. A line at that row's end, so exploring the row by
+    // pointer finds the option.
+    if let Some(menu) = menu
+        && let Some((option, row)) = selected
+    {
+        let choose_id = accessibility_picker_choose_id(option);
+        let mut button = Node::new(Role::Button);
+        button.set_label(tr.picker_a11y_choose(&menu.rows[row].label));
+        button.add_action(AccessibilityAction::Click);
+        match menu.visible_row_rect(row) {
+            Some((x, y, w, h)) => button.set_bounds(bounds((x + w, y, 0.0, h))),
+            None => button.set_hidden(),
+        }
+        projection.nodes.push((choose_id, button));
+        dialog_children.push(choose_id);
+    }
     // The theme picker's footer reads as one line of text: the painted
     // readout and status, plus what its swatch and marks show.
     if let Some(menu) = menu
@@ -3063,7 +3136,7 @@ fn push_picker_accessibility(
     projection.roots.push(container_id);
     projection.nodes.push((container_id, dialog));
     if projection.focus.is_none() {
-        projection.focus = selected.or(Some(input_id));
+        projection.focus = selected.map(|(id, _)| id).or(Some(input_id));
     }
 }
 

@@ -2627,95 +2627,241 @@ fn settings_search_group_bounds_follow_first_row_indices_and_sticky_category() {
     }
 }
 
-/// Every enabled picker option offers a press, the default action screen
-/// readers run, and a press picks the option as a click on its row does: the
-/// palette's selection counts commands past its headings, the other pickers'
-/// count rows. The dispatch then hands the picker its own Enter. A disabled
-/// placeholder, a stale id, the footer's controls, another picker's options
-/// and anything under a menu or a confirmation pick nothing.
-#[test]
-fn picker_options_offer_a_press_that_picks_them_as_a_click_does() {
-    use accesskit::Action;
-    let bindings = kettle_config::keybinds::defaults();
-    let list = command_picker_list(
-        "",
-        0,
-        &bindings,
-        &EN_TEXT,
-        None,
-        Some(&[]),
-        false,
-        kettle_config::BroadcastDefault::default(),
-    );
-    let palette = picker_context_menu(list, (1280.0, 820.0), (7.8, 16.25), (7.8, 16.25), 32.0)
-        .unwrap();
-    assert!(palette.rows.iter().any(|row| row.heading), "the empty palette has headings");
-    let mut layouts = picker_context_menu(
-        layout_picker_list("", 0, &["dev".to_string(), "ops".to_string(), "web".to_string()], &EN_TEXT),
-        (1280.0, 820.0),
-        (7.8, 16.25),
-        (7.8, 16.25),
-        32.0,
-    )
-    .unwrap();
-    layouts.rows[1].enabled = false;
-    for (kind, menu) in [
-        (super::MODAL_KIND_PALETTE, palette),
-        (super::MODAL_KIND_LAYOUTS, layouts),
-    ] {
-        let palette = kind == super::MODAL_KIND_PALETTE;
-        let mut ws = WindowState::new(0, Mux::new());
-        let overlay = if palette {
-            ws.palette_input = Some((Default::default(), 0));
-            kettle_render::Overlay {
-                palette_query: Some(String::new()),
-                context_menu: Some(menu),
-                ..Default::default()
+/// The requests AccessKit 0.25's platform adapters make of a node when a
+/// screen reader selects, picks or focuses it, as (request, action): macOS
+/// `setAccessibilitySelected:` and `AXPick`, AT-SPI `Selection.SelectChild`,
+/// `DeselectChild` and `DeselectSelectedChild` on its list, UI Automation
+/// `SelectionItem` `Select`, `AddToSelection` and `RemoveFromSelection`, and
+/// a focus request. Each selection request reaches the app as a Click, with
+/// nothing to tell it from a press; UIA sends it whether or not the node
+/// offers Click.
+fn adapter_selection_requests(
+    node: &accesskit_consumer::NodeRef<'_>,
+) -> Vec<(&'static str, accesskit::Action)> {
+    use accesskit::{Action, Role};
+    let filter = accesskit_consumer::common_filter;
+    let clickable = node.is_clickable(&filter);
+    let selectable = node.is_selectable();
+    let item_like = node.is_item_like() && node.role() != Role::Tab;
+    let selected = node.is_selected();
+    let mut requests = Vec::new();
+    for want in [true, false] {
+        if clickable && item_like && selectable && selected != Some(want) {
+            requests.push((if want { "macOS select" } else { "macOS deselect" }, Action::Click));
+        }
+    }
+    if clickable && item_like && selectable {
+        requests.push(("macOS AXPick", Action::Click));
+    }
+    let in_selection = node
+        .filtered_parent(&filter)
+        .is_some_and(|parent| parent.is_container_with_selectable_children());
+    if in_selection {
+        if selected != Some(true) && selectable && clickable {
+            requests.push(("AT-SPI SelectChild", Action::Click));
+        }
+        if selected != Some(false) && selectable && clickable {
+            requests.push(("AT-SPI DeselectChild", Action::Click));
+        }
+        if node.is_item_like() && selected == Some(true) && clickable {
+            requests.push(("AT-SPI DeselectSelectedChild", Action::Click));
+        }
+    }
+    let selection_item = match node.role() {
+        Role::RadioButton | Role::MenuItemRadio => node.toggled().is_some(),
+        Role::ListBoxOption | Role::ListItem | Role::MenuListOption | Role::Tab | Role::TreeItem => {
+            selected.is_some()
+        }
+        _ => false,
+    };
+    if selection_item && !node.is_disabled() {
+        let on = selected.unwrap_or(false);
+        for (request, want) in [
+            ("UIA Select", true),
+            ("UIA AddToSelection", true),
+            ("UIA RemoveFromSelection", false),
+        ] {
+            if on != want {
+                requests.push((request, Action::Click));
             }
-        } else {
+        }
+    }
+    if node.is_focusable(&filter) {
+        requests.push(("focus", Action::Focus));
+    }
+    requests
+}
+
+/// The explicit presses the adapters make of a node that offers Click:
+/// macOS `AXPress`, AT-SPI `DoAction(0)` and UIA `Invoke`.
+fn adapter_press_requests(
+    node: &accesskit_consumer::NodeRef<'_>,
+) -> Vec<(&'static str, accesskit::Action)> {
+    if node.is_clickable(&accesskit_consumer::common_filter) {
+        ["macOS AXPress", "AT-SPI DoAction", "UIA Invoke"]
+            .map(|request| (request, accesskit::Action::Click))
+            .to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
+/// The pickers these tests open: the palette after `split`, the layout
+/// picker with a disabled placeholder, and the SSH launcher with its Save row
+/// and with its Remove row.
+const ACCESSIBLE_PICKERS: [&str; 4] = ["palette", "layouts", "ssh save", "ssh remove"];
+
+/// One of `ACCESSIBLE_PICKERS` open, with row `highlighted` highlighted: its
+/// menu's kind, the window holding it and its overlay.
+fn accessible_picker(name: &str, highlighted: usize) -> (u64, WindowState, kettle_render::Overlay) {
+    let open = |list| {
+        let mut menu =
+            picker_context_menu(list, (1280.0, 820.0), (7.8, 16.25), (7.8, 16.25), 32.0).unwrap();
+        menu.highlight = highlighted;
+        menu
+    };
+    let mut ws = WindowState::new(0, Mux::new());
+    let hosts = [("web".to_string(), "me@web.test".to_string())];
+    match name {
+        "palette" => {
+            ws.palette_input = Some((Default::default(), 0));
+            let list = command_picker_list(
+                "split",
+                0,
+                &kettle_config::keybinds::defaults(),
+                &EN_TEXT,
+                None,
+                Some(&[]),
+                false,
+                kettle_config::BroadcastDefault::default(),
+            );
+            let overlay = kettle_render::Overlay {
+                palette_query: Some("split".into()),
+                context_menu: Some(open(list)),
+                ..Default::default()
+            };
+            (super::MODAL_KIND_PALETTE, ws, overlay)
+        }
+        "layouts" => {
             ws.layout_picker_input = Some((Default::default(), 0));
-            kettle_render::Overlay {
+            let names = ["dev".to_string(), "ops".to_string(), "web".to_string()];
+            let mut menu = open(layout_picker_list("", 0, &names, &EN_TEXT));
+            menu.rows[1].enabled = false;
+            let overlay = kettle_render::Overlay {
                 layout_picker_query: Some(String::new()),
                 context_menu: Some(menu),
                 ..Default::default()
-            }
-        };
-        let projection =
-            super::modal_accessibility_projection(&overlay, (1280.0, 820.0), (7.8, 16.25), 1.0, &EN_TEXT);
-        let menu = overlay.context_menu.as_ref().unwrap();
-        let ids = super::accessibility_picker_option_ids(kind, &menu.rows);
-        let mut pressed = 0;
-        for (index, row) in menu.rows.iter().enumerate() {
-            let Some(option) = kettle_render::menu_row_option(&menu.rows, index) else {
-                continue;
             };
-            let id = ids[index].unwrap();
-            let node = &projection.nodes.iter().find(|(at, _)| *at == id).unwrap().1;
-            assert_eq!(node.supports_action(Action::Click), row.enabled, "{kind} row {index}");
-            assert_eq!(
-                super::accessibility_picker_press(&ws, menu, id),
-                row.enabled.then_some(if palette { option } else { index }),
-                "{kind} row {index}"
+            (super::MODAL_KIND_LAYOUTS, ws, overlay)
+        }
+        _ => {
+            let query = if name == "ssh save" { "me@box.test" } else { "web" };
+            ws.ssh_input = Some((Default::default(), 0));
+            let overlay = kettle_render::Overlay {
+                ssh_query: Some(query.into()),
+                context_menu: Some(open(ssh_picker_list(query, 0, &hosts, &[], &EN_TEXT))),
+                ..Default::default()
+            };
+            (super::MODAL_KIND_SSH, ws, overlay)
+        }
+    }
+}
+
+/// No request an adapter makes when a screen reader selects, deselects, picks
+/// or focuses a picker option acts on it: each only highlights that option,
+/// as the arrow keys do, in the palette, the layout picker and the SSH
+/// launcher's Save and Remove rows alike. Only a press on the Choose button,
+/// which has no selected state for an adapter to change, acts, and only on
+/// the highlighted result; a press on an option highlights it too. The
+/// Choose button follows the highlight, and one bound to another result
+/// acts on nothing.
+#[test]
+fn picker_selection_requests_only_highlight_and_choose_acts() {
+    use super::accessibility::PickerRequest;
+    for name in ACCESSIBLE_PICKERS {
+        let (kind, mut ws, overlay) = accessible_picker(name, 0);
+        let menu = overlay.context_menu.as_ref().unwrap();
+        let rows = &menu.rows;
+        let ids = super::accessibility_picker_option_ids(kind, rows);
+        let selection = |row: usize| {
+            let option = kettle_render::menu_row_option(rows, row).unwrap();
+            if kind == super::MODAL_KIND_PALETTE { option } else { row }
+        };
+        let enabled: Vec<usize> = (0..rows.len())
+            .filter(|&row| ids[row].is_some() && rows[row].enabled)
+            .collect();
+        assert!(enabled.len() >= 2, "{name}");
+        if name.starts_with("ssh") {
+            let action = if name == "ssh save" { "Save" } else { "Remove" };
+            assert!(
+                enabled.iter().any(|&row| rows[row].label.starts_with(action)),
+                "{name}: {:?}",
+                rows.iter().map(|row| &row.label).collect::<Vec<_>>()
             );
-            pressed += usize::from(row.enabled);
         }
-        assert!(pressed > 1, "{kind}");
-        let first = ids.iter().flatten().copied().next().unwrap();
-        let elsewhere = super::accessibility_picker_option_ids(super::MODAL_KIND_SSH, &menu.rows);
-        for stale in [
-            super::accessibility_modal_id(kind, 3),
-            elsewhere.iter().flatten().copied().next().unwrap(),
-            super::accessibility_modal_id(kind, 0),
-            super::accessibility_modal_id(kind, 1),
-            super::accessibility_modal_id(kind, 2),
-            super::accessibility_modal_id(kind, menu.rows.len() + 3),
-            super::accessibility_modal_id(kind, super::PICKER_CONTRAST_A11Y_INDEX),
-            super::accessibility_modal_id(kind, super::PICKER_STATUS_A11Y_INDEX),
-            super::accessibility_modal_id(super::MODAL_KIND_SSH, 3),
-        ] {
-            assert_eq!(super::accessibility_picker_press(&ws, menu, stale), None, "{stale:?}");
+        // Every enabled option takes a turn as the highlighted one, the SSH
+        // action rows among them.
+        for &highlighted in &enabled {
+            let (_, _, shown) = accessible_picker(name, highlighted);
+            let menu = shown.context_menu.as_ref().unwrap();
+            let projection =
+                super::modal_accessibility_projection(&shown, (1280.0, 820.0), (7.8, 16.25), 1.0, &EN_TEXT);
+            let tree = accesskit_consumer::Tree::new(
+                super::mouse_override_hint_tests::finished_tree(projection),
+                true,
+            );
+            let state = tree.state();
+            let choose = super::accessibility_picker_choose_id(ids[highlighted].unwrap());
+            for (row, id) in ids.iter().enumerate() {
+                let Some(id) = *id else { continue };
+                let node = state.node_by_tree_local_id(id, accesskit::TreeId::ROOT).unwrap();
+                let selections = adapter_selection_requests(&node);
+                if rows[row].enabled {
+                    assert!(
+                        selections.iter().any(|(request, _)| request.starts_with("UIA")),
+                        "{name} row {row}: UIA can select it"
+                    );
+                }
+                for (request, action) in selections.into_iter().chain(adapter_press_requests(&node)) {
+                    let got = super::accessibility_picker_request(&ws, menu, id, action);
+                    let want = rows[row].enabled.then(|| PickerRequest::Select(selection(row)));
+                    assert_eq!(got, want, "{name}: {request} on row {row} with row {highlighted} highlighted");
+                }
+            }
+            let button = state
+                .node_by_tree_local_id(choose, accesskit::TreeId::ROOT)
+                .expect("a Choose button for the highlighted result");
+            assert_eq!(button.role(), accesskit::Role::Button);
+            assert_eq!(
+                button.label().as_deref(),
+                Some(EN_TEXT.picker_a11y_choose(&rows[highlighted].label).as_str())
+            );
+            assert_eq!(button.is_selected(), None, "no selected state to change");
+            assert!(adapter_selection_requests(&button).is_empty(), "{name}");
+            for (request, action) in adapter_press_requests(&button) {
+                assert_eq!(
+                    super::accessibility_picker_request(&ws, menu, choose, action),
+                    Some(PickerRequest::Choose(selection(highlighted))),
+                    "{name}: {request} on Choose"
+                );
+            }
+            assert_eq!(
+                super::accessibility_picker_request(&ws, menu, choose, accesskit::Action::Focus),
+                None
+            );
+            // The Choose button of another result acts on nothing.
+            for &other in enabled.iter().filter(|&&row| row != highlighted) {
+                let stale = super::accessibility_picker_choose_id(ids[other].unwrap());
+                assert!(state.node_by_tree_local_id(stale, accesskit::TreeId::ROOT).is_none());
+                assert_eq!(
+                    super::accessibility_picker_request(&ws, menu, stale, accesskit::Action::Click),
+                    None,
+                    "{name}"
+                );
+            }
         }
-        assert!(super::accessibility_picker_press(&ws, menu, first).is_some());
+        // Nothing answers under a menu, or once the picker closed.
+        let first = ids[enabled[0]].unwrap();
         ws.context_menu = Some(super::ContextMenuState {
             origin: crate::app::MenuOrigin::Other,
             anchor: (0.0, 0.0),
@@ -2727,26 +2873,50 @@ fn picker_options_offer_a_press_that_picks_them_as_a_click_does() {
             typeahead_buf: String::new(),
             typeahead_until: None,
         });
-        assert_eq!(super::accessibility_picker_press(&ws, menu, first), None);
+        assert_eq!(
+            super::accessibility_picker_request(&ws, menu, first, accesskit::Action::Click),
+            None
+        );
         ws.context_menu = None;
         ws.palette_input = None;
         ws.layout_picker_input = None;
-        assert_eq!(super::accessibility_picker_press(&ws, menu, first), None);
+        ws.ssh_input = None;
+        assert_eq!(
+            super::accessibility_picker_request(&ws, menu, first, accesskit::Action::Click),
+            None
+        );
     }
+    // The dispatch: a selection only highlights, and only Choose gives the
+    // picker its Enter.
     let handler = production_source()
         .split_once("fn handle_accessibility_action(")
         .unwrap()
         .1
-        .split_once("accessibility_picker_press(ws, &menu, request.target_node)")
-        .expect("the handler dispatches a picker press")
+        .split_once("accessibility_picker_request(ws, &menu, request.target_node, request.action)")
+        .expect("the handler dispatches picker requests")
         .1
         .split("return;")
         .next()
         .unwrap()
         .to_string();
-    assert!(handler.contains("self.press_picker_option(ws, selected, event_loop)"));
+    let (select, choose) = handler.split_once("PickerRequest::Choose(selected)").unwrap();
+    assert!(select.contains("PickerRequest::Select(selected) => self.select_picker_option(ws, selected),"));
+    assert!(!select.contains("press_picker_enter"), "a selection never presses Enter");
+    assert!(choose.contains("self.press_picker_enter(ws, event_loop);"));
+    let highlight = production_source()
+        .split_once("fn select_picker_option(")
+        .unwrap()
+        .1
+        .split("\n    }\n")
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(highlight.contains("self.sync_theme_preview(ws);"), "the theme picker previews it");
+    for key in ["palette_key", "theme_picker_key", "layout_picker_key", "ssh_key"] {
+        assert!(!highlight.contains(key), "{key}");
+    }
     let press = production_source()
-        .split_once("fn press_picker_option(")
+        .split_once("fn press_picker_enter(")
         .unwrap()
         .1
         .split("\n    }\n")
@@ -3431,9 +3601,25 @@ fn accessibility_requests_are_bound_to_their_targets() {
     let after = super::accessibility_picker_option_ids(super::MODAL_KIND_LAYOUTS, &filtered.rows);
     assert_ne!(after[0], Some(dev), "the first place is not dev's any more");
     assert_eq!(after[0], Some(ops), "ops keeps its id");
-    assert_eq!(super::accessibility_picker_press(&ws, &filtered, dev), None);
-    assert_eq!(super::accessibility_picker_press(&ws, &filtered, ops), Some(0));
-    assert_eq!(super::accessibility_picker_press(&ws, &both, dev), Some(0));
+    use super::accessibility::PickerRequest;
+    let click = accesskit::Action::Click;
+    assert_eq!(super::accessibility_picker_request(&ws, &filtered, dev, click), None);
+    assert_eq!(
+        super::accessibility_picker_request(&ws, &filtered, ops, click),
+        Some(PickerRequest::Select(0))
+    );
+    assert_eq!(
+        super::accessibility_picker_request(&ws, &both, dev, click),
+        Some(PickerRequest::Select(0))
+    );
+    // Dev's Choose button, queued while dev was highlighted, acts on nothing
+    // once ops is the one highlighted.
+    let choose_dev = super::accessibility_picker_choose_id(dev);
+    assert_eq!(
+        super::accessibility_picker_request(&ws, &both, choose_dev, click),
+        Some(PickerRequest::Choose(0))
+    );
+    assert_eq!(super::accessibility_picker_request(&ws, &filtered, choose_dev, click), None);
 
     let target = |label: &str, col: usize, text: &str| super::HintTarget {
         row: 2,

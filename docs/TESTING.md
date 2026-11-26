@@ -3493,11 +3493,18 @@ Spanish. They do not run Orca or Narrator.
 These `kettle-ui` tests check the generated tree and the action routing, not
 speech:
 
-- `picker_options_offer_a_press_that_picks_them_as_a_click_does`: every
-  enabled palette and layout picker option has a Click action, and a press
-  selects the command (palette) or row (other pickers) a click would. The
-  handler then sends the picker its own Enter. Disabled rows, stale ids, footer
-  controls and options under a menu select nothing.
+- `picker_selection_requests_only_highlight_and_choose_acts` models the
+  requests AccessKit 0.25's adapters make when a screen reader selects,
+  deselects, picks, focuses or presses a node: macOS `setAccessibilitySelected:`
+  both ways and `AXPick`; AT-SPI `SelectChild`, `DeselectChild` and
+  `DeselectSelectedChild`; UIA `Select`, `AddToSelection` and
+  `RemoveFromSelection`; and the explicit `AXPress`, `DoAction` and `Invoke`.
+  It runs them against each option of the palette, the layout picker and the
+  SSH launcher's Save and Remove rows, with every option highlighted in turn.
+  Each only highlights its option. Only a press on the Choose button acts, on
+  the highlighted result. The button has no selected state, so no selection
+  request reaches it, and a Choose button bound to another result acts on
+  nothing.
 - `quick_select_labels_offer_a_press_that_acts_on_their_target`: matching
   quick-select labels have a Click action that runs `act_hint`. Dimmed labels
   have none.

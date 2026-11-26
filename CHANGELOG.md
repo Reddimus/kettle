@@ -1095,8 +1095,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
-- Screen readers can choose a command palette, picker or quick-select entry
-  by pressing it, as a click does.
+- Screen readers can highlight a command palette or picker result by pressing
+  or focusing it, and act on the highlighted result with the picker's Choose
+  button. Selecting a result never runs it. Pressing a quick-select label acts
+  on it, as typing the label does.
 
 - Screen readers can open the link under the pointer by pressing it, as a
   Ctrl or Cmd click does.

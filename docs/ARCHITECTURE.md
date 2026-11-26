@@ -2053,13 +2053,24 @@ their existing pointer behavior because they are not transient popups.
 
 The pickers, Settings and title editing are modal `Dialog` nodes in the
 accessibility tree, as the confirmation's `AlertDialog` is: each owns the
-keyboard and the pointer while open. Every enabled picker option, and each
-quick-select label that still matches what has been typed, has a press: AccessKit's `Click`, the default action a
-screen reader runs. `accessibility_picker_press` maps the option to the value
-the picker's selection holds (a command for the palette, a row elsewhere) and
-`press_picker_option` then gives the picker its own Enter, as `picker_pointer`
-does for a click on the row. A label's press runs `act_hint` without Shift, as
-typing the label does. A dimmed label and a disabled placeholder have none.
+keyboard and the pointer while open. A node with a selected state never acts
+on a `Click`: AccessKit's adapters turn selecting a selectable item (macOS
+`setAccessibilitySelected:` and `AXPick`, AT-SPI `Selection.SelectChild`,
+`DeselectChild` and `DeselectSelectedChild`, UIA `SelectionItem`, which needs
+no Click support) into the same `Click` a press sends, with nothing to tell
+them apart. Every enabled picker option has Focus and Click, and both only
+highlight it, as the arrow keys do; the theme picker previews it as they do
+(`select_picker_option`). The picker acts on its highlighted result only from
+its Choose button ("Choose Split right"), a `Button` with no selected state
+beside the list, bound to that result and painted nowhere, as a zero-width
+line at the row's end: its Click gives the picker its own Enter
+(`press_picker_enter`), as `picker_pointer` does for a click on the row, so
+the SSH launcher's Save and Remove still open their own steps.
+`accessibility_picker_request` maps a request to the value the picker's
+selection holds (a command for the palette, a row elsewhere). Each
+quick-select label that still matches what has been typed has a press too,
+which runs `act_hint` without Shift, as typing the label does; labels have no
+selected state. A dimmed label and a disabled placeholder have no press.
 The hovered link's `Link` node has a press too, which opens the link under
 the pointer through `open_pane_link`, as the click its status names does.
 
