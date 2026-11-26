@@ -1903,6 +1903,20 @@ pub(crate) fn reset_keys(field: &Field) -> Vec<&'static str> {
     }
 }
 
+/// The lines a Reset of `field` adds where removing [`reset_keys`] alone
+/// does not give its default `value`: both padding axes for Window padding.
+pub(crate) fn reset_fallback(field: &Field, value: &str) -> Vec<(&'static str, String)> {
+    reset_keys(field)
+        .into_iter()
+        .take(if field.key == "window-padding-x" {
+            2
+        } else {
+            1
+        })
+        .map(|key| (key, value.to_string()))
+        .collect()
+}
+
 /// Whether `field` already holds its [`default_value`] in `cfg`.
 pub fn holds_default(cfg: &Config, field: &Field) -> bool {
     match &field.kind {
@@ -2539,8 +2553,21 @@ mod tests {
         )
         .unwrap();
         for key in ["font-size", "window-padding-x"] {
-            kettle_config::remove_config_keys(&path, &reset_keys(field(key))).unwrap();
+            kettle_config::reset_config_setting(&path, &reset_keys(field(key)), &[], |_| true)
+                .unwrap();
         }
+        let padding = field("window-padding-x");
+        assert_eq!(
+            reset_fallback(padding, "4"),
+            [
+                ("window-padding-x", "4".to_string()),
+                ("window-padding-y", "4".to_string())
+            ]
+        );
+        assert_eq!(
+            reset_fallback(field("font-size"), "13"),
+            [("font-size", "13".to_string())]
+        );
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text, "");
         let cfg = Config::parse_text(&text);

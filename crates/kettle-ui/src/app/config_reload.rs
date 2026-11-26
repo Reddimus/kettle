@@ -89,27 +89,35 @@ impl App {
         }
     }
 
-    /// Remove `keys` from the config file, so each takes its default again.
-    /// `Ok(false)` when no line set them and nothing was written.
-    pub(super) fn unset_prefs(&self, keys: &[&str]) -> Result<bool, ()> {
+    /// Reset a setting in the config file in one atomic edit
+    /// (`kettle_config::reset_config_setting`): remove `keys`, and add
+    /// `fallback` where that alone does not satisfy `restores`. `Ok(false)`
+    /// when the file already gave the default and nothing was written; on
+    /// `Err` the file is as it was.
+    pub(super) fn reset_pref(
+        &self,
+        keys: &[&str],
+        fallback: &[(&str, &str)],
+        restores: impl Fn(&kettle_config::Config) -> bool,
+    ) -> Result<bool, ()> {
         let Some(path) = self
             .config_path
             .clone()
             .or_else(kettle_config::Config::default_path)
         else {
-            log::warn!("unset_prefs: no config path resolved");
+            log::warn!("reset_pref: no config path resolved");
             return Err(());
         };
-        match kettle_config::remove_config_keys(&path, keys) {
+        match kettle_config::reset_config_setting(&path, keys, fallback, restores) {
             Ok(backup) => {
                 if backup.is_some() {
-                    log::info!("unset_prefs: removed {keys:?} from {}", path.display());
+                    log::info!("reset_pref: reset {keys:?} in {}", path.display());
                 }
                 Ok(backup.is_some())
             }
             Err(e) => {
                 log::warn!(
-                    "unset_prefs: failed to remove {keys:?} from {}: {e}",
+                    "reset_pref: failed to reset {keys:?} in {}: {e}",
                     path.display()
                 );
                 Err(())

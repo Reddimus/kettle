@@ -16,6 +16,10 @@ you have changed shows a **Reset** button beside its value; the highlighted
 option shows it dimmed when it already holds its default. Reset removes the
 option's line from your config file, so the option follows Kettle's default
 from then on, including one that differs by platform, such as the font size.
+Where another line still decides the value, such as a `theme` line for
+Appearance or a `font` line for Font size, Reset adds the default after it and
+keeps that line. Reset saves in one step: if the file cannot be saved, the
+file and the option stay as they were.
 Where a row is too narrow for the word, Reset shows as an anticlockwise-arrow icon, and on
 the narrowest rows it is left out (Delete still resets). Below a panel width
 of 640 pixels, categories become a

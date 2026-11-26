@@ -1113,7 +1113,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Reset in Settings removes the option from your config file instead of
   writing today's default into it, so the option follows the platform's
   default (and later ones) and the file no longer gains a line with each
-  reset.
+  reset. It saves in one step: a reset that cannot be saved leaves the file
+  and the option as they were.
 
 - In Settings search, Tab leaves a search with no matches, and clearing a
   search you didn't move into puts the highlight back on the option it was

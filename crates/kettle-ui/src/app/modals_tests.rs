@@ -1472,13 +1472,14 @@ fn a_refused_capture_key_is_reported_in_the_settings_row() {
     }
 }
 
-/// Reset takes the row's keys out of the config file and reloads, instead
-/// of writing the default the running build has (`theme-mode = auto`,
-/// `font-size = 13`), which pinned the row and added a line each time. It
-/// writes the default only when that still does not show, because the key
-/// is set somewhere Kettle does not edit.
+/// Reset takes the row's keys out of the config file, instead of writing
+/// the default the running build has (`theme-mode = auto`, `font-size =
+/// 13`), which pinned the row and added a line each time. Where another line
+/// still decides the value it adds the default in the same atomic edit, and
+/// it reloads only after that edit is saved: two edits could leave the first
+/// saved and the second not, with a value neither the start nor the default.
 #[test]
-fn settings_reset_removes_the_rows_keys_before_writing_a_default() {
+fn settings_reset_is_one_edit_then_a_reload() {
     let src = production_source();
     let reset = src
         .split("fn settings_reset(")
@@ -1488,11 +1489,12 @@ fn settings_reset_removes_the_rows_keys_before_writing_a_default() {
     let flat: String = reset.split_whitespace().collect();
     assert!(
         flat.contains(
-            "ifself.unset_prefs(&crate::settings::reset_keys(field))==Ok(true){self.reload_config(ws);ifcrate::settings::holds_default(&self.cfg,field){return;}}self.settings_store(ws,field.key,value);"
+            "matchself.reset_pref(&crate::settings::reset_keys(field),&fallback,|cfg|{crate::settings::holds_default(cfg,field)}){Ok(true)=>self.reload_config(ws),Ok(false)=>{}Err(())=>fire_notify("
         ),
         "{flat}"
     );
-    assert_eq!(flat.matches("settings_store(").count(), 1);
+    assert_eq!(flat.matches("settings_store(").count(), 0);
+    assert_eq!(flat.matches("reload_config(").count(), 1);
 }
 
 /// The pointer's hover shows in Settings only where a click acts: not
