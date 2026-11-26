@@ -1095,6 +1095,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Reset in Settings no longer stops at a font size that only rounds to the
+  default, such as 13.4 px from a font = Mono 13.4 line; it sets the real
+  default and keeps the font family.
+
 - Settings answers the pointer: options and categories light up under it,
   and Reset and choice controls react like dialog buttons, without moving
   the keyboard highlight.

@@ -1923,10 +1923,29 @@ pub fn holds_default(cfg: &Config, field: &Field) -> bool {
         FieldKind::Choice { .. } => {
             read_choice(cfg, field.key) == read_choice(&Config::default(), field.key)
         }
+        // Unrounded: a 13.4 px font from a `font` line shows as 13 px but is
+        // not the 13 px default.
         FieldKind::Number { .. } => {
-            read_number(cfg, field.key) == read_number(&Config::default(), field.key)
+            let defaults = Config::default();
+            exact_number(cfg, field.key) == exact_number(&defaults, field.key)
+                && (field.key != "window-padding-x" || cfg.padding_y == defaults.padding_y)
         }
         _ => true,
+    }
+}
+
+/// A number row's value as the config holds it, before [`read_number`]
+/// rounds it for display.
+fn exact_number(cfg: &Config, key: &str) -> f64 {
+    match key {
+        "font-size" => f64::from(cfg.font_size),
+        "background-opacity" => f64::from(cfg.background_opacity),
+        "window-padding-x" => f64::from(cfg.padding_x),
+        "tab-min-width" => f64::from(cfg.tab_min_width),
+        "scrollbar-width" => f64::from(cfg.scrollbar_width),
+        "scrollback" => cfg.scrollback as f64,
+        "scrollback-bytes" => cfg.scrollback_bytes as f64,
+        key => read_number(cfg, key) as f64,
     }
 }
 
@@ -2586,6 +2605,46 @@ mod tests {
         let cfg = Config::parse_text(&text);
         assert!(holds_default(&cfg, field("font-size")));
         assert!(holds_default(&cfg, field("window-padding-x")));
+    }
+
+    /// A number holds its default only at full precision. A `font = Mono
+    /// 13.4` line beside `font-size = 18` leaves 13.4 px once Reset removes
+    /// the size line; rounded, that read as the 13 px default and Reset
+    /// stopped there. Reset now adds the real default after the `font` line,
+    /// which keeps its family.
+    #[test]
+    fn reset_reaches_a_numbers_exact_default() {
+        let cats = categories(&[]);
+        let field = cats
+            .iter()
+            .flat_map(|cat| &cat.fields)
+            .find(|field| field.key == "font-size")
+            .unwrap();
+        let near = kettle_config::DEFAULT_FONT_SIZE + 0.4;
+        let font = format!("font = Mono {near}\n");
+        assert_eq!(
+            read(&Config::parse_text(&font), field, &EN),
+            read(&Config::default(), field, &EN)
+        );
+        assert!(!holds_default(&Config::parse_text(&font), field));
+        let dir = kettle_test_support::private_tempdir("kettle-settings-reset-exact-");
+        let path = dir.join("config");
+        std::fs::write(&path, format!("{font}font-size = 18\n")).unwrap();
+        let value = default_value(field).unwrap();
+        let fallback = reset_fallback(field, &value);
+        let fallback: Vec<(&str, &str)> = fallback
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect();
+        kettle_config::reset_config_setting(&path, &reset_keys(field), &fallback, |cfg| {
+            holds_default(cfg, field)
+        })
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let cfg = Config::parse_text(&text);
+        assert_eq!(cfg.font_size, kettle_config::DEFAULT_FONT_SIZE, "{text:?}");
+        assert_eq!(cfg.font_family, "Mono");
+        assert!(text.starts_with(&font));
     }
 
     #[test]
