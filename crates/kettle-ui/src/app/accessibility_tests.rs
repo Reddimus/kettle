@@ -3932,3 +3932,89 @@ fn the_accessibility_key_follows_quick_select_targets() {
         "ifletSome((targets,_))=&ws.hint_state{fortargetintargets{accessibility_hint_id(target).hash(&muthasher);}}"
     ));
 }
+
+/// A picker option and its Choose button are bound to what the row acts on,
+/// before its label is fitted to the panel. Two layouts whose long names fit
+/// to one painted label keep apart: each has its own id and is named in full,
+/// so filtering to one never hands it the other's id, and a Choose press
+/// queued for the one filtered out acts on nothing. SSH rows bind to the host
+/// or target they act on.
+#[test]
+fn picker_options_bind_to_their_result_not_their_fitted_label() {
+    use super::accessibility::PickerRequest;
+    let prefix = "shared-prefix-".repeat(5);
+    let names = [format!("{prefix}dev"), format!("{prefix}ops")];
+    let menu = |query: &str| {
+        picker_context_menu(
+            layout_picker_list(query, 0, &names, &EN_TEXT),
+            (800.0, 820.0),
+            (8.0, 16.0),
+            (8.0, 16.0),
+            32.0,
+        )
+        .unwrap()
+    };
+    let both = menu("");
+    assert_eq!(both.rows[0].label, both.rows[1].label, "the two fit to one label");
+    assert_ne!(both.rows[0].label, names[0], "fitted");
+    assert_eq!(super::picker_row_name(&both.rows[0]), names[0]);
+    assert_eq!(super::picker_row_name(&both.rows[1]), names[1]);
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.layout_picker_input = Some((Default::default(), 0));
+    let ids = super::accessibility_picker_option_ids(super::MODAL_KIND_LAYOUTS, &both.rows);
+    let (dev, ops) = (ids[0].unwrap(), ids[1].unwrap());
+    assert_ne!(dev, ops);
+    let overlay = kettle_render::Overlay {
+        layout_picker_query: Some(String::new()),
+        context_menu: Some(both),
+        ..Default::default()
+    };
+    let projection =
+        super::modal_accessibility_projection(&overlay, (800.0, 820.0), (8.0, 16.0), 1.0, &EN_TEXT);
+    let name = |id| {
+        projection
+            .nodes
+            .iter()
+            .find(|(at, _)| *at == id)
+            .and_then(|(_, node)| node.label().map(str::to_string))
+    };
+    assert_eq!(name(dev).as_deref(), Some(names[0].as_str()));
+    assert_eq!(name(ops).as_deref(), Some(names[1].as_str()));
+    let choose_dev = super::accessibility_picker_choose_id(dev);
+    assert_eq!(name(choose_dev), Some(EN_TEXT.picker_a11y_choose(&names[0])));
+    let filtered = menu("ops");
+    assert_eq!(filtered.rows.len(), 1);
+    let after = super::accessibility_picker_option_ids(super::MODAL_KIND_LAYOUTS, &filtered.rows);
+    assert_eq!(after[0], Some(ops), "ops keeps its id");
+    let click = accesskit::Action::Click;
+    assert_eq!(super::accessibility_picker_request(&ws, &filtered, choose_dev, click), None);
+    assert_eq!(super::accessibility_picker_request(&ws, &filtered, dev, click), None);
+    assert_eq!(
+        super::accessibility_picker_request(
+            &ws,
+            &filtered,
+            super::accessibility_picker_choose_id(ops),
+            click
+        ),
+        Some(PickerRequest::Choose(0))
+    );
+    // SSH rows: the host or target each acts on.
+    let hosts = [
+        ("web".to_string(), "me@web.test".to_string()),
+        ("db".to_string(), "me@db.test".to_string()),
+    ];
+    let keys = |query: &str| -> Vec<Option<String>> {
+        ssh_picker_list(query, 0, &hosts, &[], &EN_TEXT)
+            .rows
+            .into_iter()
+            .map(|row| row.a11y_key)
+            .collect()
+    };
+    let save = keys("me@box.test");
+    assert!(save.contains(&Some("save\0me@box.test".into())), "{save:?}");
+    assert!(save.contains(&Some("connect\0me@box.test".into())), "{save:?}");
+    let remove = keys("web");
+    assert!(remove.contains(&Some("host\0web\0me@web.test".into())), "{remove:?}");
+    assert!(remove.contains(&Some("remove\0web\0me@web.test".into())), "{remove:?}");
+    assert_ne!(keys("me@box.test"), keys("me@box2.test"));
+}

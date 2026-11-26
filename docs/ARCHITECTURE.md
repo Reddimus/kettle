@@ -2094,8 +2094,13 @@ the pointer through `open_pane_link`, as the click its status names does.
 
 A node a screen reader can act on is bound to its target, not to its place:
 its AccessKit id is a hash of the target (`accessibility_bound_id`), above
-every modal kind's ids. A picker option's id comes from its label and how many
-options above it share that label (`accessibility_picker_option_ids`), a
+every modal kind's ids. A picker option's id comes from what it acts on, as
+its builder names it in `ContextMenuRow::a11y_key` (the command, the layout,
+the theme, the SSH row's kind and host or target), else from its whole name,
+and how many options above it share that (`accessibility_picker_option_ids`).
+It is bound before the label is fitted to the panel, so two long names that fit
+to one painted label stay two results, and the option and its Choose button
+are named with the whole name (`ContextMenuRow::a11y_name`). A
 quick-select label's from its label, pane, cell and text (a card's cell, never
 its nonce; `bind_hint_accessibility` gives the window's labels these ids), and
 the hovered link's from its status target and painted bounds. Adapters queue

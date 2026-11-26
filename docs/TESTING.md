@@ -3522,6 +3522,10 @@ speech:
 - `a_hovered_link_offers_a_press_that_opens_it`: the hovered link's node has
   a Click action that opens the link under the pointer through
   `open_pane_link`. Its status text has none.
+- `picker_options_bind_to_their_result_not_their_fitted_label`: two layouts
+  whose long names fit to one painted label keep separate ids and whole spoken
+  names. After filtering, a Choose press queued for the one filtered out acts
+  on nothing. SSH rows bind to the host or target they act on.
 - `accessibility_requests_are_bound_to_their_targets`: after the layout
   picker is filtered from dev and ops to ops, the id published for dev names
   nothing while ops keeps its id. A quick-select label from an earlier session,

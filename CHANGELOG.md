@@ -1103,6 +1103,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Screen readers can open the link under the pointer by pressing it, as a
   Ctrl or Cmd click does.
 
+- Screen readers hear a picker result's whole name when the panel is too
+  narrow to show it.
+
 - Screen readers treat the command palette, the pickers, Settings and title
   editing as modal dialogs, as they already treated confirmations.
 

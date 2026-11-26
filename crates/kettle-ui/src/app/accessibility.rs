@@ -2056,28 +2056,63 @@ pub(super) fn accessibility_bound_class(id: NodeId, class: BoundTarget) -> bool 
         == (ACCESSIBILITY_BOUND_ID_MASK >> ACCESSIBILITY_BOUND_KEY_BITS) | class as u64
 }
 
+/// What a screen reader hears as a picker row's name: its whole name, not
+/// the label fitted to the panel.
+pub(super) fn picker_row_name(row: &ContextMenuRow) -> &str {
+    row.a11y_name.as_deref().unwrap_or(&row.label)
+}
+
 /// The node id of each of a picker's `rows` (of `kind`), `None` for headings
-/// and separators: bound to the row's label and how many option rows above it
-/// share that label, so filtering keeps an option's id and never gives it to
-/// another result.
+/// and separators: bound to what the row acts on (`ContextMenuRow::a11y_key`,
+/// else its whole name) and how many option rows above it share that, so
+/// filtering keeps an option's id and never gives it to another result, even
+/// one whose fitted label is the same.
 pub(super) fn accessibility_picker_option_ids(
     kind: u64,
     rows: &[ContextMenuRow],
 ) -> Vec<Option<NodeId>> {
-    let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut seen: std::collections::HashMap<(bool, &str), usize> = std::collections::HashMap::new();
     rows.iter()
         .map(|row| {
             (!row.heading && !row.separator).then(|| {
-                let occurrence = seen.entry(row.label.as_str()).or_default();
-                let id = accessibility_bound_id(
-                    BoundTarget::PickerOption,
-                    (kind, &row.label, *occurrence),
-                );
+                let key = match row.a11y_key.as_deref() {
+                    Some(key) => (true, key),
+                    None => (false, picker_row_name(row)),
+                };
+                let occurrence = seen.entry(key).or_default();
+                let id =
+                    accessibility_bound_id(BoundTarget::PickerOption, (kind, key, *occurrence));
                 *occurrence += 1;
                 id
             })
         })
         .collect()
+}
+
+/// What an SSH launcher row acts on (`ContextMenuRow::a11y_key`): the host
+/// it connects to or removes, the target it connects to or saves. A
+/// placeholder acts on nothing.
+pub(super) fn ssh_row_a11y_key(
+    row: SshRow,
+    query: &str,
+    hosts: &[(String, String)],
+    imported: &[String],
+) -> Option<String> {
+    let host = |index: usize| {
+        hosts
+            .get(index)
+            .map(|(name, target)| format!("{name}\0{target}"))
+    };
+    match row {
+        SshRow::Configured(index) => host(index).map(|host| format!("host\0{host}")),
+        SshRow::Imported(index) => imported
+            .get(index)
+            .map(|alias| format!("imported\0{alias}")),
+        SshRow::ConnectTyped => Some(format!("connect\0{}", query.trim())),
+        SshRow::SaveTyped => Some(format!("save\0{}", query.trim())),
+        SshRow::Remove(index) => host(index).map(|host| format!("remove\0{host}")),
+        SshRow::Placeholder => None,
+    }
 }
 
 /// The id of the Change button for the Settings `row`: bound to its
@@ -3028,7 +3063,7 @@ fn push_picker_accessibility(
                 continue;
             };
             let mut option = Node::new(Role::ListBoxOption);
-            option.set_label(row.label.clone());
+            option.set_label(picker_row_name(row));
             if let Some(rect) = menu.visible_row_rect(index) {
                 option.set_bounds(bounds(rect));
             } else {
@@ -3094,7 +3129,7 @@ fn push_picker_accessibility(
     {
         let choose_id = accessibility_picker_choose_id(option);
         let mut button = Node::new(Role::Button);
-        button.set_label(tr.picker_a11y_choose(&menu.rows[row].label));
+        button.set_label(tr.picker_a11y_choose(picker_row_name(&menu.rows[row])));
         button.add_action(AccessibilityAction::Click);
         match menu.visible_row_rect(row) {
             Some((x, y, w, h)) => button.set_bounds(bounds((x + w, y, 0.0, h))),
