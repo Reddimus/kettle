@@ -1573,7 +1573,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   tooltip when the pointer rests on it.
 - The media viewer's and preview lane's header buttons light up under the
   pointer and take a press anywhere in a 24 by 24 point target, up from 25
-  by 17.5 pixels; the header row is a little taller to make room.
+  by 17.5 pixels. The header row grows only where the viewer has room; a
+  viewer or lane that fitted before still fits.
 - Those buttons have tooltips naming what they do and the key that does the
   same.
 - A toast's Show and × buttons, and the bad-config notice's Open Config and

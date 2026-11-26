@@ -4303,7 +4303,7 @@ impl Renderer {
                 } else {
                     palette.divider
                 };
-                let (x, y, w, h) = media_lane::control_chip(button, self.metrics.line_height);
+                let (x, y, w, h) = geometry.chip(button);
                 lane_q.push(rect(x, y, w, h, fill, 1.0));
             }
             if let Some((fx, fy, fw, fh)) = lane.focused_control {

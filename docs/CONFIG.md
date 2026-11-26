@@ -1071,9 +1071,11 @@ fitted and its source from the top, and stays put if it cannot be drawn.
 `↻` reads a Markdown file's gallery again at the diagram shown. Where the header is too narrow, these give way,
 open outside first, then zoom out, zoom in and fit, copy, browsing, the
 background and the source, and reload last. Each of these buttons takes a
-press anywhere in a target at least 24 by 24 points, so the header row, and a
-gallery's detail line, are that tall even where a line of text is shorter;
-the button under the pointer lights, unless it would do nothing (browsing
+press anywhere in a target at least 24 by 24 points. Where the lane has the
+room, the header row (and a gallery's detail line) grows to that height; where
+it has only the room it always needed, the buttons reach into the padding
+above and the line of text below instead, so a lane or viewer that fitted
+before still fits. The button under the pointer lights, unless it would do nothing (browsing
 past either end). Resting the pointer on a button shows its name in a
 tooltip, with the key that does the same while the lane holds the keyboard
 (`+`, `-`, `0`, `C`, `K`, `M`, `T`, `F`, Page Up and Page Down, and in the
