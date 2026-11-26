@@ -6444,8 +6444,10 @@ portal has none does `motion::SystemMotion` start a second watch, on GNOME's
 `org.gnome.desktop.interface enable-animations` through the same portal
 (`Preference::resolve`). Where the portal has neither key, or there is no
 portal, a GNOME-like session (`XDG_CURRENT_DESKTOP`) reads GNOME's own switch
-with the first executable `gsettings` on an absolute `PATH` entry
-(`motion/gnome_local.rs`, `Preference::linux`). That read runs on its own
+with the first `gsettings` on an absolute `PATH` entry that the process may
+run, as `faccessat` decides it for the effective user, so an unusable one
+earlier in `PATH` cannot hide it (`motion/gnome_local.rs`,
+`Preference::linux`). That read runs on its own
 thread, gives up after two seconds or 64 bytes of output, is killed and
 reaped then or when its watch is dropped, and is repeated every 30 seconds so
 a change applies; the watch's drop joins the thread. A failed read keeps the

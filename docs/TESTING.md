@@ -4047,7 +4047,8 @@ the fallback to GNOME's `enable-animations` for a portal without
 `reduced-motion`. Portable tests pin that a desktop with neither allows motion
 and that only a pending first answer holds it back. Unix tests drive the local
 GNOME read with `/bin/sh` stand-ins for `gsettings`: its parsing and output
-cap, an overrunning and a stopped read killed and reaped, a watch that follows
+cap, a `gsettings` its owner may not run (mode 0010) skipped for a working one
+later in `PATH`, an overrunning and a stopped read killed and reaped, a watch that follows
 a change and is dropped mid-read without leaving a child or thread, and a
 switch only GNOME itself reports holding motion back.
 Native acceptance still requires light/dark switching on macOS and Linux

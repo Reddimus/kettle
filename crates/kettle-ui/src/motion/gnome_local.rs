@@ -42,17 +42,27 @@ pub(crate) fn gnome_like(desktop: Option<&OsStr>) -> bool {
     })
 }
 
-/// The first executable `gsettings` file in the absolute entries of `path`
-/// (`PATH`); relative entries are skipped.
+/// The first `gsettings` file in the absolute entries of `path` (`PATH`)
+/// that this process may run; relative entries are skipped, and so is a
+/// file it may not run, so one earlier in `PATH` cannot hide a working one.
 pub(crate) fn find_gsettings(path: Option<&OsStr>) -> Option<PathBuf> {
-    use std::os::unix::fs::PermissionsExt as _;
     std::env::split_paths(path?)
         .filter(|dir| dir.is_absolute())
         .map(|dir| dir.join("gsettings"))
-        .find(|file| {
-            std::fs::metadata(file)
-                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-        })
+        .find(|file| std::fs::metadata(file).is_ok_and(|meta| meta.is_file()) && runnable(file))
+}
+
+/// Whether this process may execute `file`, as the kernel decides it for
+/// the effective user: the owner's bits for the owner, whatever the group's
+/// and others' say.
+fn runnable(file: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+    let Ok(file) = std::ffi::CString::new(file.as_os_str().as_bytes()) else {
+        return false;
+    };
+    // SAFETY: file is a NUL-terminated path that outlives the call, which
+    // reads it and writes nothing.
+    unsafe { libc::faccessat(libc::AT_FDCWD, file.as_ptr(), libc::X_OK, libc::AT_EACCESS) == 0 }
 }
 
 /// The `gsettings` command that reads the switch.

@@ -138,6 +138,46 @@ fn gsettings_is_found_only_as_an_executable_file_on_an_absolute_path() {
     );
 }
 
+/// The review's setup: a user-owned `gsettings` with mode 0010 first in
+/// `PATH`, which its owner may not run (the kernel applies the owner's bits
+/// to the owner), then a working one. The working one is found and read.
+#[test]
+fn a_gsettings_this_process_may_not_run_does_not_hide_a_working_one() {
+    use std::os::unix::fs::PermissionsExt as _;
+    // SAFETY: geteuid takes no arguments and cannot fail.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root may run a file with any execute bit");
+        return;
+    }
+    let root = kettle_test_support::private_tempdir("kettle-gnome-motion-run-");
+    let script = |dir: &str, body: &str, mode: u32| {
+        let dir = root.path().join(dir);
+        std::fs::create_dir(&dir).unwrap();
+        let file = dir.join("gsettings");
+        std::fs::write(&file, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).unwrap();
+        dir
+    };
+    let blocked = script("blocked", "printf 'true\\n'", 0o010);
+    let working = script("working", "printf 'false\\n'", 0o700);
+    let path = std::env::join_paths([blocked, working.clone()]).unwrap();
+    assert_eq!(
+        find_gsettings(Some(&path)),
+        Some(working.join("gsettings")),
+        "the file its owner may not run hid the working one"
+    );
+    // A refresh well inside the wait retries a spawn another test's fork
+    // happened to make busy.
+    let watch = LocalWatch::start_every(
+        move || find_gsettings(Some(&path)).map(gsettings_get),
+        Arc::new(|| {}),
+        Duration::from_millis(20),
+    );
+    wait_for("the working gsettings's answer", || {
+        watch.reading() == Reading::Value(false)
+    });
+}
+
 #[test]
 fn a_read_takes_true_or_false_from_a_successful_run_and_nothing_else() {
     let (_open, stop) = mpsc::channel();
