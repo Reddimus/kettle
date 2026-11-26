@@ -443,7 +443,12 @@ Paths need path context: progress counters such as `158/158`, ratios such as
 `a/b` and slash-joined words such as `read/write` stay plain text; a relative
 path counts as a link (shown on hover and offered as a hint) when its last part
 has an extension or it has three parts. Remote or unresolved paths are copied;
-see [configuration and hint actions](docs/CONFIG.md).
+see [configuration and hint actions](docs/CONFIG.md). Punctuation that ends a
+sentence is not part of a detected link, as in Ghostty, WezTerm and GNOME
+Terminal: trailing dots (`see https://example.com/docs...` links
+`https://example.com/docs`, and `/usr/lib/...` links `/usr/lib/`), commas,
+quotes, and a closing bracket that closes nothing the link opened. A path
+ending in `/.` or `/..` keeps them.
 
 ## Themes
 

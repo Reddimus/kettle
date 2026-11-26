@@ -959,6 +959,41 @@ mod tests {
         assert_eq!(found("see src/main.rs:12"), ["src/main.rs:12"]);
     }
 
+    /// Dots ending a detected URL end a sentence or trail off, as Ghostty,
+    /// WezTerm and GNOME Terminal read them, so they are not part of the
+    /// link; dots inside it are, before a query or fragment too.
+    #[test]
+    fn trailing_dots_after_a_url_are_prose() {
+        for (line, uri) in [
+            (
+                "see https://example.com/docs...",
+                "https://example.com/docs",
+            ),
+            ("see https://example.com/a.", "https://example.com/a"),
+            (
+                "curl https://example.com/a.. -o out",
+                "https://example.com/a",
+            ),
+            (
+                "get https://example.com/files/report..csv",
+                "https://example.com/files/report..csv",
+            ),
+            (
+                "get https://example.com/a..?q=1",
+                "https://example.com/a..?q=1",
+            ),
+            (
+                "get https://example.com/a..#frag",
+                "https://example.com/a..#frag",
+            ),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links(&term);
+            assert_eq!(found.len(), 1, "{line}: {found:?}");
+            assert_eq!(found[0].uri, uri, "{line}");
+        }
+    }
+
     /// A closing bracket that pairs with an open before it ends the link,
     /// whatever stray close came earlier in the query.
     #[test]
