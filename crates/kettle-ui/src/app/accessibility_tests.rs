@@ -3912,3 +3912,23 @@ fn indexed_modal_lists_stop_short_of_the_next_kinds_ids() {
         assert_eq!(held, limit, "kind {kind}");
     }
 }
+
+/// A quick-select label's id follows its target's text, which the overlay's
+/// labels do not carry, so the accessibility key hashes those ids: a new
+/// quick select over other text republishes the tree rather than leaving the
+/// screen reader with ids that no longer name anything.
+#[test]
+fn the_accessibility_key_follows_quick_select_targets() {
+    let key = production_source()
+        .split_once("fn accessibility_key(&self, ws: &WindowState, overlay: &Overlay) -> u64")
+        .unwrap()
+        .1
+        .split("fn publish_accessibility_if_due")
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .collect::<String>();
+    assert!(key.contains(
+        "ifletSome((targets,_))=&ws.hint_state{fortargetintargets{accessibility_hint_id(target).hash(&muthasher);}}"
+    ));
+}

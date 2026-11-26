@@ -1061,6 +1061,14 @@ impl App {
             hint.label.hash(&mut hasher);
             hint.dim.hash(&mut hasher);
         }
+        // Each label's id is bound to its target, text included
+        // (`accessibility_hint_id`): a new quick select whose labels sit where
+        // the last one's did, over other text, still republishes the tree.
+        if let Some((targets, _)) = &ws.hint_state {
+            for target in targets {
+                accessibility_hint_id(target).hash(&mut hasher);
+            }
+        }
         if let Some(toast) = &overlay.update_toast {
             toast.message.hash(&mut hasher);
             for rect in [
