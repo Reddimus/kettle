@@ -3512,6 +3512,10 @@ speech:
   nothing. `settings_accessibility_click_dispatches_configure_and_retry` checks
   that the Change button, not the row, reaches the global hotkey's configure
   and retry.
+- `an_unpainted_reset_leaves_the_value_control_to_change`: in a panel too
+  narrow for the Reset chip, AccessKit's consumer hit test on the value control
+  finds the Change button. Reset stays in the tree as a zero-width line at the
+  control's left edge.
 - `the_window_quick_select_tree_stays_valid_at_65536_targets` binds 65,536
   quick-select labels through the window projection and hands the tree to
   AccessKit's consumer. The list keeps its id and holds the 65,535 bound

@@ -3795,11 +3795,15 @@ pub(super) fn modal_accessibility_projection(
                 button.set_disabled();
             }
             match layout.rows.iter().find(|r| r.index == settings.focused_row) {
+                // Where its chip is painted. A panel too narrow for the chip
+                // paints none: Reset is then a line at the value control's
+                // left edge, where the chip sits when it fits, so exploring
+                // by pointer finds the Change button over the control and
+                // navigation still reaches Reset.
                 Some(geometry) => {
+                    let (x, y, _, h) = geometry.chip_rect;
                     button.set_bounds(bounds(
-                        geometry
-                            .reset
-                            .map_or(geometry.chip_rect, |reset| reset.rect),
+                        geometry.reset.map_or((x, y, 0.0, h), |reset| reset.rect),
                     ));
                 }
                 None => button.set_hidden(),

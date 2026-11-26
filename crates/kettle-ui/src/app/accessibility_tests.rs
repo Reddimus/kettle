@@ -4093,3 +4093,59 @@ fn the_window_quick_select_tree_stays_valid_at_65536_targets() {
         "the label past the cap is left out"
     );
 }
+
+/// In a panel too narrow for the Reset chip, the value control belongs to the
+/// Change button: a point on it finds Change, as AccessKit's consumer hit
+/// tests for the adapters, and Reset, painted nowhere, stays in the tree as a
+/// line at the control's left edge, where its chip sits when it fits.
+#[test]
+fn an_unpainted_reset_leaves_the_value_control_to_change() {
+    let settings = kettle_render::SettingsOverlay {
+        categories: vec!["Appearance".into()],
+        rows: vec![kettle_render::SettingsRow {
+            label: "Font size".into(),
+            value: "16 px".into(),
+            reset: Some(true),
+            ..Default::default()
+        }],
+        reset_label: "Reset".into(),
+        reset_name: EN_TEXT.settings_a11y_reset("Font size", "14 px"),
+        ..Default::default()
+    };
+    let surface = (240.0, 480.0);
+    let metrics = (8.4, 17.5);
+    let layout = kettle_render::settings_layout(&settings, metrics, surface, metrics.0, 1.0);
+    let row = &layout.rows[0];
+    assert!(row.reset.is_none(), "the narrow panel paints no Reset chip");
+    let change = super::accessibility_settings_change_id(&settings.rows[0]);
+    let overlay = kettle_render::Overlay {
+        settings: Some(settings),
+        ..Default::default()
+    };
+    let projection = super::modal_accessibility_projection(&overlay, surface, metrics, 1.0, &EN_TEXT);
+    let tree = accesskit_consumer::Tree::new(
+        super::mouse_override_hint_tests::finished_tree(projection),
+        true,
+    );
+    let state = tree.state();
+    let (x, y, w, h) = row.chip_rect;
+    let hit = state
+        .root()
+        .node_at_point(
+            accesskit::Point::new(f64::from(x + w * 0.5), f64::from(y + h * 0.5)),
+            &accesskit_consumer::common_filter,
+        )
+        .expect("something is under the value control");
+    assert_eq!(hit.id(), state.node_by_tree_local_id(change, accesskit::TreeId::ROOT).unwrap().id());
+    let reset = state
+        .node_by_tree_local_id(super::accessibility_settings_reset_id(), accesskit::TreeId::ROOT)
+        .expect("Reset stays in the tree");
+    assert_eq!(
+        accesskit_consumer::common_filter(&reset),
+        accesskit_consumer::FilterResult::Include
+    );
+    assert!(reset.is_clickable(&accesskit_consumer::common_filter));
+    let bounds = reset.data().bounds().unwrap();
+    assert_eq!((bounds.x0, bounds.x1), (f64::from(x), f64::from(x)));
+    assert_eq!((bounds.y0, bounds.y1), (f64::from(y), f64::from(y + h)));
+}
