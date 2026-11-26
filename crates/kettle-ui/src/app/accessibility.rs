@@ -965,6 +965,14 @@ impl App {
             hint.label.hash(&mut hasher);
             hint.dim.hash(&mut hasher);
         }
+        // Each label's id is bound to its target, text included
+        // (`accessibility_hint_id`): a new quick select whose labels sit where
+        // the last one's did, over other text, still republishes the tree.
+        if let Some((targets, _)) = &ws.hint_state {
+            for target in targets {
+                accessibility_hint_id(target).hash(&mut hasher);
+            }
+        }
         if let Some(toast) = &overlay.update_toast {
             toast.message.hash(&mut hasher);
             for rect in [
@@ -1226,15 +1234,10 @@ impl App {
         }
     }
 
-    /// A screen reader's press on a picker option: the option becomes the
-    /// selection (`accessibility_picker_press`), then the picker's own Enter
-    /// acts on it, as `picker_pointer` does for a click on its row.
-    fn press_picker_option(
-        &mut self,
-        ws: &mut WindowState,
-        selected: usize,
-        event_loop: &ActiveEventLoop,
-    ) {
+    /// A screen reader's request to highlight a picker option: it becomes the
+    /// selection, as the arrow keys make it, and the theme picker previews
+    /// it as they do. Nothing runs.
+    fn select_picker_option(&mut self, ws: &mut WindowState, selected: usize) {
         let selection = if let Some((_, selection)) = ws.palette_input.as_mut() {
             selection
         } else if let Some(state) = ws.theme_picker_input.as_mut() {
@@ -1247,6 +1250,18 @@ impl App {
             return;
         };
         *selection = selected;
+        // Keys get this after every window event; a screen reader's request
+        // arrives as a user event instead.
+        self.sync_theme_preview(ws);
+        ws.accessibility_pending = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
+    /// A press on the picker's Choose button: the picker's own Enter acts on
+    /// its selection, as `picker_pointer` does for a click on a row.
+    fn press_picker_enter(&mut self, ws: &mut WindowState, event_loop: &ActiveEventLoop) {
         end_modal_composition(ws);
         let mods = std::mem::replace(&mut ws.mods, ModifiersState::empty());
         let key = Key::Named(NamedKey::Enter);
@@ -1290,6 +1305,7 @@ impl App {
                     window.scale_factor() as f32,
                 )
             });
+            let focused_row = settings.focused_row;
             // The window's own overlay: production builds have no default one.
             let mut overlay = self.overlay(ws, true);
             overlay.settings = Some(settings);
@@ -1303,12 +1319,13 @@ impl App {
                 scale,
                 &self.ui_text,
             );
-            let rows: Vec<_> = ws
+            let fields = ws
                 .settings_nav
                 .as_ref()
                 .unwrap()
-                .visible_fields(&cats, &self.ui_text)
-                .into_iter()
+                .visible_fields(&cats, &self.ui_text);
+            let rows: Vec<_> = fields
+                .iter()
                 .enumerate()
                 .map(|(index, identity)| {
                     projection
@@ -1316,10 +1333,17 @@ impl App {
                         .iter()
                         .find(|(id, _)| *id == accessibility_modal_id(5, index + 2))
                         .filter(|(_, node)| !node.is_hidden() && !node.is_disabled())
-                        .map(|_| identity)
+                        .map(|_| *identity)
                 })
                 .collect();
-            if handle_accessibility_action(ws, &request, &rows, |ws, cat, fld, dir| {
+            // The Change button the tree shows now, and the field it changes.
+            let change = projection
+                .nodes
+                .iter()
+                .find(|(id, _)| accessibility_bound_class(*id, BoundTarget::SettingsChange))
+                .zip(fields.get(focused_row))
+                .map(|((id, _), field)| (*id, *field));
+            if handle_accessibility_action(ws, &request, &rows, change, |ws, cat, fld, dir| {
                 self.settings_adjust(ws, &cats, cat, fld, dir);
             }) {
                 self.update_ime_cursor_area(ws);
@@ -1495,10 +1519,11 @@ impl App {
             }
             return;
         }
-        if accessibility_link_status(request.target_node) {
-            // The link under the pointer, which the node names, opened as a
-            // Ctrl or Cmd click on it opens it.
+        if accessibility_bound_class(request.target_node, BoundTarget::Link) {
+            // The link under the pointer, opened as a Ctrl or Cmd click on it
+            // opens it, while it is still the link the node was bound to.
             if request.action == AccessibilityAction::Click
+                && accessibility_link_status(request.target_node, &self.overlay(ws, true))
                 && let Some(uri) = self.hovered_link_at_cursor(ws).map(|link| link.uri.clone())
             {
                 self.open_pane_link(ws, links_pane(ws), &uri);
@@ -1707,10 +1732,15 @@ impl App {
             return;
         }
         if let Some(menu) = accessibility_picker_kind(ws).and_then(|_| self.picker_menu(ws))
-            && let Some(selected) = accessibility_picker_press(ws, &menu, request.target_node)
+            && let Some(picked) =
+                accessibility_picker_request(ws, &menu, request.target_node, request.action)
         {
-            if request.action == AccessibilityAction::Click {
-                self.press_picker_option(ws, selected, event_loop);
+            match picked {
+                PickerRequest::Select(selected) => self.select_picker_option(ws, selected),
+                PickerRequest::Choose(selected) => {
+                    self.select_picker_option(ws, selected);
+                    self.press_picker_enter(ws, event_loop);
+                }
             }
             return;
         }
@@ -1891,6 +1921,108 @@ pub(super) fn static_text_node(text: impl Into<String>) -> Node {
     node
 }
 pub(super) const ACCESSIBILITY_MODAL_ID_MASK: u64 = 1 << 58;
+/// Nodes bound to what they act on take an id made from that target, not
+/// from their place in a list: a picker option (its label), a quick-select
+/// label (its label, pane, cell and text), the hovered link (its target and
+/// bounds). A request an adapter queued against an earlier tree then names
+/// nothing once the view changes, where a place-based id would name whatever
+/// now sits in that place, and is dropped. Above every modal kind's ids.
+const ACCESSIBILITY_BOUND_ID_MASK: u64 = ACCESSIBILITY_MODAL_ID_MASK | (1 << 57);
+/// The bits of a bound id below its class.
+const ACCESSIBILITY_BOUND_KEY_BITS: u32 = 52;
+
+/// What a bound id is bound to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BoundTarget {
+    PickerOption = 0,
+    Hint = 1,
+    Link = 2,
+    PickerChoose = 3,
+    SettingsChange = 4,
+}
+
+/// The id of the node of `class` bound to `key`. Different keys share an id
+/// only by a 52-bit hash collision.
+fn accessibility_bound_id(class: BoundTarget, key: impl std::hash::Hash) -> NodeId {
+    use std::hash::Hasher as _;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    NodeId(
+        ACCESSIBILITY_BOUND_ID_MASK
+            | ((class as u64) << ACCESSIBILITY_BOUND_KEY_BITS)
+            | (hasher.finish() & ((1 << ACCESSIBILITY_BOUND_KEY_BITS) - 1)),
+    )
+}
+
+/// Whether `id` is a bound id of `class`.
+pub(super) fn accessibility_bound_class(id: NodeId, class: BoundTarget) -> bool {
+    id.0 >> ACCESSIBILITY_BOUND_KEY_BITS
+        == (ACCESSIBILITY_BOUND_ID_MASK >> ACCESSIBILITY_BOUND_KEY_BITS) | class as u64
+}
+
+/// The node id of each of a picker's `rows` (of `kind`), `None` for headings
+/// and separators: bound to the row's label and how many option rows above it
+/// share that label, so filtering keeps an option's id and never gives it to
+/// another result.
+pub(super) fn accessibility_picker_option_ids(
+    kind: u64,
+    rows: &[ContextMenuRow],
+) -> Vec<Option<NodeId>> {
+    let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    rows.iter()
+        .map(|row| {
+            (!row.heading && !row.separator).then(|| {
+                let occurrence = seen.entry(row.label.as_str()).or_default();
+                let id = accessibility_bound_id(
+                    BoundTarget::PickerOption,
+                    (kind, &row.label, *occurrence),
+                );
+                *occurrence += 1;
+                id
+            })
+        })
+        .collect()
+}
+
+/// The id of the Change button for the Settings `row`: bound to its
+/// category and label, so a press queued for one row never changes another.
+pub(super) fn accessibility_settings_change_id(row: &kettle_render::SettingsRow) -> NodeId {
+    accessibility_bound_id(BoundTarget::SettingsChange, (row.category, &row.label))
+}
+
+/// The id of the Choose button that acts on the option whose id is `option`.
+pub(super) fn accessibility_picker_choose_id(option: NodeId) -> NodeId {
+    accessibility_bound_id(BoundTarget::PickerChoose, option.0)
+}
+
+/// The node id of a quick-select label: bound to the label, the pane and
+/// cell it sits on and what it points at, so a label of an earlier quick
+/// select, or of text that has since moved, names nothing. A card's target
+/// is its cell, never its nonce.
+pub(super) fn accessibility_hint_id(target: &HintTarget) -> NodeId {
+    let what = match &target.what {
+        HintWhat::Text { kind, text, .. } => (*kind as u8, text.as_str()),
+        HintWhat::Card(_) => (u8::MAX, ""),
+    };
+    accessibility_bound_id(
+        BoundTarget::Hint,
+        (&target.label, target.pane, target.row, target.col, what),
+    )
+}
+
+/// The node id of a hovered link: bound to the target its status names and
+/// where the link is painted, so a press queued for one link never opens
+/// another under the pointer by then.
+pub(super) fn accessibility_link_id(status: &kettle_render::PaneStatus) -> NodeId {
+    let bounds = status.link_bounds.unwrap_or(status.rect);
+    accessibility_bound_id(
+        BoundTarget::Link,
+        (
+            status.target.as_deref(),
+            [bounds.0, bounds.1, bounds.2, bounds.3].map(f32::to_bits),
+        ),
+    )
+}
 /// Inline cards on screen, each by its placement's instance number, which
 /// stays below this bit; never by its nonce.
 pub(super) const ACCESSIBILITY_CARD_ID_MASK: u64 = crate::media::MAX_CARD_INSTANCE;
@@ -2275,10 +2407,16 @@ pub(super) fn card_accessibility_node(
 
 /// Dispatch Settings row actions independently of the event loop. The row map
 /// comes from the same filtered projection and geometry as the accessible nodes.
+///
+/// Focus or Click on a row only selects it: the adapters send that Click
+/// when a screen reader selects the row too. Only a Click on the selected
+/// row's Change button (`change`: its id and the row's field) changes it,
+/// through `adjust`, as Space does.
 pub(super) fn handle_accessibility_action(
     ws: &mut WindowState,
     request: &ActionRequest,
     rows: &[Option<(usize, usize)>],
+    change: Option<(NodeId, (usize, usize))>,
     adjust: impl FnOnce(&mut WindowState, usize, usize, i32),
 ) -> bool {
     if request.target_tree != TreeId::ROOT
@@ -2295,6 +2433,20 @@ pub(super) fn handle_accessibility_action(
     {
         return false;
     }
+    if let Some((id, (cat, fld))) = change
+        && id == request.target_node
+    {
+        if request.action != AccessibilityAction::Click {
+            return false;
+        }
+        end_modal_composition(ws);
+        adjust(ws, cat, fld, 0);
+        ws.accessibility_pending = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+        return true;
+    }
     let Some((cat, fld)) = request
         .target_node
         .0
@@ -2310,9 +2462,6 @@ pub(super) fn handle_accessibility_action(
     nav.category = cat;
     nav.field = fld;
     nav.search_focused = false;
-    if request.action == AccessibilityAction::Click {
-        adjust(ws, cat, fld, 0);
-    }
     ws.accessibility_pending = true;
     if let Some(window) = &ws.window {
         window.request_redraw();
@@ -2324,35 +2473,87 @@ pub(super) fn accessibility_modal_id(kind: u64, index: usize) -> NodeId {
     NodeId(ACCESSIBILITY_MODAL_ID_MASK | (kind << 16) | index as u64)
 }
 
+/// How many rows of a list placed by index (`accessibility_modal_id(kind,
+/// row + 1)`) the tree holds: an index past 16 bits would take the next
+/// kind's ids. A menu or quick select longer than this leaves the rest out.
+const MODAL_INDEXED_ROWS: usize = (1 << 16) - 1;
+
 pub(super) fn accessibility_confirm_button_index(id: NodeId) -> Option<usize> {
     let first = accessibility_modal_id(1, 1).0;
     let raw = id.0.checked_sub(first)?;
     (raw < (1 << 16) - 1).then_some(raw as usize)
 }
 
-/// Whether `id` is a hovered link's node (`Role::Link`, over the status that
-/// names its target and how to open it).
-pub(super) fn accessibility_link_status(id: NodeId) -> bool {
-    id.0.checked_sub(accessibility_modal_id(19, 0).0)
-        .is_some_and(|raw| raw < (1 << 16) - 1)
+/// Whether `id` is the node of a hovered link that `overlay` still shows:
+/// the same target, painted in the same place.
+pub(super) fn accessibility_link_status(id: NodeId, overlay: &Overlay) -> bool {
+    accessibility_bound_class(id, BoundTarget::Link)
+        && overlay
+            .pane_statuses
+            .iter()
+            .any(|status| status.target.is_some() && accessibility_link_id(status) == id)
 }
 
 /// The quick-select target a hint label's node names, while quick select is
 /// open and the label still matches what has been typed; a dimmed label, as
 /// a key that does not extend the typed prefix, picks nothing.
 pub(super) fn accessibility_hint_target(id: NodeId, ws: &WindowState) -> Option<HintTarget> {
-    if ws.confirm_dialog.is_some() {
+    if ws.confirm_dialog.is_some() || !accessibility_bound_class(id, BoundTarget::Hint) {
         return None;
     }
     let (targets, typed) = ws.hint_state.as_ref()?;
-    let raw = id.0.checked_sub(accessibility_modal_id(3, 1).0)?;
-    if raw >= (1 << 16) - 1 {
-        return None;
-    }
     targets
-        .get(raw as usize)
+        .iter()
+        .find(|target| accessibility_hint_id(target) == id)
         .filter(|target| target.label.starts_with(typed.as_str()))
         .cloned()
+}
+
+/// Give the quick-select labels in `projection` their bound ids
+/// (`accessibility_hint_id`) from the window's `targets`, which the overlay's
+/// labels follow in order. A label that does not match its target keeps its
+/// place id and loses its press, so a press on it names nothing.
+fn bind_hint_accessibility(
+    projection: &mut ModalAccessibilityProjection,
+    overlay: &Overlay,
+    targets: &[HintTarget],
+) {
+    let mut renamed = Vec::new();
+    for (index, hint) in overlay.hint_labels.iter().enumerate() {
+        let place = accessibility_modal_id(3, index + 1);
+        let Some((id, node)) = projection.nodes.iter_mut().find(|(id, _)| *id == place) else {
+            continue;
+        };
+        match targets
+            .get(index)
+            .filter(|target| target.label == hint.label)
+        {
+            Some(target) => {
+                *id = accessibility_hint_id(target);
+                renamed.push((place, *id));
+            }
+            None => node.remove_action(AccessibilityAction::Click),
+        }
+    }
+    let container = accessibility_modal_id(3, 0);
+    if let Some((_, list)) = projection.nodes.iter_mut().find(|(id, _)| *id == container) {
+        let children: Vec<NodeId> = list
+            .children()
+            .iter()
+            .map(|child| {
+                renamed
+                    .iter()
+                    .find(|(place, _)| place == child)
+                    .map_or(*child, |(_, bound)| *bound)
+            })
+            .collect();
+        list.set_children(children);
+    }
+    if let Some(focus) = projection.focus.as_mut()
+        && let Some((_, bound)) = renamed.iter().find(|(place, _)| place == focus)
+    {
+        *focus = *bound;
+    }
 }
 
 pub(super) fn accessibility_context_menu_item_index(id: NodeId, ws: &WindowState) -> Option<usize> {
@@ -2567,7 +2768,8 @@ fn push_text_input_run(
     nodes.push((run_id, run));
 }
 
-/// The theme picker footer's node index, past any row's (rows start at 3).
+/// The theme picker footer's node index. Options take bound ids
+/// (`accessibility_picker_option_ids`), so no option reaches these indices.
 pub(super) const PICKER_FOOTER_A11Y_INDEX: usize = (1 << 16) - 1;
 /// The footer's dark and light sides, as radio buttons, just below it.
 const PICKER_SLOT_A11Y_INDEX: [(usize, kettle_render::ThemeSlot); 2] = [
@@ -2582,8 +2784,7 @@ const PICKER_SIDES_A11Y_INDEX: usize = PICKER_FOOTER_A11Y_INDEX - 3;
 /// The footer's Contrast button, below the group.
 pub(super) const PICKER_CONTRAST_A11Y_INDEX: usize = PICKER_FOOTER_A11Y_INDEX - 4;
 /// The SSH launcher's polite status line, after a save, a removal or a failed
-/// write. It is the lowest of these fixed indices, so the rows below it never
-/// reach them.
+/// write. It is the lowest of these fixed indices.
 pub(super) const PICKER_STATUS_A11Y_INDEX: usize = PICKER_FOOTER_A11Y_INDEX - 5;
 
 /// The kind of the picker that has the keyboard, as `picker_pointer` finds
@@ -2602,30 +2803,60 @@ pub(super) fn accessibility_picker_kind(ws: &WindowState) -> Option<u64> {
     }
 }
 
-/// What a screen reader's press on `node` selects in the open picker: the
-/// value its selection then holds (the palette's counts commands, every
-/// other picker's rows), or `None` for a node that is not one of its enabled
-/// options in `menu`, as laid out for this frame.
-pub(super) fn accessibility_picker_press(
+/// What a screen reader's request on a node of the open picker asks for,
+/// with the value the picker's selection then holds (the palette's counts
+/// commands, every other picker's rows).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PickerRequest {
+    /// Focus or Click on an enabled option: highlight it, as the arrow keys
+    /// do. A selection request arrives as this Click too, so it never acts.
+    Select(usize),
+    /// Click on the Choose button: act on the highlighted result, as Enter.
+    Choose(usize),
+}
+
+/// The request `action` on `node` makes of the open picker, as `menu` lays
+/// it out for this frame, or `None` for a node that is not one of its enabled
+/// options or its Choose button. An id bound to a result the picker no longer
+/// shows, or a Choose button bound to another result than the highlighted
+/// one, is `None`.
+pub(super) fn accessibility_picker_request(
     ws: &WindowState,
     menu: &ContextMenu,
     node: NodeId,
-) -> Option<usize> {
+    action: AccessibilityAction,
+) -> Option<PickerRequest> {
     let kind = accessibility_picker_kind(ws)?;
-    let raw = node.0.checked_sub(accessibility_modal_id(kind, 3).0)?;
-    // The footer, its sides and the status line sit above every option.
-    if raw >= (PICKER_STATUS_A11Y_INDEX - 3) as u64 {
-        return None;
+    let ids = accessibility_picker_option_ids(kind, &menu.rows);
+    let selection = |row: usize| {
+        let option = kettle_render::menu_row_option(&menu.rows, row)?;
+        menu.rows[row]
+            .enabled
+            .then_some(if kind == MODAL_KIND_PALETTE {
+                option
+            } else {
+                row
+            })
+    };
+    if let Some(row) = ids.iter().position(|id| *id == Some(node)) {
+        return matches!(
+            action,
+            AccessibilityAction::Focus | AccessibilityAction::Click
+        )
+        .then(|| selection(row))
+        .flatten()
+        .map(PickerRequest::Select);
     }
-    let option = raw as usize;
-    let row = kettle_render::menu_option_row(&menu.rows, option)?;
-    menu.rows[row]
-        .enabled
-        .then_some(if kind == MODAL_KIND_PALETTE {
-            option
-        } else {
-            row
-        })
+    let highlight = menu.highlight;
+    let choose = ids
+        .get(highlight)
+        .copied()
+        .flatten()
+        .map(accessibility_picker_choose_id);
+    (action == AccessibilityAction::Click && choose == Some(node))
+        .then(|| selection(highlight))
+        .flatten()
+        .map(PickerRequest::Choose)
 }
 
 /// Whether `node` is the theme picker's Contrast button.
@@ -2691,15 +2922,15 @@ fn push_picker_accessibility(
     });
     let mut position = 0;
     if let Some(menu) = menu {
+        let ids = accessibility_picker_option_ids(kind, &menu.rows);
         for (index, row) in menu.rows.iter().enumerate() {
             // A heading is not an option: the list stays flat, and the
-            // group's name is read after its first command instead. Options
-            // are numbered past headings, so typing a query, which drops the
-            // headings, keeps the first option's id.
-            let Some(option_index) = kettle_render::menu_row_option(&menu.rows, index) else {
+            // group's name is read after its first command instead. Each
+            // option's id is bound to the result (see
+            // `accessibility_picker_option_ids`), not to its place.
+            let Some(id) = ids[index] else {
                 continue;
             };
-            let id = accessibility_modal_id(kind, option_index + 3);
             let mut option = Node::new(Role::ListBoxOption);
             option.set_label(row.label.clone());
             if let Some(rect) = menu.visible_row_rect(index) {
@@ -2724,7 +2955,12 @@ fn push_picker_accessibility(
                 // Zero-based, unlike ARIA: the AT-SPI adapter adds one.
                 option.set_position_in_set(position);
                 option.set_size_of_set(results);
-                // A press picks the option as a click on its row does.
+                // A press or focus selects the option, as the arrow keys do,
+                // and never acts on it: the adapters also turn selecting it
+                // (macOS AXSelected and AXPick, AT-SPI Selection, UIA
+                // SelectionItem) into this same Click. The Choose button
+                // below acts on it.
+                option.add_action(AccessibilityAction::Focus);
                 option.add_action(AccessibilityAction::Click);
                 position += 1;
             } else {
@@ -2735,7 +2971,7 @@ fn push_picker_accessibility(
             let is_selected = index == menu.highlight && row.enabled;
             option.set_selected(is_selected);
             if is_selected {
-                selected = Some(id);
+                selected = Some((id, index));
             }
             list_children.push(id);
             projection.nodes.push((id, option));
@@ -2753,6 +2989,24 @@ fn push_picker_accessibility(
     projection.nodes.push((list_id, list));
 
     let mut dialog_children = vec![input_id, list_id];
+    // The one node that acts on a result: a button, with no selected state
+    // for an adapter to turn a selection into its press, bound to the
+    // highlighted result. A line at that row's end, so exploring the row by
+    // pointer finds the option.
+    if let Some(menu) = menu
+        && let Some((option, row)) = selected
+    {
+        let choose_id = accessibility_picker_choose_id(option);
+        let mut button = Node::new(Role::Button);
+        button.set_label(tr.picker_a11y_choose(&menu.rows[row].label));
+        button.add_action(AccessibilityAction::Click);
+        match menu.visible_row_rect(row) {
+            Some((x, y, w, h)) => button.set_bounds(bounds((x + w, y, 0.0, h))),
+            None => button.set_hidden(),
+        }
+        projection.nodes.push((choose_id, button));
+        dialog_children.push(choose_id);
+    }
     // The theme picker's footer reads as one line of text: the painted
     // readout and status, plus what its swatch and marks show.
     if let Some(menu) = menu
@@ -2832,7 +3086,7 @@ fn push_picker_accessibility(
     projection.roots.push(container_id);
     projection.nodes.push((container_id, dialog));
     if projection.focus.is_none() {
-        projection.focus = selected.or(Some(input_id));
+        projection.focus = selected.map(|(id, _)| id).or(Some(input_id));
     }
 }
 
@@ -2856,6 +3110,9 @@ pub(super) fn modal_accessibility_projection_for_window(
 ) -> ModalAccessibilityProjection {
     let mut projection =
         modal_accessibility_projection(overlay, surface, metrics, scale_factor, tr);
+    if let Some((targets, _)) = ws.hint_state.as_ref() {
+        bind_hint_accessibility(&mut projection, overlay, targets);
+    }
     let Some(status) = palette_profile_accessibility_status(overlay, ws, tr) else {
         return projection;
     };
@@ -3016,7 +3273,7 @@ pub(super) fn modal_accessibility_projection(
         let container_id = accessibility_modal_id(2, 0);
         let mut children = Vec::new();
         let mut highlighted = None;
-        for (index, row) in menu.rows.iter().enumerate() {
+        for (index, row) in menu.rows.iter().enumerate().take(MODAL_INDEXED_ROWS) {
             if row.separator {
                 continue;
             }
@@ -3060,7 +3317,7 @@ pub(super) fn modal_accessibility_projection(
             (y + h) as f64,
         ));
         if let Some(target) = &status.target {
-            let link_id = accessibility_modal_id(19, index);
+            let link_id = accessibility_link_id(status);
             let mut link = Node::new(Role::Link);
             link.set_label(target.clone());
             // A press opens it as the click the status names does.
@@ -3087,7 +3344,12 @@ pub(super) fn modal_accessibility_projection(
     if !overlay.hint_labels.is_empty() {
         let container_id = accessibility_modal_id(3, 0);
         let mut children = Vec::with_capacity(overlay.hint_labels.len());
-        for (index, hint) in overlay.hint_labels.iter().enumerate() {
+        for (index, hint) in overlay
+            .hint_labels
+            .iter()
+            .enumerate()
+            .take(MODAL_INDEXED_ROWS)
+        {
             let id = accessibility_modal_id(3, index + 1);
             let mut node = Node::new(Role::ListBoxOption);
             node.set_label(hint.label.clone());
@@ -3346,6 +3608,33 @@ pub(super) fn modal_accessibility_projection(
         }
         projection.nodes.push((list_id, list));
         let mut dialog_children = vec![search_id, list_id];
+        // One Change button, for the selected row: the node that changes it,
+        // as Space does. A row has a selected state, and the adapters turn
+        // selecting it into the Click a press sends, so a row's own Click
+        // only selects it. The button has none, is bound to the row and
+        // covers its painted control. The inline editor, when open, is the
+        // row's control instead.
+        let editing = !settings.search_focused
+            && !picker_open
+            && overlay.edit_title.is_none()
+            && overlay.text_field.is_some();
+        if !settings.search_focused
+            && !editing
+            && let Some(row) = settings.rows.get(settings.focused_row)
+            && !row.disabled
+        {
+            let id = accessibility_settings_change_id(row);
+            let mut button = Node::new(Role::Button);
+            button.set_label(tr.settings_a11y_change(&row.label));
+            button.set_keyboard_shortcut("Space");
+            button.add_action(AccessibilityAction::Click);
+            match layout.rows.iter().find(|r| r.index == settings.focused_row) {
+                Some(geometry) => button.set_bounds(bounds(geometry.chip_rect)),
+                None => button.set_hidden(),
+            }
+            projection.nodes.push((id, button));
+            dialog_children.push(id);
+        }
         // One Reset button, for the selected row, named for that row and
         // its default and unavailable while the row holds it. It follows
         // the selection and the row's value on every update, and works
@@ -3704,7 +3993,7 @@ pub(super) fn nest_context_menu_accessibility(
     {
         let kind = 40 + depth as u64;
         let mut children = Vec::new();
-        for (index, row) in panel.rows.iter().enumerate() {
+        for (index, row) in panel.rows.iter().enumerate().take(MODAL_INDEXED_ROWS) {
             if row.separator {
                 continue;
             }

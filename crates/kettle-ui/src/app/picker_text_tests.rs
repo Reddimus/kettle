@@ -862,13 +862,11 @@ fn selection_and_accessibility_skip_the_headings() {
                 .any(|(_, node)| node.role() == accesskit::Role::Group)
         );
         let menu = overlay.context_menu.as_ref().unwrap();
+        let ids = super::accessibility_picker_option_ids(super::MODAL_KIND_PALETTE, &menu.rows);
         for (option, (id, node)) in options.iter().enumerate() {
-            assert_eq!(
-                *id,
-                super::accessibility_modal_id(super::MODAL_KIND_PALETTE, option + 3)
-            );
-            assert_eq!(node.is_selected(), Some(option == 3), "option {option}");
             let row = kettle_render::menu_option_row(&menu.rows, option).unwrap();
+            assert_eq!(Some(*id), ids[row], "option {option}");
+            assert_eq!(node.is_selected(), Some(option == 3), "option {option}");
             assert_eq!(node.label(), Some(menu.rows[row].label.as_str()));
             match headings.iter().find(|(index, _)| index + 1 == row) {
                 Some((_, group)) => assert!(

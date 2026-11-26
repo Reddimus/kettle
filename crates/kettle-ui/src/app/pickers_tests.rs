@@ -1825,7 +1825,7 @@ fn palette_shows_twelve_rows_at_1280x820() {
         let node = projection
             .nodes
             .iter()
-            .find(|(id, _)| *id == super::accessibility_modal_id(super::MODAL_KIND_PALETTE, option + 3))
+            .find(|(id, _)| Some(*id) == super::accessibility_picker_option_ids(super::MODAL_KIND_PALETTE, &menu.rows)[index])
             .unwrap();
         assert_eq!(node.1.label(), Some(menu.rows[index].label.as_str()));
         assert_eq!(

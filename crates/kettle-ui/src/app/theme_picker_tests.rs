@@ -1540,7 +1540,13 @@ fn the_contrast_button_is_a_button_and_the_sides_a_radio_group() {
                     .filter(move |(_, node)| node.role() == role)
                     .collect::<Vec<_>>()
             };
-            let buttons = role(accesskit::Role::Button);
+            // Beside the highlighted theme's Choose button.
+            let buttons: Vec<_> = role(accesskit::Role::Button)
+                .into_iter()
+                .filter(|(id, _)| {
+                    !super::accessibility_bound_class(*id, super::BoundTarget::PickerChoose)
+                })
+                .collect();
             assert_eq!(buttons.len(), 1, "{mode:?}");
             let (id, button) = buttons[0];
             assert!(super::accessibility_theme_contrast(*id));

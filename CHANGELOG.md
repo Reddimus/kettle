@@ -1098,8 +1098,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
-- Screen readers can choose a command palette, picker or quick-select entry
-  by pressing it, as a click does.
+- Screen readers can highlight a command palette or picker result by pressing
+  or focusing it, and act on the highlighted result with the picker's Choose
+  button. Selecting a result never runs it. Pressing a quick-select label acts
+  on it, as typing the label does.
 
 - Screen readers can open the link under the pointer by pressing it, as a
   Ctrl or Cmd click does.
@@ -1115,6 +1117,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - A screen reader's cursor can reach Settings rows scrolled out of the panel;
   moving to one scrolls it into view.
+
+- Selecting a Settings row with a screen reader no longer changes its value:
+  the platforms send selection as a press. The row's Change button changes it,
+  as Space does.
 
 - Screen readers find only tabs in the tab list; New Tab, the New Tab menu,
   Settings and the header buttons are in a toolbar beside it.

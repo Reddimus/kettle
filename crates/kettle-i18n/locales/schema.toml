@@ -1142,6 +1142,10 @@ context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-re
 context = "crates/kettle-ui/src/app.rs push_picker_accessibility: screen-reader name of a picker's result list. label is the picker's translated name, such as Theme picker."
 args = [{ name = "label", type = "str" }]
 
+[messages.picker_a11y_choose]
+context = "crates/kettle-ui/src/app/accessibility.rs push_picker_accessibility: screen-reader name of the button beside a picker's results (command palette, theme, layout or SSH picker) that acts on the highlighted result, as Enter does: runs the command, applies the theme, opens the layout, connects, or opens the SSH launcher's save or remove step. item is that result's name as the list shows it. Never painted. Needs screen-reader second pass."
+args = [{ name = "item", type = "str" }]
+
 [messages.picker_a11y_ssh]
 context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the ssh launcher dialog."
 
@@ -1789,6 +1793,10 @@ context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: the R
 [messages.settings_a11y_reset]
 context = "crates/kettle-ui/src/app/accessibility.rs: screen-reader name of the Reset button for the selected Settings row. setting is the row's label, value the default it would restore, as the row shows values (for example 14 px, Off). The button is marked unavailable while the row already holds that default."
 args = [{ name = "setting", type = "str" }, { name = "value", type = "str" }]
+
+[messages.settings_a11y_change]
+context = "crates/kettle-ui/src/app/accessibility.rs: screen-reader name of the button over the selected Settings row's value control that changes it as Space does: turns a switch on or off, moves a choice to its next value, or opens the row's editor, theme picker or shortcut capture. setting is the row's label. Needs screen-reader second pass."
+args = [{ name = "setting", type = "str" }]
 
 [messages.settings_value_right]
 context = "crates/kettle-ui/src/settings.rs read(): Settings value. Tab bar position set in the config file."

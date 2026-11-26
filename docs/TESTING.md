@@ -3517,17 +3517,40 @@ Spanish. They do not run Orca or Narrator.
 These `kettle-ui` tests check the generated tree and the action routing, not
 speech:
 
-- `picker_options_offer_a_press_that_picks_them_as_a_click_does`: every
-  enabled palette and layout picker option has a Click action, and a press
-  selects the command (palette) or row (other pickers) a click would. The
-  handler then sends the picker its own Enter. Disabled rows, stale ids, footer
-  controls and options under a menu select nothing.
+- `picker_selection_requests_only_highlight_and_choose_acts` models the
+  requests AccessKit 0.25's adapters make when a screen reader selects,
+  deselects, picks, focuses or presses a node: macOS `setAccessibilitySelected:`
+  both ways and `AXPick`; AT-SPI `SelectChild`, `DeselectChild` and
+  `DeselectSelectedChild`; UIA `Select`, `AddToSelection` and
+  `RemoveFromSelection`; and the explicit `AXPress`, `DoAction` and `Invoke`.
+  It runs them against each option of the palette, the layout picker and the
+  SSH launcher's Save and Remove rows, with every option highlighted in turn.
+  Each only highlights its option. Only a press on the Choose button acts, on
+  the highlighted result. The button has no selected state, so no selection
+  request reaches it, and a Choose button bound to another result acts on
+  nothing.
+- `settings_selection_requests_never_change_a_row` runs the same modelled
+  requests against every Settings row, painted or scrolled out. Each only
+  selects its row. Only a press on the selected row's Change button changes
+  it, and a Change button queued for a row that is no longer selected changes
+  nothing. `settings_accessibility_click_dispatches_configure_and_retry` checks
+  that the Change button, not the row, reaches the global hotkey's configure
+  and retry.
+- `indexed_modal_lists_stop_short_of_the_next_kinds_ids`: a 70,000-row
+  context menu and quick select keep 65,535 rows each in the tree, every id
+  distinct, where row 65,535 of the menu would have taken the quick-select
+  list's id.
 - `quick_select_labels_offer_a_press_that_acts_on_their_target`: matching
   quick-select labels have a Click action that runs `act_hint`. Dimmed labels
   have none.
 - `a_hovered_link_offers_a_press_that_opens_it`: the hovered link's node has
   a Click action that opens the link under the pointer through
   `open_pane_link`. Its status text has none.
+- `accessibility_requests_are_bound_to_their_targets`: after the layout
+  picker is filtered from dev and ops to ops, the id published for dev names
+  nothing while ops keeps its id. A quick-select label from an earlier session,
+  or one over other text, names nothing, and neither does a link node once
+  another link, or the same target painted elsewhere, is shown.
 - `every_modal_surface_is_a_modal_dialog`: the palette, the theme, layout and
   SSH pickers, Settings and title editing each project one modal dialog.
 - `the_tab_list_holds_only_tabs_beside_a_toolbar_of_the_strips_buttons`: the

@@ -817,6 +817,7 @@ palette_zoom_out_all = "accepted"
 picker_a11y_layouts = "accepted"
 picker_a11y_palette = "accepted"
 picker_a11y_results = "accepted"
+picker_a11y_choose = "draft"
 picker_a11y_ssh = "accepted"
 picker_a11y_themes = "accepted"
 picker_create_layout_hint = "accepted"
@@ -1227,6 +1228,7 @@ settings_value_unavailable = "draft"
 settings_value_checking = "draft"
 settings_reset_button = "draft"
 settings_a11y_reset = "draft"
+settings_a11y_change = "draft"
 
 quick_portal_size = "draft"
 quick_portal_unset = "draft"
@@ -1382,6 +1384,7 @@ keys = [
     "picker_a11y_layouts",
     "picker_a11y_palette",
     "picker_a11y_results",
+    "picker_a11y_choose",
     "picker_a11y_ssh",
     "picker_a11y_themes",
     "receipt_a11y_dismiss",
@@ -1403,6 +1406,7 @@ keys = [
     "settings_a11y_fields",
     "settings_a11y_title",
     "settings_a11y_reset",
+    "settings_a11y_change",
     "update_a11y_available",
     "menu_a11y_update",
     "update_a11y_failed",
