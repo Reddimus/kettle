@@ -789,6 +789,12 @@ context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is th
 [messages.notify_title_session_log_stopped]
 context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
 
+[messages.notify_title_setting_not_durable]
+context = "crates/kettle-ui/src/app/modals.rs settings_reset: desktop notification title when a Settings Reset was saved to the config file and applies, but the system could not confirm the change reached the disk. Starts with the product name like the other notification titles."
+
+[messages.notify_body_setting_not_durable]
+context = "crates/kettle-ui/src/app/modals.rs settings_reset: body of notify_title_setting_not_durable. The reset applies now; a sudden power loss or crash of the computer could undo it."
+
 [messages.notify_title_setting_not_saved]
 context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
 

@@ -372,10 +372,10 @@ fn a_search_that_chose_nothing_leaves_the_row_it_began_on() {
     assert_eq!(focused(&cats, &nav), "font-size");
 }
 
-/// A GPU recovery rebuilds the device from the saved config: its GPU
-/// policy then runs, so a force-software change no longer waits for a
-/// restart, while a renderer change still does, since recovery keeps the
-/// renderer Kettle started with.
+/// A GPU recovery rebuilds the device from the saved config: a saved GPU
+/// setting the adapter it got honours runs then, so a force-software change
+/// no longer waits for a restart. A renderer change still does, since
+/// recovery keeps the renderer Kettle started with.
 #[test]
 fn a_gpu_recovery_applies_the_saved_gpu_policy() {
     let launch = Config::default();
@@ -384,11 +384,19 @@ fn a_gpu_recovery_applies_the_saved_gpu_policy() {
         gpu_force_software: !launch.gpu_force_software,
         ..Config::default()
     };
+    let got = |software: bool| kettle_render::GpuAdapterInfo {
+        name: "Adapter A".into(),
+        vendor: 0x10de,
+        device: 0x1111,
+        kind: if software { "Software" } else { "Discrete" },
+        backend: "Vulkan",
+    };
+    let on = got(software.gpu_force_software);
     assert_eq!(
         pending_apply(Some(&running), &software, false),
         SettingsApply::Restart
     );
-    let recovered = running.after_gpu_rebuild(&software);
+    let recovered = running.after_gpu_rebuild(&software, &on, software.gpu_force_software);
     assert_eq!(
         pending_apply(Some(&recovered), &software, false),
         SettingsApply::None
@@ -408,10 +416,87 @@ fn a_gpu_recovery_applies_the_saved_gpu_policy() {
     };
     assert_eq!(
         pending_apply(
-            Some(&running.after_gpu_rebuild(&renderer)),
+            Some(&running.after_gpu_rebuild(&renderer, &on, software.gpu_force_software)),
             &renderer,
             false
         ),
+        SettingsApply::Restart
+    );
+}
+
+/// The recovery tiers pass over a saved pin, backend and power preference,
+/// and can escalate to software. A saved change the adapter recovery got
+/// does not honour stays pending; one it happens to honour applies.
+#[test]
+fn a_gpu_recovery_keeps_changes_its_adapter_ignored_pending() {
+    use kettle_config::{GpuBackend, GpuPowerPreference};
+    let launch = Config::default();
+    let running = GraphicsSettings::of(&launch);
+    let a = kettle_render::GpuAdapterInfo {
+        name: "GPU A".into(),
+        vendor: 0x10de,
+        device: 0xaaaa,
+        kind: "Discrete",
+        backend: "Metal",
+    };
+    let b = kettle_render::GpuAdapterInfo {
+        name: "GPU B".into(),
+        device: 0xbbbb,
+        kind: "Integrated",
+        backend: "Vulkan",
+        ..a.clone()
+    };
+    let pinned_b = Config {
+        gpu_vendor_id: 0x10de,
+        gpu_device_id: 0xbbbb,
+        gpu_name: "GPU B".into(),
+        ..Config::default()
+    };
+    let vulkan = Config {
+        gpu_backend: GpuBackend::Vulkan,
+        ..Config::default()
+    };
+    let low_power = Config {
+        gpu_power_preference: GpuPowerPreference::Low,
+        ..Config::default()
+    };
+    let software = Config {
+        gpu_force_software: !launch.gpu_force_software,
+        ..Config::default()
+    };
+    for (saved, what) in [
+        (&pinned_b, "a pin to GPU B"),
+        (&vulkan, "the Vulkan backend"),
+        (&low_power, "low power"),
+    ] {
+        let recovered = running.after_gpu_rebuild(saved, &a, false);
+        assert_eq!(
+            pending_apply(Some(&recovered), saved, false),
+            SettingsApply::Restart,
+            "recovery on GPU A through Metal did not apply {what}"
+        );
+        let recovered = running.after_gpu_rebuild(saved, &b, false);
+        assert_eq!(
+            pending_apply(Some(&recovered), saved, false),
+            SettingsApply::None,
+            "GPU B through Vulkan applies {what}"
+        );
+    }
+    // Software forced by escalation does not apply a saved change back to
+    // hardware, and hardware does not apply a saved change to software.
+    let back = Config {
+        gpu_force_software: launch.gpu_force_software,
+        ..Config::default()
+    };
+    let forced = GraphicsSettings::of(&software);
+    let recovered = forced.after_gpu_rebuild(&back, &a, !launch.gpu_force_software);
+    assert_eq!(
+        pending_apply(Some(&recovered), &back, false),
+        SettingsApply::Restart
+    );
+    let recovered = running.after_gpu_rebuild(&software, &a, launch.gpu_force_software);
+    assert_eq!(
+        pending_apply(Some(&recovered), &software, false),
         SettingsApply::Restart
     );
 }

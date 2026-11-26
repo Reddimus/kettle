@@ -269,7 +269,9 @@ fn gpu_recovery_updates_the_running_graphics() {
     let flat: String = recover.split_whitespace().collect();
     let installed = flat.find("self.gpu=Some(new_gpu);").expect("installs the device");
     let updated = flat
-        .find("self.running_graphics=Some(running.after_gpu_rebuild(&cfg));")
+        .find(
+            "self.running_graphics=Some(running.after_gpu_rebuild(&cfg,&adapter,self.gpu_software_fallback));",
+        )
         .expect("updates the running graphics");
     assert!(installed < updated);
 }

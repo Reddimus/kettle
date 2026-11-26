@@ -815,9 +815,6 @@ impl App {
         }
         let overlay = self.overlay(ws, reuse_pane_snapshots);
         remember_picker_scroll(ws, overlay.context_menu.as_ref());
-        // What this frame shows under the pointer, for the next move to
-        // compare with (`track_settings_hover`).
-        ws.settings_hover = overlay.settings.as_ref().and_then(|set| set.hover);
         // Search and completion state are semantic accessibility state. Reuse
         // the exact projection this frame will draw instead of rebuilding the
         // full overlay twice for the accessibility key and tree. Snapshot reuse
@@ -1128,6 +1125,12 @@ impl App {
                     let _ = proxy.send_event(UserEvent::CardsTipClaimed(claimed));
                 },
             );
+        }
+        // The Settings hover the window shows, for the next pointer move to
+        // compare with (`track_settings_hover`). A frame the gate held back,
+        // or one that did not present, leaves the one still on screen.
+        if presented {
+            ws.settings_hover = overlay.settings.as_ref().and_then(|set| set.hover);
         }
         // C1 records only a presented scene. Reuse that scene immediately,
         // before any renderer setter can invalidate it, and with the same cfg.

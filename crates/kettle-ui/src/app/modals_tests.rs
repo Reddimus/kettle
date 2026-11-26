@@ -1489,12 +1489,40 @@ fn settings_reset_is_one_edit_then_a_reload() {
     let flat: String = reset.split_whitespace().collect();
     assert!(
         flat.contains(
-            "matchself.reset_pref(&crate::settings::reset_keys(field),&fallback,|cfg|{crate::settings::holds_default(cfg,field)}){Ok(true)=>self.reload_config(ws),Ok(false)=>{}Err(())=>fire_notify("
+            "matchself.reset_pref(&crate::settings::reset_keys(field),&fallback,|cfg|{crate::settings::holds_default(cfg,field)}){Ok(ResetSaved::Unchanged)=>{}"
+        ),
+        "{flat}"
+    );
+    // A file in place whose directory did not sync is saved: it reloads,
+    // with a warning, rather than failing as a write that never happened.
+    assert!(
+        flat.contains(
+            "Ok(saved)=>{self.reload_config(ws);ifsaved==ResetSaved::NotDurable{fire_notify(self.ui_text.text(kettle_i18n::Text::NotifyTitleSettingNotDurable),self.ui_text.text(kettle_i18n::Text::NotifyBodySettingNotDurable),);}}Err(())=>fire_notify("
         ),
         "{flat}"
     );
     assert_eq!(flat.matches("settings_store(").count(), 0);
     assert_eq!(flat.matches("reload_config(").count(), 1);
+    let reset_pref: String = src
+        .split("fn reset_pref(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap()
+        .split_whitespace()
+        .collect();
+    assert!(reset_pref.contains("Ok(Some(saved))=>{"));
+    assert!(reset_pref.contains("Some(error)=>{"));
+    assert!(reset_pref.contains("ResetSaved::NotDurable"));
+    for (language, title) in [
+        (kettle_i18n::Language::En, "kettle: setting may not be kept"),
+        (kettle_i18n::Language::Es, "kettle: puede que el ajuste no se conserve"),
+    ] {
+        assert_eq!(
+            kettle_i18n::Translator::new(language)
+                .text(kettle_i18n::Text::NotifyTitleSettingNotDurable),
+            title
+        );
+    }
 }
 
 /// The pointer's hover shows in Settings only where a click acts: not
@@ -1535,8 +1563,9 @@ fn settings_hover_shows_only_where_a_click_acts() {
 /// Settings paints hover from the window's own pointer, works it out
 /// afresh for every frame (rows move under a still pointer as the keyboard
 /// scrolls), and repaints a move only when its target differs from the one
-/// the last frame painted. A move compared with a cache only moves set
-/// missed a hover a keyboard redraw had painted, which then stayed lit.
+/// the window shows. A move compared with a cache only moves set missed a
+/// hover a keyboard redraw had painted, which then stayed lit; and a frame
+/// that a gate held back or that did not present must not count as shown.
 /// Leaving the window clears the pointer, and the hover with it. Hover never
 /// moves the keyboard focus.
 #[test]
@@ -1553,13 +1582,18 @@ fn settings_hover_follows_the_pointer_and_leaves_the_focus_alone() {
     ] {
         assert!(flat.contains(needle), "missing: {needle}");
     }
-    let painted = flat
-        .find("ws.settings_hover=overlay.settings.as_ref().and_then(|set|set.hover);")
+    let shown = flat
+        .find("ifpresented{ws.settings_hover=overlay.settings.as_ref().and_then(|set|set.hover);}")
+        .expect("only a presented frame records the hover");
+    let presented = flat
+        .find("letpresented=matches!(&frame_result,Ok(FrameOutcome::Presented));")
         .unwrap();
-    let built = flat
-        .find("letoverlay=self.overlay(ws,reuse_pane_snapshots);")
-        .unwrap();
-    assert!(built < painted, "the frame's own overlay records the hover");
+    assert!(presented < shown);
+    assert_eq!(
+        flat.matches("ws.settings_hover=").count(),
+        1,
+        "nothing else records a hover as shown"
+    );
     for name in ["track_settings_hover", "settings_hover"] {
         let body = src
             .split(&format!("fn {name}("))
