@@ -15,7 +15,8 @@ pub(crate) enum Reading<T> {
     Value(T),
 }
 
-#[cfg(any(target_os = "linux", test))]
+// Only the Linux chain and the Unix tests of its local GNOME read use these.
+#[cfg(any(target_os = "linux", all(test, unix)))]
 impl<T> Reading<T> {
     /// This reading, or where it is unavailable, `other`'s.
     pub(crate) fn or_else(self, other: impl FnOnce() -> Self) -> Self {
@@ -68,6 +69,7 @@ impl Preference {
     /// none, GNOME's `enable-animations` through the portal; and where the
     /// portal has neither, GNOME's own (`gnome_local`), so a session with no
     /// portal still follows GNOME.
+    #[cfg(any(target_os = "linux", all(test, unix)))]
     pub(crate) fn linux(
         portal: Reading<u32>,
         gnome_portal: impl FnOnce() -> Reading<bool>,
