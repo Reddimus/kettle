@@ -1699,7 +1699,7 @@ impl WindowState {
     /// is lit.
     pub(crate) fn leave_tab_bar(&mut self) {
         self.release_tab_hold();
-        self.tooltip.hover(None, std::time::Instant::now());
+        self.tooltip.hover(None, None, std::time::Instant::now());
         self.lane_control_hover = None;
         self.toast_control_hover = None;
         self.release_titlebar_buttons();

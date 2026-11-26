@@ -2517,7 +2517,7 @@ fn lane_button_tooltips_share_the_clock_and_the_screen_reader_name() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(source.contains(
-        "let target = strip_tooltip_target(ws, bar, &self.strip_tooltip_context(ws, bar)) .or_else(|| self.lane_control_tooltip(ws)) .map(|tip| tip.target);"
+        "let target = strip_tooltip_target(ws, bar, &self.strip_tooltip_context(ws, bar)) .or_else(|| self.lane_control_tooltip(ws)) .map(|tip| (tip.target, tip.rect));"
     ));
     assert!(
         source.contains(

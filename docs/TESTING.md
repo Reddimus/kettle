@@ -156,7 +156,9 @@ gaps, AccessKit bounds and the production `ui_geometry` serializer.
 `new_tab_tooltips_translate` checks English/Spanish labels and live shortcuts.
 `kettle-ui`'s `tooltip::tests` and `strip_tooltips_wait_for_a_rest` check
 tooltip timing: the 500 ms rest, the one-second warm spell, a press hiding the
-tooltip until the pointer leaves, and a single scheduler wake per deadline;
+tooltip until the pointer leaves the control's place (a moment with no control
+to name, while the press is held or a dropdown is open, is no leave), and a
+single scheduler wake per deadline;
 `the_tooltip_clock_follows_moves_presses_leaves` guards the wiring.
 `overflow_arrows_light_point_and_name_what_a_press_does` (`kettle-ui`) and
 `overflow_arrows_prelight_like_the_other_flat_buttons` (`kettle-render`) cover

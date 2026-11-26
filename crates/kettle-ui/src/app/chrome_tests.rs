@@ -1841,13 +1841,25 @@ fn strip_tooltips_wait_for_a_rest_and_a_press_hides_them() {
         tab_format: "{title}",
         tab_cell_width: 8.0,
     };
-    let bar = kettle_render::TabBar::hidden();
+    let mut bar = kettle_render::TabBar::hidden();
+    bar.new_tab_menu = (68.0, 0.0, 28.0, 28.0);
+    bar.new_tab = (100.0, 0.0, 28.0, 28.0);
     let shown = |ws: &crate::window_state::WindowState, at| {
         shown_strip_tooltip(ws, &bar, &context, at).map(|tip| tip.text)
     };
+    // The pointer is where the hover flags say: on `+`, on `▾`, or on the
+    // strip between tabs.
     let hover = |ws: &mut crate::window_state::WindowState, at| {
-        let target = strip_tooltip_target(ws, &bar, &context).map(|tip| tip.target);
-        ws.tooltip.hover(target, at);
+        let target =
+            strip_tooltip_target(ws, &bar, &context).map(|tip| (tip.target, tip.rect));
+        let pointer = if ws.hovered_new_tab {
+            (110.0, 10.0)
+        } else if ws.hovered_new_tab_menu {
+            (80.0, 10.0)
+        } else {
+            (300.0, 10.0)
+        };
+        ws.tooltip.hover(target, Some(pointer), at);
     };
     let ms = Duration::from_millis;
     let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
@@ -1867,9 +1879,12 @@ fn strip_tooltips_wait_for_a_rest_and_a_press_hides_them() {
         shown(&ws, t0 + ms(600)).as_deref(),
         Some("New Tab Options")
     );
-    // A press hides it, and the release leaves it hidden.
+    // A press hides it, and the release leaves it hidden. While the press
+    // is held the strip names no control (N1 of the 6.0 live recheck: that
+    // moment was taken for a leave, and the tooltip came back).
     ws.tooltip.press(t0 + ms(700));
     ws.pressed_new_tab_menu = true;
+    hover(&mut ws, t0 + ms(750));
     assert_eq!(shown(&ws, t0 + ms(700)), None);
     ws.pressed_new_tab_menu = false;
     hover(&mut ws, t0 + ms(800));
@@ -1907,7 +1922,7 @@ fn the_tooltip_clock_follows_moves_presses_leaves_and_one_scheduled_wake() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(window_state.contains(
-        "pub(crate) fn leave_tab_bar(&mut self) { self.release_tab_hold(); self.tooltip.hover(None, std::time::Instant::now());"
+        "pub(crate) fn leave_tab_bar(&mut self) { self.release_tab_hold(); self.tooltip.hover(None, None, std::time::Instant::now());"
     ));
     assert!(source.contains("ws.leave_tab_bar();"));
     assert!(source.contains("let (tooltip_due, tooltip_wake) = ws.tooltip.poll(now);"));
@@ -1976,8 +1991,8 @@ fn overflow_arrows_light_point_and_name_what_a_press_does() {
         ws.hovered_scroll_arrow = Some(forward);
         // Each round starts long after the last tooltip went away.
         let t0 = start + Duration::from_secs(20 * round as u64);
-        let target = strip_tooltip_target(&ws, &bar, &context).map(|tip| tip.target);
-        ws.tooltip.hover(target, t0);
+        let target = strip_tooltip_target(&ws, &bar, &context).map(|tip| (tip.target, tip.rect));
+        ws.tooltip.hover(target, None, t0);
         assert_eq!(shown_strip_tooltip(&ws, &bar, &context, t0), None);
         let tip = shown_strip_tooltip(&ws, &bar, &context, t0 + Duration::from_millis(500))
             .expect("named after a rest");
@@ -1989,7 +2004,7 @@ fn overflow_arrows_light_point_and_name_what_a_press_does() {
             _ => label.to_owned(),
         };
         assert_eq!(tip.text, expected);
-        ws.tooltip.hover(None, t0 + Duration::from_secs(10));
+        ws.tooltip.hover(None, None, t0 + Duration::from_secs(10));
     }
     // The hand, as the strip's other buttons show.
     let source = super::production_source()
@@ -2065,7 +2080,7 @@ fn a_cut_tab_title_shows_whole_in_a_tooltip() {
     assert_eq!(folder.text, path);
     // It waits for a rest, as every chrome tooltip does.
     let t0 = Instant::now();
-    ws.tooltip.hover(Some(tip.target), t0);
+    ws.tooltip.hover(Some((tip.target, tip.rect)), Some((120.0, 14.0)), t0);
     ws.native_pointer = Some(winit::dpi::PhysicalPosition::new(120.0, 14.0));
     assert_eq!(shown_strip_tooltip(&ws, &bar, &context, t0), None);
     assert_eq!(

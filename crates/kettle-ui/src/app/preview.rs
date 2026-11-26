@@ -3244,6 +3244,7 @@ impl App {
             target: crate::tooltip::TooltipTarget::Media(lane.pane, hit),
             text: shortcut.map_or_else(|| label.to_owned(), |key| format!("{label}  {key}")),
             anchor: button,
+            rect: button.unwrap_or(lane.rect),
         })
     }
 
