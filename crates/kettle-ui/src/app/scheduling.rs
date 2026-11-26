@@ -630,6 +630,7 @@ impl App {
                 .saturating_duration_since(now)
                 .max(std::time::Duration::from_millis(1))
         });
+        let theme_preview_wait = self.settle_theme_hover_preview(ws, now);
         let receipt_enabled = ws
             .media_paste_receipt
             .as_ref()
@@ -985,6 +986,9 @@ impl App {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = mouse_hint_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = theme_preview_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = card_settle_wait {

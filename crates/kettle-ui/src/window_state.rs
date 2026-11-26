@@ -552,6 +552,31 @@ impl MouseOverrideHint {
     }
 }
 
+/// How long a pointer that moved a theme picker selection must rest before
+/// the window previews that theme, so a sweep across rows does not flash
+/// every theme it crosses. The keyboard previews at once.
+pub(crate) const THEME_HOVER_PREVIEW_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(150);
+
+/// The open picker's list as the pointer and the wheel see it: the command
+/// palette, theme, layout or SSH picker, whichever is open. Reset when one
+/// opens.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct PickerView {
+    /// Where the pointer was when the picker last saw it: at a hover, or when
+    /// it opened, took a key or scrolled. Rows move under a pointer that
+    /// stays put, so only a pointer somewhere else selects the row under it,
+    /// and the keyboard's selection holds until the pointer really moves.
+    pub(crate) pointer_seen: Option<PhysicalPosition<f64>>,
+    /// The row under the pointer that a hover lights without selecting: the
+    /// SSH launcher's Save or Remove row, which only a click or a deliberate
+    /// Down selects.
+    pub(crate) prelight: Option<usize>,
+    /// When the theme a hover or the wheel selected becomes the window's
+    /// preview; until then the window keeps the theme it previews now.
+    pub(crate) preview_at: Option<std::time::Instant>,
+}
+
 const MEDIA_RECEIPT_EXPANDED: std::time::Duration = std::time::Duration::from_secs(4);
 const MEDIA_RECEIPT_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30);
 const MEDIA_RECEIPT_HARD_LIFETIME: std::time::Duration = std::time::Duration::from_secs(120);
@@ -1590,6 +1615,8 @@ pub(crate) struct WindowState {
     /// The Shift hint over a program that uses the mouse; see
     /// `MouseOverrideHint`.
     pub(crate) mouse_override_hint: MouseOverrideHint,
+    /// The open picker's scroll, pointer and preview state; see `PickerView`.
+    pub(crate) picker_view: PickerView,
     /// The first `Resized` after window creation is the initial
     /// placement, not a user resize — `resize-overlay = after-first`
     /// (the default) skips it.
@@ -2022,6 +2049,7 @@ impl WindowState {
             resize_overlay: None,
             resize_overlay_label: None,
             mouse_override_hint: MouseOverrideHint::default(),
+            picker_view: PickerView::default(),
             seen_first_resize: false,
             spawned_at: std::time::Instant::now(),
             pane_snapshots: Vec::new(),

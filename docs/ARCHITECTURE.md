@@ -2007,7 +2007,8 @@ configured name or target equals, or `Remove` when row 0 is the configured
 host the query names. `SshRow::is_action` keeps them out of everything but a
 deliberate Down or a press on the row: the Up wrap, the clamp after the list
 shrinks, and the wheel limit in `apply_picker_pointer` all skip them, and a
-hover selects nothing. Save opens the title editor with
+hover only lights them (`PickerView::prelight`, painted as
+`ContextMenuRow::prelit`) without selecting them. Save opens the title editor with
 `TitleEditScope::SaveSshHost` and `TitleEditTarget::SshHost`, which no pane
 exit makes stale. Remove and a Save over an existing name go through
 `ConfirmAction::RemoveSshHost` and `ReplaceSshHost`, Cancel first. The
@@ -2040,7 +2041,17 @@ contiguously, as `screen` does in `fullscreen`) the palette leaves
 out rows the query only lies scattered through. Command labels accent the
 characters of the alignment that ranked the row; English alias matches in
 Spanish have no accent unless the displayed label also matches. The whole card counts
-as inside. Any pointer press cancels a keyboard-only hint. Settings closes
+as inside. A pointer that moves over a row selects it (`picker_hover`), the
+quick-pick rule of editors: `PickerView::pointer_seen` is the pointer position
+the picker last saw, set when it opens, on each of its keys
+(`note_picker_keys`) and on each wheel step, so rows that scroll or change
+under a still pointer are never selected and the keyboard's selection holds
+until the pointer really moves. A row a hover may not select is lit instead.
+The keyboard previews the theme it selects at once; a theme the pointer
+selects previews once the pointer has rested 150 ms (`PickerView::preview_at`,
+which `theme_preview_change` waits for and `about_to_wait_inner` wakes for),
+so a sweep across the list does not flash themes. A click runs the row as
+Enter does. Any pointer press cancels a keyboard-only hint. Settings closes
 on a press outside its panel; an active path editor or keybinding capture instead
 cancels only that capture on a press outside its focused row. Confirmation dialogs
 keep their question and consume outside presses. The search lane and vi mode keep
@@ -4487,7 +4498,8 @@ a later surface batch, it would paint over them and leave the menu blank.
 
 Each open menu level, and a picker's card, is a rounded panel (about 10
 logical pixels) on a shadow of four concentric low-opacity rounded layers,
-with the highlighted row drawn as an inset rounded selection. A picker whose
+with the highlighted row drawn as an inset rounded selection, and a prelit row
+(one a hover lights without selecting) as the same inset at half its accent. A picker whose
 results overflow also gets a decorative scrollbar thumb, a rounded pill in the
 gap between the selection's right inset and the border, drawn after the
 selection; its rows fill the panel from the header down, since pickers scroll

@@ -1560,6 +1560,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   leave a truncated file when they fail, GPU setup keeps trying other
   backends when one device fails to open, and macOS audio decoding moved off
   the sound-control thread.
+- Moving the pointer over a row in the command palette or the theme, layout
+  or SSH picker now selects it, as the arrow keys do; a pointer that stays
+  still never takes the selection from the keys, and the theme picker
+  previews a hovered theme only once the pointer rests on it.
 
 ## Older releases
 

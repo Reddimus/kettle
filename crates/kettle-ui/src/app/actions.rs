@@ -1098,6 +1098,7 @@ impl App {
                 self.close_all_modals(ws);
                 ws.layout_picker_entries = crate::session::Session::list_layouts();
                 ws.layout_picker_input = Some((Default::default(), 0));
+                reset_picker_view(ws);
             }
             Action::OpenThemePicker => self.open_theme_picker(ws),
             Action::OpenMediaShelf => self.open_media_shelf(ws),
