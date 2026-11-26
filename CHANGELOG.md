@@ -1095,6 +1095,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- On macOS the Settings Window blur switch is as wide as the other switches;
+  it kept room for an Unavailable state that macOS never shows.
+
 - The Settings guide and Getting started now give Cmd+, as the macOS
   shortcut for Settings; they said Ctrl+, on every platform.
 

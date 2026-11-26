@@ -1684,6 +1684,26 @@ pub fn column_widths(cfg: &Config, cats: &[Category], tr: &Translator) -> (usize
 /// while the value changes; it measures with the renderer's own
 /// `display_width`.
 pub fn field_value_cols(cfg: &Config, field: &Field, tr: &Translator) -> usize {
+    field_value_cols_on(cfg, field, tr, std::env::consts::OS)
+}
+
+/// The states a Window blur switch can show on `os` (`std::env::consts::OS`):
+/// only Wayland asks its compositor, so only Linux checks, and macOS always
+/// blurs.
+pub(crate) fn blur_states(os: &str) -> &'static [BlurState] {
+    match os {
+        "macos" => &[BlurState::Available],
+        "windows" => &[BlurState::Available, BlurState::Unavailable],
+        _ => &[
+            BlurState::Available,
+            BlurState::Checking,
+            BlurState::Unavailable,
+        ],
+    }
+}
+
+/// [`field_value_cols`] on `os`, which decides the Window blur states.
+pub(crate) fn field_value_cols_on(cfg: &Config, field: &Field, tr: &Translator, os: &str) -> usize {
     use kettle_render::display_width as width;
     let mut cols = width(&read(cfg, field, tr));
     match &field.kind {
@@ -1692,9 +1712,15 @@ pub fn field_value_cols(cfg: &Config, field: &Field, tr: &Translator) -> usize {
                 cols = cols.max(width(tr.text(value)));
             }
             // The words `row_value` shows instead while this session cannot
-            // blur, or is still asking whether it can.
+            // blur, or is still asking whether it can, where it can show them.
+            // Elsewhere the switch keeps every other switch's width.
             if field.key == "window-blur" {
-                for value in [Text::SettingsValueChecking, Text::SettingsValueUnavailable] {
+                for state in blur_states(os) {
+                    let value = match state {
+                        BlurState::Available => continue,
+                        BlurState::Checking => Text::SettingsValueChecking,
+                        BlurState::Unavailable => Text::SettingsValueUnavailable,
+                    };
                     cols = cols.max(width(tr.text(value)));
                 }
             }
@@ -4138,10 +4164,41 @@ mod control_size_tests {
             .collect()
     }
 
+    /// Where blur is always available (macOS), the Window blur switch is as
+    /// wide as every other switch, rather than sized for an Unavailable it
+    /// cannot show. Elsewhere it keeps room for every state it can show.
+    #[test]
+    fn window_blur_is_sized_for_the_states_its_platform_shows() {
+        let cats = categories(&[]);
+        let field = |key: &str| {
+            cats.iter()
+                .flat_map(|c| &c.fields)
+                .find(|f| f.key == key)
+                .unwrap()
+        };
+        let cfg = Config::default();
+        for language in [Language::En, Language::Es] {
+            let tr = Translator::new(language);
+            let switch = field_value_cols_on(&cfg, field("cursor-blink"), &tr, "macos");
+            assert_eq!(
+                field_value_cols_on(&cfg, field("window-blur"), &tr, "macos"),
+                switch,
+                "{language:?}"
+            );
+            for os in ["linux", "windows"] {
+                assert!(
+                    field_value_cols_on(&cfg, field("window-blur"), &tr, os)
+                        >= kettle_render::display_width(tr.text(Text::SettingsValueUnavailable)),
+                    "{language:?} {os}"
+                );
+            }
+        }
+    }
+
     /// The Window blur switch keeps one width through every state it can
-    /// show (On, Off, Checking…, Unavailable) in English and Spanish, so a
-    /// Wayland probe or an unavailable session never moves its edge or the
-    /// Reset chip beside it.
+    /// show here (On, Off, and where they occur Checking… and Unavailable)
+    /// in English and Spanish, so a Wayland probe or an unavailable session
+    /// never moves its edge or the Reset chip beside it.
     #[test]
     fn window_blur_keeps_one_width_through_its_states() {
         let cats = categories(&[]);
@@ -4159,11 +4216,7 @@ mod control_size_tests {
                         window_blur: saved,
                         ..Config::default()
                     };
-                    for state in [
-                        BlurState::Available,
-                        BlurState::Checking,
-                        BlurState::Unavailable,
-                    ] {
+                    for &state in blur_states(std::env::consts::OS) {
                         let set = kettle_render::SettingsOverlay {
                             rows: vec![kettle_render::SettingsRow {
                                 label: tr.text(blur.label).into(),
