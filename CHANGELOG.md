@@ -1095,7 +1095,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
-- The New Tab button and the GNOME header's Find button act when released over them, like native buttons, so pressing one and dragging off cancels instead of opening a tab or toggling Find.
+- The New Tab button and the GNOME header's Find button act when released over them, like native buttons, so pressing one and dragging off cancels instead of opening a tab or toggling Find. A dialog, menu or picker that opens while one is held cancels it too.
 
 - A scrollbar no longer stays lit and wide after the pointer leaves it for a pane whose program tracks pointer motion.
 
