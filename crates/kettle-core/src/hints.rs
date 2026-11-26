@@ -32,7 +32,9 @@ pub struct HintSpan {
     /// edge, or delimiting punctuation. A path that ran into a character the
     /// pattern does not take (`out/report#1.pdf` matched as `out/report`, or
     /// `foo(1)/bar.png` as `/bar.png`) is only part of a name, so it may be
-    /// copied but must not be opened.
+    /// copied but must not be opened. A path holding a character that hides
+    /// text (a zero-width joiner, a variation selector) is not bounded
+    /// either: it does not read as the file it names.
     pub bounded: bool,
 }
 
@@ -342,6 +344,12 @@ fn quoted_path_len(body: &str, quote: char) -> Option<usize> {
     (directory || extension || deep).then_some(path.len())
 }
 
+/// Whether a path holds a character that hides text, a space aside.
+fn path_hides_text(path: &str) -> bool {
+    path.chars()
+        .any(|c| c != ' ' && crate::links::hides_text(c))
+}
+
 /// Whether a match starting after `before` and followed by `rest` meets a
 /// boundary on both sides (see [`HintSpan::bounded`]).
 ///
@@ -489,7 +497,7 @@ fn detect_line(
                     end: col_of_byte[be - 1],
                     kind: Kind::Path,
                     text: line[bs..be].to_string(),
-                    bounded: true,
+                    bounded: !path_hides_text(&line[bs..be]),
                 });
             }
         }
@@ -515,7 +523,9 @@ fn detect_line(
             // is part of a longer quoted name or sentence: `Files/a` in
             // `'My Files/a b.txt'`.
             let bounded = is_bounded(before, &line[m.end()..])
-                && (*kind != Kind::Path || path_reaches_quote(line, &runs, m.start(), m.end()));
+                && (*kind != Kind::Path
+                    || (path_reaches_quote(line, &runs, m.start(), m.end())
+                        && !path_hides_text(trimmed)));
             let (bs, be) = (m.start(), m.start() + trimmed.len());
             if taken.overlaps(bs, be) {
                 continue;
@@ -1213,6 +1223,29 @@ mod tests {
             let wide = format!("\"{}docs/{} b.pdf\"", "a".repeat(pad), "é".repeat(600));
             assert!(paths(&wide).iter().all(|(text, _)| !text.contains(' ')));
         }
+    }
+
+    /// A path holding a character that hides text reads as another name, so
+    /// its hint copies rather than opens, quoted or bare.
+    #[test]
+    fn a_path_hiding_a_character_is_not_bounded() {
+        for line in [
+            "open \"docs/my a\u{200d}b.pdf\" now",
+            "open docs/a\u{200c}b.pdf now",
+            "open /tmp/a\u{fe0f}b.pdf now",
+            "open /tmp/a\u{3164}b.pdf now",
+        ] {
+            let spans = detect(&[line]);
+            let paths = spans
+                .iter()
+                .filter(|span| span.kind == Kind::Path)
+                .collect::<Vec<_>>();
+            assert!(!paths.is_empty(), "{line}: {spans:?}");
+            assert!(paths.iter().all(|span| !span.bounded), "{line}: {spans:?}");
+        }
+        let spans = detect(&["open \"docs/my café.pdf\" now"]);
+        assert_eq!(spans.len(), 1);
+        assert!(spans[0].bounded);
     }
 
     /// A quote after a `:` never opens a quoted path: `host:"…"` and

@@ -334,12 +334,9 @@ fn path_match_to_file_uri_with_home(
 ) -> Option<String> {
     let path = strip_location_suffix(raw);
     // Only a quoted path holds a space (see `hints::quoted_paths`); the
-    // URL encodes it.
-    if path.is_empty()
-        || path
-            .chars()
-            .any(|c| c.is_control() || (c.is_whitespace() && c != ' '))
-    {
+    // URL encodes it. Encoded, a character that hides text would pass the
+    // URL's own check, so it is refused here, as `is_safe_url` refuses it.
+    if path.is_empty() || path.chars().any(|c| c != ' ' && hides_text(c)) {
         return None;
     }
     let normalized = path.replace('\\', "/");
@@ -469,17 +466,60 @@ fn encode_file_path(path: &str) -> String {
     out
 }
 
+/// Whether `c` hides or reorders text instead of showing as itself: a
+/// control, Unicode whitespace (the no-break and ideographic spaces, line
+/// and paragraph separators), a format character (zero-width spaces and
+/// joiners, bidirectional controls, the byte order mark, tags), another
+/// default-ignorable code point (variation selectors, Hangul fillers), or
+/// the blank Braille pattern. Text holding one does not read as what it
+/// names, so a link holding one does not open.
+pub(crate) fn hides_text(c: char) -> bool {
+    c.is_control()
+        || c.is_whitespace()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{034F}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061C}'
+                | '\u{06DD}'
+                | '\u{070F}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08E2}'
+                | '\u{115F}'..='\u{1160}'
+                | '\u{17B4}'..='\u{17B5}'
+                | '\u{180B}'..='\u{180F}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{2800}'
+                | '\u{3164}'
+                | '\u{FE00}'..='\u{FE0F}'
+                | '\u{FEFF}'
+                | '\u{FFA0}'
+                | '\u{FFF0}'..='\u{FFFB}'
+                | '\u{110BD}'
+                | '\u{110CD}'
+                | '\u{13430}'..='\u{1343F}'
+                | '\u{1BCA0}'..='\u{1BCA3}'
+                | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0000}'..='\u{E0FFF}'
+        )
+}
+
 /// Whether a URI from terminal output is safe to hand to the OS opener.
 /// Terminal output is untrusted: an OSC 8 hyperlink (or a crafted line)
 /// can carry an arbitrary URI, and custom schemes (`vscode:`, `ms-…`,
 /// `javascript:`, app handlers that exec) are a known abuse/RCE vector.
 /// We allow only a conservative scheme allowlist and reject controls,
-/// whitespace, and absurd lengths. Pure — fully unit tested.
+/// whitespace, characters that hide or reorder text (see `hides_text`),
+/// and absurd lengths, so the URI a user reads is the one that opens. Pure
+/// — fully unit tested.
 pub fn is_safe_url(uri: &str) -> bool {
     if uri.is_empty() || uri.len() > MAX_URL_BYTES {
         return false;
     }
-    if uri.chars().any(|c| c.is_control() || c == ' ') {
+    if uri.chars().any(hides_text) {
         return false;
     }
     let Some((scheme, rest)) = uri.split_once(':') else {
@@ -1414,6 +1454,97 @@ mod tests {
         assert!(!is_safe_url("file://../../etc/passwd"));
         assert!(!is_safe_url(&format!("https://{}", "a".repeat(5000))));
         assert!(!is_safe_url("https:"), "scheme with empty target");
+    }
+
+    /// A URI holding a character that hides or reorders text does not read
+    /// as what it opens, so it is refused: every Unicode space, the format
+    /// characters (zero-width, bidirectional, byte order mark, tags) and
+    /// the other characters drawn as nothing. Visible non-ASCII stays.
+    #[test]
+    fn uris_holding_invisible_characters_are_refused() {
+        let invisible = [
+            '\u{a0}',
+            '\u{1680}',
+            '\u{2000}',
+            '\u{2001}',
+            '\u{2002}',
+            '\u{2003}',
+            '\u{2004}',
+            '\u{2005}',
+            '\u{2006}',
+            '\u{2007}',
+            '\u{2008}',
+            '\u{2009}',
+            '\u{200a}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{202f}',
+            '\u{205f}',
+            '\u{3000}',
+            '\u{200b}',
+            '\u{200c}',
+            '\u{200d}',
+            '\u{2060}',
+            '\u{feff}',
+            '\u{202e}',
+            '\u{202a}',
+            '\u{202b}',
+            '\u{202c}',
+            '\u{202d}',
+            '\u{2066}',
+            '\u{2067}',
+            '\u{2068}',
+            '\u{2069}',
+            '\u{180e}',
+            '\u{200e}',
+            '\u{200f}',
+            '\u{061c}',
+            '\u{ad}',
+            '\u{34f}',
+            '\u{fe0f}',
+            '\u{e0041}',
+            '\u{3164}',
+            '\u{115f}',
+            '\u{2800}',
+            '\u{85}',
+        ];
+        for c in invisible {
+            for uri in [
+                format!("https://x.test/a{c}b"),
+                format!("https://x{c}.test/"),
+                format!("mailto:a{c}@b.test"),
+                format!("file:///tmp/a{c}b.pdf"),
+            ] {
+                assert!(!is_safe_url(&uri), "U+{:04X} in {uri:?}", u32::from(c));
+            }
+            // Encoded, a detected path would slip past the URL's check.
+            let path = format!("/tmp/a{c}b.pdf");
+            assert_eq!(
+                path_match_to_file_uri(&path, None),
+                None,
+                "U+{:04X}",
+                u32::from(c)
+            );
+            let line = format!("open \"docs/my a{c}b.pdf\" now");
+            let term = term_with(line.chars().count(), &[&line], &[]);
+            assert!(
+                links_with_cwd(&term, Some("/work")).is_empty(),
+                "U+{:04X}",
+                u32::from(c)
+            );
+        }
+        for uri in [
+            "https://x.test/café",
+            "https://例.test/路径",
+            "https://x.test/a%E2%80%8Bb",
+            "file:///tmp/caf%C3%A9",
+        ] {
+            assert!(is_safe_url(uri), "{uri}");
+        }
+        assert_eq!(
+            path_match_to_file_uri("/tmp/my café.pdf", None).as_deref(),
+            Some("file:///tmp/my%20caf%C3%A9.pdf")
+        );
     }
 
     /// Drift guard: `file://` must be local-only — a remote
