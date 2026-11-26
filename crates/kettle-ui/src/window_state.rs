@@ -1425,6 +1425,8 @@ pub(crate) struct WindowState {
     /// press opens or closes Find; the press only shows until its release.
     pub(crate) hovered_search: bool,
     pub(crate) pressed_search: bool,
+    /// When the tooltip of the control under the pointer shows.
+    pub(crate) tooltip: crate::tooltip::TooltipClock,
     /// The pointer is over the tab bar's update chip.
     /// What a screen reader calls the open context menu, when it is not the
     /// terminal's. Each new menu resets it.
@@ -1683,9 +1685,10 @@ impl WindowState {
     }
 
     /// When the pointer leaves the window, nothing in the tab bar is under
-    /// it or pressed any more.
+    /// it or pressed any more, and no tooltip shows.
     pub(crate) fn leave_tab_bar(&mut self) {
         self.release_tab_hold();
+        self.tooltip.hover(None, std::time::Instant::now());
         self.release_titlebar_buttons();
         self.hovered_close_idx = None;
         self.hovered_tab_idx = None;
@@ -1977,6 +1980,7 @@ impl WindowState {
             pressed_settings: false,
             hovered_search: false,
             pressed_search: false,
+            tooltip: crate::tooltip::TooltipClock::default(),
             context_menu_a11y_label: None,
             context_menu_output_row: None,
             vi_mode: None,

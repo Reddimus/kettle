@@ -557,6 +557,13 @@ impl App {
                 ..
             } => {
                 ws.resume_native_pointer();
+                // A press hides the tooltip until the pointer leaves its
+                // control.
+                if ws.tooltip.press(std::time::Instant::now())
+                    && let Some(window) = &ws.window
+                {
+                    window.request_redraw();
+                }
                 // A paste still waiting for the clipboard never lands behind
                 // a click.
                 self.drop_clipboard_wait(ws);

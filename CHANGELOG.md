@@ -1563,6 +1563,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - In a narrow window, tabs whose titles share a start and an end no longer
   all read alike (`Tab …t-1`): a title with fewer than 16 columns to show
   keeps its start and ends with an ellipsis.
+- Tooltips no longer pop up the moment the pointer crosses a button. The
+  first one shows after the pointer rests for half a second, the next one at
+  once while you move along the row, and a click hides it until the pointer
+  leaves the button.
 
 ## Older releases
 

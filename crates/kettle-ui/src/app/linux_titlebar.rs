@@ -307,13 +307,11 @@ impl App {
     }
 }
 
-pub(super) fn window_control_tooltip_label(
+/// The window button whose tooltip shows: hovered and not held.
+pub(super) fn hovered_window_control_button(
     controls: &[kettle_render::WindowControlButton],
-) -> Option<&str> {
-    controls
-        .iter()
-        .find(|b| b.hovered && !b.pressed)
-        .map(|b| b.label.as_str())
+) -> Option<&kettle_render::WindowControlButton> {
+    controls.iter().find(|b| b.hovered && !b.pressed)
 }
 
 /// The window buttons in the header `band`, laid out as libadwaita does:

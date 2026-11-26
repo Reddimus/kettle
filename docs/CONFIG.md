@@ -1300,7 +1300,11 @@ including its transparency, and keeps an accent line. Wallpaper strips retain
 Horizontal New Tab Options and New Tab controls each have a hit area of at
 least 28 by 28 points (growing with a taller strip), a 4 point gap, an 8 point outside margin, and rounded hover and
 pressed feedback. Their tooltips follow the UI language; New Tab also shows
-its current configured shortcut. At 420 by 260 points, overflow keeps the
+its current configured shortcut. A tooltip shows once the pointer has rested
+on its control for half a second, and at once on the next control within a
+second of the last tooltip going away. A click hides it until the pointer
+leaves the control. The same timing applies to every tooltip in the strip, the
+GNOME header bar and the media viewer. At 420 by 260 points, overflow keeps the
 active title visible alongside both controls. Closing or renaming tabs uses
 the same layout as pointer actions and accessibility.
 

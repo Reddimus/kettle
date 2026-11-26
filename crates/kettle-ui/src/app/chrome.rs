@@ -102,39 +102,42 @@ impl App {
         }
     }
 
+    /// The strip's tooltip in this frame: the hovered control's, once
+    /// [`crate::tooltip::TooltipClock`] says it shows.
     fn new_tab_tooltip(
         &self,
         ws: &WindowState,
         controls: &[kettle_render::WindowControlButton],
     ) -> Option<String> {
-        if !ws.window_focused
-            || self.pointer_modal_open(ws)
-            || ws.context_menu.is_some()
-            || ws.pressed_new_tab
-            || ws.pressed_new_tab_menu
-            || ws.pressed_settings
-            || ws.pressed_search
-            || ws.pressed_window_control.is_some()
+        shown_strip_tooltip(
+            ws,
+            controls,
+            self.pointer_modal_open(ws),
+            (&self.cfg.keybinds, &self.ui_text),
+            std::time::Instant::now(),
+        )
+    }
+
+    /// Tell the window's tooltip clock which strip control is under the
+    /// pointer, after a pointer move set the strip's hover, and repaint when
+    /// the tooltip shown changes.
+    pub(super) fn sync_tooltip(
+        &self,
+        ws: &mut WindowState,
+        controls: &[kettle_render::WindowControlButton],
+    ) {
+        let target = strip_tooltip_target(
+            ws,
+            controls,
+            self.pointer_modal_open(ws),
+            (&self.cfg.keybinds, &self.ui_text),
+        )
+        .map(|(target, _)| target);
+        if ws.tooltip.hover(target, std::time::Instant::now())
+            && let Some(window) = &ws.window
         {
-            return None;
+            window.request_redraw();
         }
-        if let Some(label) = window_control_tooltip_label(controls) {
-            return Some(label.to_owned());
-        }
-        if ws.hovered_new_tab_menu && ws.linux_titlebar {
-            return Some(self.ui_text.text(kettle_i18n::Text::A11yMainMenu).into());
-        }
-        let target = if ws.hovered_settings {
-            Some(NewTabHoverTarget::Settings)
-        } else if ws.hovered_search {
-            Some(NewTabHoverTarget::Search)
-        } else if ws.hovered_new_tab_menu {
-            Some(NewTabHoverTarget::Menu)
-        } else {
-            ws.hovered_new_tab.then_some(NewTabHoverTarget::Plus)
-        };
-        let shortcut = target.and_then(|target| chrome_button_shortcut(&self.cfg.keybinds, target));
-        new_tab_tooltip(target, &self.ui_text, shortcut.as_deref())
     }
 
     pub(super) fn tab_bar(&self, ws: &WindowState) -> TabBar {
@@ -1149,6 +1152,73 @@ pub(super) fn chrome_button_description(
     let macos = cfg!(target_os = "macos");
     kettle_config::keybinds::hint_trigger(bindings, &chrome_button_action(target), macos)
         .map(|trigger| trigger.spoken_label(macos, tr))
+}
+
+/// The strip control under the pointer that has a tooltip, and what the
+/// tooltip says, whether or not it shows yet. Nothing in an unfocused window,
+/// under a modal or menu, or while a strip button is held.
+pub(super) fn strip_tooltip_target(
+    ws: &WindowState,
+    controls: &[kettle_render::WindowControlButton],
+    modal_open: bool,
+    (bindings, tr): (&kettle_config::keybinds::Bindings, &kettle_i18n::Translator),
+) -> Option<(crate::tooltip::TooltipTarget, String)> {
+    use crate::tooltip::TooltipTarget;
+    if !ws.window_focused
+        || modal_open
+        || ws.context_menu.is_some()
+        || ws.pressed_new_tab
+        || ws.pressed_new_tab_menu
+        || ws.pressed_settings
+        || ws.pressed_search
+        || ws.pressed_window_control.is_some()
+    {
+        return None;
+    }
+    if let Some(button) = hovered_window_control_button(controls) {
+        return Some((
+            TooltipTarget::WindowControl(button.action),
+            button.label.clone(),
+        ));
+    }
+    if ws.hovered_new_tab_menu && ws.linux_titlebar {
+        return Some((
+            TooltipTarget::NewTabMenu,
+            tr.text(kettle_i18n::Text::A11yMainMenu).into(),
+        ));
+    }
+    let target = if ws.hovered_settings {
+        Some(NewTabHoverTarget::Settings)
+    } else if ws.hovered_search {
+        Some(NewTabHoverTarget::Search)
+    } else if ws.hovered_new_tab_menu {
+        Some(NewTabHoverTarget::Menu)
+    } else {
+        ws.hovered_new_tab.then_some(NewTabHoverTarget::Plus)
+    };
+    let shortcut = target.and_then(|target| chrome_button_shortcut(bindings, target));
+    let text = new_tab_tooltip(target, tr, shortcut.as_deref())?;
+    let target = match target? {
+        NewTabHoverTarget::Menu => TooltipTarget::NewTabMenu,
+        NewTabHoverTarget::Plus => TooltipTarget::NewTab,
+        NewTabHoverTarget::Settings => TooltipTarget::Settings,
+        NewTabHoverTarget::Search => TooltipTarget::Search,
+    };
+    Some((target, text))
+}
+
+/// The strip's tooltip at `now`: the hovered control's, once the pointer has
+/// rested on it or tooltips are warm, and never after a press on it until
+/// the pointer leaves (see [`crate::tooltip::TooltipClock`]).
+pub(super) fn shown_strip_tooltip(
+    ws: &WindowState,
+    controls: &[kettle_render::WindowControlButton],
+    modal_open: bool,
+    text: (&kettle_config::keybinds::Bindings, &kettle_i18n::Translator),
+    now: std::time::Instant,
+) -> Option<String> {
+    let (target, text) = strip_tooltip_target(ws, controls, modal_open, text)?;
+    (ws.tooltip.shown(now) == Some(target)).then_some(text)
 }
 
 pub(super) fn new_tab_tooltip(

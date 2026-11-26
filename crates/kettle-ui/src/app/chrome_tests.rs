@@ -1822,3 +1822,89 @@ fn compact_header_rtl_and_wide_literal_titles_fit_the_lone_tab() {
         }
     }
 }
+
+/// Should 6 of the 6.0 UI review: the strip's tooltips showed the moment the
+/// pointer arrived. A tooltip now waits for the pointer to rest on its
+/// button, shows at once on the next button while tooltips are warm, and a
+/// press hides it until the pointer leaves the button and comes back; the
+/// release alone never brings it back.
+#[test]
+fn strip_tooltips_wait_for_a_rest_and_a_press_hides_them() {
+    use super::chrome::{shown_strip_tooltip, strip_tooltip_target};
+    use std::time::{Duration, Instant};
+    let bindings = kettle_config::keybinds::defaults();
+    let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+    let text = (&bindings, &tr);
+    let shown = |ws: &crate::window_state::WindowState, at| {
+        shown_strip_tooltip(ws, &[], false, text, at)
+    };
+    let hover = |ws: &mut crate::window_state::WindowState, at| {
+        let target = strip_tooltip_target(ws, &[], false, text).map(|(target, _)| target);
+        ws.tooltip.hover(target, at);
+    };
+    let ms = Duration::from_millis;
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    ws.window_focused = true;
+    let t0 = Instant::now();
+    ws.hovered_new_tab = true;
+    hover(&mut ws, t0);
+    assert_eq!(shown(&ws, t0), None, "nothing the moment the pointer lands");
+    assert_eq!(shown(&ws, t0 + ms(499)), None);
+    let plus = shown(&ws, t0 + ms(500)).expect("shown after a rest");
+    assert!(plus.starts_with("New Tab"), "{plus}");
+    // Straight on to the dropdown beside it: warm, so at once.
+    ws.hovered_new_tab = false;
+    ws.hovered_new_tab_menu = true;
+    hover(&mut ws, t0 + ms(600));
+    assert_eq!(
+        shown(&ws, t0 + ms(600)).as_deref(),
+        Some("New Tab Options")
+    );
+    // A press hides it, and the release leaves it hidden.
+    ws.tooltip.press(t0 + ms(700));
+    ws.pressed_new_tab_menu = true;
+    assert_eq!(shown(&ws, t0 + ms(700)), None);
+    ws.pressed_new_tab_menu = false;
+    hover(&mut ws, t0 + ms(800));
+    assert_eq!(shown(&ws, t0 + ms(5000)), None, "no reshow after release");
+    // Off the button and back: it shows again after a rest.
+    ws.hovered_new_tab_menu = false;
+    hover(&mut ws, t0 + ms(5000));
+    ws.hovered_new_tab_menu = true;
+    hover(&mut ws, t0 + ms(7000));
+    assert_eq!(shown(&ws, t0 + ms(7000)), None);
+    assert_eq!(
+        shown(&ws, t0 + ms(7500)).as_deref(),
+        Some("New Tab Options")
+    );
+}
+
+/// The tooltip clock follows the physical pointer: every native move tells
+/// it what is under the pointer, a native press hides the tooltip, leaving
+/// the window clears it, and the scheduler wakes once at its deadline
+/// instead of redrawing while it waits.
+#[test]
+fn the_tooltip_clock_follows_moves_presses_leaves_and_one_scheduled_wake() {
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(source.contains(
+        "let (new_tab_hover, hover_changed) = hover_tab_bar(ws, &bar); self.sync_tooltip(ws, &bar.window_controls);"
+    ));
+    assert!(source.contains(
+        "ws.resume_native_pointer(); // A press hides the tooltip until the pointer leaves its // control. if ws.tooltip.press(std::time::Instant::now())"
+    ));
+    let window_state = include_str!("../window_state.rs")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(window_state.contains(
+        "pub(crate) fn leave_tab_bar(&mut self) { self.release_tab_hold(); self.tooltip.hover(None, std::time::Instant::now());"
+    ));
+    assert!(source.contains("ws.leave_tab_bar();"));
+    assert!(source.contains("let (tooltip_due, tooltip_wake) = ws.tooltip.poll(now);"));
+    assert!(source.contains(
+        "if let Some(next) = tooltip_wait { wait = Some(wait.map_or(next, |current| current.min(next))); }"
+    ));
+}

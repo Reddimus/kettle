@@ -154,6 +154,10 @@ Window-chrome regressions use `kettle-render`'s `solid_chrome_is_quiet`,
 traffic-light insets, 1x/1.5x/2x scaling, active-tab overflow, control hit corners,
 gaps, AccessKit bounds and the production `ui_geometry` serializer.
 `new_tab_tooltips_translate` checks English/Spanish labels and live shortcuts.
+`kettle-ui`'s `tooltip::tests` and `strip_tooltips_wait_for_a_rest` check
+tooltip timing: the 500 ms rest, the one-second warm spell, a press hiding the
+tooltip until the pointer leaves, and a single scheduler wake per deadline;
+`the_tooltip_clock_follows_moves_presses_leaves` guards the wiring.
 Full render/UI suites and clippy remain required; native focus changes,
 hover/press feedback, tooltip placement and Spanish acceptance need a desktop.
 
