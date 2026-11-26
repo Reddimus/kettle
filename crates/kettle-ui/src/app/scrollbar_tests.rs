@@ -182,9 +182,9 @@ fn the_scrollbar_shows_the_arrow_where_a_press_grabs_it() {
 fn releasing_a_scrollbar_drag_restores_the_cursor_at_once() {
     let source: String = production_source().split_whitespace().collect();
     for needle in [
-        "ifend_scrollbar_drag(ws){self.sync_cursor_icon(ws);}",
+        "ifend_scrollbar_drag(ws){self.update_scrollbar_hover(ws);self.sync_cursor_icon(ws);}",
         "ifbcode==0{end_scrollbar_drag(ws);ws.tab_drag_active=false;",
-        "fnend_scrollbar_drag(ws:&mutWindowState)->bool{ifws.scrollbar_drag_offset.take().is_none(){returnfalse;}ifletSome(window)=&ws.window{window.request_redraw();}true}",
+        "fnend_scrollbar_drag(ws:&mutWindowState)->bool{ifws.scrollbar_drag_offset.take().is_none(){returnfalse;}ws.scrollbar_hover=None;ifletSome(window)=&ws.window{window.request_redraw();}true}",
     ] {
         assert!(source.contains(needle), "missing: {needle}");
     }
@@ -221,4 +221,32 @@ fn a_program_taking_motion_leaves_no_scrollbar_lit() {
     assert!(source.contains(
         "fnupdate_scrollbar_hover(&self,ws:&mutWindowState){ifws.scrollbar_drag_offset.is_some(){return;}letarea=self.area(ws);let(px,py)=(ws.cursor.xasf32,ws.cursor.yasf32);lethover=self.scrollbar_pane_at(ws,area,px,py);ifhover!=ws.scrollbar_hover{ws.scrollbar_hover=hover;"
     ));
+}
+
+/// A drag freezes the bar's hover, so it stays wide while held. Released off
+/// the bar, over text and without moving again, it must narrow: ending the
+/// drag lets the frozen hover go, and the native release works the hover out
+/// again from where the pointer is, which keeps it only on the bar.
+#[test]
+fn a_drag_released_off_the_bar_leaves_it_narrow() {
+    let mut ws = WindowState::new(1, Mux::new());
+    ws.scrollbar_hover = Some(PANE);
+    ws.scrollbar_drag_offset = Some(4.0);
+    assert!(super::end_scrollbar_drag(&mut ws));
+    assert_eq!(
+        ws.scrollbar_hover, None,
+        "the frozen hover went with the drag"
+    );
+    let cfg = Config {
+        scrollbar: ScrollbarMode::Auto,
+        ..Config::default()
+    };
+    let lines = (ROWS, HISTORY, 0);
+    let released = pane_scrollbar(&cfg, &ws, PANE, terminal(1.0), 1.0, lines);
+    ws.scrollbar_hover = Some(PANE);
+    let hovered = pane_scrollbar(&cfg, &ws, PANE, terminal(1.0), 1.0, lines);
+    assert!(
+        released.track_rect.2 < hovered.track_rect.2,
+        "released off the bar it is drawn at its resting width"
+    );
 }

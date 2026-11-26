@@ -1205,11 +1205,14 @@ pub(super) fn scrollbar_hit_contains((x, y, w, h): Rect, px: f32, py: f32) -> bo
 
 /// End a scrollbar drag, if one is live. Says whether one was: the bar it
 /// held wide narrows back on the frame this asks for, and the cursor it held
-/// as the arrow must be worked out again where the pointer is now.
+/// as the arrow, and the hover it froze, must be worked out again where the
+/// pointer is now. The frozen hover goes with the drag, so a release off the
+/// bar leaves it narrow.
 pub(super) fn end_scrollbar_drag(ws: &mut WindowState) -> bool {
     if ws.scrollbar_drag_offset.take().is_none() {
         return false;
     }
+    ws.scrollbar_hover = None;
     if let Some(window) = &ws.window {
         window.request_redraw();
     }
@@ -1225,7 +1228,9 @@ mod scrollbar_release_tests {
     #[test]
     fn a_release_ends_a_scrollbar_drag_once_and_says_so() {
         let mut ws = crate::window_state::WindowState::new(1, crate::mux::Mux::new());
+        ws.scrollbar_hover = Some(7);
         assert!(!end_scrollbar_drag(&mut ws), "no drag to end");
+        assert_eq!(ws.scrollbar_hover, Some(7), "a hover with no drag stays");
         ws.scrollbar_drag_offset = Some(4.0);
         assert!(end_scrollbar_drag(&mut ws), "the drag ended");
         assert_eq!(ws.scrollbar_drag_offset, None);

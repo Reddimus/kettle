@@ -1251,10 +1251,11 @@ impl App {
                 }
                 if bcode == 0 {
                     ws.search.dragging_editor = false;
-                    // A drag held the arrow wherever it went; released over
-                    // text the pointer gets the I-beam back now, not on its
-                    // next move.
+                    // A drag held the arrow and the bar's hover wherever it
+                    // went; released over text the pointer gets the I-beam
+                    // back and the bar narrows now, not on its next move.
                     if end_scrollbar_drag(ws) {
+                        self.update_scrollbar_hover(ws);
                         self.sync_cursor_icon(ws);
                     }
                     // End the drag-to-reorder gesture on
