@@ -69,20 +69,30 @@ fn trim_trailing_inner(s: &str, path: bool) -> &str {
             kept = at + 1;
         }
     }
-    // Everything past `kept` is ASCII punctuation, so every offset there is
-    // a character boundary.
-    if path
-        && let Some(end) = (kept..=bytes.len()).rev().find(|&end| {
-            let prefix = &s[..end];
-            [".", ".."].iter().any(|part| {
-                prefix == *part
-                    || prefix
-                        .strip_suffix(part)
-                        .is_some_and(|base| base.ends_with(['/', '\\']))
-            })
-        })
-    {
-        return &s[..end];
+    if path {
+        // A last component of `.` or `..` names a directory, so it stays.
+        // Any longer run of dots is prose, after a name (`notes...`) or a
+        // separator (`/usr/lib/...`), as Ghostty reads a path's end: the
+        // whole run goes, never just enough of it to leave `..`, which
+        // would name the parent instead. Each run is scanned once, so this
+        // stays linear too.
+        let mut end = bytes.len();
+        while end > kept {
+            if bytes[end - 1] != b'.' {
+                end -= 1;
+                continue;
+            }
+            let dots = bytes[..end]
+                .iter()
+                .rev()
+                .take_while(|&&b| b == b'.')
+                .count();
+            let start = end - dots;
+            if dots <= 2 && (start == 0 || matches!(bytes[start - 1], b'/' | b'\\')) {
+                return &s[..end];
+            }
+            end = start;
+        }
     }
     &s[..kept]
 }
@@ -217,6 +227,40 @@ mod tests {
         );
         assert_eq!(super::trim_path_trailing("./a)b(c)"), "./a)b(c)");
         assert_eq!(super::trim_path_trailing("./a)b(c))."), "./a)b(c)");
+    }
+
+    /// A last path component of `.` or `..` names a directory and stays. A
+    /// longer run of dots is an ellipsis, as after a name, and goes whole:
+    /// trimming `...` only down to `..` would name the parent directory.
+    #[test]
+    fn a_dot_run_ending_a_path_never_becomes_its_parent() {
+        use super::trim_path_trailing;
+        for (path, trimmed) in [
+            (".", "."),
+            ("..", ".."),
+            ("/tmp/.", "/tmp/."),
+            ("/tmp/..", "/tmp/.."),
+            (r"C:\x\..", r"C:\x\.."),
+            ("...", ""),
+            ("/tmp/...", "/tmp/"),
+            ("foo/....", "foo/"),
+            (r"C:\x\...", r"C:\x\"),
+            ("/usr/lib/...", "/usr/lib/"),
+            ("dir/notes...", "dir/notes"),
+            ("/tmp/a..", "/tmp/a"),
+            ("/tmp/a.", "/tmp/a"),
+        ] {
+            assert_eq!(trim_path_trailing(path), trimmed, "{path}");
+            for tail in [",", ").", "\".", ";:"] {
+                let candidate = format!("{path}{tail}");
+                assert_eq!(trim_path_trailing(&candidate), trimmed, "{candidate}");
+            }
+        }
+        // The run takes linear work however long it is.
+        let long = format!("a/{}", ".".repeat(1_000_000));
+        assert_eq!(trim_path_trailing(&long), "a/");
+        let long = format!("a/b{}", ".".repeat(1_000_000));
+        assert_eq!(trim_path_trailing(&long), "a/b");
     }
 
     #[test]

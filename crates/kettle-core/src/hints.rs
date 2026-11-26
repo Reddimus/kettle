@@ -762,6 +762,19 @@ mod tests {
         }
     }
 
+    /// A longer run of dots ending a path is an ellipsis: the hint names
+    /// the directory before it, never the parent `/tmp/..`.
+    #[test]
+    fn an_ellipsis_ending_a_path_hint_is_not_its_parent() {
+        for line in ["open /tmp/...", "open /tmp/....", "open /tmp/...)."] {
+            let spans = detect(&[line]);
+            assert_eq!(spans.len(), 1, "{line}: {spans:?}");
+            assert_eq!(spans[0].kind, Kind::Path);
+            assert_eq!(spans[0].text, "/tmp/", "{line}");
+            assert!(spans[0].bounded, "{line}");
+        }
+    }
+
     #[test]
     fn detects_each_kind_with_columns() {
         let rows = ["see https://example.com/x and /etc/hosts now"];
