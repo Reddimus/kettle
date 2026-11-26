@@ -415,3 +415,58 @@ fn a_gpu_recovery_applies_the_saved_gpu_policy() {
         SettingsApply::Restart
     );
 }
+
+/// Search focused again after a result was chosen starts from that
+/// result: clearing the query then keeps it, rather than going back to
+/// the row the first search began on.
+#[test]
+fn a_search_refocused_after_a_result_keeps_it() {
+    use winit::keyboard::{Key, ModifiersState as Mods, NamedKey};
+    let cats = categories(&[]);
+    let cfg = Config::default();
+    let graphics = category(&cats, Text::SettingsCategoryGraphics);
+    for macos in [true, false] {
+        let find = if macos { Mods::SUPER } else { Mods::CONTROL };
+        let mut nav = SettingsNav {
+            category: graphics,
+            field: 1,
+            ..Default::default()
+        };
+        let press = |nav: &mut SettingsNav, key: Key, mods| {
+            nav.search_key(&cats, &cfg, &EN, &key, mods, macos)
+        };
+        assert_eq!(
+            press(&mut nav, Key::Character("f".into()), find),
+            SearchRoute::Handled
+        );
+        nav.query = "font-size".into();
+        nav.reconcile(&cats, &cfg, &EN);
+        press(&mut nav, Key::Named(NamedKey::Enter), Mods::empty());
+        assert!(!nav.search_focused);
+        assert_eq!(focused(&cats, &nav), "font-size");
+        assert_eq!(
+            press(&mut nav, Key::Character("f".into()), find),
+            SearchRoute::Handled
+        );
+        assert!(nav.search_focused);
+        assert_eq!(
+            press(&mut nav, Key::Named(NamedKey::Escape), Mods::empty()),
+            SearchRoute::Handled
+        );
+        assert!(nav.query.is_empty());
+        assert_eq!(focused(&cats, &nav), "font-size", "macos={macos}");
+    }
+    // A click on the search field does the same.
+    let mut nav = SettingsNav {
+        category: graphics,
+        field: 1,
+        query: "font-size".into(),
+        ..Default::default()
+    };
+    nav.search_origin = Some((0, 0));
+    nav.reconcile(&cats, &cfg, &EN);
+    nav.apply_hit(&cats, &cfg, &EN, kettle_render::SettingsHit::Search);
+    nav.query = Default::default();
+    nav.reconcile(&cats, &cfg, &EN);
+    assert_eq!(focused(&cats, &nav), "font-size");
+}

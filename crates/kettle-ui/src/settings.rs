@@ -523,7 +523,7 @@ impl SettingsNav {
     ) -> Option<(usize, usize)> {
         match hit {
             kettle_render::SettingsHit::Search => {
-                self.search_focused = true;
+                self.focus_search();
                 self.capturing = false;
             }
             kettle_render::SettingsHit::Category(index) if index < cats.len() => {
@@ -571,7 +571,7 @@ impl SettingsNav {
             )
             && matches!(key, Key::Character(s) if s == "/");
         if find || slash {
-            self.search_focused = true;
+            self.focus_search();
             return SearchRoute::Handled;
         }
         if matches!(key, Key::Named(NamedKey::Escape)) {
@@ -786,6 +786,16 @@ impl SettingsNav {
             }
             RowMove::PageUp => nearest_enabled_field(cfg, fields, field.saturating_sub(half), 1),
         };
+    }
+
+    /// Focus the search field. Gaining focus, it notes the row focused now,
+    /// a result chosen earlier included, as the one a search cleared from
+    /// the field goes back to.
+    pub(crate) fn focus_search(&mut self) {
+        if !self.search_focused {
+            self.search_origin = Some((self.category, self.field));
+        }
+        self.search_focused = true;
     }
 
     /// Drop the query, and the row the search began on with it.

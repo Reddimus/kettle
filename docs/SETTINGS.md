@@ -43,8 +43,8 @@ value editing work there too; Home, End and the page keys stop at the first
 and last results. A search with no matches shows **No settings
 match**; **Tab** then leaves the search for the next category. **Esc** clears
 the query; another **Esc** closes Settings. A search cleared from its field,
-without moving into a result, leaves the highlight where it was before the
-search. Clicking a
+without moving into a result, leaves the highlight where it was when the field
+was focused, on a result chosen before that included. Clicking a
 category clears the search and opens that category. Focusing Search through
 assistive technology cancels any pending keybinding capture.
 

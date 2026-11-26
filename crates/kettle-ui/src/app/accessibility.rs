@@ -30,7 +30,7 @@ pub(super) fn focus_settings_search_accessibility(
             end_modal_composition(ws);
         }
         let nav = ws.settings_nav.as_mut().unwrap();
-        nav.search_focused = true;
+        nav.focus_search();
         nav.capturing = false;
         true
     } else {
