@@ -1095,6 +1095,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- In Settings search, Tab leaves a search with no matches, and clearing a
+  search you didn't move into puts the highlight back on the option it was
+  on, rather than on a match of something typed on the way.
+
 - On macOS the Settings Window blur switch is as wide as the other switches;
   it kept room for an Unavailable state that macOS never shows.
 

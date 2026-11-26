@@ -457,6 +457,9 @@ pub struct SettingsNav {
     pub capture_refused: bool,
     pub(crate) query: crate::text_editor::TextEditor,
     pub search_focused: bool,
+    /// The row focused when the query was first typed. A search left from
+    /// its field without moving into a result puts the focus back here.
+    pub(crate) search_origin: Option<(usize, usize)>,
 }
 
 /// Fold Spanish precomposed and decomposed accents without changing stored text.
@@ -495,7 +498,7 @@ impl SettingsNav {
         }) else {
             return false;
         };
-        self.query = Default::default();
+        self.clear_query();
         self.search_focused = false;
         self.capturing = false;
         self.category = category;
@@ -516,7 +519,7 @@ impl SettingsNav {
                 self.capturing = false;
             }
             kettle_render::SettingsHit::Category(index) if index < cats.len() => {
-                self.query = Default::default();
+                self.clear_query();
                 self.search_focused = false;
                 self.category = index;
                 self.field = nearest_enabled_field(cfg, &cats[index].fields, self.field, -1);
@@ -579,6 +582,13 @@ impl SettingsNav {
                 self.reconcile(cats, cfg, tr);
                 if !self.visible_fields(cats, tr).is_empty() {
                     self.search_focused = false;
+                } else if matches!(key, Key::Named(NamedKey::Tab)) {
+                    // No result to move into: Tab leaves the search for the
+                    // next category after the row the search began on.
+                    self.query = Default::default();
+                    self.reconcile(cats, cfg, tr);
+                    self.search_focused = false;
+                    return SearchRoute::Pass;
                 }
                 return SearchRoute::Handled;
             }
@@ -661,6 +671,21 @@ impl SettingsNav {
     }
 
     pub fn reconcile(&mut self, cats: &[Category], cfg: &Config, tr: &Translator) {
+        if self.query.is_empty() {
+            // Cleared from its field, the search chose nothing: the focus
+            // goes back to where it began, not to a match of a query
+            // typed on the way.
+            if let Some((category, field)) = self.search_origin.take()
+                && self.search_focused
+                && cats
+                    .get(category)
+                    .is_some_and(|cat| field < cat.fields.len())
+            {
+                (self.category, self.field) = (category, field);
+            }
+        } else if self.search_origin.is_none() {
+            self.search_origin = Some((self.category, self.field));
+        }
         let fields = self.visible_fields(cats, tr);
         if !fields.contains(&(self.category, self.field))
             && let Some(&(category, field)) = fields
@@ -755,13 +780,19 @@ impl SettingsNav {
         };
     }
 
+    /// Drop the query, and the row the search began on with it.
+    pub(crate) fn clear_query(&mut self) {
+        self.query = Default::default();
+        self.search_origin = None;
+    }
+
     /// Open the next (or previous) category on its first row, leaving any
     /// search.
     pub(crate) fn switch_category(&mut self, cats: &[Category], cfg: &Config, next: bool) {
         if cats.is_empty() {
             return;
         }
-        self.query = Default::default();
+        self.clear_query();
         let count = cats.len();
         let category = self.category.min(count - 1);
         self.category = if next {

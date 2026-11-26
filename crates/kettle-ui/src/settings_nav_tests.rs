@@ -307,3 +307,67 @@ fn a_pending_restart_lasts_until_the_change_is_undone() {
     // Before the first renderer there is nothing to restart.
     assert_eq!(pending_apply(None, &changed[0], false), SettingsApply::None);
 }
+
+/// A search typed and then cleared from its field, having chosen no
+/// result, leaves the focus on the row the search began on, not on a match
+/// of a query typed on the way ("q" matches Background opacity). With no
+/// results, Tab leaves the search for the next category after that row, as
+/// it does from results; Enter and ↓ have nothing to move into.
+#[test]
+fn a_search_that_chose_nothing_leaves_the_row_it_began_on() {
+    use winit::keyboard::{Key, ModifiersState as Mods, NamedKey};
+    let cats = categories(&[]);
+    let cfg = Config::default();
+    let graphics = category(&cats, Text::SettingsCategoryGraphics);
+    let start = SettingsNav {
+        category: graphics,
+        field: 1,
+        search_focused: true,
+        ..Default::default()
+    };
+    let type_query = |nav: &mut SettingsNav| {
+        for query in ["q", "qqzzxx"] {
+            nav.query = query.into();
+            nav.reconcile(&cats, &cfg, &EN);
+            if query == "q" {
+                assert_ne!(nav.category, graphics, "\"q\" focuses a match elsewhere");
+            }
+        }
+        assert!(nav.visible_fields(&cats, &EN).is_empty());
+    };
+    let press = |nav: &mut SettingsNav, key| {
+        nav.search_key(&cats, &cfg, &EN, &Key::Named(key), Mods::empty(), false)
+    };
+
+    let mut nav = start.clone();
+    type_query(&mut nav);
+    for key in [NamedKey::Enter, NamedKey::ArrowDown] {
+        assert_eq!(press(&mut nav, key), SearchRoute::Handled);
+        assert!(nav.search_focused, "{key:?} has no result to move into");
+    }
+    assert_eq!(press(&mut nav, NamedKey::Escape), SearchRoute::Handled);
+    assert!(nav.query.is_empty());
+    assert_eq!((nav.category, nav.field), (graphics, 1));
+
+    let mut nav = start.clone();
+    type_query(&mut nav);
+    assert_eq!(
+        press(&mut nav, NamedKey::Tab),
+        SearchRoute::Pass,
+        "the row handler opens the next category"
+    );
+    assert!(!nav.search_focused && nav.query.is_empty());
+    assert_eq!((nav.category, nav.field), (graphics, 1));
+    nav.switch_category(&cats, &cfg, true);
+    assert_eq!(nav.category, graphics + 1);
+
+    // A result moved into stays focused when the query is cleared.
+    let mut nav = start;
+    nav.query = "font".into();
+    nav.reconcile(&cats, &cfg, &EN);
+    assert_eq!(press(&mut nav, NamedKey::ArrowDown), SearchRoute::Handled);
+    let chosen = (nav.category, nav.field);
+    assert_eq!(press(&mut nav, NamedKey::Escape), SearchRoute::Handled);
+    assert_eq!((nav.category, nav.field), chosen);
+    assert_eq!(focused(&cats, &nav), "font-size");
+}

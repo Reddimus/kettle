@@ -30,7 +30,10 @@ case and Spanish accents. Results stay grouped by category; **Enter** or
 **Down** moves from the search field into the results. Normal navigation and
 value editing work there too; Home, End and the page keys stop at the first
 and last results. A search with no matches shows **No settings
-match**. **Esc** clears the query; another **Esc** closes Settings. Clicking a
+match**; **Tab** then leaves the search for the next category. **Esc** clears
+the query; another **Esc** closes Settings. A search cleared from its field,
+without moving into a result, leaves the highlight where it was before the
+search. Clicking a
 category clears the search and opens that category. Focusing Search through
 assistive technology cancels any pending keybinding capture.
 
