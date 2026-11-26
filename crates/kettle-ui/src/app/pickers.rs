@@ -1240,10 +1240,24 @@ pub(super) fn ssh_picker_hint(status: Option<&str>, tr: &kettle_i18n::Translator
     )
 }
 
-/// Keep the selected picker row inside the visible suffix. Picker rows have no
-/// separators, so this is the context-menu scroll rule reduced to equal-height
-/// rows and can be recomputed from selection on each frame.
+/// The first row a picker list shows when it opens: as far down as keeps the
+/// selected row in view. [`picker_scroll_offset_from`] with nothing shown yet.
+#[cfg(test)]
 pub(super) fn picker_scroll_offset(
+    row_count: usize,
+    selected: usize,
+    panel_height: f32,
+    row_height: f32,
+) -> usize {
+    picker_scroll_offset_from(0, row_count, selected, panel_height, row_height)
+}
+
+/// The first row a picker list of `row_count` equal-height rows shows when
+/// it last showed row `shown` first: still `shown` while the selected row is
+/// in view, else just far enough down or up to bring that row in. The keys
+/// move the list this way; the wheel moves `shown` itself.
+pub(super) fn picker_scroll_offset_from(
+    shown: usize,
     row_count: usize,
     selected: usize,
     panel_height: f32,
@@ -1261,10 +1275,14 @@ pub(super) fn picker_scroll_offset(
         .max(1)
         .min(row_count);
     let selected = selected.min(row_count - 1);
-    selected
-        .saturating_add(1)
-        .saturating_sub(visible)
-        .min(row_count - visible)
+    let shown = shown.min(row_count - visible);
+    if selected < shown {
+        selected
+    } else if selected >= shown + visible {
+        selected + 1 - visible
+    } else {
+        shown
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1490,13 +1508,30 @@ pub(super) fn theme_picker_list_with_footer(
     list
 }
 
-/// The results rectangle shares its x and width with the query header.
+/// The results rectangle shares its x and width with the query header. A
+/// list laid out as it opens, before any frame painted it; the window lays
+/// out its open picker with [`open_picker_menu`].
+#[cfg(test)]
 pub(super) fn picker_context_menu(
+    list: PickerList,
+    surface: (f32, f32),
+    cell: (f32, f32),
+    text_cell: (f32, f32),
+    top_chrome: f32,
+) -> Option<ContextMenu> {
+    picker_context_menu_at(list, surface, cell, text_cell, top_chrome, None)
+}
+
+/// The picker's card and rows for `list`, which showed row `shown` first
+/// when it was last painted (`PickerView::scroll`; `None` before the first
+/// frame). See [`picker_scroll_offset_from`].
+pub(super) fn picker_context_menu_at(
     mut list: PickerList,
     surface: (f32, f32),
     cell: (f32, f32),
     text_cell: (f32, f32),
     top_chrome: f32,
+    shown: Option<usize>,
 ) -> Option<ContextMenu> {
     // At least one row: the query header comes from this layout, and an
     // open picker keeps its field even with nothing listed.
@@ -1576,7 +1611,13 @@ pub(super) fn picker_context_menu(
         fit_context_menu_row(row, max_columns);
     }
     let (_, content_h) = kettle_render::menu::picker_scroll_content(height);
-    let scroll_offset = picker_scroll_offset(list.rows.len(), list.selected, content_h, row_height);
+    let scroll_offset = picker_scroll_offset_from(
+        shown.unwrap_or(0),
+        list.rows.len(),
+        list.selected,
+        content_h,
+        row_height,
+    );
     Some(ContextMenu {
         anchor: (x, y),
         rows: list.rows,
@@ -1589,6 +1630,18 @@ pub(super) fn picker_context_menu(
         picker_header_height: geometry.header.3,
         picker_footer: footer,
     })
+}
+
+/// Remember where the open picker's list was `painted`, so the next key or
+/// wheel step moves it from there (`PickerView::scroll`) instead of from
+/// the top. A context menu is not a picker.
+pub(super) fn remember_picker_scroll(ws: &mut WindowState, painted: Option<&ContextMenu>) {
+    if ws.context_menu.is_some() {
+        return;
+    }
+    if let Some(menu) = painted.filter(|menu| menu.picker_header_height > 0.0) {
+        ws.picker_view.scroll = Some(menu.scroll_offset);
+    }
 }
 
 /// The open picker laid out once: its card, its rows and its header (see
@@ -1608,12 +1661,13 @@ pub(super) fn open_picker_menu(
     text_cell: (f32, f32),
     top_chrome: f32,
 ) -> Option<ContextMenu> {
-    let mut menu = picker_context_menu(
+    let mut menu = picker_context_menu_at(
         open_picker_list(ws, cfg, theme_key, tr, notice)?,
         surface,
         cell,
         text_cell,
         top_chrome,
+        ws.picker_view.scroll,
     )?;
     // Lit only while the physical pointer is in the window: a pointer that
     // left it, or a control client's move, lights nothing.
@@ -1883,32 +1937,32 @@ pub(super) fn apply_picker_pointer(
             .scroll_offset
             .saturating_add_signed(delta)
             .min(max_offset);
-        // The picker viewport follows selection. Crossing the cut edge selects
-        // the newly exposed row and keeps keyboard/preview routing in sync. A
-        // disabled row (a placeholder) is never selected: the nearest enabled
-        // row above it in view is. Nor is the SSH launcher's Save or Remove
-        // row, which takes a deliberate Down or a click on it.
-        let wheel_rows = picker_pointer_select_limit(ws, cfg);
-        if offset == menu.scroll_offset {
+        if offset != menu.scroll_offset {
+            ws.picker_view.scroll = Some(offset);
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+        // The wheel scrolls the list only. The selection stays while it is
+        // in view; one the list scrolls past moves to the nearest row in view
+        // the wheel may select. That is never a disabled row (a placeholder)
+        // or a heading, nor the SSH launcher's Save or Remove row, which
+        // takes a deliberate Down or a click on it.
+        let limit = picker_pointer_select_limit(ws, cfg);
+        let selectable = |index: &usize| {
+            *index < limit
+                && menu
+                    .rows
+                    .get(*index)
+                    .is_some_and(|row| row.enabled && !row.separator)
+        };
+        let shown = offset..offset + visible;
+        if shown.contains(&menu.highlight) {
             menu.highlight
+        } else if menu.highlight < offset {
+            shown.clone().find(selectable).unwrap_or(menu.highlight)
         } else {
-            let exposed = offset + visible - 1;
-            let selectable = |index: usize| {
-                index < wheel_rows
-                    && menu
-                        .rows
-                        .get(index)
-                        .is_some_and(|row| row.enabled && !row.separator)
-            };
-            // Scrolling down, a heading (or another row nothing selects) at
-            // the bottom would leave the last selectable row where it was,
-            // and the viewport, which follows the selection, with it: take
-            // the first selectable row from the exposed one on instead.
-            (delta > 0)
-                .then(|| (exposed..menu.rows.len()).find(|&index| selectable(index)))
-                .flatten()
-                .or_else(|| (offset..=exposed).rev().find(|&index| selectable(index)))
-                .unwrap_or(menu.highlight)
+            shown.rev().find(selectable).unwrap_or(menu.highlight)
         }
     };
     let wheel = matches!(event, PickerPointer::Wheel(_));

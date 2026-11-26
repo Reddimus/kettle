@@ -563,6 +563,10 @@ pub(crate) const THEME_HOVER_PREVIEW_DELAY: std::time::Duration =
 /// opens.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct PickerView {
+    /// The first row the list showed when it was last painted, or where the
+    /// wheel left it. The list moves from there only as far as it must to
+    /// keep the selection in view. `None` until it first paints.
+    pub(crate) scroll: Option<usize>,
     /// Where the pointer was when the picker last saw it: at a hover, or when
     /// it opened, took a key or scrolled. Rows move under a pointer that
     /// stays put, so only a pointer somewhere else selects the row under it,

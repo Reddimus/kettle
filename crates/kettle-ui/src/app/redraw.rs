@@ -802,6 +802,7 @@ impl App {
             return;
         }
         let overlay = self.overlay(ws, reuse_pane_snapshots);
+        remember_picker_scroll(ws, overlay.context_menu.as_ref());
         // Search and completion state are semantic accessibility state. Reuse
         // the exact projection this frame will draw instead of rebuilding the
         // full overlay twice for the accessibility key and tree. Snapshot reuse

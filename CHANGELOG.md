@@ -1564,6 +1564,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   or SSH picker now selects it, as the arrow keys do; a pointer that stays
   still never takes the selection from the keys, and the theme picker
   previews a hovered theme only once the pointer rests on it.
+- The mouse wheel over the command palette and the theme, layout and SSH
+  pickers scrolls the list without moving the selection; only a selection
+  that scrolls out of view moves, to the nearest row still shown.
 
 ## Older releases
 

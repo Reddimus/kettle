@@ -4503,7 +4503,12 @@ with the highlighted row drawn as an inset rounded selection, and a prelit row
 results overflow also gets a decorative scrollbar thumb, a rounded pill in the
 gap between the selection's right inset and the border, drawn after the
 selection; its rows fill the panel from the header down, since pickers scroll
-with the selection and the wheel and keep no arrow strips. The panel's
+with the keys and the wheel and keep no arrow strips. The wheel scrolls the
+list only (`PickerView::scroll`): the selection stays while it is in view, and
+one the list scrolls past moves to the nearest row in view the wheel may
+select. Each frame records where it drew the list (`remember_picker_scroll`),
+and the keys move it from there only as far as keeps the selection in view
+(`picker_scroll_offset_from`). The panel's
 border is blended over the panel colour and drawn opaque, because the shader
 leaves the fill out of the border band; a translucent border would let the
 level beneath show through the edge. These are
