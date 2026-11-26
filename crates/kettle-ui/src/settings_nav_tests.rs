@@ -371,3 +371,47 @@ fn a_search_that_chose_nothing_leaves_the_row_it_began_on() {
     assert_eq!((nav.category, nav.field), chosen);
     assert_eq!(focused(&cats, &nav), "font-size");
 }
+
+/// A GPU recovery rebuilds the device from the saved config: its GPU
+/// policy then runs, so a force-software change no longer waits for a
+/// restart, while a renderer change still does, since recovery keeps the
+/// renderer Kettle started with.
+#[test]
+fn a_gpu_recovery_applies_the_saved_gpu_policy() {
+    let launch = Config::default();
+    let running = GraphicsSettings::of(&launch);
+    let software = Config {
+        gpu_force_software: !launch.gpu_force_software,
+        ..Config::default()
+    };
+    assert_eq!(
+        pending_apply(Some(&running), &software, false),
+        SettingsApply::Restart
+    );
+    let recovered = running.after_gpu_rebuild(&software);
+    assert_eq!(
+        pending_apply(Some(&recovered), &software, false),
+        SettingsApply::None
+    );
+    assert_eq!(
+        pending_apply(Some(&recovered), &launch, false),
+        SettingsApply::Restart,
+        "saving the old value back asks for a restart to undo the recovered one"
+    );
+    let renderer = Config {
+        gpu_force_software: software.gpu_force_software,
+        ..Config::parse_text(if read_choice(&launch, "renderer") == "cpu" {
+            "renderer = gpu"
+        } else {
+            "renderer = cpu"
+        })
+    };
+    assert_eq!(
+        pending_apply(
+            Some(&running.after_gpu_rebuild(&renderer)),
+            &renderer,
+            false
+        ),
+        SettingsApply::Restart
+    );
+}

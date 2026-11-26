@@ -271,6 +271,8 @@ launch** (the GPU/surface graph can't hot-swap). While a saved graphics setting
 differs from the one Kettle started with, the footer says "Restart Kettle to
 apply graphics changes.", however the change was made and however often
 Settings is reopened, until Kettle restarts or the setting is put back. A
+recovery from a lost GPU device builds the new device with the saved GPU
+settings, so their note goes then too; a renderer change still waits. A
 background opacity, type or blur change that this window was not opened able
 to show says "Restart Kettle or open a new window to apply pending changes."
 instead. The GPU picker persists the selection per application.

@@ -255,6 +255,25 @@ fn gpu_picker_checks_persist_results_before_flagging_restart() {
     );
 }
 
+/// A full GPU recovery builds the new device from the reloaded config, so
+/// Settings' restart note compares the saved graphics settings with what
+/// the recovery applied, not with the launch's.
+#[test]
+fn gpu_recovery_updates_the_running_graphics() {
+    let src = production_source();
+    let recover = src
+        .split("fn try_recover_gpu(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("try_recover_gpu");
+    let flat: String = recover.split_whitespace().collect();
+    let installed = flat.find("self.gpu=Some(new_gpu);").expect("installs the device");
+    let updated = flat
+        .find("self.running_graphics=Some(running.after_gpu_rebuild(&cfg));")
+        .expect("updates the running graphics");
+    assert!(installed < updated);
+}
+
 #[test]
 fn gpu_init_watchdog_fires_only_on_a_real_hang() {
     use super::gpu_init_timed_out;

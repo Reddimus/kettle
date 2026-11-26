@@ -286,6 +286,14 @@ impl GraphicsSettings {
             cfg.gpu_force_software.to_string(),
         ])
     }
+
+    /// What runs after a GPU recovery rebuilt the device from `cfg`: its GPU
+    /// policy, while the renderer stays the one Kettle started with.
+    pub(crate) fn after_gpu_rebuild(&self, cfg: &Config) -> Self {
+        let mut running = Self::of(cfg);
+        running.0[0].clone_from(&self.0[0]);
+        running
+    }
 }
 
 /// What the saved settings still wait for in a window: a restart while the

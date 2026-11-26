@@ -304,6 +304,12 @@ impl App {
             let _ = recovery_proxy.send_event(UserEvent::Wakeup);
         }));
         self.gpu = Some(new_gpu);
+        // The device was built from the reloaded config, so its GPU policy
+        // is what runs now, and Settings stops asking for a restart to
+        // apply it.
+        if let Some(running) = &self.running_graphics {
+            self.running_graphics = Some(running.after_gpu_rebuild(&cfg));
+        }
 
         self.finish_gpu_renderer_recovery(ws);
         for seq in secondary_seqs {
