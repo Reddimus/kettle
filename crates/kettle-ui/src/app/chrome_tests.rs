@@ -2164,32 +2164,33 @@ fn a_tab_drag_resting_on_an_overflow_arrow_scrolls_the_strip() {
     use std::time::{Duration, Instant};
     let ms = Duration::from_millis;
     let t0 = Instant::now();
-    assert_eq!(tab_drag_arrow_step(None, None, t0), (None, None));
-    let (step, rest) = tab_drag_arrow_step(None, Some(true), t0);
+    let any = |_| true;
+    assert_eq!(tab_drag_arrow_step(None, None, any, t0), (None, None));
+    let (step, rest) = tab_drag_arrow_step(None, Some(true), any, t0);
     assert_eq!((step, rest), (None, Some((true, t0))));
     assert_eq!(
-        tab_drag_arrow_step(rest, Some(true), t0 + ms(399)),
+        tab_drag_arrow_step(rest, Some(true), any, t0 + ms(399)),
         (None, Some((true, t0)))
     );
     let at = t0 + TAB_DRAG_SCROLL_DWELL;
-    let (step, rest) = tab_drag_arrow_step(rest, Some(true), at);
+    let (step, rest) = tab_drag_arrow_step(rest, Some(true), any, at);
     assert_eq!((step, rest), (Some(true), Some((true, at))), "a step");
     assert_eq!(
-        tab_drag_arrow_step(rest, Some(true), at + ms(100)).0,
+        tab_drag_arrow_step(rest, Some(true), any, at + ms(100)).0,
         None,
         "the next waits again"
     );
     assert_eq!(
-        tab_drag_arrow_step(rest, Some(true), at + TAB_DRAG_SCROLL_DWELL).0,
+        tab_drag_arrow_step(rest, Some(true), any, at + TAB_DRAG_SCROLL_DWELL).0,
         Some(true)
     );
     // The other arrow starts over, and leaving forgets the rest.
     let back = t0 + ms(2000);
     assert_eq!(
-        tab_drag_arrow_step(rest, Some(false), back),
+        tab_drag_arrow_step(rest, Some(false), any, back),
         (None, Some((false, back)))
     );
-    assert_eq!(tab_drag_arrow_step(rest, None, back), (None, None));
+    assert_eq!(tab_drag_arrow_step(rest, None, any, back), (None, None));
 
     // The scheduler steps a live drag by moving the dragged tab one place
     // on, which the strip keeps in view, and wakes for the next step.
@@ -2198,7 +2199,10 @@ fn a_tab_drag_resting_on_an_overflow_arrow_scrolls_the_strip() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(source.contains(
-        "let dragging = ws.tab_drag_active && ws.tab_drag_press.is_none(); let over = ws.hovered_scroll_arrow.filter(|_| dragging); let (step, rest) = tab_drag_arrow_step(ws.tab_drag_arrow, over, now); ws.tab_drag_arrow = rest; if let Some(forward) = step && ws.mux.move_active_tab(if forward { 1 } else { -1 })"
+        "let (step, rest) = tab_drag_arrow_step(ws.tab_drag_arrow, over, can_step, now); ws.tab_drag_arrow = rest; if let Some(forward) = step && ws.mux.move_active_tab(if forward { 1 } else { -1 })"
+    ));
+    assert!(source.contains(
+        "let dragging = ws.tab_drag_active && ws.tab_drag_press.is_none(); let over = ws.hovered_scroll_arrow.filter(|_| dragging);"
     ));
     assert!(source.contains("let tab_drag_scroll_wait = self.scroll_tab_drag_at_arrow(ws, now)"));
     assert!(source.contains(
@@ -2236,4 +2240,37 @@ fn an_actionable_toast_body_lights_under_the_pointer() {
         "kettle_render::UpdateToastHit::Details | kettle_render::UpdateToastHit::Body => { self.activate_notification_toast(ws, true) }"
     ));
     assert!(source.contains("Some(0) => Some(toast.geometry.rect),"));
+}
+
+/// Defect 8 of the 6.0 final review: a dragged tab already in the last slot,
+/// resting on the forward arrow, woke the scheduler every 400 ms to move a
+/// tab the mux could not move. Where the tab can go no further that way
+/// there is no rest and nothing to wake for; the rest starts again once the
+/// pointer moves to the other arrow or a new tab makes room.
+#[test]
+fn a_tab_drag_at_the_end_rests_on_nothing() {
+    use super::windowing::{TAB_DRAG_SCROLL_DWELL, tab_drag_arrow_step};
+    use std::time::{Duration, Instant};
+    let t0 = Instant::now();
+    let at_last = |forward: bool| !forward;
+    // Arriving on `›` with the tab last: nothing to wait for.
+    assert_eq!(tab_drag_arrow_step(None, Some(true), at_last, t0), (None, None));
+    // A rest that was running when the tab reached the end stops there.
+    let rest = Some((true, t0));
+    assert_eq!(
+        tab_drag_arrow_step(rest, Some(true), at_last, t0 + TAB_DRAG_SCROLL_DWELL),
+        (None, None)
+    );
+    // The way back still works.
+    let back = t0 + Duration::from_millis(50);
+    assert_eq!(
+        tab_drag_arrow_step(None, Some(false), at_last, back),
+        (None, Some((false, back)))
+    );
+    // A new tab past it makes room: the rest starts on the next look.
+    let later = t0 + Duration::from_secs(2);
+    assert_eq!(
+        tab_drag_arrow_step(None, Some(true), |_| true, later),
+        (None, Some((true, later)))
+    );
 }

@@ -183,7 +183,9 @@ ties the Esc a tooltip names to Esc's dispatch. `the_toast_button_under_the_poin
 (`kettle-ui`) cover the toast and notice buttons' hover, and
 `an_actionable_toast_body_lights_under_the_pointer` the notification toast's body.
 `a_tab_drag_resting_on_an_overflow_arrow_scrolls_the_strip` covers the
-400 ms drag auto-scroll; the drag itself needs a desktop.
+400 ms drag auto-scroll, and `a_tab_drag_at_the_end_rests_on_nothing` that it
+schedules no wake where the tab can go no further; the drag itself needs a
+desktop.
 Full render/UI suites and clippy remain required; native focus changes,
 hover/press feedback, tooltip placement and Spanish acceptance need a desktop.
 
