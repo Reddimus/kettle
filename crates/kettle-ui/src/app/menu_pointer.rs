@@ -425,6 +425,25 @@ impl MenuAnchor {
     }
 }
 
+/// Put the menu's own panel at `origin`. Its open submenus hang off its rows
+/// where they were, so a move closes them, leaving lit the row that opened
+/// the first; true when it did.
+pub(super) fn place_menu_root(menu: &mut ContextMenuState, origin: (f32, f32)) -> bool {
+    let root = menu
+        .drill_stack
+        .first()
+        .map_or(menu.anchor, |level| level.anchor);
+    let closes = !menu.drill_stack.is_empty() && root != origin;
+    if closes {
+        while menu.leave_submenu() {}
+    }
+    match menu.drill_stack.first_mut() {
+        Some(level) => level.anchor = origin,
+        None => menu.anchor = origin,
+    }
+    closes
+}
+
 /// `ui_geometry`'s account of what a menu was placed around: the point, and
 /// the line's span for one placed beside a text line (`null` for a pointer's
 /// menu). The panel itself is the menu's `rect`.

@@ -992,3 +992,38 @@ fn leaving_the_window_from_a_submenu_still_closes_it() {
         .expect("a motion");
     assert!(moved.contains("ws.context_menu_session.pointer.moved_in_window();"));
 }
+
+#[test]
+fn moving_a_menu_closes_the_submenus_that_hung_off_it() {
+    // The audit's resize: a keyboard menu flipped above the prompt at y 96,
+    // Split's submenu open beside its row at y 208; the window grows and the
+    // menu now fits below the prompt, at y 516.
+    let mut menu = state(vec![
+        submenu("Split", Action::SplitRight),
+        submenu("Pane", Action::ClosePane),
+    ]);
+    menu.anchor = (100.0, 96.0);
+    menu.highlight = 1;
+    assert!(menu.enter_submenu(1));
+    menu.anchor = (400.0, 208.0);
+    let closed = place_menu_root(&mut menu, (100.0, 516.0));
+    assert!(menu.drill_stack.is_empty(), "no submenu left at y 208");
+    assert!(closed);
+    assert_eq!(menu.anchor, (100.0, 516.0));
+    assert_eq!(menu.highlight, 1, "Pane, whose submenu it was, stays lit");
+    // A menu that stays where it is keeps its submenu.
+    assert!(menu.enter_submenu(1));
+    menu.anchor = (400.0, 540.0);
+    assert!(!place_menu_root(&mut menu, (100.0, 516.0)));
+    assert_eq!(menu.drill_stack.len(), 1);
+    assert_eq!(menu.drill_stack[0].anchor, (100.0, 516.0));
+    assert_eq!(menu.anchor, (400.0, 540.0));
+
+    let src = super::super::production_source();
+    let line = src
+        .split("fn place_context_menu_at_line(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("the line placement");
+    assert!(line.contains("&& place_menu_root(menu, placement.origin)"));
+}

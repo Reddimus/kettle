@@ -5392,7 +5392,9 @@ side, it takes the roomier one and is held short enough to leave the line in
 view (`ContextMenuSession::root_max_h`), and scrolls; with not one complete row
 of room beside the line it does not open, rather than cover the line or run
 off the window. A resize places it again beside the cursor's line once the
-terminals have reflowed (`follow_line_menu`), closing it if no row fits.
+terminals have reflowed (`follow_line_menu`), closing it if no row fits; a
+move closes its open submenus, which hung off its rows where they were, and
+leaves lit the row that opened them (`place_menu_root`).
 A right-click on a tab segment, native or through `ctl`, opens that tab's
 menu (`open_tab_menu`): Rename Tab…, Duplicate Tab, Move Tab Left/Right and
 Close Tab, as ordinary action rows. Like the terminal's menu it leaves an open

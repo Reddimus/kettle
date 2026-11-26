@@ -943,11 +943,11 @@ impl App {
             ws.context_menu_session.root_max_h = placement.max_h;
             ws.context_menu_session.line = true;
             ws.context_menu_session.anchor = Some(anchor);
-            if let Some(menu) = ws.context_menu.as_mut() {
-                match menu.drill_stack.first_mut() {
-                    Some(level) => level.anchor = placement.origin,
-                    None => menu.anchor = placement.origin,
-                }
+            if let Some(menu) = ws.context_menu.as_mut()
+                && place_menu_root(menu, placement.origin)
+            {
+                ws.context_menu_session.pointer.cancel_pending();
+                ws.accessibility_pending = true;
             }
             self.reclamp_context_menu(ws, surface);
         } else {
