@@ -398,6 +398,16 @@ impl App {
         }
     }
 
+    /// Where a press reaches the open modal text field to place its caret
+    /// (`modal_text_pointer`), the rect that takes the I-beam.
+    pub(super) fn modal_text_press_rect(&self, ws: &WindowState) -> Option<Rect> {
+        let field = self.modal_text_projection(ws)?;
+        Some(text_field_press_rect(
+            &field,
+            self.modal_field_cell_width(ws, &field),
+        ))
+    }
+
     pub(super) fn modal_text_pointer(&self, ws: &mut WindowState, press: bool) -> bool {
         if !press && !ws.dragging_modal_editor {
             return false;
@@ -407,19 +417,8 @@ impl App {
             return false;
         };
         let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
-        let slot =
-            kettle_render::text_field_rects(&field, self.modal_field_cell_width(ws, &field))[1];
-        if press
-            && !rect_contains(
-                if field.picker_header {
-                    field.rect
-                } else {
-                    slot
-                },
-                x,
-                y,
-            )
-        {
+        let reach = text_field_press_rect(&field, self.modal_field_cell_width(ws, &field));
+        if press && !rect_contains(reach, x, y) {
             return false;
         }
         if ws.ime_preedit.is_some() {
@@ -4135,6 +4134,50 @@ pub(super) fn picker_placeholder(ws: &WindowState, tr: &kettle_i18n::Translator)
     }
 }
 
+/// Where a press reaches `field` to place its caret: anywhere on a picker's
+/// header, else only the editor slot between its prefix and its hint. `cw` is
+/// the field's own cell width (`text_field_cell_width`).
+pub(super) fn text_field_press_rect(field: &kettle_render::TextFieldOverlay, cw: f32) -> Rect {
+    if field.picker_header {
+        field.rect
+    } else {
+        kettle_render::text_field_rects(field, cw)[1]
+    }
+}
+
+#[cfg(test)]
+mod text_field_press_tests {
+    use super::text_field_press_rect;
+
+    /// A picker's whole header places the caret; title edit and a Settings
+    /// value take a press only between their prefix and hint.
+    #[test]
+    fn a_press_reaches_a_picker_header_whole_and_a_field_between_its_labels() {
+        let mut field = kettle_render::TextFieldOverlay {
+            picker_header: false,
+            placeholder: String::new(),
+            text: "query".into(),
+            cursor_byte: 0,
+            selection: None,
+            horizontal_scroll: 0,
+            rect: (100.0, 20.0, 400.0, 24.0),
+            prefix: "Tab: ".into(),
+            hint: "Esc".into(),
+            accent_palette: 3,
+        };
+        assert_eq!(
+            text_field_press_rect(&field, 10.0),
+            kettle_render::text_field_rects(&field, 10.0)[1]
+        );
+        assert_eq!(
+            text_field_press_rect(&field, 10.0),
+            (150.0, 20.0, 320.0, 24.0)
+        );
+        field.picker_header = true;
+        assert_eq!(text_field_press_rect(&field, 10.0), field.rect);
+    }
+}
+
 pub(super) fn modal_editor(ws: &WindowState) -> Option<&crate::text_editor::TextEditor> {
     if ws.confirm_dialog.is_some() || ws.context_menu.is_some() {
         return None;
@@ -4383,7 +4426,7 @@ impl App {
     /// routing, focus-follows-mouse, and file drops keep using
     /// `any_modal_open`, because search does own the keyboard.
     pub(super) fn pointer_modal_open(&self, ws: &WindowState) -> bool {
-        self.non_search_modal_open(ws) || ws.preview_overlay.is_some()
+        modal_owns_pointer(ws)
     }
 
     /// Every modal that owns the keyboard and more: the search bar as well
@@ -4398,21 +4441,31 @@ impl App {
     /// `any_modal_open` and `pointer_modal_open` derive from, so the two
     /// cannot drift apart on anything but search.
     pub(super) fn non_search_modal_open(&self, ws: &WindowState) -> bool {
-        ws.palette_input.is_some()
-            || ws.settings_nav.is_some()
-            || ws.layout_picker_input.is_some()
-            || ws.theme_picker_input.is_some()
-            || ws.hint_state.is_some()
-            || ws.ssh_input.is_some()
-            || ws.context_menu.is_some()
-            || ws.editing_title.is_some()
-            || ws.vi_mode.is_some()
-            // The confirm dialog is a modal too. Its keys have a dedicated
-            // priority branch, but mouse, scroll, and cursor gating read this
-            // list. Without it, clicks fall through to the terminal behind a
-            // "Quit?" / "Close pane?" prompt.
-            || ws.confirm_dialog.is_some()
+        non_search_modal(ws)
     }
+}
+
+/// `App::pointer_modal_open`, for code that has only the window.
+pub(super) fn modal_owns_pointer(ws: &WindowState) -> bool {
+    non_search_modal(ws) || ws.preview_overlay.is_some()
+}
+
+/// `App::non_search_modal_open`, for code that has only the window.
+pub(super) fn non_search_modal(ws: &WindowState) -> bool {
+    ws.palette_input.is_some()
+        || ws.settings_nav.is_some()
+        || ws.layout_picker_input.is_some()
+        || ws.theme_picker_input.is_some()
+        || ws.hint_state.is_some()
+        || ws.ssh_input.is_some()
+        || ws.context_menu.is_some()
+        || ws.editing_title.is_some()
+        || ws.vi_mode.is_some()
+        // The confirm dialog is a modal too. Its keys have a dedicated
+        // priority branch, but mouse, scroll, and cursor gating read this
+        // list. Without it, clicks fall through to the terminal behind a
+        // "Quit?" / "Close pane?" prompt.
+        || ws.confirm_dialog.is_some()
 }
 
 pub(super) fn confirmation_button_action(

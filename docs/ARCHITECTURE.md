@@ -1934,7 +1934,13 @@ The search bar owns the keyboard but not the pointer. It is a reserved lane
 below the grid, so `App::any_modal_open` (keyboard, file drops,
 focus-follows-mouse) includes it while `App::pointer_modal_open` (the mouse
 arms and the cursor icon) does not; both derive from one
-`non_search_modal_open` list so they cannot drift on anything else. The pure
+`non_search_modal` list so they cannot drift on anything else
+(`modal_owns_pointer` answers `pointer_modal_open` for code that has only the
+window). Chrome under a pointer modal takes no press, so it shows no hover:
+`chrome_pointer` is `None` then, and `hover_tab_bar` clears the tab, `✕`,
+button and window-control hover, with the hand cursor and tooltips they drive,
+on the first frame after a modal opens. The Settings gear keeps its hover over
+open Settings, where a press on it still arms it. The pure
 `search_pointer_route` decides each pointer event by geometry: a press inside
 the lane goes to the bar's controls, a press above it is ordinary grid input,
 and motion or release follow whichever gesture is live (an editor drag keeps
@@ -1988,7 +1994,10 @@ the suffix, and commits through the same editor. IME candidate placement shapes
 the exact same projection, including preedit, rather than estimating text widths.
 Native and control pointer routes both place the caret and extend drag selections
 from those shaped stops. A pointer press ends composition before mapping into
-committed text.
+committed text. `text_field_press_rect` says where a press reaches a field (a
+picker's whole header, else the slot between prefix and hint), and the cursor
+shows the I-beam over that same rect, as it does over open Settings' search box
+and the find bar's editor.
 
 The SSH launcher's rows come from one model, `SshRow` in
 `kettle-ui::app::pickers`. A host whose name or alias equals the trimmed query
@@ -6369,7 +6378,10 @@ focus changes. Typing, wheel input, pointer exit and focus events explicitly
 dismiss it. Modifier presses preserve it so the advertised opening gesture
 remains visible. A selection drag suspends hover in `link_under_native_pointer`,
 and `link_rects` clears the hover flag of a link group any of whose cells is
-selected, leaving its status and hand cursor. Hint actions and their legend share `hint_action`; OSC 8
+selected, leaving its status and hand cursor. The hand also needs
+`link_click_opens`, the test the press makes (`link-single-click`, or Ctrl or
+Cmd held), so a plain hover keeps the I-beam and a modifier change re-syncs the
+cursor. Hint actions and their legend share `hint_action`; OSC 8
 captions use the URI rather than their displayed text. The underlines
 themselves are pane quads: `terminal::link_decoration` picks each line from
 the link's hover state, its source and `link-underline`, and pane quads are

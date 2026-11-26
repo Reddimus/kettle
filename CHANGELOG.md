@@ -1119,6 +1119,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - The find bar's match count and status reach screen readers as one named
   status, with no unnamed second one.
 
+- The pointer shows the arrow, not the text cursor, over a scrollbar and while dragging it.
+
+- The pointer shows the text cursor over the command palette's field, the picker filters, the title editor and the Settings search and value fields, as it already did in Find.
+
+- The pointer turns into a hand over a link only while a click would open it (Cmd or Ctrl held, or `link-single-click` on); a plain hover keeps the text cursor.
+
+- Tabs, their close buttons and the title-bar buttons no longer light up or show the hand cursor under the command palette, Settings, a picker or a dialog, where a click would not reach them.
+
+- A program that tracks the mouse no longer hears the pointer moving over the tab bar, the status bar or another split as motion at its edge.
+
 - `tab-min-width` is measured in logical pixels, as documented. On a display
   with a scale above 100% tabs could shrink to a fraction of the width set
   (half on a Retina display) before the tab bar started to scroll.

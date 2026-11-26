@@ -355,6 +355,44 @@ fn motion_coalesces_to_cell_crossings() {
     assert!(!App::motion_should_report(true, Some((4, 4)), (4, 4)));
 }
 
+/// A program in mouse mode hears plain motion only while the pointer is over
+/// its pane's terminal. Over the tab bar, the status bar, a pane titlebar or
+/// another split, `report_mouse` declines it before `send_mouse_to` turns
+/// the pointer into a cell, which would pin it to the pane's edge cell. The
+/// held-button branch is routed first, so a drag the program's press began
+/// still follows the pointer out of the pane. Native and control moves share
+/// this path.
+#[test]
+fn hover_outside_the_pane_reports_nothing_to_its_program() {
+    let source = production_source();
+    let report = source
+        .split("    fn report_mouse(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    }\n").next())
+        .expect("report_mouse")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let held = report
+        .find("return self.send_mouse_to(ws, pane, at, button, pressed, motion);")
+        .expect("a held button's drag is routed to its pane");
+    let gate = report
+        .find(
+            "if !hover_reaches_pane(motion, rect, (ws.cursor.x as f32, ws.cursor.y as f32)) \
+             { return MouseReport::Declined; }",
+        )
+        .expect("plain motion outside the focused pane is declined");
+    let hover = report
+        .find("self.send_mouse_to(ws, pane_id, MouseAt::Pointer(rect), btn, pressed, motion)")
+        .expect("hover goes to the focused pane");
+    assert!(held < gate && gate < hover);
+    let flat = source.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("fn hover_reaches_pane(motion: bool, terminal: Rect, (x, y): (f32, f32)) -> bool { !motion || rect_contains(terminal, x, y) }"),
+        "motion is the program's only over its pane"
+    );
+}
+
 #[test]
 fn mouse_and_focus_reports_use_chronological_user_input() {
     let source = production_source();

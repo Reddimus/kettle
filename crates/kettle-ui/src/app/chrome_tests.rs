@@ -10,7 +10,7 @@ fn horizontal_single_tab_controls_use_count_and_physical_hover() {
         .0;
     assert!(horizontal.contains("let show_controls = n > 1 || (hovered && !lone_title);"));
     assert!(horizontal.contains("rect,\n                    show_controls,"));
-    assert!(horizontal.contains("rect_contains(rect, p.x as f32, p.y as f32)"));
+    assert!(horizontal.contains("chrome_pointer(ws).is_some_and(|(x, y)| rect_contains(rect, x, y))"));
 }
 
 #[test]
@@ -1570,6 +1570,127 @@ fn moving_onto_or_off_the_settings_gear_changes_the_tab_bar_hover() {
     );
     assert!(ws.hovered_settings && !ws.hovered_new_tab_menu);
 }
+/// A modal that owns the pointer takes every press on the strip under it,
+/// so the strip shows no hover there: no tab fill, no `✕` chip, no button
+/// hover, and with them no hand cursor or tooltip. Opening one clears the
+/// hover already shown although the pointer has not moved. Over open
+/// Settings the gear still takes a press, so it keeps its hover, until
+/// Settings edits text or a dialog opens over it.
+#[test]
+fn the_strip_under_a_modal_shows_no_hover() {
+    use super::chrome::{NewTabHoverTarget, hover_tab_bar};
+    let mut bar = macos_titlebar_strip(1280.0, 1.0);
+    let h = bar.height;
+    bar.segments.push(kettle_render::TabSeg {
+        idx: 0,
+        rect: (300.0, 0.0, 200.0, h),
+        title_rect: (308.0, 0.0, 160.0, h),
+        hint: None,
+        close: (500.0 - h, 0.0, h, h),
+        title: "one".into(),
+        path: None,
+        active: true,
+        activity: kettle_render::TabActivity::Normal,
+    });
+    bar.hovered_tab_idx = Some(0);
+    let close = centre_of(bar.segments[0].close);
+    let gear = centre_of(bar.settings);
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    point_at(&mut ws, close);
+    assert_eq!(hover_tab_bar(&mut ws, &bar), (None, true));
+    assert_eq!((ws.hovered_tab_idx, ws.hovered_close_idx), (Some(0), Some(0)));
+
+    let strip_hover = |ws: &crate::window_state::WindowState| {
+        super::chrome::tab_bar_hover(ws) != (None, None, false, false, false, false)
+    };
+    fn dialog() -> super::ConfirmDialogState {
+        super::ConfirmDialogState {
+            heading: String::new(),
+            body: String::new(),
+            buttons: vec![super::ConfirmButton::Cancel],
+            focus_idx: 0,
+            on_confirm: super::ConfirmAction::ClosePane(1),
+            scroll: 0,
+            armed_press: None,
+            space_pressed: None,
+            paste: None,
+        }
+    }
+    type Open = fn(&mut crate::window_state::WindowState);
+    let modals: [(&str, Open); 4] = [
+        ("palette", |ws| {
+            ws.palette_input = Some((crate::text_editor::TextEditor::default(), 0));
+        }),
+        ("hint mode", |ws| ws.hint_state = Some((Vec::new(), String::new()))),
+        ("Settings", |ws| {
+            ws.settings_nav = Some(crate::settings::SettingsNav::default());
+        }),
+        ("a confirmation", |ws| ws.confirm_dialog = Some(dialog())),
+    ];
+    for (name, open) in modals {
+        let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+        point_at(&mut ws, close);
+        hover_tab_bar(&mut ws, &bar);
+        assert!(strip_hover(&ws), "{name}: hovered before it opens");
+        open(&mut ws);
+        assert_eq!(hover_tab_bar(&mut ws, &bar), (None, true), "{name}");
+        assert!(!strip_hover(&ws), "{name}: the hover shown is cleared");
+        for button in [bar.new_tab, bar.new_tab_menu] {
+            point_at(&mut ws, centre_of(button));
+            assert_eq!(hover_tab_bar(&mut ws, &bar), (None, false), "{name}");
+            assert!(!strip_hover(&ws), "{name}");
+        }
+    }
+
+    // The gear over open Settings takes a press, so it keeps its hover.
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    ws.settings_nav = Some(crate::settings::SettingsNav::default());
+    point_at(&mut ws, gear);
+    assert_eq!(
+        hover_tab_bar(&mut ws, &bar),
+        (Some(NewTabHoverTarget::Settings), true)
+    );
+    // While Settings edits text, or a dialog sits over it, Settings keeps
+    // the press.
+    ws.settings_text_edit = Some(crate::settings::SettingsTextEdit {
+        key: "background-image",
+        buf: crate::text_editor::TextEditor::default(),
+    });
+    assert_eq!(hover_tab_bar(&mut ws, &bar), (None, true));
+    assert!(!ws.hovered_settings);
+    ws.settings_text_edit = None;
+    ws.confirm_dialog = Some(dialog());
+    assert_eq!(hover_tab_bar(&mut ws, &bar), (None, false));
+    ws.confirm_dialog = None;
+    assert_eq!(
+        hover_tab_bar(&mut ws, &bar),
+        (Some(NewTabHoverTarget::Settings), true)
+    );
+}
+
+/// The rest of the chrome follows the same rule: the tab prelight and the
+/// lone tab's `✕` reveal the strip paints, the GNOME window controls, and
+/// the hand cursor over a window control or a toast all read the pointer
+/// only while no modal owns it.
+#[test]
+fn chrome_under_a_modal_reads_no_pointer() {
+    let src = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "fn chrome_pointer(ws: &WindowState) -> Option<(f32, f32)> { ws.native_pointer .filter(|_| !modal_owns_pointer(ws)) .map(|p| (p.x as f32, p.y as f32)) }",
+        "let hovered = chrome_pointer(ws).is_some_and(|(x, y)| rect_contains(rect, x, y));",
+        ".find(|s| chrome_pointer(ws).is_some_and(|(x, y)| rect_contains(s.rect, x, y)))",
+        "ws.window.as_ref().is_some_and(|w| w.is_maximized()), chrome_pointer(ws), ws.pressed_window_control,",
+        "let modal = self.pointer_modal_open(ws); let control_hover = window_control_at(&bar, cursor_x, cursor_y).filter(|_| !modal);",
+        ".chain(self.update_toast_projection(ws)) .filter(|_| !modal) .find_map(|toast| {",
+        "fn pointer_modal_open(&self, ws: &WindowState) -> bool { modal_owns_pointer(ws) }",
+    ] {
+        assert!(src.contains(needle), "{needle}");
+    }
+}
+
 #[test]
 fn compact_header_controls_join_plus_then_menu() {
     let cfg = kettle_config::Config::default();

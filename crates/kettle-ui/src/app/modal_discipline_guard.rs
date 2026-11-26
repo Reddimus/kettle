@@ -53,16 +53,18 @@ fn confirm_dialog_is_tracked_as_a_modal() {
              another overlay"
     );
     // `any_modal_open` and `pointer_modal_open` both derive from the one
-    // `non_search_modal_open` list, so the confirm dialog only needs to be
+    // `non_search_modal` list, so the confirm dialog only needs to be
     // counted there to gate keyboard and pointer input alike.
     assert!(
-        body("non_search_modal_open").contains("ws.confirm_dialog.is_some()"),
-        "non_search_modal_open must count the confirm dialog so input doesn't fall \
+        body("non_search_modal").contains("ws.confirm_dialog.is_some()"),
+        "non_search_modal must count the confirm dialog so input doesn't fall \
              through to the terminal behind it"
     );
     assert!(
         body("any_modal_open").contains("self.pointer_modal_open(ws)")
-            && body("pointer_modal_open").contains("self.non_search_modal_open(ws)"),
+            && body("pointer_modal_open").contains("modal_owns_pointer(ws)")
+            && body("modal_owns_pointer").contains("non_search_modal(ws)")
+            && body("non_search_modal_open").contains("non_search_modal(ws)"),
         "both modal predicates must derive from the shared non-search list"
     );
 }

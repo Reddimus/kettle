@@ -622,3 +622,26 @@ fn a_late_clipboard_answer_reaches_the_modal_field_that_asked_for_it() {
         )))
     ));
 }
+
+/// Every modal text field shows the I-beam where a press places its caret,
+/// as the find bar's editor does: the palette's and each picker's header, title
+/// edit and a Settings value between their labels, and open Settings' search
+/// box. The press and the cursor share `text_field_press_rect`; the I-beam
+/// ranks with the dialog buttons, ahead of the arrow a modal otherwise shows.
+#[test]
+fn modal_text_fields_show_the_i_beam_where_a_press_places_the_caret() {
+    let src = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "let reach = text_field_press_rect(&field, self.modal_field_cell_width(ws, &field)); if press && !rect_contains(reach, x, y) { return false; }",
+        "let field = self.modal_text_projection(ws)?; Some(text_field_press_rect( &field, self.modal_field_cell_width(ws, &field), ))",
+        "let field = self .modal_text_press_rect(ws) .is_some_and(|rect| rect_contains(rect, x, y));",
+        "let search = matches!( top_modal(ws), Some(KeyModal::Settings | KeyModal::SettingsSearch) ) && self.settings_pointer_hit(ws, (x, y)) == Some(kettle_render::SettingsHit::Search); (field || search).then_some(CursorIcon::Text)",
+        "let modal_text_hover = self.modal_text_hover_icon(ws);",
+        ".or(confirm_hover) .or(modal_text_hover) .or(search_hover)",
+    ] {
+        assert!(src.contains(needle), "{needle}");
+    }
+}
