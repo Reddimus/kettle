@@ -2802,11 +2802,12 @@ fn grapheme_copy_search_and_reflow_preserve_the_complete_cluster() {
     feed(&mut term, &mut parser, b"BCDE");
     let matches = crate::search::search(&term, cluster);
     assert_eq!(matches.len(), 1);
+    // The wide cluster's match ends on its spacer cell, as the find bar's does.
     assert_eq!(
         (matches[0].start, matches[0].end),
         (
             crate::search::SearchPoint::new(0, 1),
-            crate::search::SearchPoint::new(0, 1)
+            crate::search::SearchPoint::new(0, 2)
         )
     );
     let mut selection = Selection::new(

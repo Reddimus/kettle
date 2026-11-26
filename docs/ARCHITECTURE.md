@@ -2712,6 +2712,10 @@ whole scrollback buffer:
   the engine's single leftmost-first pass; consequently, a nullable alternative
   that wins with an empty match can shadow a later consuming alternative at
   the same position.
+  `search`/`search_with`, the whole-buffer call that tests and the fuzz
+  harness use, runs the find bar's exact-count scan (`SearchCountScan`) to the
+  end, so it returns the same `SearchSpan`s the find bar counts and stops
+  where that count is limited.
 - **`kettle-ui` owns interaction and scheduling.** Each `WindowState` has one
   search state and an in-memory per-pane query map. An open search bar follows
   focus and carries its query to the newly focused pane, where closing it

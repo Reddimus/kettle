@@ -1270,6 +1270,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   drawn only when a theme makes that colour too close in brightness to the
   other matches' to tell them apart, as about one bundled theme in five does.
 
+- Kettle's whole-scrollback search function, used by its tests and fuzzing, now finds exactly what the find bar finds: matches across a soft wrap, `^`, `$` and `\b` only at real line edges, one match per accented cell, and both cells of a wide character.
+
 - On Linux machines with many processors, about 12 or more, ffmpeg drew no
   video poster, video frame or HEIC/AVIF photo. Left to choose, it started
   filter and encoder threads for every processor, and their stacks and
