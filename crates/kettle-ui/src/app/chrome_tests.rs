@@ -1897,7 +1897,7 @@ fn the_tooltip_clock_follows_moves_presses_leaves_and_one_scheduled_wake() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(source.contains(
-        "let (new_tab_hover, hover_changed) = hover_tab_bar(ws, &bar); self.sync_tooltip(ws, &bar);"
+        "let (new_tab_hover, hover_changed) = hover_tab_bar(ws, &bar); self.sync_lane_control_hover(ws); self.sync_tooltip(ws, &bar);"
     ));
     assert!(source.contains(
         "ws.resume_native_pointer(); // A press hides the tooltip until the pointer leaves its // control. if ws.tooltip.press(std::time::Instant::now())"
@@ -2096,12 +2096,12 @@ fn moving_onto_a_lane_button_repaints_to_light_it() {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    assert!(source.contains("self.sync_tooltip(ws, &bar); self.sync_lane_control_hover(ws);"));
+    assert!(source.contains("self.sync_lane_control_hover(ws); self.sync_tooltip(ws, &bar);"));
     assert!(source.contains(
         "let hovered = self.hovered_lane_control(ws); if hovered != ws.lane_control_hover { ws.lane_control_hover = hovered; if let Some(window) = &ws.window { window.request_redraw(); } }"
     ));
     assert!(source.contains(
-        "(!matches!(hit, Hit::Inside | Hit::Resize) && lane_control_enabled(&lane, hit)) .then_some((pane, hit))"
+        "(!matches!(hit, Hit::Inside | Hit::Resize) && lane_control_enabled(&lane, hit)) .then_some((lane, button, hit))"
     ));
     let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
     ws.lane_control_hover = Some((1, kettle_render::MediaLaneHit::ZoomIn));

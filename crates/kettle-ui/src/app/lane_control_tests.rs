@@ -2436,3 +2436,101 @@ fn run_command_respects_preview_keyboard_ownership_in_each_window() {
     windows.get_mut(&2).unwrap().preview_focus = None;
     assert!(!pane_preview_holds_keyboard(&ws, &windows, foreign));
 }
+
+/// Must 4 of the 6.0 UI review: the media viewer's icon-only buttons had no
+/// tooltips. Each now names its action, with the key that does the same
+/// while the lane holds the keyboard; this keeps every key named the one the
+/// lane's key handling acts on, so a tooltip never promises a key that does
+/// something else.
+#[test]
+fn lane_button_tooltips_name_the_keys_the_lane_acts_on() {
+    use super::{lane_action_hit, lane_control_action, lane_control_key};
+    use crate::media::{PageStep, PreviewKey as K, ViewerKey};
+    use kettle_config::Action;
+    use kettle_render::MediaLaneHit as Hit;
+    use winit::keyboard::{Key, ModifiersState, NamedKey, SmolStr};
+    let winit_key = |key: kettle_config::Key| match key {
+        kettle_config::Key::Char(c) => Key::Character(SmolStr::new(c.to_string())),
+        kettle_config::Key::PageUp => Key::Named(NamedKey::PageUp),
+        kettle_config::Key::PageDown => Key::Named(NamedKey::PageDown),
+        kettle_config::Key::Escape => Key::Named(NamedKey::Escape),
+        other => panic!("no lane key {other:?}"),
+    };
+    let none = ModifiersState::empty();
+    for (hit, expected) in [
+        (Hit::ZoomIn, K::ZoomIn),
+        (Hit::ZoomOut, K::ZoomOut),
+        (Hit::Fit, K::Fit),
+        (Hit::Copy, K::Copy),
+        (Hit::Play, K::Play),
+        (Hit::Sound, K::Mute),
+        (Hit::Theater, K::Theater),
+        (Hit::Fullscreen, K::Fullscreen),
+        (Hit::PreviousPage, K::Page(PageStep::By(-1))),
+        (Hit::NextPage, K::Page(PageStep::By(1))),
+    ] {
+        for viewer in [false, true] {
+            let key = winit_key(lane_control_key(hit, viewer).expect("a lane key"));
+            assert_eq!(crate::media::preview_key(&key, none), expected, "{hit:?}");
+            assert_eq!(crate::media::viewer_key(&key, none), None, "{hit:?}");
+        }
+    }
+    // The viewer pins with P and closes with Esc; a lane does neither.
+    let pin = winit_key(lane_control_key(Hit::Pin, true).unwrap());
+    assert_eq!(crate::media::viewer_key(&pin, none), Some(ViewerKey::Pin));
+    let close = winit_key(lane_control_key(Hit::Close, true).unwrap());
+    assert_eq!(crate::media::preview_key(&close, none), K::Exit);
+    for hit in [Hit::Pin, Hit::Close, Hit::Toggle, Hit::Mode, Hit::Reload] {
+        assert_eq!(lane_control_key(hit, false), None, "{hit:?}");
+    }
+    // Outside the lane's keyboard, a bound action's shortcut: the inverse of
+    // the actions a lane runs as its buttons.
+    for action in [
+        Action::PreviewNext,
+        Action::PreviewPrevious,
+        Action::PreviewNextDiagram,
+        Action::PreviewPreviousDiagram,
+        Action::ClosePreview,
+        Action::PreviewSource,
+        Action::PreviewCanvas,
+        Action::PreviewCopy,
+        Action::PreviewReload,
+        Action::VideoPlay,
+        Action::VideoMute,
+        Action::PreviewZoomIn,
+        Action::PreviewZoomOut,
+        Action::PreviewFit,
+    ] {
+        let hit = lane_action_hit(&action).unwrap();
+        assert_eq!(lane_control_action(hit), Some(action));
+    }
+    assert_eq!(lane_control_action(Hit::Toggle), None);
+}
+
+/// The lane buttons' tooltips are the window's tooltip: the same clock, so
+/// the same rest, warm spell and press rule, the same name a screen reader
+/// hears, and the frame carries it even when the tab strip is hidden.
+#[test]
+fn lane_button_tooltips_share_the_clock_and_the_screen_reader_name() {
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(source.contains(
+        "let target = strip_tooltip_target(ws, bar, &self.strip_tooltip_context(ws, bar)) .or_else(|| self.lane_control_tooltip(ws)) .map(|tip| tip.target);"
+    ));
+    assert!(
+        source.contains(
+            "let mut tabbar = self.tab_bar(ws); self.attach_lane_tooltip(ws, &mut tabbar);"
+        )
+    );
+    assert!(source.contains(".filter(|tip| shown == Some(tip.target))"));
+    assert!(
+        source.contains(
+            "let Some(text) = self.lane_control_label(ws, lane, hit) else { continue; };"
+        )
+    );
+    assert!(source.contains("let label = self.lane_control_label(ws, &lane, hit)?;"));
+    assert!(source.contains("target: crate::tooltip::TooltipTarget::Media(lane.pane, hit),"));
+    assert!(source.contains("anchor: button,"));
+}

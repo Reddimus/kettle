@@ -3074,6 +3074,109 @@ impl App {
         !self.non_search_modal_open(ws) && ws.preview_overlay.is_none_or(|open| open.pane == pane)
     }
 
+    /// What a lane control is called, for a screen reader and in its
+    /// tooltip. `None` for a part that is no button, and for open outside
+    /// when nothing here opens the item.
+    pub(super) fn lane_control_label(
+        &self,
+        ws: &WindowState,
+        lane: &kettle_render::MediaLanePanel,
+        hit: kettle_render::MediaLaneHit,
+    ) -> Option<&'static str> {
+        Some(match hit {
+            kettle_render::MediaLaneHit::Previous => {
+                self.ui_text.text(kettle_i18n::Text::MediaLaneA11yPrevious)
+            }
+            kettle_render::MediaLaneHit::Next => {
+                self.ui_text.text(kettle_i18n::Text::MediaLaneA11yNext)
+            }
+            kettle_render::MediaLaneHit::PreviousPage => self.ui_text.text(if lane.document {
+                kettle_i18n::Text::MediaLaneA11yPreviousPage
+            } else {
+                kettle_i18n::Text::MediaLaneA11yPreviousDiagram
+            }),
+            kettle_render::MediaLaneHit::NextPage => self.ui_text.text(if lane.document {
+                kettle_i18n::Text::MediaLaneA11yNextPage
+            } else {
+                kettle_i18n::Text::MediaLaneA11yNextDiagram
+            }),
+            kettle_render::MediaLaneHit::Pin => {
+                self.ui_text.text(kettle_i18n::Text::MediaViewerA11yPin)
+            }
+            kettle_render::MediaLaneHit::Toggle if lane.collapsed => {
+                self.ui_text.text(kettle_i18n::Text::MediaLaneA11yExpand)
+            }
+            kettle_render::MediaLaneHit::Toggle => {
+                self.ui_text.text(kettle_i18n::Text::MediaLaneA11yCollapse)
+            }
+            kettle_render::MediaLaneHit::Close => {
+                self.ui_text.text(kettle_i18n::Text::MediaLaneA11yClose)
+            }
+            kettle_render::MediaLaneHit::OpenOutside => self
+                .preview_opens_outside(ws, lane.pane)?
+                .label(&self.ui_text),
+            kettle_render::MediaLaneHit::Mode
+                if lane.mode == kettle_render::MediaLaneMode::Source =>
+            {
+                self.ui_text.text(kettle_i18n::Text::MediaLaneA11yRendered)
+            }
+            kettle_render::MediaLaneHit::Mode => {
+                self.ui_text.text(kettle_i18n::Text::MediaLaneA11ySource)
+            }
+            kettle_render::MediaLaneHit::Canvas => {
+                self.ui_text.text(kettle_i18n::Text::MediaLaneA11yCanvas)
+            }
+            kettle_render::MediaLaneHit::Copy => {
+                self.ui_text.text(kettle_i18n::Text::MediaLaneA11yCopy)
+            }
+            kettle_render::MediaLaneHit::Reload => {
+                self.ui_text.text(kettle_i18n::Text::MediaLaneA11yReload)
+            }
+            kettle_render::MediaLaneHit::Play
+                if lane.play == Some(kettle_render::MediaLanePlay::Stop) =>
+            {
+                self.ui_text
+                    .text(kettle_i18n::Text::MediaLaneA11yStopPreview)
+            }
+            kettle_render::MediaLaneHit::Play
+                if lane.play == Some(kettle_render::MediaLanePlay::Pause) =>
+            {
+                self.ui_text
+                    .text(kettle_i18n::Text::MediaLaneA11yPauseVideo)
+            }
+            kettle_render::MediaLaneHit::Play => {
+                self.ui_text.text(kettle_i18n::Text::MediaLaneA11yPlayVideo)
+            }
+            kettle_render::MediaLaneHit::Sound
+                if lane.sound == Some(kettle_render::MediaLaneSound::Muted) =>
+            {
+                self.ui_text
+                    .text(kettle_i18n::Text::MediaLaneA11yUnmuteVideo)
+            }
+            kettle_render::MediaLaneHit::Sound => {
+                self.ui_text.text(kettle_i18n::Text::MediaLaneA11yMuteVideo)
+            }
+            kettle_render::MediaLaneHit::ZoomOut => {
+                self.ui_text.text(kettle_i18n::Text::MediaLaneA11yZoomOut)
+            }
+            kettle_render::MediaLaneHit::ZoomIn => {
+                self.ui_text.text(kettle_i18n::Text::MediaLaneA11yZoomIn)
+            }
+            kettle_render::MediaLaneHit::Fit => {
+                self.ui_text.text(kettle_i18n::Text::MediaLaneA11yFit)
+            }
+            kettle_render::MediaLaneHit::Theater => {
+                self.ui_text.text(kettle_i18n::Text::MediaViewerTheater)
+            }
+            kettle_render::MediaLaneHit::Fullscreen => {
+                self.ui_text.text(kettle_i18n::Text::MediaViewerFullscreen)
+            }
+            kettle_render::MediaLaneHit::Resize
+            | kettle_render::MediaLaneHit::Scrub
+            | kettle_render::MediaLaneHit::Inside => return None,
+        })
+    }
+
     /// The lane button under the real pointer that a press would act on, by
     /// pane: what the renderer lights from the same pointer. Nothing under a
     /// dialog or menu.
@@ -3081,6 +3184,20 @@ impl App {
         &self,
         ws: &WindowState,
     ) -> Option<(u64, kettle_render::MediaLaneHit)> {
+        self.hovered_lane_button(ws)
+            .map(|(lane, _, hit)| (lane.pane, hit))
+    }
+
+    /// The lane under the real pointer, the button there and what a press
+    /// on it does, for [`Self::hovered_lane_control`].
+    fn hovered_lane_button(
+        &self,
+        ws: &WindowState,
+    ) -> Option<(
+        kettle_render::MediaLanePanel,
+        Option<kettle_render::Rect4>,
+        kettle_render::MediaLaneHit,
+    )> {
         use kettle_render::MediaLaneHit as Hit;
         if self.non_search_modal_open(ws) {
             return None;
@@ -3089,9 +3206,46 @@ impl App {
         let (x, y) = (pointer.x as f32, pointer.y as f32);
         let (pane, rect, collapsed) = self.preview_lane_at(ws, x, y)?;
         let lane = self.preview_lane_panel(ws, pane, rect, collapsed)?;
-        let hit = self.preview_lane_geometry(ws, &lane)?.hit_test(x, y)?;
+        let geometry = self.preview_lane_geometry(ws, &lane)?;
+        let hit = geometry.hit_test(x, y)?;
+        let button = lane_controls(&geometry)
+            .into_iter()
+            .find(|(_, _, control)| *control == hit)
+            .and_then(|(_, rect, _)| rect);
         (!matches!(hit, Hit::Inside | Hit::Resize) && lane_control_enabled(&lane, hit))
-            .then_some((pane, hit))
+            .then_some((lane, button, hit))
+    }
+
+    /// The tooltip of the lane button under the real pointer: what it is
+    /// called, and the key that does the same where there is one, hung from
+    /// the button. Whether it shows yet is the tooltip clock's to say.
+    pub(super) fn lane_control_tooltip(&self, ws: &WindowState) -> Option<ChromeTooltip> {
+        if !ws.window_focused || ws.context_menu.is_some() || ws.tab_drag_active {
+            return None;
+        }
+        let (lane, button, hit) = self.hovered_lane_button(ws)?;
+        let label = self.lane_control_label(ws, &lane, hit)?;
+        let viewer = ws
+            .preview_overlay
+            .is_some_and(|open| open.pane == lane.pane);
+        let shortcut = if self.preview_holds_keyboard(ws, lane.pane) {
+            lane_control_key(hit, viewer).map(|key| {
+                kettle_config::Trigger::new(kettle_config::Mods::empty(), key)
+                    .ui_label(cfg!(target_os = "macos"))
+            })
+        } else {
+            None
+        }
+        .or_else(|| {
+            lane_control_action(hit).and_then(|action| {
+                kettle_config::keybinds::ui_hint_label(&self.cfg.keybinds, &action)
+            })
+        });
+        Some(ChromeTooltip {
+            target: crate::tooltip::TooltipTarget::Media(lane.pane, hit),
+            text: shortcut.map_or_else(|| label.to_owned(), |key| format!("{label}  {key}")),
+            anchor: button,
+        })
     }
 
     /// Repaint as the pointer moves onto or off a lane button, so its chip

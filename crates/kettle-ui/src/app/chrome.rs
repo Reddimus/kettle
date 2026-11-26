@@ -133,11 +133,30 @@ impl App {
         }
     }
 
+    /// Give the frame's `bar` the tooltip of the lane button under the
+    /// pointer, when the strip has none, once it shows. A strip hidden with
+    /// one tab still carries it to the renderer.
+    pub(super) fn attach_lane_tooltip(&self, ws: &WindowState, bar: &mut TabBar) {
+        let shown = ws.tooltip.shown(std::time::Instant::now());
+        if bar.tooltip.is_some() || !matches!(shown, Some(crate::tooltip::TooltipTarget::Media(..)))
+        {
+            return;
+        }
+        if let Some(tip) = self
+            .lane_control_tooltip(ws)
+            .filter(|tip| shown == Some(tip.target))
+        {
+            bar.tooltip = Some(tip.text);
+            bar.tooltip_anchor = tip.anchor;
+        }
+    }
+
     /// Tell the window's tooltip clock which strip control is under the
     /// pointer, after a pointer move set the strip's hover, and repaint when
     /// the tooltip shown changes.
     pub(super) fn sync_tooltip(&self, ws: &mut WindowState, bar: &TabBar) {
         let target = strip_tooltip_target(ws, bar, &self.strip_tooltip_context(ws, bar))
+            .or_else(|| self.lane_control_tooltip(ws))
             .map(|tip| tip.target);
         if ws.tooltip.hover(target, std::time::Instant::now())
             && let Some(window) = &ws.window

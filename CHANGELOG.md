@@ -1574,6 +1574,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - The media viewer's and preview lane's header buttons light up under the
   pointer and take a press anywhere in a 24 by 24 point target, up from 25
   by 17.5 pixels; the header row is a little taller to make room.
+- Those buttons have tooltips naming what they do and the key that does the
+  same.
 
 ## Older releases
 

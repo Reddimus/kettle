@@ -1073,7 +1073,10 @@ background and the source, and reload last. Each of these buttons takes a
 press anywhere in a target at least 24 by 24 points, so the header row, and a
 gallery's detail line, are that tall even where a line of text is shorter;
 the button under the pointer lights, unless it would do nothing (browsing
-past either end). A press or the wheel over a lane never
+past either end). Resting the pointer on a button shows its name in a
+tooltip, with the key that does the same while the lane holds the keyboard
+(`+`, `-`, `0`, `C`, `K`, `M`, `T`, `F`, Page Up and Page Down, and in the
+centred viewer `P` and Esc), or otherwise the shortcut bound to its action. A press or the wheel over a lane never
 reaches the terminal, and menus and dialogs open over it without closing it.
 The command palette lists it as "Open media shelf". On macOS its default
 chord is `Ctrl+Shift+Cmd+I`; elsewhere it has no default binding.

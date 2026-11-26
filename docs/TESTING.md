@@ -169,6 +169,10 @@ the end ellipsis below 16 columns.
 and `browsing_past_an_end_is_not_a_live_button` (`kettle-render`) and
 `moving_onto_a_lane_button_repaints_to_light_it` (`kettle-ui`) cover the media
 lane buttons' WCAG 2.5.8 targets and hover fill.
+`lane_button_tooltips_name_the_keys_the_lane_acts_on` checks every key a lane
+button's tooltip names against the lane's own key handling, and
+`lane_button_tooltips_share_the_clock_and_the_screen_reader_name` guards their
+timing and names.
 Full render/UI suites and clippy remain required; native focus changes,
 hover/press feedback, tooltip placement and Spanish acceptance need a desktop.
 

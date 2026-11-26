@@ -36,6 +36,8 @@ pub(crate) enum TooltipTarget {
     ScrollForward,
     /// A tab whose title the strip shortened, by index.
     TabTitle(usize),
+    /// A media viewer or preview lane's button, by pane.
+    Media(u64, kettle_render::MediaLaneHit),
 }
 
 /// The pointer's tooltip state in one window.
