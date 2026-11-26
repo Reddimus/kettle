@@ -589,7 +589,8 @@ impl App {
     /// wherever focus has gone since, so no program is left holding half a
     /// click and no other gets a release it never had the press for. The
     /// newest press owns the drag, so a gesture of Kettle's own started
-    /// since takes it. Hover goes to the focused pane.
+    /// since takes it. Hover goes to the focused pane, and only while the
+    /// pointer is over that pane's terminal.
     pub(super) fn report_mouse(
         &mut self,
         ws: &mut WindowState,
@@ -625,8 +626,12 @@ impl App {
         let Some(rect) = self.focused_terminal(ws, self.area(ws)) else {
             return MouseReport::Declined;
         };
-        // Motion over a lane is the lane's: only a drag the program's own
-        // press began follows the pointer there (above).
+        // Motion outside the pane is not the program's, and motion over a
+        // lane is the lane's: only a drag the program's own press began
+        // follows the pointer there (above).
+        if !hover_reaches_pane(motion, rect, (ws.cursor.x as f32, ws.cursor.y as f32)) {
+            return MouseReport::Declined;
+        }
         if motion && self.preview_lane_under_pointer(ws) {
             return MouseReport::Declined;
         }
@@ -1021,6 +1026,39 @@ impl App {
             }
         }
         true
+    }
+}
+
+/// Whether a mouse event that no held button owns reaches the focused
+/// pane's program, with `terminal` that pane's terminal and the pointer at
+/// `(x, y)`. Plain motion does only while the pointer is over the pane, as
+/// xterm reports none for a pointer outside its window: moving over the tab
+/// bar, the status bar or another split reports nothing, rather than motion
+/// pinned to the pane's edge cell. A press is not held back here, and a drag
+/// the program's own press began is not decided here: it follows the pointer
+/// anywhere, at the nearest edge cell.
+pub(super) fn hover_reaches_pane(motion: bool, terminal: Rect, (x, y): (f32, f32)) -> bool {
+    !motion || rect_contains(terminal, x, y)
+}
+
+#[cfg(test)]
+mod hover_report_tests {
+    use super::hover_reaches_pane;
+
+    /// Motion is the program's only inside its pane's terminal, its first
+    /// row and column included; past any edge it reports nothing. A press is
+    /// never held back here.
+    #[test]
+    fn plain_motion_reaches_the_program_only_over_its_pane() {
+        let terminal = (100.0, 40.0, 640.0, 384.0);
+        for inside in [(100.0, 40.0), (420.0, 200.0), (739.9, 423.9)] {
+            assert!(hover_reaches_pane(true, terminal, inside), "{inside:?}");
+        }
+        // The tab bar above, the status bar below, a split to either side.
+        for outside in [(420.0, 16.0), (420.0, 424.0), (99.0, 200.0), (740.0, 200.0)] {
+            assert!(!hover_reaches_pane(true, terminal, outside), "{outside:?}");
+            assert!(hover_reaches_pane(false, terminal, outside), "{outside:?}");
+        }
     }
 }
 
