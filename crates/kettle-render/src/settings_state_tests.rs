@@ -60,3 +60,58 @@ fn a_search_marks_no_category_as_open() {
     ));
     assert!(!source.contains("layout.category_rects.get(set.active_category)"));
 }
+
+/// The focused row's fill, and the open category's, stand out from the
+/// panel by 1.3:1 in every bundled theme, light and dark, in both blend
+/// modes and with the theme's, a palette and a GNOME desktop's accent, so
+/// the fill marks focus along with its bar; Kettle Day's was 1.07:1. The
+/// row's label keeps 4.5:1 on it, its description the text floor, and the
+/// bar 3:1 against the panel and the fill. A fill that already stood out
+/// keeps the light tint it had.
+#[test]
+fn the_focused_row_fill_stands_out_in_every_theme() {
+    use super::chrome::{ICON_CONTRAST, TEXT_CONTRAST};
+    use super::color::contrast_ratio as ratio;
+    use super::settings::{SETTINGS_SELECTED_ALPHA, SETTINGS_SELECTED_CONTRAST};
+    let mut colors = chrome::Colors::default();
+    let mut failures = Vec::new();
+    for name in kettle_config::Theme::list() {
+        let theme = kettle_config::Theme::by_name(name);
+        let bg = theme.background;
+        for linear in [true, false] {
+            for accent in [
+                theme.accent,
+                theme.palette[4],
+                kettle_config::Rgb::new(0xbb, 0x99, 0xf8),
+            ] {
+                let palette = settings_colors(&theme, accent, linear, &mut colors);
+                let at = format!("{name} linear={linear} accent={accent:?}");
+                let fill = ratio(palette.selected, bg);
+                if fill + 0.005 < SETTINGS_SELECTED_CONTRAST {
+                    failures.push(format!("{at}: fill {fill:.3}"));
+                }
+                let light = color::over(bg, accent, SETTINGS_SELECTED_ALPHA, linear);
+                if ratio(light, bg) >= SETTINGS_SELECTED_CONTRAST && palette.selected != light {
+                    failures.push(format!("{at}: a fill that stood out changed"));
+                }
+                let label = colors.text(theme.foreground, palette.selected);
+                for (role, ink, floor) in [
+                    ("label", label, TEXT_CONTRAST),
+                    ("description", palette.description_selected, TEXT_CONTRAST),
+                    ("bar on the fill", palette.focus, ICON_CONTRAST),
+                ] {
+                    if ratio(ink, palette.selected) + 0.005 < floor {
+                        failures.push(format!("{at}: {role} {:.3}", ratio(ink, palette.selected)));
+                    }
+                }
+                if ratio(palette.focus, bg) + 0.005 < ICON_CONTRAST {
+                    failures.push(format!("{at}: bar {:.3}", ratio(palette.focus, bg)));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    let day = kettle_config::Theme::by_name("Kettle Day");
+    let palette = settings_colors(&day, day.accent, true, &mut colors);
+    assert!(ratio(palette.selected, day.background) >= SETTINGS_SELECTED_CONTRAST - 0.005);
+}

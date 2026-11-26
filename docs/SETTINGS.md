@@ -10,7 +10,8 @@ shows the category title, a short description under each option, and a value
 control. On/Off switches show their state with a knob as well as the label,
 choices have arrows, and quantities
 show their units. A control keeps one width while its value changes. The
-highlighted option has a bar at its left edge as well as a tint. An option
+highlighted option has a bar at its left edge as well as a tint, which stands
+out from the panel (at least 1.3:1) in light and dark themes alike. An option
 you have changed shows a **Reset** button beside its value; the highlighted
 option shows it dimmed when it already holds its default. Reset removes the
 option's line from your config file, so the option follows Kettle's default

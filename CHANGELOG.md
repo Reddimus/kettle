@@ -1095,6 +1095,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- In light themes the highlighted Settings option and the open category now
+  have a tint you can see (at least 1.3:1 against the panel); before, only
+  the bar at their edge showed which was highlighted.
+
 - A long value scrolled in a text field, such as a path in Settings' Image
   file prompt, no longer shows a cut-off sliver of a letter at the left edge
   that looked like a second caret.

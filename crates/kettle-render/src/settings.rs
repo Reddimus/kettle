@@ -49,10 +49,44 @@ impl SettingsOverlay {
     }
 }
 
-/// How strongly the focused row and the active category are filled with the
-/// accent. Their focus bar, not the fill, shows focus, so the fill stays
-/// light enough for the row's text to keep most of its contrast.
+/// How lightly the focused row and the active category are filled with the
+/// accent at least, so the row's text keeps most of its contrast.
 pub(crate) const SETTINGS_SELECTED_ALPHA: f64 = 0.08;
+
+/// The contrast the focused row's and the active category's fill keeps
+/// against the panel, so the fill marks focus as well as its bar. A light
+/// theme's tint at `SETTINGS_SELECTED_ALPHA` was 1.07:1, leaving the bar
+/// alone to show it.
+pub(crate) const SETTINGS_SELECTED_CONTRAST: f64 = 1.3;
+
+/// The focused row's fill: the accent over the panel at
+/// `SETTINGS_SELECTED_ALPHA`, strengthened only as far as it takes to reach
+/// `SETTINGS_SELECTED_CONTRAST`. An accent too close to the panel to get
+/// there is first moved away from it, keeping its hue.
+pub(crate) fn settings_selected_fill(bg: Rgb, accent: Rgb, linear: bool) -> Rgb {
+    use super::color::{contrast_ratio, over, with_min_contrast};
+    let reaches = |tint: Rgb, alpha: f64| {
+        contrast_ratio(over(bg, tint, alpha, linear), bg) >= SETTINGS_SELECTED_CONTRAST
+    };
+    if reaches(accent, SETTINGS_SELECTED_ALPHA) {
+        return over(bg, accent, SETTINGS_SELECTED_ALPHA, linear);
+    }
+    let tint = if reaches(accent, 1.0) {
+        accent
+    } else {
+        with_min_contrast(accent, bg, super::chrome::ICON_CONTRAST)
+    };
+    let (mut lo, mut hi) = (SETTINGS_SELECTED_ALPHA, 1.0_f64);
+    while hi - lo > 1.0 / 1024.0 {
+        let mid = (lo + hi) / 2.0;
+        if reaches(tint, mid) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    over(bg, tint, hi, linear)
+}
 
 /// How far a description may fall below its label: at least this fraction
 /// of the label's contrast, between `TEXT_CONTRAST` and
@@ -124,7 +158,7 @@ pub(crate) fn settings_colors(
         return palette;
     }
     let bg = theme.background;
-    let selected = colors.surface(bg, accent, SETTINGS_SELECTED_ALPHA, linear);
+    let selected = settings_selected_fill(bg, accent, linear);
     let quiet = colors.surface(bg, theme.palette[8], 0.65, linear);
     let border = colors.icon(quiet, bg);
     // A mid-tone theme can leave no ink at the text floor against both the
