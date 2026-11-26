@@ -3488,6 +3488,8 @@ speech:
 - `quick_select_labels_offer_a_press_that_acts_on_their_target`: matching
   quick-select labels have a Click action that runs `act_hint`. Dimmed labels
   have none.
+- `every_modal_surface_is_a_modal_dialog`: the palette, the theme, layout and
+  SSH pickers, Settings and title editing each project one modal dialog.
 
 VoiceOver and Orca have not yet been run against these changes.
 

@@ -2861,6 +2861,8 @@ fn push_picker_accessibility(
     }
     let mut dialog = Node::new(Role::Dialog);
     dialog.set_label(label);
+    // The picker owns the keyboard and the pointer until it closes.
+    dialog.set_modal();
     dialog.set_children(dialog_children);
     dialog.set_bounds(menu.map_or(full_bounds, |menu| bounds(menu.card_rect())));
     projection.roots.push(container_id);
@@ -3399,6 +3401,7 @@ pub(super) fn modal_accessibility_projection(
             Some(category) => tr.settings_a11y_dialog(category),
             None => tr.text(kettle_i18n::Text::SettingsA11yTitle).to_string(),
         });
+        dialog.set_modal();
         dialog.set_children(dialog_children);
         dialog.set_bounds(bounds(layout.rect));
         projection.roots.push(container_id);
@@ -3451,6 +3454,7 @@ pub(super) fn modal_accessibility_projection(
         projection.nodes.push((input_id, input));
         let mut dialog = Node::new(Role::Dialog);
         dialog.set_label(edit.label.clone());
+        dialog.set_modal();
         dialog.set_children([input_id]);
         dialog.set_bounds(full_bounds);
         projection.roots.push(container_id);

@@ -2046,8 +2046,10 @@ cancels only that capture on a press outside its focused row. Confirmation dialo
 keep their question and consume outside presses. The search lane and vi mode keep
 their existing pointer behavior because they are not transient popups.
 
-Every enabled picker option, and each quick-select label that still matches
-what has been typed, has a press: AccessKit's `Click`, the default action a
+The pickers, Settings and title editing are modal `Dialog` nodes in the
+accessibility tree, as the confirmation's `AlertDialog` is: each owns the
+keyboard and the pointer while open. Every enabled picker option, and each
+quick-select label that still matches what has been typed, has a press: AccessKit's `Click`, the default action a
 screen reader runs. `accessibility_picker_press` maps the option to the value
 the picker's selection holds (a command for the palette, a row elsewhere) and
 `press_picker_option` then gives the picker its own Enter, as `picker_pointer`

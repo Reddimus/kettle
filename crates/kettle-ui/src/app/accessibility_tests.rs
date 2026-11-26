@@ -2824,3 +2824,76 @@ fn quick_select_labels_offer_a_press_that_acts_on_their_target() {
     assert!(handler.contains("ws.hint_state = None;"));
     assert!(handler.contains("self.act_hint(ws, &target, false)"));
 }
+
+/// The command palette, the theme, layout and SSH pickers, Settings and
+/// title editing own the keyboard and the pointer while open, so each is a
+/// modal dialog to assistive technology, as the confirmation already is.
+#[test]
+fn every_modal_surface_is_a_modal_dialog() {
+    let menu = || {
+        picker_context_menu(
+            layout_picker_list("", 0, &["dev".to_string(), "ops".to_string()], &EN_TEXT),
+            (1280.0, 820.0),
+            (7.8, 16.25),
+            (7.8, 16.25),
+            32.0,
+        )
+    };
+    let pickers: [fn(&mut kettle_render::Overlay); 4] = [
+        |overlay| overlay.palette_query = Some(String::new()),
+        |overlay| overlay.theme_picker_query = Some(String::new()),
+        |overlay| overlay.layout_picker_query = Some(String::new()),
+        |overlay| overlay.ssh_query = Some(String::new()),
+    ];
+    let mut overlays: Vec<(&str, kettle_render::Overlay)> = pickers
+        .into_iter()
+        .zip(["palette", "themes", "layouts", "ssh"])
+        .map(|(open, name)| {
+            let mut overlay = kettle_render::Overlay {
+                context_menu: menu(),
+                ..Default::default()
+            };
+            open(&mut overlay);
+            (name, overlay)
+        })
+        .collect();
+    overlays.push((
+        "settings",
+        kettle_render::Overlay {
+            settings: Some(kettle_render::SettingsOverlay {
+                categories: vec!["Appearance".into()],
+                rows: vec![kettle_render::SettingsRow {
+                    label: "Font size".into(),
+                    value: "14 px".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    ));
+    overlays.push((
+        "title",
+        kettle_render::Overlay {
+            edit_title: Some(kettle_render::TitleEditOverlay {
+                label: "Tab title".into(),
+                input: "shell".into(),
+                hint: String::new(),
+                rect: (0.0, 0.0, 400.0, 28.0),
+            }),
+            ..Default::default()
+        },
+    ));
+    for (name, overlay) in &overlays {
+        let projection =
+            super::modal_accessibility_projection(overlay, (1280.0, 820.0), (7.8, 16.25), 1.0, &EN_TEXT);
+        let dialogs: Vec<_> = projection
+            .nodes
+            .iter()
+            .filter(|(_, node)| matches!(node.role(), accesskit::Role::Dialog | accesskit::Role::AlertDialog))
+            .collect();
+        assert_eq!(dialogs.len(), 1, "{name}");
+        assert!(projection.roots.contains(&dialogs[0].0), "{name}");
+        assert!(dialogs[0].1.is_modal(), "{name} is not modal");
+    }
+}
