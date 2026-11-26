@@ -1406,6 +1406,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - `run_command` output cut at its 512 KiB cap no longer ends with the spaces that came just before the cut.
 
+- `run_command` no longer reports its output truncated when all that lay past the 512 KiB cap was blank space.
+
 - On macOS, title-bar buttons no longer drag the window. AppKit moved the
   window with any press in the title bar, so a press on the Settings gear,
   `▾`, `+` or a tab's close button that was dragged off came back over the
