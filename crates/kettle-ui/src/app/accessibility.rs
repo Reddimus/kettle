@@ -3280,6 +3280,17 @@ pub(super) fn modal_accessibility_projection_for_window(
     if let Some((targets, _)) = ws.hint_state.as_ref() {
         bind_hint_accessibility(&mut projection, overlay, targets);
     }
+    // While a shortcut row captures a chord, keys go to the capture and
+    // the Change button's press is refused, so it shows as unavailable.
+    if ws.settings_nav.as_ref().is_some_and(|nav| nav.capturing)
+        && let Some((_, change)) = projection
+            .nodes
+            .iter_mut()
+            .find(|(id, _)| accessibility_bound_class(*id, BoundTarget::SettingsChange))
+    {
+        change.set_disabled();
+        change.remove_action(AccessibilityAction::Click);
+    }
     let Some(status) = palette_profile_accessibility_status(overlay, ws, tr) else {
         return projection;
     };

@@ -3518,6 +3518,9 @@ speech:
 - `the_change_button_names_space_only_where_space_changes_the_row`: the
   Change button names Space as its key on a switch, a choice and a text row,
   and no key on a value row, which may be a number that Space leaves alone.
+- `the_change_button_is_unavailable_while_a_chord_is_captured`: in the window
+  projection the Change button is disabled and offers no press while a
+  shortcut row captures a chord, and is available again afterwards.
 - `an_unpainted_reset_leaves_the_value_control_to_change`: in a panel too
   narrow for the Reset chip, AccessKit's consumer hit test on the value control
   finds the Change button. Reset stays in the tree as a zero-width line at the

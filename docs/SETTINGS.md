@@ -55,7 +55,8 @@ up, as → steps it), and one Reset button, named for the row and the default it
 to 14 px") and marked unavailable while the row holds that default. Pressing,
 focusing or selecting a row with a screen reader only highlights it: the
 platforms send the same request for selecting a row as for pressing it, so a
-row's own press never changes its value. Each row is read with its value
+row's own press never changes its value. While a shortcut row captures a
+chord, its Change button is unavailable. Each row is read with its value
 (a choice's current choice, a switch's On or Off); on Linux a switch is also
 reported checked or not checked. The locked macOS and Windows adapters cannot
 carry that state on a list row, so VoiceOver and Narrator hear the On or Off.

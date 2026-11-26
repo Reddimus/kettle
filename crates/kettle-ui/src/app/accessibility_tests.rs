@@ -4258,3 +4258,58 @@ fn the_change_button_names_space_only_where_space_changes_the_row() {
         assert_eq!(button.keyboard_shortcut(), key, "{control:?}");
     }
 }
+
+/// While a shortcut row captures a chord, its Change button, whose press the
+/// dispatch then refuses, shows as unavailable and offers no press; once the
+/// capture ends it is available again.
+#[test]
+fn the_change_button_is_unavailable_while_a_chord_is_captured() {
+    let row = kettle_render::SettingsRow {
+        label: "New tab".into(),
+        value: "Press a chord".into(),
+        ..Default::default()
+    };
+    let change = super::accessibility_settings_change_id(&row);
+    let overlay = kettle_render::Overlay {
+        settings: Some(kettle_render::SettingsOverlay {
+            categories: vec!["Keybinds".into()],
+            rows: vec![row],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    for capturing in [true, false] {
+        let mut ws = WindowState::new(0, Mux::new());
+        ws.settings_nav = Some(crate::settings::SettingsNav {
+            capturing,
+            ..Default::default()
+        });
+        let projection = super::modal_accessibility_projection_for_window(
+            &overlay,
+            &ws,
+            (1280.0, 820.0),
+            (8.4, 17.5),
+            1.0,
+            &EN_TEXT,
+        );
+        let button = &projection.nodes.iter().find(|(id, _)| *id == change).unwrap().1;
+        assert_eq!(button.is_disabled(), capturing, "capturing {capturing}");
+        assert_eq!(button.supports_action(accesskit::Action::Click), !capturing);
+        // The dispatch refuses it while capturing, as before.
+        let press = accesskit::ActionRequest {
+            action: accesskit::Action::Click,
+            target_tree: accesskit::TreeId::ROOT,
+            target_node: change,
+            data: None,
+        };
+        let mut changed = false;
+        let handled = super::accessibility::handle_accessibility_action(
+            &mut ws,
+            &press,
+            &[Some((0, 0))],
+            Some((change, (0, 0))),
+            |_, _, _, _| changed = true,
+        );
+        assert_eq!((handled, changed), (!capturing, !capturing));
+    }
+}
