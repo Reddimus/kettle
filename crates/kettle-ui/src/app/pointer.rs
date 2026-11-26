@@ -201,6 +201,25 @@ impl App {
             })
     }
 
+    /// Overlay-scrollbar hover-brighten: point `scrollbar_hover` at the pane
+    /// whose bar is under the pointer, repainting only on the enter/leave
+    /// edge so it costs nothing while the pointer is elsewhere. A drag holds
+    /// the hover it started with until its release.
+    pub(super) fn update_scrollbar_hover(&self, ws: &mut WindowState) {
+        if ws.scrollbar_drag_offset.is_some() {
+            return;
+        }
+        let area = self.area(ws);
+        let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        let hover = self.scrollbar_pane_at(ws, area, px, py);
+        if hover != ws.scrollbar_hover {
+            ws.scrollbar_hover = hover;
+            if let Some(w) = &ws.window {
+                w.request_redraw();
+            }
+        }
+    }
+
     pub(super) fn px_to_point(
         &self,
         ws: &WindowState,

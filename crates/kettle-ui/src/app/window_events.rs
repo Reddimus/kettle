@@ -503,6 +503,10 @@ impl App {
                         return;
                     }
                 }
+                // The scrollbar hover goes first: motion a program reports
+                // returns below, and must not leave lit a bar the pointer
+                // has left.
+                self.update_scrollbar_hover(ws);
                 {
                     // Motion. `MOUSE_NO_BUTTON` is xterm's code 3, which with
                     // the motion bit is the `CSI < 35 ; x ; y M` report DEC
@@ -523,20 +527,6 @@ impl App {
                         w.request_redraw();
                     }
                     return;
-                }
-                // Overlay-scrollbar hover-brighten. Update the hovered
-                // pane's identity and repaint only on the enter/leave edge so it
-                // costs nothing while the pointer is elsewhere.
-                {
-                    let area = self.area(ws);
-                    let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
-                    let hover = self.scrollbar_pane_at(ws, area, px, py);
-                    if hover != ws.scrollbar_hover {
-                        ws.scrollbar_hover = hover;
-                        if let Some(w) = &ws.window {
-                            w.request_redraw();
-                        }
-                    }
                 }
                 if ws.selecting {
                     let area = self.area(ws);
