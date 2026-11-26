@@ -1866,7 +1866,10 @@ impl App {
         let bar = self.tab_bar(ws);
         let (new_tab_hover, hover_changed) = hover_tab_bar(ws, &bar);
         let (cursor_x, cursor_y) = (ws.cursor.x as f32, ws.cursor.y as f32);
-        let control_hover = window_control_at(&bar, cursor_x, cursor_y);
+        // A modal owns the pointer: chrome under it takes no press, so it
+        // shows no hover either (`chrome_pointer`).
+        let modal = self.pointer_modal_open(ws);
+        let control_hover = window_control_at(&bar, cursor_x, cursor_y).filter(|_| !modal);
         if control_hover != ws.hovered_window_control {
             ws.hovered_window_control = control_hover;
             if let Some(window) = &ws.window {
@@ -1921,6 +1924,7 @@ impl App {
                     .map(|view| view.overlay),
             )
             .chain(self.update_toast_projection(ws))
+            .filter(|_| !modal)
             .find_map(|toast| {
                 let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
                 toast.geometry.hit_test(x, y).map(|hit| match hit {

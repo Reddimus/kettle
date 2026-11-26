@@ -4383,7 +4383,7 @@ impl App {
     /// routing, focus-follows-mouse, and file drops keep using
     /// `any_modal_open`, because search does own the keyboard.
     pub(super) fn pointer_modal_open(&self, ws: &WindowState) -> bool {
-        self.non_search_modal_open(ws) || ws.preview_overlay.is_some()
+        modal_owns_pointer(ws)
     }
 
     /// Every modal that owns the keyboard and more: the search bar as well
@@ -4398,21 +4398,31 @@ impl App {
     /// `any_modal_open` and `pointer_modal_open` derive from, so the two
     /// cannot drift apart on anything but search.
     pub(super) fn non_search_modal_open(&self, ws: &WindowState) -> bool {
-        ws.palette_input.is_some()
-            || ws.settings_nav.is_some()
-            || ws.layout_picker_input.is_some()
-            || ws.theme_picker_input.is_some()
-            || ws.hint_state.is_some()
-            || ws.ssh_input.is_some()
-            || ws.context_menu.is_some()
-            || ws.editing_title.is_some()
-            || ws.vi_mode.is_some()
-            // The confirm dialog is a modal too. Its keys have a dedicated
-            // priority branch, but mouse, scroll, and cursor gating read this
-            // list. Without it, clicks fall through to the terminal behind a
-            // "Quit?" / "Close pane?" prompt.
-            || ws.confirm_dialog.is_some()
+        non_search_modal(ws)
     }
+}
+
+/// `App::pointer_modal_open`, for code that has only the window.
+pub(super) fn modal_owns_pointer(ws: &WindowState) -> bool {
+    non_search_modal(ws) || ws.preview_overlay.is_some()
+}
+
+/// `App::non_search_modal_open`, for code that has only the window.
+pub(super) fn non_search_modal(ws: &WindowState) -> bool {
+    ws.palette_input.is_some()
+        || ws.settings_nav.is_some()
+        || ws.layout_picker_input.is_some()
+        || ws.theme_picker_input.is_some()
+        || ws.hint_state.is_some()
+        || ws.ssh_input.is_some()
+        || ws.context_menu.is_some()
+        || ws.editing_title.is_some()
+        || ws.vi_mode.is_some()
+        // The confirm dialog is a modal too. Its keys have a dedicated
+        // priority branch, but mouse, scroll, and cursor gating read this
+        // list. Without it, clicks fall through to the terminal behind a
+        // "Quit?" / "Close pane?" prompt.
+        || ws.confirm_dialog.is_some()
 }
 
 pub(super) fn confirmation_button_action(

@@ -202,7 +202,7 @@ impl App {
         linux_window_control_layout_with_preferences(
             band,
             ws.window.as_ref().is_some_and(|w| w.is_maximized()),
-            ws.native_pointer.map(|p| (p.x as f32, p.y as f32)),
+            chrome_pointer(ws),
             ws.pressed_window_control,
             &self.ui_text,
             preferences,

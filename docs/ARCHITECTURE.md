@@ -1934,7 +1934,13 @@ The search bar owns the keyboard but not the pointer. It is a reserved lane
 below the grid, so `App::any_modal_open` (keyboard, file drops,
 focus-follows-mouse) includes it while `App::pointer_modal_open` (the mouse
 arms and the cursor icon) does not; both derive from one
-`non_search_modal_open` list so they cannot drift on anything else. The pure
+`non_search_modal` list so they cannot drift on anything else
+(`modal_owns_pointer` answers `pointer_modal_open` for code that has only the
+window). Chrome under a pointer modal takes no press, so it shows no hover:
+`chrome_pointer` is `None` then, and `hover_tab_bar` clears the tab, `✕`,
+button and window-control hover, with the hand cursor and tooltips they drive,
+on the first frame after a modal opens. The Settings gear keeps its hover over
+open Settings, where a press on it still arms it. The pure
 `search_pointer_route` decides each pointer event by geometry: a press inside
 the lane goes to the bar's controls, a press above it is ordinary grid input,
 and motion or release follow whichever gesture is live (an editor drag keeps

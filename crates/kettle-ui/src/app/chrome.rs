@@ -297,9 +297,7 @@ impl App {
                 let rect = (x, y, seg_w, height);
                 // A tab narrowed below its close button's width has no room
                 // for one: the button would reach past it onto the arrows.
-                let hovered = ws
-                    .native_pointer
-                    .is_some_and(|p| rect_contains(rect, p.x as f32, p.y as f32));
+                let hovered = chrome_pointer(ws).is_some_and(|(x, y)| rect_contains(rect, x, y));
                 let mut full_label = kettle_config::template::fill(
                     &self.cfg.tab_format,
                     &[
@@ -357,10 +355,7 @@ impl App {
             .collect();
         let segments_hovered = segments
             .iter()
-            .find(|s| {
-                ws.native_pointer
-                    .is_some_and(|p| rect_contains(s.rect, p.x as f32, p.y as f32))
-            })
+            .find(|s| chrome_pointer(ws).is_some_and(|(x, y)| rect_contains(s.rect, x, y)))
             .map(|s| s.idx);
         let arrow_width = layout.arrow_width;
         let to_btn =
@@ -1300,18 +1295,41 @@ pub(super) fn tab_bar_hover(ws: &WindowState) -> TabBarHover {
     )
 }
 
+/// The physical pointer where the window's chrome sees it: nowhere while a
+/// modal owns the pointer. The modal takes every press there (it closes, or
+/// ignores it), so no tab, `✕`, button or window control under it lights up
+/// or takes the hand cursor. The one exception, the Settings gear over open
+/// Settings, is `hover_tab_bar`'s.
+pub(super) fn chrome_pointer(ws: &WindowState) -> Option<(f32, f32)> {
+    ws.native_pointer
+        .filter(|_| !modal_owns_pointer(ws))
+        .map(|p| (p.x as f32, p.y as f32))
+}
+
 /// Point the tab bar's hover at what lies under the pointer on `bar`: a
 /// tab, its `✕`, or one of the strip's buttons. Returns the strip button
-/// hovered, if any, and whether the hover changed.
+/// hovered, if any, and whether the hover changed. While a modal owns the
+/// pointer nothing in the strip is hovered, so opening one clears the hover
+/// already shown, except the Settings gear while a press on it would still
+/// reach it over open Settings.
 pub(super) fn hover_tab_bar(
     ws: &mut WindowState,
     bar: &TabBar,
 ) -> (Option<NewTabHoverTarget>, bool) {
     let before = tab_bar_hover(ws);
     let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
-    ws.hovered_tab_idx = bar.hovered_tab_idx;
-    ws.hovered_close_idx = hovered_close_button(&bar.segments, x, y);
-    let target = new_tab_hover_target(bar, x, y);
+    let modal = modal_owns_pointer(ws);
+    let gear_live = ws.confirm_dialog.is_none()
+        && settings_gear_takes_press_over_settings(
+            ws.settings_nav.as_ref(),
+            ws.settings_text_edit.is_some(),
+            true,
+            true,
+        );
+    ws.hovered_tab_idx = bar.hovered_tab_idx.filter(|_| !modal);
+    ws.hovered_close_idx = hovered_close_button(&bar.segments, x, y).filter(|_| !modal);
+    let target = new_tab_hover_target(bar, x, y)
+        .filter(|target| !modal || (gear_live && *target == NewTabHoverTarget::Settings));
     ws.hovered_new_tab = target == Some(NewTabHoverTarget::Plus);
     ws.hovered_new_tab_menu = target == Some(NewTabHoverTarget::Menu);
     ws.hovered_settings = target == Some(NewTabHoverTarget::Settings);
