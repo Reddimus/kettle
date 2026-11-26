@@ -2966,21 +2966,12 @@ impl App {
                     .lane_drag
                     .is_some_and(|drag| drag.pane == pane && drag.scrub)
                     .into();
-                lane["hovered_control"] = ws
-                    .native_pointer
-                    .filter(|_| !self.non_search_modal_open(ws))
-                    .and_then(|p| geometry.hit_test(p.x as f32, p.y as f32))
-                    .filter(|hit| {
-                        matches!(
-                            hit,
-                            kettle_render::MediaLaneHit::Play
-                                | kettle_render::MediaLaneHit::Sound
-                                | kettle_render::MediaLaneHit::Scrub
-                                | kettle_render::MediaLaneHit::Theater
-                                | kettle_render::MediaLaneHit::Fullscreen
-                        )
-                    })
-                    .map(lane_control_name)
+                // The control the pointer lights: a header button or a
+                // player's, as the frame draws it.
+                lane["hovered_control"] = self
+                    .hovered_lane_control(ws)
+                    .filter(|&(hovered, _)| hovered == pane)
+                    .map(|(_, hit)| lane_control_name(hit))
                     .into();
                 lane["keyboard"] = if ws.preview_focus.is_some_and(|focus| focus.pane == pane) {
                     "preview"

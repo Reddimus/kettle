@@ -2595,3 +2595,22 @@ fn the_fullscreen_viewer_names_no_key_that_does_something_else() {
     assert!(source.contains("K::Exit => match preview_exit(LaneKeys::of(ws.preview_overlay)) {"));
     assert!(source.contains("lane_control_key(hit, LaneKeys::of(ws.preview_overlay))"));
 }
+
+/// N3 of the 6.0 live recheck: `ui_geometry` reported a lane's
+/// `hovered_control` only for the player's buttons, so it read null while a
+/// header button under the pointer was lit. It now names whatever the frame
+/// lights, from the same hit test and the same rule.
+#[test]
+fn ui_geometry_names_the_lane_button_the_pointer_lights() {
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(source.contains(
+        "lane[\"hovered_control\"] = self .hovered_lane_control(ws) .filter(|&(hovered, _)| hovered == pane) .map(|(_, hit)| lane_control_name(hit)) .into();"
+    ));
+    // The same rule repaints the lit chip as the pointer moves.
+    assert!(source.contains(
+        "let hovered = self.hovered_lane_control(ws); if hovered != ws.lane_control_hover {"
+    ));
+}
