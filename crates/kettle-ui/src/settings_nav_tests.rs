@@ -585,11 +585,8 @@ fn page_keys_move_by_the_rows_in_view() {
         ..Default::default()
     };
     nav.reconcile(&cats, &cfg, &EN);
-    let results: Vec<_> = nav
-        .visible_fields(&cats, &EN)
-        .into_iter()
-        .filter(|&(c, f)| !field_disabled(&cfg, cats[c].fields[f].key))
-        .collect();
+    // Positions in painted order, the rows that do not apply included.
+    let results = nav.visible_fields(&cats, &EN);
     assert!(results.len() > 40, "{} results", results.len());
     let mut press = |key: Key, mods| {
         assert_eq!(
@@ -603,8 +600,10 @@ fn page_keys_move_by_the_rows_in_view() {
     assert_eq!(press(Key::Named(NamedKey::PageDown), Mods::empty()), 10);
     assert_eq!(press(Key::Named(NamedKey::PageDown), Mods::empty()), 20);
     assert_eq!(press(Key::Named(NamedKey::PageUp), Mods::empty()), 10);
-    assert_eq!(press(Key::Character("d".into()), Mods::CONTROL), 15);
-    assert_eq!(press(Key::Character("u".into()), Mods::CONTROL), 10);
+    // Five rows on is Background image, which does not apply with a solid
+    // background; the half page stops on the row before it.
+    assert_eq!(press(Key::Character("d".into()), Mods::CONTROL), 14);
+    assert_eq!(press(Key::Character("u".into()), Mods::CONTROL), 9);
 
     let cfg = Config {
         cursor_blink: false,
@@ -630,4 +629,103 @@ fn page_keys_move_by_the_rows_in_view() {
     );
     assert_eq!(moves(RowMove::PageUp), 7);
     assert_eq!(moves(RowMove::HalfUp), 5);
+}
+
+/// A page that ends on a row that does not apply, with no row that does
+/// between it and the focus, goes on to the next row that applies in the
+/// direction of travel, as the arrows do: in a window two rows tall, with
+/// Starfield, Page Down and Ctrl+D from Background step over Image file to
+/// Animation, and Page Up and Ctrl+U come back. They stayed put.
+#[test]
+fn a_page_crosses_a_row_that_does_not_apply() {
+    let cats = categories(&[]);
+    let cfg = Config {
+        background_type: kettle_config::BackgroundType::Starfield,
+        ..Config::default()
+    };
+    let background = category(&cats, Text::SettingsCategoryBackground);
+    let fields = &cats[background].fields;
+    assert!(field_disabled(&cfg, fields[1].key), "{}", fields[1].key);
+    assert!(!field_disabled(&cfg, fields[2].key));
+    for (down, up) in [
+        (RowMove::PageDown, RowMove::PageUp),
+        (RowMove::HalfDown, RowMove::HalfUp),
+    ] {
+        let mut nav = SettingsNav {
+            category: background,
+            visible_rows: 2,
+            ..Default::default()
+        };
+        nav.move_focus(&cats, &cfg, down);
+        assert_eq!(nav.field, 2, "{down:?}");
+        nav.move_focus(&cats, &cfg, up);
+        assert_eq!(nav.field, 0, "{up:?}");
+    }
+    // At the ends it stays, and it never lands on a row that does not
+    // apply.
+    assert_eq!(page_target(&[true, false, false], 0, 1), 0);
+    assert_eq!(page_target(&[true, false, true, true], 0, 2), 2);
+    assert_eq!(page_target(&[true, true, false, true], 0, 2), 1);
+    assert_eq!(page_target(&[true, true, true], 2, 5), 2);
+    assert_eq!(page_target(&[false, true, true], 2, -5), 1);
+}
+
+/// Search results page by painted rows, the ones that do not apply
+/// included, as the page in view counts them: with Starfield, query `o` and
+/// four rows in view, Page Down from Built-in box drawing goes three rows
+/// on to Animation, keeping a row of overlap, rather than three rows that
+/// apply on to Interface bar color. Half pages count the same way.
+#[test]
+fn search_results_page_by_painted_rows() {
+    use winit::keyboard::{Key, ModifiersState as Mods, NamedKey};
+    let cats = categories(&[]);
+    let cfg = Config {
+        background_type: kettle_config::BackgroundType::Starfield,
+        ..Config::default()
+    };
+    let mut nav = SettingsNav {
+        query: "o".into(),
+        visible_rows: 4,
+        ..Default::default()
+    };
+    let results = nav.visible_fields(&cats, &EN);
+    let at = |key: &str| {
+        results
+            .iter()
+            .position(|&(c, f)| cats[c].fields[f].key == key)
+            .unwrap()
+    };
+    let start = at("builtin-box-drawing");
+    assert!(
+        (start + 1..start + 3).any(|i| {
+            let (c, f) = results[i];
+            field_disabled(&cfg, cats[c].fields[f].key)
+        }),
+        "a row that does not apply lies within the page"
+    );
+    let key_at = |nav: &SettingsNav| cats[nav.category].fields[nav.field].key;
+    for (key, mods, from, to) in [
+        (
+            Key::Named(NamedKey::PageDown),
+            Mods::empty(),
+            "builtin-box-drawing",
+            "background-animation",
+        ),
+        (
+            Key::Named(NamedKey::PageUp),
+            Mods::empty(),
+            "background-animation",
+            "builtin-box-drawing",
+        ),
+        (
+            Key::Character("d".into()),
+            Mods::CONTROL,
+            "builtin-box-drawing",
+            "background-type",
+        ),
+    ] {
+        (nav.category, nav.field) = results[at(from)];
+        nav.search_key(&cats, &cfg, &EN, &key, mods, false);
+        assert_eq!(key_at(&nav), to, "{key:?} from {from}");
+    }
 }
