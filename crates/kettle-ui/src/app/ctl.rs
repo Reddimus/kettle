@@ -2563,9 +2563,8 @@ impl App {
         if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
             if press_settings_gear(ws, &bar, (px, py), bcode) {
                 // Armed on a primary press; opens on release.
-            } else if bcode == 0 && search_button_at(&bar, px, py) {
-                ws.pressed_search = true;
-                self.toggle_header_find(ws);
+            } else if bcode == 0 && press_strip_button(ws, &bar, (px, py)) {
+                // `+` and Find: armed on a primary press; act on release.
             } else if bcode == 0
                 && bar.new_tab_menu.2 > 0.0
                 && rect_contains(bar.new_tab_menu, px, py)
@@ -2573,17 +2572,6 @@ impl App {
                 ws.pressed_new_tab_menu = true;
                 let (ax, ay, _, ah) = bar.new_tab_menu;
                 self.open_new_tab_menu(ws, ax, ay + ah);
-            } else if bcode == 0 && rect_contains(bar.new_tab, px, py) {
-                ws.pressed_new_tab = true;
-                let area = self.area(ws);
-                let (cols, rows) = self.grid_of(ws, area);
-                let geometry = self.pty_geometry_for_grid(ws, cols, rows);
-                match ws.mux.new_tab_geometry(&self.cfg, geometry, self.waker()) {
-                    // Fire TabAdd so Lua / dev-record see tabs opened via the
-                    // agent `+` click, like every other new-tab path.
-                    Ok(()) => self.fire_tab_add_event(ws),
-                    Err(e) => log::warn!("could not open a new tab (agent send_mouse): {e}"),
-                }
             } else if bcode == 0
                 && bar.scroll_left.2 > 0.0
                 && rect_contains(bar.scroll_left, px, py)
@@ -2689,13 +2677,17 @@ impl App {
         event_loop: &ActiveEventLoop,
         bcode: u8,
     ) -> bool {
-        if bcode == 0 && (ws.pressed_new_tab || ws.pressed_new_tab_menu || ws.pressed_search) {
-            ws.pressed_new_tab = false;
+        if bcode == 0 && ws.pressed_new_tab_menu {
             ws.pressed_new_tab_menu = false;
-            ws.pressed_search = false;
             if let Some(window) = &ws.window {
                 window.request_redraw();
             }
+        }
+        if bcode == 0
+            && let Some(released) = release_strip_button(ws, |ws| self.tab_bar(ws))
+        {
+            self.act_on_strip_release(ws, released);
+            return true;
         }
         if bcode == 0
             && let Some(action) = release_settings_gear(ws, |ws| self.tab_bar(ws))

@@ -711,19 +711,27 @@ fn tab_add_event_recomputes_chrome_hover_after_layout_changes() {
 fn tab_bar_controls_reconcile_focus_owners() {
     let src = production_source();
     let controls = src
-        .split("} else if bcode == 0 && in_bar(bar.new_tab, px, py) {")
+        .split("} else if bcode == 0 && press_strip_button(ws, &bar, (px, py)) {")
         .nth(1)
         .unwrap()
         .split("} else if let Some(seg) =")
         .next()
         .unwrap();
+    assert_eq!(controls.matches("self.press_tab_scroll_arrow(ws, &bar, ").count(), 2);
+    // `+` opens its tab on release, through the helper both releases share.
+    let plus = src
+        .split("fn act_on_strip_release(")
+        .nth(1)
+        .unwrap()
+        .split("\n    }\n")
+        .next()
+        .unwrap();
     assert_eq!(
-        controls.matches("self.note_focus_change(ws, pre);").count(),
+        plus.matches("self.note_focus_change(ws, pre);").count(),
         1,
         "plus must reconcile focus owners"
     );
-    assert_eq!(controls.matches("let pre = self.focus_key(ws);").count(), 1);
-    assert_eq!(controls.matches("self.press_tab_scroll_arrow(ws, &bar, ").count(), 2);
+    assert_eq!(plus.matches("let pre = self.focus_key(ws);").count(), 1);
     // An arrow that moves the selection reconciles them too.
     let arrow = src
         .split("fn press_tab_scroll_arrow(")
@@ -1942,4 +1950,45 @@ fn compact_header_rtl_and_wide_literal_titles_fit_the_lone_tab() {
             assert_eq!(kettle_render::fit_tab_segment_title(title, None, 0, "{title}", content.title.2, 8.0), title);
         }
     }
+}
+
+/// `+` and GNOME's Find act on release over themselves, like GTK and AppKit
+/// buttons, so a press dragged off them cancels: neither the native nor the
+/// ctl press opens a tab or toggles Find, both arm the button instead, and
+/// both releases act through the one helper. The `▾` still opens on press,
+/// as a menu button does.
+#[test]
+fn plus_and_find_act_on_release_not_press() {
+    let src = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let between = |from: &str, to: &str| -> String {
+        let start = src.find(from).unwrap_or_else(|| panic!("{from}"));
+        let rest = &src[start..];
+        rest[..rest.find(to).unwrap_or_else(|| panic!("{to}"))].to_string()
+    };
+    let native_press = between("WindowEvent::MouseInput { state: ElementState::Pressed,", "WindowEvent::MouseInput { state: ElementState::Released,");
+    let ctl_press = between("fn ctl_mouse_press(", "fn ctl_mouse_release(");
+    for (name, press) in [("native", &native_press), ("ctl", &ctl_press)] {
+        assert!(
+            press.contains("} else if bcode == 0 && press_strip_button(ws, &bar, (px, py)) {"),
+            "{name}: the press arms `+` and Find"
+        );
+        for acts in ["self.toggle_header_find(ws)", "new_tab_geometry("] {
+            assert!(!press.contains(acts), "{name}: the press must not act: {acts}");
+        }
+        assert!(
+            press.contains("self.open_new_tab_menu(ws, ax, ay + ah);"),
+            "{name}: the menu button opens on press"
+        );
+    }
+    assert_eq!(
+        src.matches(
+            "let Some(released) = release_strip_button(ws, |ws| self.tab_bar(ws)) { self.act_on_strip_release(ws, released);"
+        )
+        .count(),
+        2,
+        "native and ctl releases act through one helper"
+    );
 }

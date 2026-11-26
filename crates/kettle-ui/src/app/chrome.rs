@@ -607,6 +607,43 @@ impl App {
         }
     }
 
+    /// What a primary release does after a press on `+` or GNOME's Find
+    /// (`release_strip_button`): `+` opens a tab and Find opens or closes
+    /// Find, as its shortcut does, when the release lands back on the button.
+    /// Native and ctl releases both come here.
+    pub(super) fn act_on_strip_release(
+        &mut self,
+        ws: &mut WindowState,
+        released: Option<NewTabHoverTarget>,
+    ) {
+        match released {
+            Some(NewTabHoverTarget::Plus) => {
+                let area = self.area(ws);
+                let (cols, rows) = self.grid_of(ws, area);
+                let geometry = self.pty_geometry_for_grid(ws, cols, rows);
+                // Log a `+`-button new-tab spawn failure rather than
+                // swallowing it, and fire TabAdd on success so Lua `TabAdd`
+                // and dev-record see the new tab.
+                let pre = self.focus_key(ws);
+                match ws.mux.new_tab_geometry(&self.cfg, geometry, self.waker()) {
+                    Ok(()) => {
+                        self.note_focus_change(ws, pre);
+                        self.fire_tab_add_event(ws);
+                    }
+                    Err(e) => log::warn!("could not open a new tab (+ button): {e}"),
+                }
+                // A second tab can bring the strip in, which takes room
+                // from the panes.
+                self.resize_all(ws);
+            }
+            Some(NewTabHoverTarget::Search) => self.toggle_header_find(ws),
+            Some(NewTabHoverTarget::Menu | NewTabHoverTarget::Settings) | None => {}
+        }
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
     /// A press on an overflow arrow, native or ctl. A title-bar strip
     /// scrolls one tab and leaves the active tab as it is, as a browser's tab
     /// strip does; any other strip follows its active tab, so the selection
@@ -1278,6 +1315,116 @@ pub(super) fn release_settings_gear(
         ws.cursor.x as f32,
         ws.cursor.y as f32,
     ))
+}
+
+/// A primary press on a click-style strip button: `+`, or the GNOME header's
+/// Find. It arms the button, which shows pressed while the pointer stays on
+/// it, and acts on its release (`release_strip_button`), as GTK and AppKit
+/// buttons do. The `▾` (GNOME's `≡`) is a menu button and opens on press; the
+/// gear has its own pair. Says whether the press was on `+` or Find.
+pub(super) fn press_strip_button(ws: &mut WindowState, bar: &TabBar, (x, y): (f32, f32)) -> bool {
+    match new_tab_hover_target(bar, x, y) {
+        Some(NewTabHoverTarget::Plus) => ws.pressed_new_tab = true,
+        Some(NewTabHoverTarget::Search) => ws.pressed_search = true,
+        _ => return false,
+    }
+    true
+}
+
+/// A primary release, native or ctl, after `press_strip_button` armed a
+/// button: `None` when none is armed, so the release goes on to the rest of
+/// the window. Otherwise the press ends, and the release names the button to
+/// act on only when it lands back on that button while no modal owns the
+/// pointer; dragging off cancels. `bar` gives the strip under the pointer.
+pub(super) fn release_strip_button(
+    ws: &mut WindowState,
+    bar: impl FnOnce(&WindowState) -> TabBar,
+) -> Option<Option<NewTabHoverTarget>> {
+    let pressed = if ws.pressed_new_tab {
+        NewTabHoverTarget::Plus
+    } else if ws.pressed_search {
+        NewTabHoverTarget::Search
+    } else {
+        return None;
+    };
+    ws.pressed_new_tab = false;
+    ws.pressed_search = false;
+    let bar = bar(ws);
+    ws.held_buttons.end_own(0);
+    let over = new_tab_hover_target(&bar, ws.cursor.x as f32, ws.cursor.y as f32);
+    Some((over == Some(pressed) && !modal_owns_pointer(ws)).then_some(pressed))
+}
+
+#[cfg(test)]
+mod strip_button_tests {
+    use super::{NewTabHoverTarget, press_strip_button, release_strip_button};
+
+    fn strip() -> kettle_render::TabBar {
+        let mut bar = kettle_render::TabBar::hidden();
+        bar.height = 28.0;
+        bar.band = (0.0, 0.0, 800.0, 28.0);
+        bar.search = (8.0, 0.0, 28.0, 28.0);
+        bar.new_tab = (40.0, 0.0, 28.0, 28.0);
+        bar.new_tab_menu = (68.0, 0.0, 20.0, 28.0);
+        bar
+    }
+
+    fn at(ws: &mut crate::window_state::WindowState, (x, y): (f32, f32)) {
+        ws.cursor = winit::dpi::PhysicalPosition::new(f64::from(x), f64::from(y));
+    }
+
+    /// `+` and Find act on a release back over themselves and nowhere else:
+    /// pressing does nothing yet, dragging off and releasing cancels, and
+    /// releasing over the other button does not run it. The `▾` is not
+    /// theirs, and a release with nothing armed goes on to the window.
+    #[test]
+    fn plus_and_find_act_on_a_release_over_themselves() {
+        let bar = strip();
+        let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+        assert_eq!(release_strip_button(&mut ws, |_| strip()), None);
+        assert!(
+            !press_strip_button(&mut ws, &bar, (78.0, 14.0)),
+            "the menu button"
+        );
+        assert!(
+            !press_strip_button(&mut ws, &bar, (400.0, 14.0)),
+            "empty strip"
+        );
+        for (button, target, other) in [
+            ((54.0, 14.0), NewTabHoverTarget::Plus, (22.0, 14.0)),
+            ((22.0, 14.0), NewTabHoverTarget::Search, (54.0, 14.0)),
+        ] {
+            ws.held_buttons.pressed(0, None, (0, 0));
+            assert!(press_strip_button(&mut ws, &bar, button));
+            assert!(
+                ws.pressed_new_tab || ws.pressed_search,
+                "{target:?} shows pressed"
+            );
+            at(&mut ws, button);
+            assert_eq!(
+                release_strip_button(&mut ws, |_| strip()),
+                Some(Some(target))
+            );
+            assert!(!ws.pressed_new_tab && !ws.pressed_search);
+            assert_eq!(ws.held_buttons.dragging(), None, "the press is over");
+            assert_eq!(release_strip_button(&mut ws, |_| strip()), None, "once");
+            // Press, drag off and release: cancelled.
+            for off in [(400.0, 14.0), (54.0, 200.0), other] {
+                assert!(press_strip_button(&mut ws, &bar, button));
+                at(&mut ws, off);
+                assert_eq!(
+                    release_strip_button(&mut ws, |_| strip()),
+                    Some(None),
+                    "{target:?} released at {off:?}"
+                );
+            }
+        }
+        // A modal that opened while the button was held keeps the release.
+        assert!(press_strip_button(&mut ws, &bar, (54.0, 14.0)));
+        at(&mut ws, (54.0, 14.0));
+        ws.palette_input = Some((crate::text_editor::TextEditor::default(), 0));
+        assert_eq!(release_strip_button(&mut ws, |_| strip()), Some(None));
+    }
 }
 
 /// What in the tab bar is under the pointer. A change between two pointer

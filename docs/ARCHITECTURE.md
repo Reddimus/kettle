@@ -6508,7 +6508,11 @@ presses are consumed. The 6 logical pixel inner resize band takes priority over
 header input and uses `drag_resize_window`, except when maximized, fullscreen
 or non-resizable. Tiled windows retain the band because tiled state is not
 available. Native window controls activate on release over
-the originally pressed control. Close follows the native `CloseRequested`
+the originally pressed control, and so do `+`, Find and the Settings gear
+(`press_strip_button` / `release_strip_button`, `release_settings_gear`): each
+shows pressed while the pointer stays on it, and a release anywhere else
+cancels. The `▾` (GNOME's `≡`) is a menu button and opens on press, as GTK's
+and AppKit's do; the overflow arrows step on press. Close follows the native `CloseRequested`
 confirmation policy; AccessKit exposes the same actions. Synthetic control
 input can activate buttons but does not impersonate a compositor drag serial.
 The shared `portal_settings.rs` watcher also reads GNOME button-layout beside

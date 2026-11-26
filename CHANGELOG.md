@@ -1095,6 +1095,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- The New Tab button and the GNOME header's Find button act when released over them, like native buttons, so pressing one and dragging off cancels instead of opening a tab or toggling Find.
+
 - A scrollbar no longer stays lit and wide after the pointer leaves it for a pane whose program tracks pointer motion.
 
 - The pointer shows the arrow, not the text cursor, over a scrollbar and while dragging it, and the text cursor comes back as soon as a drag ends over text.
