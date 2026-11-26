@@ -2752,7 +2752,7 @@ pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io
 /// Reset a setting to its default in one atomic edit: what a Settings row's
 /// Reset does. Every line that sets one of `keys` goes; lines match as they
 /// do for [`persist_config_toggle`], in the sections Kettle reads, and
-/// [`without_config_keys`] says what else stays. Where the rest of the file
+/// `without_config_keys` says what else stays. Where the rest of the file
 /// still does not give the default (`restores` judges the candidate as
 /// Kettle reads it), each `fallback` line is added as
 /// [`persist_config_toggle`] adds a key it does not find; each line added
