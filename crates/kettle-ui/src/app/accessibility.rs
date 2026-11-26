@@ -2649,39 +2649,49 @@ fn bind_hint_accessibility(
     overlay: &Overlay,
     targets: &[HintTarget],
 ) {
-    let mut renamed = Vec::new();
-    for (index, hint) in overlay.hint_labels.iter().enumerate() {
+    let at: std::collections::HashMap<NodeId, usize> = projection
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(position, (id, _))| (*id, position))
+        .collect();
+    let mut renamed: std::collections::HashMap<NodeId, NodeId> = std::collections::HashMap::new();
+    // The projection holds only the labels its ids can number; a place past
+    // them would be another node's id (the list's own, at 65,536 labels).
+    for (index, hint) in overlay
+        .hint_labels
+        .iter()
+        .enumerate()
+        .take(MODAL_INDEXED_ROWS)
+    {
         let place = accessibility_modal_id(3, index + 1);
-        let Some((id, node)) = projection.nodes.iter_mut().find(|(id, _)| *id == place) else {
+        let Some(&position) = at.get(&place) else {
             continue;
         };
+        let (id, node) = &mut projection.nodes[position];
         match targets
             .get(index)
             .filter(|target| target.label == hint.label)
         {
             Some(target) => {
                 *id = accessibility_hint_id(target);
-                renamed.push((place, *id));
+                renamed.insert(place, *id);
             }
             None => node.remove_action(AccessibilityAction::Click),
         }
     }
     let container = accessibility_modal_id(3, 0);
-    if let Some((_, list)) = projection.nodes.iter_mut().find(|(id, _)| *id == container) {
+    if let Some(&position) = at.get(&container) {
+        let list = &mut projection.nodes[position].1;
         let children: Vec<NodeId> = list
             .children()
             .iter()
-            .map(|child| {
-                renamed
-                    .iter()
-                    .find(|(place, _)| place == child)
-                    .map_or(*child, |(_, bound)| *bound)
-            })
+            .map(|child| renamed.get(child).copied().unwrap_or(*child))
             .collect();
         list.set_children(children);
     }
     if let Some(focus) = projection.focus.as_mut()
-        && let Some((_, bound)) = renamed.iter().find(|(place, _)| place == focus)
+        && let Some(bound) = renamed.get(focus)
     {
         *focus = *bound;
     }

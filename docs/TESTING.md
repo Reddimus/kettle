@@ -3512,6 +3512,10 @@ speech:
   nothing. `settings_accessibility_click_dispatches_configure_and_retry` checks
   that the Change button, not the row, reaches the global hotkey's configure
   and retry.
+- `the_window_quick_select_tree_stays_valid_at_65536_targets` binds 65,536
+  quick-select labels through the window projection and hands the tree to
+  AccessKit's consumer. The list keeps its id and holds the 65,535 bound
+  labels the projection numbers.
 - `indexed_modal_lists_stop_short_of_the_next_kinds_ids`: a 70,000-row
   context menu and quick select keep 65,535 rows each in the tree, every id
   distinct, where row 65,535 of the menu would have taken the quick-select

@@ -4018,3 +4018,78 @@ fn picker_options_bind_to_their_result_not_their_fitted_label() {
     assert!(remove.contains(&Some("remove\0web\0me@web.test".into())), "{remove:?}");
     assert_ne!(keys("me@box.test"), keys("me@box2.test"));
 }
+
+/// The window's quick-select projection, labels bound to their targets,
+/// stays a valid tree past what 16-bit places can number: at 65,536 labels
+/// the binder leaves the 65,536th out with the projection, where binding it
+/// would have renamed the list itself, and AccessKit's consumer, as the
+/// adapters use it, takes the tree. Every label in it is bound and the list
+/// holds exactly those.
+#[test]
+fn the_window_quick_select_tree_stays_valid_at_65536_targets() {
+    let count = 1 << 16;
+    let labels: Vec<String> = (0..count).map(|i| format!("h{i}")).collect();
+    let targets: Vec<super::HintTarget> = labels
+        .iter()
+        .enumerate()
+        .map(|(i, label)| super::HintTarget {
+            row: i / 80,
+            col: i % 80,
+            label: label.clone(),
+            pane: 1,
+            what: super::HintWhat::Text {
+                kind: kettle_core::hints::Kind::Url,
+                text: format!("https://{i}.test"),
+                bounded: true,
+            },
+        })
+        .collect();
+    let overlay = kettle_render::Overlay {
+        hint_labels: targets
+            .iter()
+            .map(|target| kettle_render::HintLabel {
+                row: target.row,
+                col: target.col,
+                label: target.label.clone(),
+                dim: false,
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.hint_state = Some((targets.clone(), String::new()));
+    let projection = super::modal_accessibility_projection_for_window(
+        &overlay,
+        &ws,
+        (800.0, 600.0),
+        (8.0, 16.0),
+        1.0,
+        &EN_TEXT,
+    );
+    let list_id = super::accessibility_modal_id(3, 0);
+    assert_eq!(projection.focus, Some(list_id));
+    let tree = accesskit_consumer::Tree::new(
+        super::mouse_override_hint_tests::finished_tree(projection),
+        true,
+    );
+    let state = tree.state();
+    let list = state
+        .node_by_tree_local_id(list_id, accesskit::TreeId::ROOT)
+        .expect("the list keeps its id");
+    assert_eq!(list.role(), accesskit::Role::ListBox);
+    let children: Vec<_> = list.children().map(|child| child.id()).collect();
+    assert_eq!(children.len(), count - 1);
+    for (index, target) in targets.iter().take(count - 1).enumerate() {
+        let id = super::accessibility_hint_id(target);
+        let node = state
+            .node_by_tree_local_id(id, accesskit::TreeId::ROOT)
+            .unwrap_or_else(|| panic!("label {index} is bound"));
+        assert_eq!(node.label().as_deref(), Some(target.label.as_str()));
+    }
+    assert!(
+        state
+            .node_by_tree_local_id(super::accessibility_hint_id(&targets[count - 1]), accesskit::TreeId::ROOT)
+            .is_none(),
+        "the label past the cap is left out"
+    );
+}
