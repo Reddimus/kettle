@@ -296,7 +296,10 @@ fn hover_row(
         pointer.open = None;
         return MenuHoverEffect::None;
     }
-    let changed = menu.highlight != index || std::mem::take(&mut pointer.away);
+    // Clear the away mark whichever row the pointer comes back to: `||` would
+    // skip it when the row changed and leave the new row unlit.
+    let was_away = std::mem::take(&mut pointer.away);
+    let changed = menu.highlight != index || was_away;
     menu.highlight = index;
     let lit = if changed {
         MenuHoverEffect::Redraw

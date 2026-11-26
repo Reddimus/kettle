@@ -506,6 +506,41 @@ fn leaving_the_menu_clears_its_highlight_until_a_key_or_the_pointer_lights_a_row
     assert_eq!(menu_shown_highlight(&menu, &pointer), 2);
 }
 
+/// Coming back from outside onto a different row lights that row, and Enter
+/// runs it. The away mark must clear whichever row the pointer returns to;
+/// a short-circuit once left it set when the row changed, so nothing was lit.
+#[test]
+fn returning_onto_another_row_lights_it_and_enter_runs_it() {
+    let items = vec![
+        leaf("Copy", Action::Copy),
+        ContextMenuItem::Separator,
+        leaf("Paste", Action::Paste),
+        leaf("Select All", Action::SelectAll),
+    ];
+    let panels = [(10.0, 10.0, 160.0, 80.0)];
+    let t0 = Instant::now();
+    let mut menu = state(items);
+    let mut pointer = MenuPointer::default();
+    let mut hover = |menu: &mut ContextMenuState, hit, at, after| {
+        menu_pointer_moved(menu, &mut pointer, hit, &panels, at, t0 + ms(after))
+    };
+    hover(&mut menu, MenuHit::Row(2), (90.0, 50.0), 0);
+    hover(&mut menu, MenuHit::Outside, (300.0, 50.0), 16);
+    assert_eq!(
+        hover(&mut menu, MenuHit::Row(3), (90.0, 70.0), 32),
+        MenuHoverEffect::Redraw
+    );
+    assert_eq!(
+        menu_shown_highlight(&menu, &pointer),
+        3,
+        "the row returned to is lit"
+    );
+    assert!(
+        menu_activate_click(&menu, &pointer).is_some(),
+        "Enter runs the lit row"
+    );
+}
+
 #[test]
 fn leaving_with_a_submenu_open_keeps_the_highlight() {
     let mut cascade = Cascade::new(false);
