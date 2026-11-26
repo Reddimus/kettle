@@ -963,7 +963,11 @@ impl App {
                     active_gpu.as_deref(),
                     active.fields.get(fld).map(|f| f.key),
                     blur_unavailable,
-                    ws.settings_restart_pending,
+                    crate::settings::pending_apply(
+                        self.running_graphics.as_ref(),
+                        &self.cfg,
+                        ws.surface_caps.lacks_for(&self.cfg),
+                    ),
                     self.language_change_pending(),
                     match active.fields.get(fld).map(|f| f.key) {
                         Some("agent-display-claude-code") => Some(claude_code_note(
@@ -2341,8 +2345,9 @@ impl App {
         // The GPU device picker is one row but persists THREE keys
         // (vendor/device/name). "auto" clears the pin; "<vendor>:<device>:<name>"
         // sets it. GPU changes apply on the NEXT launch (the wgpu device/surface
-        // graph can't hot-swap and every window shares one adapter), so we flag
-        // a restart affordance instead of rebuilding the renderer live.
+        // graph can't hot-swap and every window shares one adapter), so the
+        // footer asks for a restart (`settings::pending_apply`) instead of the
+        // renderer being rebuilt live.
         if key_str == "gpu" {
             // Fold all three `persist_pref` results together (false on an
             // unexpected `new_val` shape). A partial or total write failure
@@ -2364,9 +2369,7 @@ impl App {
             } else {
                 false
             };
-            if saved {
-                ws.settings_restart_pending = crate::settings::SettingsApply::Restart;
-            } else {
+            if !saved {
                 fire_notify(
                     self.ui_text
                         .text(kettle_i18n::Text::NotifyTitleSettingNotSaved),
@@ -2404,31 +2407,13 @@ impl App {
             );
         }
         // The renderer and the remaining GPU policy keys (power preference /
-        // backend / force-software) also only take effect on restart.
-        if saved
-            && matches!(
-                key_str,
-                "renderer" | "gpu-power-preference" | "gpu-backend" | "gpu-force-software"
-            )
-        {
-            ws.settings_restart_pending = crate::settings::SettingsApply::Restart;
-        }
-        let surface_setting = matches!(
-            key_str,
-            "background-opacity" | "background-type" | "window-blur"
-        );
+        // backend / force-software) also only take effect on restart. Winit's
+        // alpha-capable window attribute is fixed at creation: renderer colors
+        // and the surface's alpha mode reload immediately, so only a change
+        // this window was not created able to show (an opaque window turning
+        // translucent, or blur turned on) needs a new window. The footer works
+        // both out from the reloaded config (`settings::pending_apply`).
         self.reload_config(ws);
-        // Winit's alpha-capable window attribute is fixed at creation.
-        // Renderer colors and the surface's alpha mode reload immediately, so
-        // only a change this window was not created able to show (an opaque
-        // window turning translucent, or blur turned on) needs a new window.
-        if saved
-            && surface_setting
-            && ws.surface_caps.lacks_for(&self.cfg)
-            && ws.settings_restart_pending == crate::settings::SettingsApply::None
-        {
-            ws.settings_restart_pending = crate::settings::SettingsApply::NewWindow;
-        }
         // A theme pick needs no `save_session()`. `persist_pref` above durably
         // writes the config `theme =` line, the single source of truth on restart.
     }

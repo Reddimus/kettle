@@ -363,7 +363,6 @@ impl App {
                 },
             );
         }
-        ws.settings_restart_pending = crate::settings::SettingsApply::None;
         ws.settings_nav = Some(crate::settings::SettingsNav::default());
     }
 

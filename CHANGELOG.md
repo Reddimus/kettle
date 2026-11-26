@@ -1095,6 +1095,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Settings keeps saying "Restart Kettle to apply graphics changes" after you
+  close and reopen it, for as long as a renderer or GPU change is still
+  waiting for a restart.
+
 - In Settings, ← now turns a switch off and → turns it on, instead of both
   flipping it, and Space or Enter no longer steps a number up with no way
   back down.

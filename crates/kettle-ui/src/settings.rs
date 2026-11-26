@@ -266,6 +266,42 @@ pub(crate) enum SettingsApply {
     Restart,
 }
 
+/// The settings a renderer is built from, which apply only when Kettle
+/// starts: the renderer and the GPU policy, in the tokens Settings writes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GraphicsSettings([String; 5]);
+
+impl GraphicsSettings {
+    pub(crate) fn of(cfg: &Config) -> Self {
+        Self([
+            read_choice(cfg, "renderer"),
+            read_choice(cfg, "gpu-power-preference"),
+            read_choice(cfg, "gpu-backend"),
+            read_choice(cfg, "gpu"),
+            cfg.gpu_force_software.to_string(),
+        ])
+    }
+}
+
+/// What the saved settings still wait for in a window: a restart while the
+/// graphics settings differ from the ones Kettle `running` started with, or
+/// a new window while the window lacks a surface `cfg` needs. It is worked
+/// out from the values themselves, so it holds however the change was made
+/// and for as long as it is pending, and it goes once a change is undone.
+pub(crate) fn pending_apply(
+    running: Option<&GraphicsSettings>,
+    cfg: &Config,
+    surface_lacks: bool,
+) -> SettingsApply {
+    if running.is_some_and(|running| *running != GraphicsSettings::of(cfg)) {
+        SettingsApply::Restart
+    } else if surface_lacks {
+        SettingsApply::NewWindow
+    } else {
+        SettingsApply::None
+    }
+}
+
 /// What a row shows under its label. While the window system cannot blur
 /// (`BlurState::Unavailable`), the Window blur row says so, and names the
 /// saved setting, instead of describing an effect the window will not show.

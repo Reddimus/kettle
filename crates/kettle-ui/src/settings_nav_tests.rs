@@ -1,5 +1,5 @@
-//! Settings row keys: where each one moves the focused row and what it does
-//! to its value.
+//! Settings row keys (where each one moves the focused row and what it does
+//! to its value) and the panel state they leave.
 
 use super::*;
 use kettle_i18n::Language;
@@ -253,4 +253,57 @@ fn arrows_set_switches_and_space_leaves_numbers_alone() {
     assert_eq!(value_key_dir(&cfg, opacity, left), Some(-1));
     let bell = field("bell");
     assert_eq!(value_key_dir(&cfg, bell, ValueKey::Activate), Some(0));
+}
+
+/// A graphics change waits for a restart for as long as the saved value
+/// differs from the one Kettle started with, and no longer once it is put
+/// back. A surface the window lacks asks for a new window, unless a restart
+/// is already pending, which covers it.
+#[test]
+fn a_pending_restart_lasts_until_the_change_is_undone() {
+    let launch = Config::default();
+    let running = GraphicsSettings::of(&launch);
+    assert_eq!(
+        pending_apply(Some(&running), &launch, false),
+        SettingsApply::None
+    );
+    let changed = [
+        Config {
+            gpu_power_preference: kettle_config::GpuPowerPreference::Low,
+            ..Config::default()
+        },
+        Config {
+            gpu_backend: kettle_config::GpuBackend::Gl,
+            ..Config::default()
+        },
+        Config {
+            gpu_force_software: !launch.gpu_force_software,
+            ..Config::default()
+        },
+        Config {
+            gpu_vendor_id: 0x10de,
+            gpu_device_id: 0x2684,
+            gpu_name: "GeForce".into(),
+            ..Config::default()
+        },
+        Config::parse_text(if read_choice(&launch, "renderer") == "cpu" {
+            "renderer = gpu"
+        } else {
+            "renderer = cpu"
+        }),
+    ];
+    for cfg in &changed {
+        for lacks in [false, true] {
+            assert_eq!(
+                pending_apply(Some(&running), cfg, lacks),
+                SettingsApply::Restart
+            );
+        }
+    }
+    assert_eq!(
+        pending_apply(Some(&running), &launch, true),
+        SettingsApply::NewWindow
+    );
+    // Before the first renderer there is nothing to restart.
+    assert_eq!(pending_apply(None, &changed[0], false), SettingsApply::None);
 }

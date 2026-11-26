@@ -247,12 +247,14 @@ history-scan bounds, and TUI behavior.
 A footer line shows the **Active GPU** in use right now, or, for windows drawn
 on the CPU, **Active renderer: CPU** with its presenter. On the CPU renderer the
 GPU device list holds only **Automatic**: listing adapters would load a GPU
-driver into the process. GPU changes take effect
-on the **next launch** (the GPU/surface graph can't hot-swap), so the panel shows
-"Restart Kettle or open a new window to apply pending changes." after an edit
-that requires a restart or new window. The pending flag does not record the
-cause, so selecting Graphics does not change that wording. GPU edits require a
-full restart. The GPU picker persists the selection per application.
+driver into the process. Renderer and GPU changes take effect on the **next
+launch** (the GPU/surface graph can't hot-swap). While a saved graphics setting
+differs from the one Kettle started with, the footer says "Restart Kettle to
+apply graphics changes.", however the change was made and however often
+Settings is reopened, until Kettle restarts or the setting is put back. A
+background opacity, type or blur change that this window was not opened able
+to show says "Restart Kettle or open a new window to apply pending changes."
+instead. The GPU picker persists the selection per application.
 
 **Agents**
 

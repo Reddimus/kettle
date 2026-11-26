@@ -425,6 +425,9 @@ pub struct App {
     /// Window 1 draws on the CPU (`renderer`), so every window does, and
     /// `gpu` stays `None`: no GPU driver is loaded.
     cpu_rendering: bool,
+    /// The graphics settings window 1's renderer was built from. Settings
+    /// asks for a restart while the saved ones differ.
+    running_graphics: Option<crate::settings::GraphicsSettings>,
     /// The system fonts, loading on their own thread since `run_with`
     /// began. Window 1 takes them before its first spawn; later windows load their own.
     font_preload: Option<crate::font_preload::FontPreload>,
