@@ -1334,18 +1334,9 @@ impl App {
     /// selection, as the arrow keys make it, and the theme picker previews
     /// it as they do. Nothing runs.
     fn select_picker_option(&mut self, ws: &mut WindowState, selected: usize) {
-        let selection = if let Some((_, selection)) = ws.palette_input.as_mut() {
-            selection
-        } else if let Some(state) = ws.theme_picker_input.as_mut() {
-            &mut state.selected
-        } else if let Some((_, selection)) = ws.layout_picker_input.as_mut() {
-            selection
-        } else if let Some((_, selection)) = ws.ssh_input.as_mut() {
-            selection
-        } else {
+        if !select_accessible_picker_option(ws, selected) {
             return;
-        };
-        *selection = selected;
+        }
         // Keys get this after every window event; a screen reader's request
         // arrives as a user event instead.
         self.sync_theme_preview(ws);
@@ -2927,6 +2918,28 @@ pub(super) const PICKER_CONTRAST_A11Y_INDEX: usize = PICKER_FOOTER_A11Y_INDEX - 
 /// The SSH launcher's polite status line, after a save, a removal or a failed
 /// write. It is the lowest of these fixed indices.
 pub(super) const PICKER_STATUS_A11Y_INDEX: usize = PICKER_FOOTER_A11Y_INDEX - 5;
+
+/// Make `selected` the open picker's selection for a screen reader's
+/// request, as a key does: the keyboard's bookkeeping (`note_picker_keys`)
+/// drops what the pointer left pending, a cancelled hover preview among it, so
+/// the theme picker previews the new selection at once. `false` when no
+/// picker is open.
+pub(super) fn select_accessible_picker_option(ws: &mut WindowState, selected: usize) -> bool {
+    let selection = if let Some((_, selection)) = ws.palette_input.as_mut() {
+        selection
+    } else if let Some(state) = ws.theme_picker_input.as_mut() {
+        &mut state.selected
+    } else if let Some((_, selection)) = ws.layout_picker_input.as_mut() {
+        selection
+    } else if let Some((_, selection)) = ws.ssh_input.as_mut() {
+        selection
+    } else {
+        return false;
+    };
+    *selection = selected;
+    note_picker_keys(ws);
+    true
+}
 
 /// The kind of the picker that has the keyboard, as `picker_pointer` finds
 /// it, while no menu or confirmation covers it.

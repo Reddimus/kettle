@@ -4149,3 +4149,77 @@ fn an_unpainted_reset_leaves_the_value_control_to_change() {
     assert_eq!((bounds.x0, bounds.x1), (f64::from(x), f64::from(x)));
     assert_eq!((bounds.y0, bounds.y1), (f64::from(y), f64::from(y + h)));
 }
+
+/// A theme a screen reader selects previews at once, as one a key selects
+/// does, even after the pointer left a row before its hover preview was due
+/// (the pointer's preview held): the selection takes the keyboard's
+/// bookkeeping, which drops what the pointer left pending.
+#[test]
+fn an_accessibility_selection_previews_its_theme_after_a_held_hover() {
+    use super::{
+        PickerPointer, apply_picker_pointer, begin_theme_picker, picker_context_menu,
+        theme_picker_list, theme_picker_selection, theme_preview_change,
+    };
+    use crate::window_state::PointerPreview;
+    let tr = kettle_i18n::Translator::default();
+    let cfg = kettle_config::Config {
+        theme_name: "Dracula".into(),
+        ..Default::default()
+    };
+    let mut ws = WindowState::new(0, Mux::new());
+    begin_theme_picker(&mut ws, ("Dracula".into(), cfg.theme.clone()));
+    let state = ws.theme_picker_input.clone().unwrap();
+    let menu = picker_context_menu(
+        theme_picker_list(&state.query, state.selected, &state.opened_on, &tr),
+        (800.0, 600.0),
+        (8.0, 16.0),
+        (8.0, 16.0),
+        0.0,
+    )
+    .unwrap();
+    let row_h = kettle_render::menu::row_height(16.0);
+    let (inset, _) = kettle_render::menu::picker_scroll_content(menu.panel_h_clamped);
+    let row_y = |row: usize| menu.anchor.1 + inset + row_h * ((row - menu.scroll_offset) as f32 + 0.5);
+    let move_to = |ws: &mut WindowState, x: f32, y: f32| {
+        ws.cursor.x = f64::from(x);
+        ws.cursor.y = f64::from(y);
+        apply_picker_pointer(ws, &cfg, &menu, 16.0, PickerPointer::Hover);
+    };
+    // Hover another theme, then leave its row before the preview is due.
+    let hovered = (menu.scroll_offset..menu.rows.len())
+        .find(|&row| row != menu.highlight && menu.visible_row_rect(row).is_some())
+        .unwrap();
+    move_to(&mut ws, menu.anchor.0 + 20.0, row_y(hovered));
+    assert!(matches!(ws.picker_view.pointer_preview, PointerPreview::At(_)));
+    move_to(&mut ws, menu.anchor.0 + 20.0, menu.anchor.1 + menu.panel_h_clamped + 4.0);
+    assert_eq!(ws.picker_view.pointer_preview, PointerPreview::Held);
+    assert!(theme_preview_change(&mut ws, &cfg, &tr).is_none(), "the held hover previews nothing");
+    // A screen reader selects a third theme.
+    let chosen = (menu.scroll_offset..menu.rows.len())
+        .find(|&row| row != menu.highlight && row != hovered && menu.rows[row].enabled)
+        .unwrap();
+    let id = super::accessibility_picker_option_ids(super::MODAL_KIND_THEMES, &menu.rows)[chosen].unwrap();
+    let Some(super::accessibility::PickerRequest::Select(selected)) =
+        super::accessibility_picker_request(&ws, &menu, id, accesskit::Action::Focus)
+    else {
+        panic!("a focus request selects the theme");
+    };
+    assert!(super::select_accessible_picker_option(&mut ws, selected));
+    assert_eq!(ws.picker_view.pointer_preview, PointerPreview::None);
+    let (preview, _) =
+        theme_preview_change(&mut ws, &cfg, &tr).expect("the selected theme previews at once");
+    assert_eq!(
+        Some(preview.as_str()),
+        theme_picker_selection(ws.theme_picker_input.as_ref().unwrap(), &tr)
+    );
+    let select = production_source()
+        .split_once("fn select_picker_option(")
+        .unwrap()
+        .1
+        .split("\n    }\n")
+        .next()
+        .unwrap()
+        .to_string();
+    let bookkeeping = select.find("select_accessible_picker_option(ws, selected)").unwrap();
+    assert!(bookkeeping < select.find("self.sync_theme_preview(ws);").unwrap());
+}

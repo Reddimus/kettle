@@ -3512,6 +3512,9 @@ speech:
   nothing. `settings_accessibility_click_dispatches_configure_and_retry` checks
   that the Change button, not the row, reaches the global hotkey's configure
   and retry.
+- `an_accessibility_selection_previews_its_theme_after_a_held_hover`: after
+  the pointer leaves a theme's row before its preview is due, a screen
+  reader's selection of another theme still previews it at once.
 - `an_unpainted_reset_leaves_the_value_control_to_change`: in a panel too
   narrow for the Reset chip, AccessKit's consumer hit test on the value control
   finds the Change button. Reset stays in the tree as a zero-width line at the

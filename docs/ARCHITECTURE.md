@@ -2073,8 +2073,10 @@ on a `Click`: AccessKit's adapters turn selecting a selectable item (macOS
 `DeselectChild` and `DeselectSelectedChild`, UIA `SelectionItem`, which needs
 no Click support) into the same `Click` a press sends, with nothing to tell
 them apart. Every enabled picker option has Focus and Click, and both only
-highlight it, as the arrow keys do; the theme picker previews it as they do
-(`select_picker_option`). The picker acts on its highlighted result only from
+highlight it, as the arrow keys do; the theme picker previews it as they do,
+at once, since the selection takes the keyboard's bookkeeping
+(`select_accessible_picker_option` calls `note_picker_keys`), so a hover
+preview the pointer left pending never holds it back. The picker acts on its highlighted result only from
 its Choose button ("Choose Split right"), a `Button` with no selected state
 beside the list, bound to that result and painted nowhere, as a zero-width
 line at the row's end: its Click gives the picker its own Enter
