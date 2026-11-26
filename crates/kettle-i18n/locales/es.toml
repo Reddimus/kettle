@@ -1073,6 +1073,7 @@ a11y_window_maximize = "Maximizar ventana"
 a11y_window_restore = "Restaurar ventana"
 a11y_window_close = "Cerrar ventana"
 a11y_header_find = "Buscar"
+a11y_tab_toolbar = "Controles de la barra de pestañas"
 
 
 

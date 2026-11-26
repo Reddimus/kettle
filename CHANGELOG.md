@@ -1095,6 +1095,30 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Screen readers can choose a command palette, picker or quick-select entry
+  by pressing it, as a click does.
+
+- Screen readers can open the link under the pointer by pressing it, as a
+  Ctrl or Cmd click does.
+
+- Screen readers treat the command palette, the pickers, Settings and title
+  editing as modal dialogs, as they already treated confirmations.
+
+- On Linux, screen readers report each Settings switch as checked or not
+  checked.
+
+- On Linux and Windows, screen readers hear each Settings row's place in the
+  list, such as 3 of 12.
+
+- A screen reader's cursor can reach Settings rows scrolled out of the panel;
+  moving to one scrolls it into view.
+
+- Screen readers find only tabs in the tab list; New Tab, the New Tab menu,
+  Settings and the header buttons are in a toolbar beside it.
+
+- The find bar's match count and status reach screen readers as one named
+  status, with no unnamed second one.
+
 - `tab-min-width` is measured in logical pixels, as documented. On a display
   with a scale above 100% tabs could shrink to a fraction of the width set
   (half on a Retina display) before the tab bar started to scroll.

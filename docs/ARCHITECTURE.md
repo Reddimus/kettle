@@ -1954,6 +1954,11 @@ so lines above the lane stay put. A focused result's pane takes back no more
 than it is scrolled up, keeping its first visible row. The right-click menu is
 the one modal allowed to coexist with the bar; keys go to the menu while it is
 up because its arm precedes search in the key handler.
+The bar's AccessKit `Search` region has one polite `Status`
+(`search_status_nodes`): the match count, then the search's own status when
+the bar paints one (Wrapped, Invalid pattern), over both painted rects. Match
+and No matches are left to the count, and a bar that shows neither has no
+status node, so the live region always has a name.
 
 Modal text fields and search share `kettle-ui::text_editor::TextEditor`: one
 bounded UTF-8 string, a caret and an optional selection anchor on extended
@@ -2045,6 +2050,18 @@ on a press outside its panel; an active path editor or keybinding capture instea
 cancels only that capture on a press outside its focused row. Confirmation dialogs
 keep their question and consume outside presses. The search lane and vi mode keep
 their existing pointer behavior because they are not transient popups.
+
+The pickers, Settings and title editing are modal `Dialog` nodes in the
+accessibility tree, as the confirmation's `AlertDialog` is: each owns the
+keyboard and the pointer while open. Every enabled picker option, and each
+quick-select label that still matches what has been typed, has a press: AccessKit's `Click`, the default action a
+screen reader runs. `accessibility_picker_press` maps the option to the value
+the picker's selection holds (a command for the palette, a row elsewhere) and
+`press_picker_option` then gives the picker its own Enter, as `picker_pointer`
+does for a click on the row. A label's press runs `act_hint` without Shift, as
+typing the label does. A dimmed label and a disabled placeholder have none.
+The hovered link's `Link` node has a press too, which opens the link under
+the pointer through `open_pane_link`, as the click its status names does.
 
 The context menu retains its platform convention: left/middle presses outside
 it, including in the terminal, dismiss and consume; an outside right press
@@ -2158,7 +2175,11 @@ starts the strip, and clamps the grab offset inside that tab.
 The menu owns its origin through shell-discovery replacement and submenu
 navigation. Only the macOS new-tab menu omits Settings through About; its
 origin also supplies the accessible name and expanded/pressed state, and
-clears with the menu. AccessKit children follow each strip's screen order.
+clears with the menu. The AccessKit tab list holds only the tabs; the
+strip's own buttons (New tab, the new-tab menu, the gear, and in the GNOME
+header Find, the main menu and the window buttons) sit beside it in a
+`Toolbar` named "Tab bar controls" (`tab_strip_roots`), and each container's
+children follow the strip's screen order.
 On macOS the dropdown uses the ComboBox role, mapped to AXPopUpButton, and a
 toggled value for open state because this adapter drops HasPopup/expanded.
 While the menu is open, only its popup remains in the strip's accessibility

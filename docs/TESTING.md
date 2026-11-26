@@ -3463,7 +3463,20 @@ value is included in that name. Linux retains the value description used by
 AT-SPI, and Windows retains its separate name and value. The native macOS
 check opens Settings and reads these row names through the accessibility tree;
 it does not establish VoiceOver speech output. Control diagnostics retain the
-field name alone, including on macOS.
+field name alone, including on macOS. `settings_row_text_follows_each_platforms_reader`
+builds a row the macOS, AT-SPI and UI Automation ways on any host, so each
+platform's text keeps unit coverage off its own runner.
+`settings_switches_expose_their_checked_state` gives a switch row its checked
+state wherever the speech choice allows it (every platform but macOS) and no
+other row one, keeps each row's value, and checks that the accessibility key
+follows a switch's state. `settings_rows_report_their_place_among_all_rows`
+hands the projection to AccessKit's consumer and reads each row's position
+and set size as the AT-SPI and UIA adapters do, while browsing sections and
+in a search.
+`off_screen_settings_rows_stay_reachable_at_the_list_edges` checks that rows
+scrolled out of the panel pass AccessKit's common filter with Focus and Click,
+bounded as zero-height lines on the edge of the painted rows they left by, at
+1x and 2x, and that a section scrolled out whole still has bounds.
 
 ## Static text names on every platform
 
@@ -3474,6 +3487,34 @@ AT-SPI and UI Automation do: a label's from its value, any other node's from its
 label. They check the theme picker's footer text (with the lowest colour's
 number and the below-3:1 warning) and Settings' no-match line in English and
 Spanish. They do not run Orca or Narrator.
+
+## Accessibility tree semantics
+
+These `kettle-ui` tests check the generated tree and the action routing, not
+speech:
+
+- `picker_options_offer_a_press_that_picks_them_as_a_click_does`: every
+  enabled palette and layout picker option has a Click action, and a press
+  selects the command (palette) or row (other pickers) a click would. The
+  handler then sends the picker its own Enter. Disabled rows, stale ids, footer
+  controls and options under a menu select nothing.
+- `quick_select_labels_offer_a_press_that_acts_on_their_target`: matching
+  quick-select labels have a Click action that runs `act_hint`. Dimmed labels
+  have none.
+- `a_hovered_link_offers_a_press_that_opens_it`: the hovered link's node has
+  a Click action that opens the link under the pointer through
+  `open_pane_link`. Its status text has none.
+- `every_modal_surface_is_a_modal_dialog`: the palette, the theme, layout and
+  SSH pickers, Settings and title editing each project one modal dialog.
+- `the_tab_list_holds_only_tabs_beside_a_toolbar_of_the_strips_buttons`: the
+  tab list's children are tabs only. New tab, the new-tab menu, the gear and
+  the GNOME header's Find, main menu and window buttons sit in a "Tab bar
+  controls" toolbar beside it, in screen order, in English and Spanish.
+- `the_find_bar_has_one_named_status`: the find bar's count and status are one
+  named polite status, in English and Spanish, bounded over both painted
+  rects, and absent when the bar shows neither.
+
+VoiceOver and Orca have not yet been run against these changes.
 
 ## Configured-session and desktop acceptance, 2026-11-01
 

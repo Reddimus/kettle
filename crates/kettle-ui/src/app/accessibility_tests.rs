@@ -2585,9 +2585,10 @@ fn settings_browsing_groups_preserve_focus_editor_membership_and_hidden_rows() {
             assert_eq!(node.children(),(0..4).map(|i| super::accessibility_modal_id(5,ordinal*4+i+2)).collect::<Vec<_>>());
         }
         assert_eq!(tree.focus,Some(super::accessibility_modal_id(5,12)));
+        assert!(layout.rows.len() < settings.rows.len(), "some rows are scrolled out");
         for (index,_) in settings.rows.iter().enumerate() {
             let node = &tree.nodes.iter().find(|(id,_)| *id==super::accessibility_modal_id(5,index+2)).unwrap().1;
-            assert_eq!(node.is_hidden(),!layout.rows.iter().any(|row| row.index==index));
+            assert!(!node.is_hidden(), "row {index} stays reachable");
         }
         let mut editing = overlay;
         editing.text_field = Some(kettle_render::TextFieldOverlay { text: "editing".into(), rect: layout.rows.iter().find(|row| row.index==10).unwrap().chip_rect, picker_header: false, placeholder: String::new(), cursor_byte: 0, selection: None, horizontal_scroll: 0, prefix: String::new(), hint: String::new(), accent_palette: 0 });
@@ -2625,4 +2626,759 @@ fn settings_search_group_bounds_follow_first_row_indices_and_sticky_category() {
             assert_eq!(tree.focus,Some(super::accessibility_modal_id(5,focus+2)));
         }
     }
+}
+
+/// Every enabled picker option offers a press, the default action screen
+/// readers run, and a press picks the option as a click on its row does: the
+/// palette's selection counts commands past its headings, the other pickers'
+/// count rows. The dispatch then hands the picker its own Enter. A disabled
+/// placeholder, a stale id, the footer's controls, another picker's options
+/// and anything under a menu or a confirmation pick nothing.
+#[test]
+fn picker_options_offer_a_press_that_picks_them_as_a_click_does() {
+    use accesskit::Action;
+    let bindings = kettle_config::keybinds::defaults();
+    let list = command_picker_list(
+        "",
+        0,
+        &bindings,
+        &EN_TEXT,
+        None,
+        Some(&[]),
+        false,
+        kettle_config::BroadcastDefault::default(),
+    );
+    let palette = picker_context_menu(list, (1280.0, 820.0), (7.8, 16.25), (7.8, 16.25), 32.0)
+        .unwrap();
+    assert!(palette.rows.iter().any(|row| row.heading), "the empty palette has headings");
+    let mut layouts = picker_context_menu(
+        layout_picker_list("", 0, &["dev".to_string(), "ops".to_string(), "web".to_string()], &EN_TEXT),
+        (1280.0, 820.0),
+        (7.8, 16.25),
+        (7.8, 16.25),
+        32.0,
+    )
+    .unwrap();
+    layouts.rows[1].enabled = false;
+    for (kind, menu) in [
+        (super::MODAL_KIND_PALETTE, palette),
+        (super::MODAL_KIND_LAYOUTS, layouts),
+    ] {
+        let palette = kind == super::MODAL_KIND_PALETTE;
+        let mut ws = WindowState::new(0, Mux::new());
+        let overlay = if palette {
+            ws.palette_input = Some((Default::default(), 0));
+            kettle_render::Overlay {
+                palette_query: Some(String::new()),
+                context_menu: Some(menu),
+                ..Default::default()
+            }
+        } else {
+            ws.layout_picker_input = Some((Default::default(), 0));
+            kettle_render::Overlay {
+                layout_picker_query: Some(String::new()),
+                context_menu: Some(menu),
+                ..Default::default()
+            }
+        };
+        let projection =
+            super::modal_accessibility_projection(&overlay, (1280.0, 820.0), (7.8, 16.25), 1.0, &EN_TEXT);
+        let menu = overlay.context_menu.as_ref().unwrap();
+        let mut pressed = 0;
+        for (index, row) in menu.rows.iter().enumerate() {
+            let Some(option) = kettle_render::menu_row_option(&menu.rows, index) else {
+                continue;
+            };
+            let id = super::accessibility_modal_id(kind, option + 3);
+            let node = &projection.nodes.iter().find(|(at, _)| *at == id).unwrap().1;
+            assert_eq!(node.supports_action(Action::Click), row.enabled, "{kind} row {index}");
+            assert_eq!(
+                super::accessibility_picker_press(&ws, menu, id),
+                row.enabled.then_some(if palette { option } else { index }),
+                "{kind} row {index}"
+            );
+            pressed += usize::from(row.enabled);
+        }
+        assert!(pressed > 1, "{kind}");
+        let first = super::accessibility_modal_id(kind, 3);
+        for stale in [
+            super::accessibility_modal_id(kind, 0),
+            super::accessibility_modal_id(kind, 1),
+            super::accessibility_modal_id(kind, 2),
+            super::accessibility_modal_id(kind, menu.rows.len() + 3),
+            super::accessibility_modal_id(kind, super::PICKER_CONTRAST_A11Y_INDEX),
+            super::accessibility_modal_id(kind, super::PICKER_STATUS_A11Y_INDEX),
+            super::accessibility_modal_id(super::MODAL_KIND_SSH, 3),
+        ] {
+            assert_eq!(super::accessibility_picker_press(&ws, menu, stale), None, "{stale:?}");
+        }
+        assert!(super::accessibility_picker_press(&ws, menu, first).is_some());
+        ws.context_menu = Some(super::ContextMenuState {
+            origin: crate::app::MenuOrigin::Other,
+            anchor: (0.0, 0.0),
+            anchor_scale: 1.0,
+            items: Vec::new(),
+            highlight: 0,
+            drill_stack: Vec::new(),
+            scroll_offset: 0,
+            typeahead_buf: String::new(),
+            typeahead_until: None,
+        });
+        assert_eq!(super::accessibility_picker_press(&ws, menu, first), None);
+        ws.context_menu = None;
+        ws.palette_input = None;
+        ws.layout_picker_input = None;
+        assert_eq!(super::accessibility_picker_press(&ws, menu, first), None);
+    }
+    let handler = production_source()
+        .split_once("fn handle_accessibility_action(")
+        .unwrap()
+        .1
+        .split_once("accessibility_picker_press(ws, &menu, request.target_node)")
+        .expect("the handler dispatches a picker press")
+        .1
+        .split("return;")
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(handler.contains("self.press_picker_option(ws, selected, event_loop)"));
+    let press = production_source()
+        .split_once("fn press_picker_option(")
+        .unwrap()
+        .1
+        .split("\n    }\n")
+        .next()
+        .unwrap()
+        .to_string();
+    for call in [
+        "self.palette_key(ws, &key, None, event_loop)",
+        "self.theme_picker_key(ws, &key, None)",
+        "self.layout_picker_key(ws, &key, None)",
+        "self.ssh_key(ws, &key, None)",
+    ] {
+        assert!(press.contains(call), "{call}");
+    }
+}
+
+/// Each quick-select label still matching what has been typed offers a
+/// press, which acts on its target as typing the label does; a dimmed label
+/// has none and picks nothing, as does any label once quick select closes.
+#[test]
+fn quick_select_labels_offer_a_press_that_acts_on_their_target() {
+    use accesskit::Action;
+    let target = |label: &str| super::HintTarget {
+        row: 0,
+        col: 0,
+        label: label.into(),
+        pane: 1,
+        what: super::HintWhat::Text {
+            kind: kettle_core::hints::Kind::Url,
+            text: format!("https://{label}.test"),
+            bounded: true,
+        },
+    };
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.hint_state = Some((vec![target("aa"), target("ab"), target("ba")], "a".into()));
+    let overlay = kettle_render::Overlay {
+        hint_labels: ["aa", "ab", "ba"]
+            .into_iter()
+            .enumerate()
+            .map(|(col, label)| kettle_render::HintLabel {
+                row: 0,
+                col: col * 4,
+                label: label.into(),
+                dim: !label.starts_with('a'),
+            })
+            .collect(),
+        hint_bounds: (0..3).map(|col| (col as f32 * 32.0, 0.0, 16.0, 16.0)).collect(),
+        ..Default::default()
+    };
+    let projection =
+        super::modal_accessibility_projection(&overlay, (800.0, 400.0), (8.0, 16.0), 1.0, &EN_TEXT);
+    for (index, (label, live)) in [("aa", true), ("ab", true), ("ba", false)].into_iter().enumerate() {
+        let id = super::accessibility_modal_id(3, index + 1);
+        let node = &projection.nodes.iter().find(|(at, _)| *at == id).unwrap().1;
+        assert_eq!(node.supports_action(Action::Click), live, "{label}");
+        assert_eq!(
+            super::accessibility_hint_target(id, &ws).map(|target| target.label),
+            live.then(|| label.to_string()),
+            "{label}"
+        );
+    }
+    for stale in [super::accessibility_modal_id(3, 0), super::accessibility_modal_id(3, 4)] {
+        assert!(super::accessibility_hint_target(stale, &ws).is_none());
+    }
+    let first = super::accessibility_modal_id(3, 1);
+    ws.hint_state = None;
+    assert!(super::accessibility_hint_target(first, &ws).is_none());
+    let handler = production_source()
+        .split_once("fn handle_accessibility_action(")
+        .unwrap()
+        .1
+        .split_once("accessibility_hint_target(request.target_node, ws)")
+        .expect("the handler dispatches a hint press")
+        .1
+        .split("return;")
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(handler.contains("ws.hint_state = None;"));
+    assert!(handler.contains("self.act_hint(ws, &target, false)"));
+}
+
+/// The command palette, the theme, layout and SSH pickers, Settings and
+/// title editing own the keyboard and the pointer while open, so each is a
+/// modal dialog to assistive technology, as the confirmation already is.
+#[test]
+fn every_modal_surface_is_a_modal_dialog() {
+    let menu = || {
+        picker_context_menu(
+            layout_picker_list("", 0, &["dev".to_string(), "ops".to_string()], &EN_TEXT),
+            (1280.0, 820.0),
+            (7.8, 16.25),
+            (7.8, 16.25),
+            32.0,
+        )
+    };
+    let pickers: [fn(&mut kettle_render::Overlay); 4] = [
+        |overlay| overlay.palette_query = Some(String::new()),
+        |overlay| overlay.theme_picker_query = Some(String::new()),
+        |overlay| overlay.layout_picker_query = Some(String::new()),
+        |overlay| overlay.ssh_query = Some(String::new()),
+    ];
+    let mut overlays: Vec<(&str, kettle_render::Overlay)> = pickers
+        .into_iter()
+        .zip(["palette", "themes", "layouts", "ssh"])
+        .map(|(open, name)| {
+            let mut overlay = kettle_render::Overlay {
+                context_menu: menu(),
+                ..Default::default()
+            };
+            open(&mut overlay);
+            (name, overlay)
+        })
+        .collect();
+    overlays.push((
+        "settings",
+        kettle_render::Overlay {
+            settings: Some(kettle_render::SettingsOverlay {
+                categories: vec!["Appearance".into()],
+                rows: vec![kettle_render::SettingsRow {
+                    label: "Font size".into(),
+                    value: "14 px".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    ));
+    overlays.push((
+        "title",
+        kettle_render::Overlay {
+            edit_title: Some(kettle_render::TitleEditOverlay {
+                label: "Tab title".into(),
+                input: "shell".into(),
+                hint: String::new(),
+                rect: (0.0, 0.0, 400.0, 28.0),
+            }),
+            ..Default::default()
+        },
+    ));
+    for (name, overlay) in &overlays {
+        let projection =
+            super::modal_accessibility_projection(overlay, (1280.0, 820.0), (7.8, 16.25), 1.0, &EN_TEXT);
+        let dialogs: Vec<_> = projection
+            .nodes
+            .iter()
+            .filter(|(_, node)| matches!(node.role(), accesskit::Role::Dialog | accesskit::Role::AlertDialog))
+            .collect();
+        assert_eq!(dialogs.len(), 1, "{name}");
+        assert!(projection.roots.contains(&dialogs[0].0), "{name}");
+        assert!(dialogs[0].1.is_modal(), "{name} is not modal");
+    }
+}
+
+/// The three ways a Settings row's value reaches a screen reader, checked on
+/// any host: macOS reads it in the name, AT-SPI after the name in the
+/// description, UI Automation as the value. A choice's current choice is the
+/// value in all three, and the host builds its rows the way its reader needs.
+#[test]
+fn settings_row_text_follows_each_platforms_reader() {
+    use super::accessibility::{SETTINGS_ROW_SPEECH, SettingsRowSpeech, settings_row_node};
+    let row = kettle_render::SettingsRow {
+        label: "Cursor shape".into(),
+        value: "Block".into(),
+        description: "Choose the terminal cursor shape.".into(),
+        control: kettle_render::SettingsControl::Choice,
+        ..Default::default()
+    };
+    let mac = SettingsRowSpeech { value_in_name: true, value_in_description: false, checked: false };
+    let atspi = SettingsRowSpeech { value_in_name: false, value_in_description: true, checked: true };
+    let uia = SettingsRowSpeech { value_in_name: false, value_in_description: false, checked: true };
+    for (speech, name, description) in [
+        (mac, "Cursor shape, Block", "Choose the terminal cursor shape."),
+        (atspi, "Cursor shape", "Block. Choose the terminal cursor shape."),
+        (uia, "Cursor shape", "Choose the terminal cursor shape."),
+    ] {
+        let node = settings_row_node(&row, speech);
+        assert_eq!(node.role(), accesskit::Role::ListBoxOption);
+        assert_eq!(node.label(), Some(name), "{speech:?}");
+        assert_eq!(node.value(), Some("Block"), "{speech:?}");
+        assert_eq!(node.description(), Some(description), "{speech:?}");
+    }
+    assert_eq!(SETTINGS_ROW_SPEECH.value_in_name, cfg!(target_os = "macos"));
+    assert_eq!(
+        SETTINGS_ROW_SPEECH.value_in_description,
+        cfg!(all(unix, not(target_os = "macos")))
+    );
+}
+
+/// A Settings switch exposes whether it is on as its checked state where the
+/// platform's adapter can carry it (AT-SPI: checkable and checked), and every
+/// other row has none. On macOS, where the locked adapter would replace the
+/// option's name with the state, the name keeps saying On or Off instead.
+/// The host's own rows follow its platform's choice.
+#[test]
+fn settings_switches_expose_their_checked_state() {
+    use super::accessibility::{SETTINGS_ROW_SPEECH, SettingsRowSpeech, settings_row_node};
+    use accesskit::Toggled;
+    use kettle_render::SettingsControl;
+    let rows = [
+        ("Window blur", "On", SettingsControl::Toggle(true), Some(Toggled::True)),
+        ("Show pane titlebars", "Off", SettingsControl::Toggle(false), Some(Toggled::False)),
+        ("Cursor shape", "Block", SettingsControl::Choice, None),
+        ("Font size", "14 px", SettingsControl::Value, None),
+        ("Background image", "", SettingsControl::Text, None),
+    ]
+    .map(|(label, value, control, checked)| {
+        (
+            kettle_render::SettingsRow {
+                label: label.into(),
+                value: value.into(),
+                control,
+                ..Default::default()
+            },
+            checked,
+        )
+    });
+    for value_in_name in [false, true] {
+        for value_in_description in [false, true] {
+            for checked in [false, true] {
+                let speech = SettingsRowSpeech { value_in_name, value_in_description, checked };
+                for (row, state) in &rows {
+                    let node = settings_row_node(row, speech);
+                    assert_eq!(node.toggled(), state.filter(|_| checked), "{} {speech:?}", row.label);
+                    // The choice, the size or the switch's word stays the value.
+                    assert_eq!(node.value(), Some(row.value.as_str()), "{} {speech:?}", row.label);
+                    if value_in_name && !row.value.is_empty() {
+                        assert_eq!(node.label(), Some(format!("{}, {}", row.label, row.value).as_str()));
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(SETTINGS_ROW_SPEECH.checked, !cfg!(target_os = "macos"));
+    // The host's projection: one switch on, one off, as its reader gets them.
+    let overlay = kettle_render::Overlay {
+        settings: Some(kettle_render::SettingsOverlay {
+            categories: vec!["Appearance".into()],
+            rows: rows.iter().map(|(row, _)| row.clone()).collect(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let projection =
+        super::modal_accessibility_projection(&overlay, (1280.0, 820.0), (8.4, 17.5), 1.0, &EN_TEXT);
+    for (index, (row, state)) in rows.iter().enumerate() {
+        let node = &projection
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == super::accessibility_modal_id(5, index + 2))
+            .unwrap()
+            .1;
+        assert_eq!(
+            node.toggled(),
+            state.filter(|_| SETTINGS_ROW_SPEECH.checked),
+            "{}",
+            row.label
+        );
+    }
+    // A switch that flips republishes the tree even where its value (an
+    // unavailable switch's) does not change.
+    let key = production_source()
+        .split_once("fn accessibility_key(&self, ws: &WindowState, overlay: &Overlay) -> u64")
+        .unwrap()
+        .1
+        .split("fn publish_accessibility_if_due")
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(key.contains("matches!(row.control, kettle_render::SettingsControl::Toggle(true))"));
+}
+
+/// Each Settings row says where it stands among all the rows the list shows,
+/// across its sections while browsing and its categories in a search, as
+/// AT-SPI and UI Automation read it once the tree reaches AccessKit's
+/// consumer: a zero-based position, and the set's size from the list.
+#[test]
+fn settings_rows_report_their_place_among_all_rows() {
+    for query in ["", "o"] {
+        let settings = kettle_render::SettingsOverlay {
+            categories: vec!["Appearance".into(), "Terminal".into()],
+            search_query: query.into(),
+            rows: (0..9)
+                .map(|i| kettle_render::SettingsRow {
+                    label: format!("Field {i}"),
+                    value: "On".into(),
+                    category: i / 5,
+                    group: ["Colors and text", "Window"][i % 2].into(),
+                    disabled: i == 4,
+                    ..Default::default()
+                })
+                .collect(),
+            focused_row: 2,
+            ..Default::default()
+        };
+        let total = settings.rows.len();
+        let overlay = kettle_render::Overlay {
+            settings: Some(settings),
+            ..Default::default()
+        };
+        let projection =
+            super::modal_accessibility_projection(&overlay, (1280.0, 820.0), (8.4, 17.5), 1.0, &EN_TEXT);
+        let tree = accesskit_consumer::Tree::new(
+            super::mouse_override_hint_tests::finished_tree(projection),
+            true,
+        );
+        let state = tree.state();
+        for index in 0..total {
+            let row = state
+                .node_by_tree_local_id(super::accessibility_modal_id(5, index + 2), accesskit::TreeId::ROOT)
+                .unwrap();
+            assert_eq!(row.position_in_set(), Some(index), "{query:?} row {index}");
+            assert_eq!(
+                row.size_of_set_from_container(&accesskit_consumer::common_filter),
+                Some(total),
+                "{query:?} row {index}"
+            );
+            if query.is_empty() {
+                assert_eq!(row.parent().unwrap().role(), accesskit::Role::Group, "in its section");
+            }
+        }
+    }
+}
+
+/// A Settings row scrolled out of the panel stays in the tree, where the
+/// platform adapters include it, so a screen reader's cursor can reach it:
+/// a line along the edge of the painted rows it left by, with the Focus and
+/// Click a painted row has (focusing it scrolls it into view). Painted rows
+/// keep their painted bounds, and a section scrolled out whole is bounded
+/// with its first row.
+#[test]
+fn off_screen_settings_rows_stay_reachable_at_the_list_edges() {
+    use accesskit::Action;
+    for scale in [1.0, 2.0] {
+        let settings = kettle_render::SettingsOverlay {
+            categories: vec!["Appearance".into()],
+            rows: (0..12)
+                .map(|i| kettle_render::SettingsRow {
+                    label: format!("Field {i}"),
+                    value: "On".into(),
+                    group: ["Colors and text", "Window", "Cursor"][i / 4].into(),
+                    ..Default::default()
+                })
+                .collect(),
+            focused_row: 6,
+            ..Default::default()
+        };
+        let surface = (1280.0 * scale, 420.0 * scale);
+        let metrics = (8.4 * scale, 17.5 * scale);
+        let layout = kettle_render::settings_layout(&settings, metrics, surface, metrics.0, scale);
+        let painted: Vec<_> = layout.rows.iter().map(|row| row.index).collect();
+        let (first, last) = (layout.rows.first().unwrap(), layout.rows.last().unwrap());
+        assert!(first.index > 0 && last.index < 11, "rows are cut off at both edges: {painted:?}");
+        let overlay = kettle_render::Overlay {
+            settings: Some(settings.clone()),
+            ..Default::default()
+        };
+        let projection =
+            super::modal_accessibility_projection(&overlay, surface, metrics, scale, &EN_TEXT);
+        let tree = accesskit_consumer::Tree::new(
+            super::mouse_override_hint_tests::finished_tree(projection),
+            true,
+        );
+        let state = tree.state();
+        let top = first.rect.1 as f64;
+        let bottom = (last.rect.1 + last.rect.3) as f64;
+        for index in 0..settings.rows.len() {
+            let node = state
+                .node_by_tree_local_id(super::accessibility_modal_id(5, index + 2), accesskit::TreeId::ROOT)
+                .unwrap();
+            assert_eq!(
+                accesskit_consumer::common_filter(&node),
+                accesskit_consumer::FilterResult::Include,
+                "row {index} at {scale}x"
+            );
+            assert!(node.data().supports_action(Action::Focus), "row {index}");
+            assert!(node.data().supports_action(Action::Click), "row {index}");
+            let rect = node.data().bounds().unwrap();
+            match layout.rows.iter().find(|row| row.index == index) {
+                Some(row) => {
+                    let (x, y, w, h) = row.rect;
+                    assert_eq!(
+                        rect,
+                        accesskit::Rect::new(x as f64, y as f64, (x + w) as f64, (y + h) as f64)
+                    );
+                }
+                None => {
+                    assert_eq!(rect.height(), 0.0, "row {index}");
+                    assert_eq!((rect.x0, rect.x1), ((first.rect.0) as f64, (first.rect.0 + first.rect.2) as f64));
+                    let edge = if index < first.index { rect.y0 <= top } else { rect.y0 == bottom };
+                    assert!(edge, "row {index} at {rect:?}, rows {top}..{bottom}");
+                }
+            }
+        }
+        for section in 0..3 {
+            let group = state
+                .node_by_tree_local_id(
+                    // The sections are modal kind 16.
+                    super::accessibility_modal_id(16, section),
+                    accesskit::TreeId::ROOT,
+                )
+                .unwrap();
+            assert!(group.data().bounds().is_some(), "section {section} at {scale}x");
+        }
+    }
+}
+
+/// The tab list holds only tabs. The strip's own buttons (New tab, the
+/// new-tab menu, the macOS Settings gear, and in the GNOME header Find, the
+/// main menu and the window buttons) sit beside it in a named toolbar, in
+/// screen order, and both are children of the window's node. A strip with
+/// no tab shown has no tab list, and one with no button no toolbar.
+#[test]
+fn the_tab_list_holds_only_tabs_beside_a_toolbar_of_the_strips_buttons() {
+    use accesskit::Role;
+    // The macOS title-bar strip, or the GNOME header with Find and a window
+    // button; two tabs either way.
+    let strip = |header: bool, tr: &kettle_i18n::Translator| {
+        let mut bar = kettle_render::TabBar::hidden();
+        bar.height = 32.0;
+        for index in 0..2 {
+            let rect = (120.0 + index as f32 * 160.0, 0.0, 160.0, 32.0);
+            bar.segments.push(kettle_render::TabSeg {
+                idx: index,
+                rect,
+                title_rect: rect,
+                hint: None,
+                close: (rect.0 + rect.2 - 28.0, 0.0, 28.0, 32.0),
+                title: format!("shell {index}"),
+                path: None,
+                active: index == 0,
+                activity: kettle_render::TabActivity::Normal,
+            });
+        }
+        bar.settings = (1172.0, 0.0, 32.0, 32.0);
+        bar.new_tab = (1212.0, 0.0, 32.0, 32.0);
+        bar.new_tab_menu = (1244.0, 0.0, 28.0, 32.0);
+        if header {
+            bar.linux_header = true;
+            bar.settings = (0.0, 0.0, 0.0, 0.0);
+            bar.new_tab = (7.0, 0.0, 34.0, 34.0);
+            bar.search = (1100.0, 0.0, 34.0, 34.0);
+            bar.window_controls.push(kettle_render::WindowControlButton {
+                action: kettle_render::WindowControl::Close,
+                rect: (1280.0, 0.0, 34.0, 34.0),
+                label: tr.text(kettle_i18n::Text::A11yWindowClose).into(),
+                hovered: false,
+                pressed: false,
+            });
+        }
+        bar
+    };
+    for (language, toolbar_name) in [
+        (kettle_i18n::Language::En, "Tab bar controls"),
+        (kettle_i18n::Language::Es, "Controles de la barra de pestañas"),
+    ] {
+        let tr = kettle_i18n::Translator::new(language);
+        for header in [false, true] {
+            let bar = strip(header, &tr);
+            let nodes = super::tab_accessibility_projection(&bar, &[10, 20], false, &tr);
+            let node = |id: accesskit::NodeId| &nodes.iter().find(|(at, _)| *at == id).unwrap().1;
+            assert_eq!(
+                super::tab_strip_roots(&nodes),
+                [super::ACCESSIBILITY_TAB_LIST_ID, super::ACCESSIBILITY_TAB_TOOLBAR_ID]
+            );
+            let list = node(super::ACCESSIBILITY_TAB_LIST_ID);
+            assert_eq!(list.role(), Role::TabList);
+            assert_eq!(
+                list.children(),
+                [super::accessibility_tab_id(10, false), super::accessibility_tab_id(20, false)],
+                "header {header}"
+            );
+            let toolbar = node(super::ACCESSIBILITY_TAB_TOOLBAR_ID);
+            assert_eq!(toolbar.role(), Role::Toolbar);
+            assert_eq!(toolbar.label(), Some(toolbar_name));
+            assert_eq!(toolbar.orientation(), Some(accesskit::Orientation::Horizontal));
+            let expected = if header {
+                vec![
+                    super::ACCESSIBILITY_TAB_NEW_ID,
+                    super::ACCESSIBILITY_HEADER_FIND_ID,
+                    super::ACCESSIBILITY_TAB_MENU_ID,
+                    super::window_control_accessibility_id(kettle_render::WindowControl::Close),
+                ]
+            } else {
+                vec![
+                    super::ACCESSIBILITY_TAB_SETTINGS_ID,
+                    super::ACCESSIBILITY_TAB_NEW_ID,
+                    super::ACCESSIBILITY_TAB_MENU_ID,
+                ]
+            };
+            assert_eq!(toolbar.children(), expected, "header {header}");
+            // Every node in the strip is in one of the two, or a tab's, once.
+            let mut held: Vec<_> = list.children().to_vec();
+            held.extend(toolbar.children());
+            for (_, tab) in &nodes {
+                if tab.role() == Role::Tab {
+                    held.extend(tab.children());
+                }
+            }
+            for (id, _) in &nodes {
+                if ![super::ACCESSIBILITY_TAB_LIST_ID, super::ACCESSIBILITY_TAB_TOOLBAR_ID].contains(id) {
+                    assert_eq!(held.iter().filter(|held| *held == id).count(), 1, "{id:?}");
+                }
+            }
+        }
+    }
+    let tr = kettle_i18n::Translator::default();
+    // The new-tab menu open: its button alone, so no tab list.
+    let mut open = strip(false, &tr);
+    open.new_tab_menu_open = true;
+    let nodes = super::tab_accessibility_projection(&open, &[10, 20], false, &tr);
+    assert_eq!(super::tab_strip_roots(&nodes), [super::ACCESSIBILITY_TAB_TOOLBAR_ID]);
+    // No button: no toolbar.
+    let mut bare = strip(false, &tr);
+    bare.settings = (0.0, 0.0, 0.0, 0.0);
+    bare.new_tab = (0.0, 0.0, 0.0, 0.0);
+    bare.new_tab_menu = (0.0, 0.0, 0.0, 0.0);
+    let nodes = super::tab_accessibility_projection(&bare, &[10, 20], false, &tr);
+    assert_eq!(super::tab_strip_roots(&nodes), [super::ACCESSIBILITY_TAB_LIST_ID]);
+    // The window's node takes the strip's containers.
+    let tree = production_source()
+        .split_once("fn accessibility_tree(&self, ws: &WindowState, overlay: &Overlay)")
+        .unwrap()
+        .1
+        .split("fn accessibility_key(")
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(tree.contains("children.extend(tab_strip_roots(&tabs));"));
+}
+
+/// The find bar has one status for screen readers, always named: the match
+/// count and, when the bar shows one, the search's own status after it, in
+/// the UI's language, as one polite live region over where both are painted.
+/// The count speaks for Match and No matches, and a bar showing neither
+/// count nor status has no status node at all.
+#[test]
+fn the_find_bar_has_one_named_status() {
+    use kettle_render::SearchStatus;
+    let count_rect = (600.0, 4.0, 60.0, 20.0);
+    let status_rect = (670.0, 4.0, 90.0, 20.0);
+    for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
+        let tr = kettle_i18n::Translator::new(language);
+        let count = kettle_render::search_match_label(&tr, 3, Some(12), false);
+        let none = kettle_render::search_match_label(&tr, 0, Some(0), false);
+        let wrapped = SearchStatus::Wrapped.label(&tr);
+        for (count, status, heard, rect) in [
+            (count.as_str(), "", count.clone(), count_rect),
+            (none.as_str(), "", none.clone(), count_rect),
+            (count.as_str(), wrapped, format!("{count}, {wrapped}"), (600.0, 4.0, 160.0, 20.0)),
+            ("", SearchStatus::Typing.label(&tr), SearchStatus::Typing.label(&tr).to_string(), status_rect),
+            ("", SearchStatus::Invalid.label(&tr), SearchStatus::Invalid.label(&tr).to_string(), status_rect),
+        ] {
+            let nodes = super::search_status_nodes(count, status, count_rect, status_rect);
+            assert_eq!(nodes.len(), 1, "{language:?} {heard:?}");
+            let node = &nodes[0].1;
+            assert_eq!(node.role(), accesskit::Role::Status);
+            assert_eq!(node.label(), Some(heard.as_str()), "{language:?}");
+            assert_eq!(node.live(), Some(accesskit::Live::Polite));
+            let (x, y, w, h) = rect;
+            assert_eq!(
+                node.bounds(),
+                Some(accesskit::Rect::new(x as f64, y as f64, (x + w) as f64, (y + h) as f64)),
+                "{heard:?}"
+            );
+        }
+        assert!(super::search_status_nodes("", "", count_rect, status_rect).is_empty());
+    }
+    let tree = production_source()
+        .split_once("fn accessibility_tree(&self, ws: &WindowState, overlay: &Overlay)")
+        .unwrap()
+        .1
+        .split("fn accessibility_key(")
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .collect::<String>();
+    let search = tree
+        .split_once("children.push(ACCESSIBILITY_SEARCH_CONTAINER_ID);")
+        .unwrap()
+        .1
+        .split("letmutsearch=Node::new(Role::Search);")
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(search.contains("search_status_nodes("));
+    assert!(!search.contains("Role::Status"), "the find bar builds its status in one place");
+}
+
+/// The hovered link's node offers a press, which opens the link under the
+/// pointer as the Ctrl or Cmd click its status names does; the status beside
+/// it, and a quick-select legend, are text with no press.
+#[test]
+fn a_hovered_link_offers_a_press_that_opens_it() {
+    use accesskit::Action;
+    let link = kettle_render::link_status_layout(
+        (0.0, 0.0, 800.0, 400.0),
+        (8.0, 16.0),
+        "https://x.test/path",
+        "Ctrl+click to open",
+        &[(0.0, 0.0, 100.0, 16.0)],
+    )
+    .unwrap();
+    let overlay = kettle_render::Overlay {
+        pane_statuses: vec![link],
+        ..Default::default()
+    };
+    let projection =
+        super::modal_accessibility_projection(&overlay, (800.0, 400.0), (8.0, 16.0), 1.0, &EN_TEXT);
+    let (id, node) = projection
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == accesskit::Role::Link)
+        .unwrap();
+    assert_eq!(node.label(), Some("https://x.test/path"));
+    assert!(node.supports_action(Action::Click));
+    assert!(super::accessibility_link_status(*id));
+    for (other, node) in &projection.nodes {
+        if other != id {
+            assert!(!node.supports_action(Action::Click), "{:?}", node.role());
+            assert!(!super::accessibility_link_status(*other));
+        }
+    }
+    let handler = production_source()
+        .split_once("fn handle_accessibility_action(")
+        .unwrap()
+        .1
+        .split_once("if accessibility_link_status(request.target_node) {")
+        .expect("the handler dispatches a link press")
+        .1
+        .split("return;")
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(handler.contains("self.hovered_link_at_cursor(ws)"));
+    assert!(handler.contains("self.open_pane_link(ws, links_pane(ws), &uri)"));
 }
