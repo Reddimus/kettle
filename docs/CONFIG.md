@@ -1080,8 +1080,8 @@ room, the header row (and a gallery's detail line) grows to that height; where
 it has only the room it always needed, the buttons reach into the padding
 above and the line of text below instead, so a lane or viewer that fitted
 before still fits. The button under the pointer lights, unless it would do nothing (browsing
-past either end). Resting the pointer on a button shows its name in a
-tooltip, with the key that does the same while the lane holds the keyboard
+past either end). Resting the pointer on a button (not on a video's
+picture, which a click plays as Play does) shows its name in a tooltip, with the key that does the same while the lane holds the keyboard
 (`+`, `-`, `0`, `C`, `K`, `M`, `T`, `F`, Page Up and Page Down, and in the
 centred viewer `P`, and Esc for × except in fullscreen, where Esc leaves
 fullscreen), or otherwise the shortcut bound to its action. A press or the wheel over a lane never

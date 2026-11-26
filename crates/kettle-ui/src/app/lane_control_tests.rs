@@ -2532,7 +2532,7 @@ fn lane_button_tooltips_share_the_clock_and_the_screen_reader_name() {
     );
     assert!(source.contains("let label = self.lane_control_label(ws, &lane, hit)?;"));
     assert!(source.contains("target: crate::tooltip::TooltipTarget::Media(lane.pane, hit),"));
-    assert!(source.contains("anchor: button,"));
+    assert!(source.contains("anchor: Some(button),"));
 }
 
 /// Defect 4 of the 6.0 final review: the window lays its lanes out with the
@@ -2613,4 +2613,33 @@ fn ui_geometry_names_the_lane_button_the_pointer_lights() {
     assert!(source.contains(
         "let hovered = self.hovered_lane_control(ws); if hovered != ws.lane_control_hover {"
     ));
+}
+
+/// Defect 4 of the second 6.0 review: a press on a video's picture, which
+/// plays as Play does, was held against the Play button's rect, so a pixel's
+/// move in the picture let the Play tooltip back. A lane button's tooltip is
+/// now named only on the button itself, which is also where a press on it is
+/// held; the picture names no button.
+#[test]
+fn a_lane_buttons_tooltip_is_named_only_on_the_button() {
+    use super::lane_button_tooltip_region;
+    let play = (10.0, 200.0, 44.0, 44.0);
+    assert_eq!(
+        lane_button_tooltip_region(Some(play), (20.0, 210.0)),
+        Some(play)
+    );
+    assert_eq!(
+        lane_button_tooltip_region(Some(play), (200.0, 100.0)),
+        None,
+        "the picture names no button"
+    );
+    assert_eq!(lane_button_tooltip_region(None, (20.0, 210.0)), None);
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(source.contains(
+        "let button = lane_button_tooltip_region(button, (pointer.x as f32, pointer.y as f32))?;"
+    ));
+    assert!(source.contains("anchor: Some(button), rect: button, })"));
 }

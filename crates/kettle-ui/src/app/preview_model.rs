@@ -816,6 +816,16 @@ pub(super) fn lane_control_action(hit: kettle_render::MediaLaneHit) -> Option<Ac
     .find(|action| lane_action_hit(action) == Some(hit))
 }
 
+/// Where a lane button's tooltip names it: the `button` itself, when the
+/// pointer is on it. A press elsewhere that does what the button does (a
+/// video's picture plays as Play does) names no button.
+pub(super) fn lane_button_tooltip_region(
+    button: Option<kettle_render::Rect4>,
+    (x, y): (f32, f32),
+) -> Option<kettle_render::Rect4> {
+    button.filter(|rect| rect_contains(*rect, x, y))
+}
+
 /// A lane control's name in ctl `ui_geometry`.
 pub(super) fn lane_control_name(hit: kettle_render::MediaLaneHit) -> &'static str {
     use kettle_render::MediaLaneHit as Hit;
