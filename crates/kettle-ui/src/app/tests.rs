@@ -398,6 +398,24 @@ include!("title_tests.rs");
 include!("update_toast_tests.rs");
 include!("windowing_tests.rs");
 
+/// The app menu's Settings… (Cmd+,) reaches `open_settings` while the
+/// panel is open, since a menu key equivalent passes modal key handling.
+/// It leaves the open panel where it is instead of reopening it on its
+/// first row, which dropped the category, row, search and pending capture.
+#[test]
+fn opening_settings_keeps_an_open_panel() {
+    let source = include_str!("actions.rs");
+    let open_settings = source
+        .split("pub(super) fn open_settings(&mut self, ws: &mut WindowState) {")
+        .nth(1)
+        .unwrap();
+    let flat: String = open_settings.split_whitespace().collect();
+    assert!(
+        flat.starts_with("ifws.settings_nav.is_some(){return;}self.close_all_modals(ws);"),
+        "open_settings must return before it closes or replaces an open panel"
+    );
+}
+
 #[test]
 fn opening_settings_does_not_enumerate_gpus_on_event_loop() {
     let source = include_str!("actions.rs");

@@ -1095,6 +1095,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- On macOS, choosing Settings… (Cmd+,) while Settings is open no longer
+  sends it back to its first page and drops your search; it stays where it
+  is.
+
 - Settings keeps saying "Restart Kettle to apply graphics changes" after you
   close and reopen it, for as long as a renderer or GPU change is still
   waiting for a restart.

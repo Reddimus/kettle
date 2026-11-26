@@ -343,7 +343,12 @@ impl App {
     }
 
     /// Open the in-app Settings overlay on its first row, over nothing else.
+    /// An open panel stays as it is: the app menu's Settings… (Cmd+,) on it
+    /// keeps its category, row and search, and what sits over it.
     pub(super) fn open_settings(&mut self, ws: &mut WindowState) {
+        if ws.settings_nav.is_some() {
+            return;
+        }
         self.close_all_modals(ws);
         if self.cpu_rendering {
             // Listing adapters would load a GPU driver into a process that
