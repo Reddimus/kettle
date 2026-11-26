@@ -1245,8 +1245,8 @@ pub(crate) struct WindowState {
     /// over the settings panel; keystrokes route to it until Enter (persist) or
     /// Esc (cancel). Only meaningful while `settings_nav` is also `Some`.
     pub(crate) settings_text_edit: Option<crate::settings::SettingsTextEdit>,
-    /// What the pointer was over in Settings when it last moved, so a move
-    /// repaints only when that changes. Painting works it out afresh.
+    /// The Settings hover the last frame painted, so a pointer move repaints
+    /// only when what it is over differs. Each frame works it out afresh.
     pub(crate) settings_hover: Option<kettle_render::SettingsHover>,
     /// What this window's OS surface was created able to show. Settings asks
     /// for a new window while the config needs more than this

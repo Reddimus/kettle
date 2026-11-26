@@ -1035,16 +1035,17 @@ impl App {
     }
 
     /// Repaint Settings when the pointer moves onto or off a row, choice,
-    /// Reset or category. Only the paint changes.
+    /// Reset or category, compared with the hover last painted, which a
+    /// redraw for a key or a scroll under a still pointer also sets. Only
+    /// the paint changes.
     pub(super) fn track_settings_hover(&mut self, ws: &mut WindowState) {
         let hover = self
             .settings_overlay_projection(ws)
             .and_then(|set| self.settings_hover(ws, &set));
-        if hover != ws.settings_hover {
-            ws.settings_hover = hover;
-            if let Some(window) = &ws.window {
-                window.request_redraw();
-            }
+        if hover != ws.settings_hover
+            && let Some(window) = &ws.window
+        {
+            window.request_redraw();
         }
     }
 

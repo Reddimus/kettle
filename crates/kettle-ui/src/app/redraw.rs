@@ -805,6 +805,9 @@ impl App {
             return;
         }
         let overlay = self.overlay(ws, reuse_pane_snapshots);
+        // What this frame shows under the pointer, for the next move to
+        // compare with (`track_settings_hover`).
+        ws.settings_hover = overlay.settings.as_ref().and_then(|set| set.hover);
         // Search and completion state are semantic accessibility state. Reuse
         // the exact projection this frame will draw instead of rebuilding the
         // full overlay twice for the accessibility key and tree. Snapshot reuse

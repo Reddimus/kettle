@@ -300,7 +300,6 @@ impl App {
                 ws.leave_tab_bar();
                 self.track_titlebar_pointer(ws, TitlebarPointer::Leave);
                 ws.search.hovered_control = None;
-                ws.settings_hover = None;
                 // No card is under a pointer that left.
                 ws.native_pointer = None;
                 ws.card_hover = None;
