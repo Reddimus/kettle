@@ -1564,6 +1564,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   at full strength, and afterwards stays at least three seconds more.
 - On Linux, `reduce-motion = auto` now allows motion when the desktop has no
   reduced-motion setting, and follows GNOME's animations setting otherwise.
+- With `reduce-motion = off`, the quick terminal slides in even when the
+  system's Reduce Motion is on or cannot be read.
 
 ## Older releases
 

@@ -3885,7 +3885,8 @@ desktop, verify repeated CLI/global/menu/palette toggles create one quick window
 focus returns on explicit hide, switching apps autohides without stealing focus,
 tabs and splits keep their processes while hidden, monitor selection and all
 five geometries work across mixed-DPI displays, and Reduce Motion disables the
-slide. Also check a taken hotkey, rebind/clear on reload, CapsLock/NumLock on X11,
+slide under `reduce-motion = auto` while `reduce-motion = off` still slides.
+Also check a taken hotkey, rebind/clear on reload, CapsLock/NumLock on X11,
 window-list/cycling exclusion, English/Spanish Settings, and Wayland/Windows
 desktop shortcuts. A GUI-free test run does not establish these native behaviors.
 

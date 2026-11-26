@@ -1283,8 +1283,9 @@ impl LinkUnderline {
 
 /// Whether Kettle avoids motion it would start on its own (`reduce-motion`):
 /// a video's preview looping while the pointer rests on its lane, the
-/// visual-bell flash and the notification toast's fade. A preview the user
-/// starts plays either way, and the bell mark on the tab shows either way.
+/// visual-bell flash, the toasts' fade and the quick terminal's slide. A
+/// preview the user starts plays either way, and the bell mark on the tab
+/// shows either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReduceMotion {
     /// Follow macOS Reduce Motion, or the Linux Settings portal and, where
