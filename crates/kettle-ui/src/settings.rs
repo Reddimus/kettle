@@ -474,7 +474,7 @@ impl SettingsNav {
                 self.query = Default::default();
                 self.search_focused = false;
                 self.category = index;
-                self.field = self.field.min(cats[index].fields.len().saturating_sub(1));
+                self.field = nearest_enabled_field(cfg, &cats[index].fields, self.field, -1);
                 self.capturing = false;
             }
             kettle_render::SettingsHit::Field(index) | kettle_render::SettingsHit::Reset(index) => {
@@ -684,16 +684,20 @@ impl SettingsNav {
         self.field = match to {
             RowMove::Next => next_enabled_field(cfg, fields, field, 1),
             RowMove::Previous => next_enabled_field(cfg, fields, field, -1),
-            RowMove::First => 0,
-            RowMove::Last => count - 1,
-            RowMove::PageDown => (field + half).min(count - 1),
-            RowMove::PageUp => field.saturating_sub(half),
+            // Jumps land on the nearest row that applies, back toward the
+            // row they start from, as ↑/↓ skip the others.
+            RowMove::First => nearest_enabled_field(cfg, fields, 0, 1),
+            RowMove::Last => nearest_enabled_field(cfg, fields, count - 1, -1),
+            RowMove::PageDown => {
+                nearest_enabled_field(cfg, fields, (field + half).min(count - 1), -1)
+            }
+            RowMove::PageUp => nearest_enabled_field(cfg, fields, field.saturating_sub(half), 1),
         };
     }
 
     /// Open the next (or previous) category on its first row, leaving any
     /// search.
-    pub(crate) fn switch_category(&mut self, cats: &[Category], _cfg: &Config, next: bool) {
+    pub(crate) fn switch_category(&mut self, cats: &[Category], cfg: &Config, next: bool) {
         if cats.is_empty() {
             return;
         }
@@ -705,7 +709,7 @@ impl SettingsNav {
         } else {
             (category + count - 1) % count
         };
-        self.field = 0;
+        self.field = nearest_enabled_field(cfg, &cats[self.category].fields, 0, 1);
     }
 }
 
@@ -1822,6 +1826,25 @@ pub fn next_enabled_field(cfg: &Config, fields: &[Field], start: usize, step: i3
         }
     }
     start.min(n - 1)
+}
+
+/// The row nearest `target` that is not [`field_disabled`], looking first
+/// toward `toward` (`+1` down, `-1` up) and then the other way, without
+/// wrapping. `target` (clamped) when no row applies.
+pub fn nearest_enabled_field(cfg: &Config, fields: &[Field], target: usize, toward: i32) -> usize {
+    let Some(last) = fields.len().checked_sub(1) else {
+        return 0;
+    };
+    let target = target.min(last);
+    let enabled = |index: &usize| !field_disabled(cfg, fields[*index].key);
+    let after = (target..=last).find(enabled);
+    let before = (0..=target).rev().find(enabled);
+    let (first, second) = if toward >= 0 {
+        (after, before)
+    } else {
+        (before, after)
+    };
+    first.or(second).unwrap_or(target)
 }
 
 // ---- Config readers (string-keyed; the one place catalogue keys meet Config).
@@ -3381,6 +3404,10 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "settings_nav_tests.rs"]
+mod nav_tests;
 
 #[cfg(test)]
 mod search_tests {

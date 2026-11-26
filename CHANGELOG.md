@@ -1095,6 +1095,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- In Settings, `G`, `Ctrl+D` and `Ctrl+U` no longer land on a dimmed option
+  that doesn't apply; like the arrows, they skip it.
+
 - `tab-min-width` is measured in logical pixels, as documented. On a display
   with a scale above 100% tabs could shrink to a fraction of the width set
   (half on a Retina display) before the tab bar started to scroll.

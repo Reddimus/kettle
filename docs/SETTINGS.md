@@ -55,7 +55,9 @@ an inline text prompt, and the Theme row opens the theme picker.)
 
 With **`vim-menu-nav`** on (the default), the panel also takes vim keys:
 `j`/`k` move between options, `h`/`l` change the highlighted option, `g`/`G`
-jump to the first/last option, and `Ctrl+d`/`Ctrl+u` move half a page. The
+jump to the first/last option, and `Ctrl+d`/`Ctrl+u` move half a page. Like
+the arrows, these jumps skip options that don't apply, as does a new category
+opened with Tab or a click. The
 same scheme works in the right-click context menu and the new-tab dropdown,
 where `h` closes or pops a submenu and `l` drills in or activates. `y`/`n`
 answer confirm dialogs. In the Confirm paste dialog `y` only takes Paste
