@@ -152,7 +152,10 @@ Open Link and Copy Link before those actions. Split, Pane, Tab, Window, Title,
 Group and Appearance commands live in submenus. Click a category or press Right
 to enter it; Left or Escape returns to its parent. Resting the pointer on a
 category for a fifth of a second also opens it, and an open submenu stays put
-while the pointer heads for it across the other categories. Menus and the
+while the pointer heads for it across the other categories. Moving the
+pointer off the menu, or out of the window, clears its highlight unless a
+submenu is open; the next Down or Up starts again from the top or the bottom.
+Menus and the
 command palette show native shortcut symbols on macOS (for example, ⌘V and
 ⇧⌘D); other platforms keep Ctrl+Shift+V notation.
 

@@ -443,3 +443,99 @@ fn a_parent_row_that_cannot_run_never_takes_over_the_open_submenu() {
     assert_eq!(menu.drill_stack.len(), 1, "Split stays open");
     assert_eq!(menu.drill_stack[0].highlight, 1);
 }
+
+#[test]
+fn leaving_the_menu_clears_its_highlight_until_a_key_or_the_pointer_lights_a_row() {
+    let items = vec![
+        leaf("Copy", Action::Copy),
+        ContextMenuItem::Separator,
+        leaf("Paste", Action::Paste),
+        leaf("Select All", Action::SelectAll),
+    ];
+    let panels = [(10.0, 10.0, 160.0, 80.0)];
+    let t0 = Instant::now();
+    for (delta, expected) in [(1, 0), (-1, 3)] {
+        let mut menu = state(items.clone());
+        let mut pointer = MenuPointer::default();
+        let mut hover = |menu: &mut ContextMenuState, hit, at, after| {
+            menu_pointer_moved(menu, &mut pointer, hit, &panels, at, t0 + ms(after))
+        };
+        hover(&mut menu, MenuHit::Row(2), (90.0, 50.0), 0);
+        assert_eq!(menu.highlight, 2);
+        // Out past the panel's edge, or out of the window.
+        assert_eq!(
+            hover(&mut menu, MenuHit::Outside, (300.0, 50.0), 16),
+            MenuHoverEffect::Redraw
+        );
+        assert_eq!(
+            hover(&mut menu, MenuHit::Outside, (310.0, 50.0), 32),
+            MenuHoverEffect::None,
+            "already clear"
+        );
+        assert!(
+            menu_shown_highlight(&menu, &pointer) >= menu.items.len(),
+            "no row is lit"
+        );
+        assert!(
+            menu_activate_click(&menu, &pointer).is_none(),
+            "Enter runs nothing"
+        );
+        // The next arrow starts from the top, or the bottom.
+        let next = menu_step(&menu, &mut pointer, delta);
+        assert_eq!(next, expected, "delta {delta}");
+        menu.highlight = next;
+        assert_eq!(menu_shown_highlight(&menu, &pointer), expected);
+    }
+    // Back over the row the highlight was on lights it again.
+    let mut menu = state(items);
+    let mut pointer = MenuPointer::default();
+    let mut hover = |menu: &mut ContextMenuState, hit, at, after| {
+        menu_pointer_moved(menu, &mut pointer, hit, &panels, at, t0 + ms(after))
+    };
+    hover(&mut menu, MenuHit::Row(2), (90.0, 50.0), 0);
+    hover(&mut menu, MenuHit::Outside, (300.0, 50.0), 16);
+    assert_eq!(
+        hover(&mut menu, MenuHit::Row(2), (90.0, 50.0), 32),
+        MenuHoverEffect::Redraw
+    );
+    assert_eq!(menu_shown_highlight(&menu, &pointer), 2);
+}
+
+#[test]
+fn leaving_with_a_submenu_open_keeps_the_highlight() {
+    let mut cascade = Cascade::new(false);
+    assert_eq!(
+        cascade.hover(MenuHit::Outside, (90.0, 200.0), 16),
+        MenuHoverEffect::None
+    );
+    assert!(cascade.split_still_open());
+    assert_eq!(
+        menu_shown_highlight(&cascade.menu, &cascade.pointer),
+        cascade.menu.highlight
+    );
+}
+
+#[test]
+fn a_pointer_that_never_entered_the_menu_leaves_the_keys_highlight_alone() {
+    // Opened from the keyboard, with the pointer resting over the terminal.
+    let mut menu = state(vec![
+        leaf("Copy", Action::Copy),
+        leaf("Paste", Action::Paste),
+    ]);
+    menu.highlight = 1;
+    let mut pointer = MenuPointer::default();
+    let panels = [(10.0, 10.0, 160.0, 48.0)];
+    assert_eq!(
+        menu_pointer_moved(
+            &mut menu,
+            &mut pointer,
+            MenuHit::Outside,
+            &panels,
+            (400.0, 300.0),
+            Instant::now()
+        ),
+        MenuHoverEffect::None
+    );
+    assert_eq!(menu_shown_highlight(&menu, &pointer), 1);
+    assert!(menu_activate_click(&menu, &pointer).is_some());
+}

@@ -1279,10 +1279,12 @@ impl App {
                 }
                 serde_json::json!({"depth": depth, "rect": rect_json(panel.rows_rect()), "highlight": panel.highlight, "rows": rows})
             }).collect();
+            // `null` while no row is lit: the pointer left the menu.
+            let shown = menu_shown_highlight(menu, &target.context_menu_session.pointer);
             Some(serde_json::json!({
                 "anchor": {"x": ax, "y": ay},
                 "rect": rect_json((ax, ay, panel_w, panel_h)),
-                "highlight": menu.highlight,
+                "highlight": (shown < menu.items.len()).then_some(shown),
                 "scroll_offset": menu.scroll_offset,
                 "depth": menu.drill_stack.len(),
                 "parents": parents,

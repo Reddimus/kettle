@@ -1567,6 +1567,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Hovering a menu row that cannot run, such as Copy with nothing selected or
   the Shift hint's line, keeps the previous row lit instead of lighting
   nothing, so Enter still runs the row you see.
+- Moving the pointer off a context menu, or out of the window, clears its
+  highlight unless a submenu is open, as macOS and GTK menus do; the next
+  Down or Up starts again from the top or the bottom.
 
 ## Older releases
 

@@ -1135,6 +1135,7 @@ impl App {
         };
         let (_, panel_h) = context_menu_content_geometry(&menu.items, panel_h, row_h, sep_h);
         menu.highlight = next;
+        ws.context_menu_session.pointer.keyboard_moved();
         menu.scroll_offset = context_menu_scroll_for_highlight(
             &menu.items,
             menu.scroll_offset,
@@ -1745,6 +1746,7 @@ impl App {
             return;
         }
         ws.context_menu_session.pointer.cancel_pending();
+        ws.context_menu_session.pointer.keyboard_moved();
         let surface = ws
             .renderer
             .as_ref()
@@ -1955,7 +1957,12 @@ impl App {
                 self.step_context_menu_highlight(ws, -1);
             }
             Key::Named(NamedKey::ArrowRight) => {
-                if let Some(index) = ws.context_menu.as_ref().map(|menu| menu.highlight) {
+                // Nothing is lit while the pointer is away, so nothing opens.
+                if let Some(index) = ws
+                    .context_menu
+                    .as_ref()
+                    .map(|menu| menu_shown_highlight(menu, &ws.context_menu_session.pointer))
+                {
                     self.enter_context_submenu(ws, index);
                 }
                 if let Some(window) = &ws.window {

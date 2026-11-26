@@ -45,6 +45,13 @@ pub(crate) struct MenuPointer {
     open: Option<PendingOpen>,
     /// An open submenu the pointer has left for another row of a parent.
     switch: Option<PendingSwitch>,
+    /// Whether the pointer was over one of the menu's panels.
+    inside: bool,
+    /// The pointer left the menu with no submenu open, so no row is lit,
+    /// as in macOS and GTK menus. The pointer back on a row, or a key,
+    /// lights one again. A pointer that was never over the menu, as when
+    /// it was opened from the keyboard, leaves the highlight alone.
+    away: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -86,6 +93,11 @@ impl MenuPointer {
         self.open = None;
         self.switch = None;
     }
+
+    /// A key moved the highlight, or opened a level: it shows again.
+    pub(super) fn keyboard_moved(&mut self) {
+        self.away = false;
+    }
 }
 
 /// Per-menu state kept beside `WindowState::context_menu`, reset each time a
@@ -118,15 +130,27 @@ pub(super) fn menu_pointer_moved(
 ) -> MenuHoverEffect {
     let from = pointer.last.replace(at);
     let moved = from != Some(at);
+    let was_inside = std::mem::replace(&mut pointer.inside, hit != MenuHit::Outside);
     let (depth, index) = match hit {
         MenuHit::Row(index) => {
             pointer.switch = None;
             return hover_row(menu, pointer, index, now);
         }
         MenuHit::ParentRow { depth, index } => (depth, index),
-        MenuHit::Panel | MenuHit::Outside => {
+        MenuHit::Panel => {
             pointer.cancel_pending();
             return MenuHoverEffect::None;
+        }
+        MenuHit::Outside => {
+            pointer.cancel_pending();
+            // An open submenu keeps its row, and its own highlight, lit.
+            if !was_inside
+                || !menu.drill_stack.is_empty()
+                || std::mem::replace(&mut pointer.away, true)
+            {
+                return MenuHoverEffect::None;
+            }
+            return MenuHoverEffect::Redraw;
         }
     };
     pointer.open = None;
@@ -184,7 +208,7 @@ fn hover_row(
         pointer.open = None;
         return MenuHoverEffect::None;
     }
-    let changed = menu.highlight != index;
+    let changed = menu.highlight != index || std::mem::take(&mut pointer.away);
     menu.highlight = index;
     let lit = if changed {
         MenuHoverEffect::Redraw
@@ -235,24 +259,41 @@ fn aims_at(from: (f32, f32), to: (f32, f32), (x, y, w, h): kettle_render::Rect4)
 }
 
 /// The row an arrow key moves the highlight to, `delta` rows on.
+/// With no row lit, Down starts from the top and Up from the bottom.
 pub(super) fn menu_step(menu: &ContextMenuState, pointer: &mut MenuPointer, delta: isize) -> usize {
     pointer.cancel_pending();
+    if std::mem::take(&mut pointer.away) {
+        let first = if delta < 0 {
+            menu.items.iter().rposition(item_is_dispatchable)
+        } else {
+            menu.items.iter().position(item_is_dispatchable)
+        };
+        return first.unwrap_or(menu.highlight);
+    }
     next_context_menu_highlight(&menu.items, menu.highlight, delta)
 }
 
-/// What Enter runs, or `None` when the highlight is on nothing it can run.
+/// What Enter runs, or `None` when no row is lit or the lit row cannot run.
 pub(super) fn menu_activate_click(
     menu: &ContextMenuState,
-    _pointer: &MenuPointer,
+    pointer: &MenuPointer,
 ) -> Option<ContextMenuClick> {
+    if pointer.away {
+        return None;
+    }
     menu.items
         .get(menu.highlight)
         .and_then(|item| item_to_click(item, menu.highlight))
 }
 
-/// The highlighted row the menu paints and names to assistive technology.
-pub(super) fn menu_shown_highlight(menu: &ContextMenuState, _pointer: &MenuPointer) -> usize {
-    menu.highlight
+/// The highlighted row the menu paints and names to assistive technology;
+/// `usize::MAX`, no row at all, while the pointer is away.
+pub(super) fn menu_shown_highlight(menu: &ContextMenuState, pointer: &MenuPointer) -> usize {
+    if pointer.away {
+        usize::MAX
+    } else {
+        menu.highlight
+    }
 }
 
 /// Where a menu opens: the point it hangs from, and the vertical span of the

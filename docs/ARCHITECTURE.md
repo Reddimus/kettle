@@ -5370,6 +5370,11 @@ events, so `about_to_wait` wakes once at the pending deadline
 (`context_menu_pointer_tick`); nothing redraws until the hover changes.
 Hovering a row that cannot run (a disabled Copy, an information line) leaves
 the highlight where it was, so the lit row is always one Enter can run.
+A pointer that leaves the menu's panels, or the window, with no submenu open
+clears the highlight, as macOS and GTK menus do: the overlay and `ctl`
+report no row (`usize::MAX`, `null`), Enter runs nothing, and the next arrow
+starts from the first or last row. A pointer that was never over the menu,
+as with one opened from the keyboard, leaves the highlight alone.
 
 Other additions:
 
