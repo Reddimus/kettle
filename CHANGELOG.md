@@ -1107,6 +1107,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - On Linux and Windows, screen readers hear each Settings row's place in the
   list, such as 3 of 12.
 
+- A screen reader's cursor can reach Settings rows scrolled out of the panel;
+  moving to one scrolls it into view.
+
 - `tab-min-width` is measured in logical pixels, as documented. On a display
   with a scale above 100% tabs could shrink to a fraction of the width set
   (half on a Retina display) before the tab bar started to scroll.

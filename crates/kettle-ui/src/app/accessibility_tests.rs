@@ -2585,9 +2585,10 @@ fn settings_browsing_groups_preserve_focus_editor_membership_and_hidden_rows() {
             assert_eq!(node.children(),(0..4).map(|i| super::accessibility_modal_id(5,ordinal*4+i+2)).collect::<Vec<_>>());
         }
         assert_eq!(tree.focus,Some(super::accessibility_modal_id(5,12)));
+        assert!(layout.rows.len() < settings.rows.len(), "some rows are scrolled out");
         for (index,_) in settings.rows.iter().enumerate() {
             let node = &tree.nodes.iter().find(|(id,_)| *id==super::accessibility_modal_id(5,index+2)).unwrap().1;
-            assert_eq!(node.is_hidden(),!layout.rows.iter().any(|row| row.index==index));
+            assert!(!node.is_hidden(), "row {index} stays reachable");
         }
         let mut editing = overlay;
         editing.text_field = Some(kettle_render::TextFieldOverlay { text: "editing".into(), rect: layout.rows.iter().find(|row| row.index==10).unwrap().chip_rect, picker_header: false, placeholder: String::new(), cursor_byte: 0, selection: None, horizontal_scroll: 0, prefix: String::new(), hint: String::new(), accent_palette: 0 });
@@ -3064,6 +3065,89 @@ fn settings_rows_report_their_place_among_all_rows() {
             if query.is_empty() {
                 assert_eq!(row.parent().unwrap().role(), accesskit::Role::Group, "in its section");
             }
+        }
+    }
+}
+
+/// A Settings row scrolled out of the panel stays in the tree, where the
+/// platform adapters include it, so a screen reader's cursor can reach it:
+/// a line along the edge of the painted rows it left by, with the Focus and
+/// Click a painted row has (focusing it scrolls it into view). Painted rows
+/// keep their painted bounds, and a section scrolled out whole is bounded
+/// with its first row.
+#[test]
+fn off_screen_settings_rows_stay_reachable_at_the_list_edges() {
+    use accesskit::Action;
+    for scale in [1.0, 2.0] {
+        let settings = kettle_render::SettingsOverlay {
+            categories: vec!["Appearance".into()],
+            rows: (0..12)
+                .map(|i| kettle_render::SettingsRow {
+                    label: format!("Field {i}"),
+                    value: "On".into(),
+                    group: ["Colors and text", "Window", "Cursor"][i / 4].into(),
+                    ..Default::default()
+                })
+                .collect(),
+            focused_row: 6,
+            ..Default::default()
+        };
+        let surface = (1280.0 * scale, 420.0 * scale);
+        let metrics = (8.4 * scale, 17.5 * scale);
+        let layout = kettle_render::settings_layout(&settings, metrics, surface, metrics.0, scale);
+        let painted: Vec<_> = layout.rows.iter().map(|row| row.index).collect();
+        let (first, last) = (layout.rows.first().unwrap(), layout.rows.last().unwrap());
+        assert!(first.index > 0 && last.index < 11, "rows are cut off at both edges: {painted:?}");
+        let overlay = kettle_render::Overlay {
+            settings: Some(settings.clone()),
+            ..Default::default()
+        };
+        let projection =
+            super::modal_accessibility_projection(&overlay, surface, metrics, scale, &EN_TEXT);
+        let tree = accesskit_consumer::Tree::new(
+            super::mouse_override_hint_tests::finished_tree(projection),
+            true,
+        );
+        let state = tree.state();
+        let top = first.rect.1 as f64;
+        let bottom = (last.rect.1 + last.rect.3) as f64;
+        for index in 0..settings.rows.len() {
+            let node = state
+                .node_by_tree_local_id(super::accessibility_modal_id(5, index + 2), accesskit::TreeId::ROOT)
+                .unwrap();
+            assert_eq!(
+                accesskit_consumer::common_filter(&node),
+                accesskit_consumer::FilterResult::Include,
+                "row {index} at {scale}x"
+            );
+            assert!(node.data().supports_action(Action::Focus), "row {index}");
+            assert!(node.data().supports_action(Action::Click), "row {index}");
+            let rect = node.data().bounds().unwrap();
+            match layout.rows.iter().find(|row| row.index == index) {
+                Some(row) => {
+                    let (x, y, w, h) = row.rect;
+                    assert_eq!(
+                        rect,
+                        accesskit::Rect::new(x as f64, y as f64, (x + w) as f64, (y + h) as f64)
+                    );
+                }
+                None => {
+                    assert_eq!(rect.height(), 0.0, "row {index}");
+                    assert_eq!((rect.x0, rect.x1), ((first.rect.0) as f64, (first.rect.0 + first.rect.2) as f64));
+                    let edge = if index < first.index { rect.y0 <= top } else { rect.y0 == bottom };
+                    assert!(edge, "row {index} at {rect:?}, rows {top}..{bottom}");
+                }
+            }
+        }
+        for section in 0..3 {
+            let group = state
+                .node_by_tree_local_id(
+                    // The sections are modal kind 16.
+                    super::accessibility_modal_id(16, section),
+                    accesskit::TreeId::ROOT,
+                )
+                .unwrap();
+            assert!(group.data().bounds().is_some(), "section {section} at {scale}x");
         }
     }
 }

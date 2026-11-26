@@ -3473,6 +3473,10 @@ follows a switch's state. `settings_rows_report_their_place_among_all_rows`
 hands the projection to AccessKit's consumer and reads each row's position
 and set size as the AT-SPI and UIA adapters do, while browsing sections and
 in a search.
+`off_screen_settings_rows_stay_reachable_at_the_list_edges` checks that rows
+scrolled out of the panel pass AccessKit's common filter with Focus and Click,
+bounded as zero-height lines on the edge of the painted rows they left by, at
+1x and 2x, and that a section scrolled out whole still has bounds.
 
 ## Static text names on every platform
 

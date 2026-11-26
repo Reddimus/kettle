@@ -3229,6 +3229,30 @@ pub(super) fn modal_accessibility_projection(
         if settings.search_focused && projection.focus.is_none() {
             projection.focus = Some(search_id);
         }
+        // Where each row is painted. A row scrolled out of the panel stays
+        // in the tree, so a screen reader's cursor can still reach it, as a
+        // line along the edge of the rows it left by; focusing it scrolls it
+        // into view. Only a panel with no room for any row hides them.
+        let painted = layout.rows.first().zip(layout.rows.last());
+        let top = painted.map(|(first, _)| {
+            layout
+                .groups
+                .iter()
+                .map(|(_, heading)| heading.1)
+                .fold(first.rect.1, f32::min)
+        });
+        let row_rect = |index: usize| -> Option<kettle_render::Rect4> {
+            if let Some(geometry) = layout.rows.iter().find(|r| r.index == index) {
+                return Some(geometry.rect);
+            }
+            let (first, last) = painted?;
+            let (x, _, width, _) = first.rect;
+            Some(if index < first.index {
+                (x, top?, width, 0.0)
+            } else {
+                (x, last.rect.1 + last.rect.3, width, 0.0)
+            })
+        };
         let mut children = Vec::with_capacity(settings.rows.len());
         for (index, row) in settings.rows.iter().enumerate() {
             if index == settings.focused_row
@@ -3262,10 +3286,9 @@ pub(super) fn modal_accessibility_projection(
             }
             let id = accessibility_modal_id(5, index + 2);
             let mut node = settings_row_node(row, SETTINGS_ROW_SPEECH);
-            if let Some(geometry) = layout.rows.iter().find(|r| r.index == index) {
-                node.set_bounds(bounds(geometry.rect));
-            } else {
-                node.set_hidden();
+            match row_rect(index) {
+                Some(rect) => node.set_bounds(bounds(rect)),
+                None => node.set_hidden(),
             }
             if row.disabled {
                 node.set_disabled();
@@ -3302,12 +3325,14 @@ pub(super) fn modal_accessibility_projection(
                 let mut group = Node::new(Role::Group);
                 group.set_label(name.clone());
                 group.set_children(children[first..end].to_vec());
-                if let Some((_, rect)) = layout
+                if let Some(rect) = layout
                     .groups
                     .iter()
                     .find(|(row, _)| *row >= first && *row < end)
+                    .map(|(_, rect)| *rect)
+                    .or_else(|| row_rect(first))
                 {
-                    group.set_bounds(bounds(*rect));
+                    group.set_bounds(bounds(rect));
                 }
                 projection.nodes.push((id, group));
                 groups.push(id);
@@ -3337,12 +3362,20 @@ pub(super) fn modal_accessibility_projection(
                 let mut group = Node::new(Role::Group);
                 group.set_label(name.clone());
                 group.set_children(members);
-                if let Some((_, rect)) = layout
+                if let Some(rect) = layout
                     .groups
                     .iter()
                     .find(|(first_row, _)| settings.rows[*first_row].category == category)
+                    .map(|(_, rect)| *rect)
+                    .or_else(|| {
+                        let first = settings
+                            .rows
+                            .iter()
+                            .position(|row| row.category == category)?;
+                        row_rect(first)
+                    })
                 {
-                    group.set_bounds(bounds(*rect));
+                    group.set_bounds(bounds(rect));
                 }
                 projection.nodes.push((id, group));
                 groups.push(id);
