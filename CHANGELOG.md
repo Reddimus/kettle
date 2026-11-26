@@ -1578,6 +1578,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   same.
 - A toast's Show and × buttons, and the bad-config notice's Open Config and
   Dismiss, light up under the pointer.
+- A tab dragged onto a tab-strip overflow arrow and held there scrolls the
+  strip, so it can be moved past the tabs shown.
 
 ## Older releases
 

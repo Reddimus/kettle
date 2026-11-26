@@ -1376,6 +1376,9 @@ pub(crate) struct WindowState {
     /// Drag-to-reorder tab state. `true` while a left-mouse-button press in
     /// the tab bar is being held; cleared on release.
     pub(crate) tab_drag_active: bool,
+    /// The overflow arrow a live tab drag rests on (`true` forward), and
+    /// since when, or since the strip last scrolled for it.
+    pub(crate) tab_drag_arrow: Option<(bool, std::time::Instant)>,
     /// Surface position where the in-window tab reorder gesture was armed.
     /// A click stays visually a click until movement crosses the drag-distance
     /// threshold; this prevents the drag ghost from flashing under a normal
@@ -1977,6 +1980,7 @@ impl WindowState {
             mouse_hidden: false,
             last_cursor_icon: None,
             tab_drag_active: false,
+            tab_drag_arrow: None,
             tab_drag_press: None,
             tab_pressed_idx: None,
             detach_drag: crate::detach::DragState::default(),

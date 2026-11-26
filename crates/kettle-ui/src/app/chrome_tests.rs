@@ -2151,3 +2151,56 @@ fn toast_and_notice_buttons_light_under_the_pointer() {
     ws.leave_tab_bar();
     assert_eq!(ws.toast_control_hover, None);
 }
+
+/// Should 11 of the 6.0 UI review: a tab dragged onto an overflow arrow
+/// could go no further than the last tab shown. Resting there 400 ms now
+/// scrolls the strip a tab toward the arrow, by moving the dragged tab one
+/// place on, and again every 400 ms while it stays; leaving the arrow, or
+/// moving to the other one, starts the wait over.
+#[test]
+fn a_tab_drag_resting_on_an_overflow_arrow_scrolls_the_strip() {
+    use super::windowing::{TAB_DRAG_SCROLL_DWELL, tab_drag_arrow_step};
+    use std::time::{Duration, Instant};
+    let ms = Duration::from_millis;
+    let t0 = Instant::now();
+    assert_eq!(tab_drag_arrow_step(None, None, t0), (None, None));
+    let (step, rest) = tab_drag_arrow_step(None, Some(true), t0);
+    assert_eq!((step, rest), (None, Some((true, t0))));
+    assert_eq!(
+        tab_drag_arrow_step(rest, Some(true), t0 + ms(399)),
+        (None, Some((true, t0)))
+    );
+    let at = t0 + TAB_DRAG_SCROLL_DWELL;
+    let (step, rest) = tab_drag_arrow_step(rest, Some(true), at);
+    assert_eq!((step, rest), (Some(true), Some((true, at))), "a step");
+    assert_eq!(
+        tab_drag_arrow_step(rest, Some(true), at + ms(100)).0,
+        None,
+        "the next waits again"
+    );
+    assert_eq!(
+        tab_drag_arrow_step(rest, Some(true), at + TAB_DRAG_SCROLL_DWELL).0,
+        Some(true)
+    );
+    // The other arrow starts over, and leaving forgets the rest.
+    let back = t0 + ms(2000);
+    assert_eq!(
+        tab_drag_arrow_step(rest, Some(false), back),
+        (None, Some((false, back)))
+    );
+    assert_eq!(tab_drag_arrow_step(rest, None, back), (None, None));
+
+    // The scheduler steps a live drag by moving the dragged tab one place
+    // on, which the strip keeps in view, and wakes for the next step.
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(source.contains(
+        "let dragging = ws.tab_drag_active && ws.tab_drag_press.is_none(); let over = ws.hovered_scroll_arrow.filter(|_| dragging); let (step, rest) = tab_drag_arrow_step(ws.tab_drag_arrow, over, now); ws.tab_drag_arrow = rest; if let Some(forward) = step && ws.mux.move_active_tab(if forward { 1 } else { -1 })"
+    ));
+    assert!(source.contains("let tab_drag_scroll_wait = self.scroll_tab_drag_at_arrow(ws, now)"));
+    assert!(source.contains(
+        "if let Some(next) = tab_drag_scroll_wait { wait = Some(wait.map_or(next, |current| current.min(next))); }"
+    ));
+}
