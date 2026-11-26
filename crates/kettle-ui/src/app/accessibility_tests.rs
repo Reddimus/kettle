@@ -4343,3 +4343,69 @@ fn quick_select_labels_are_bound_to_their_quick_selects_purpose() {
         assert!(super::accessibility_hint_target(there, &ws).is_none(), "preview {preview}");
     }
 }
+
+/// Changing only an SSH host's target, with the launcher open, paints the
+/// same row but binds its option and Choose button to the new target, so
+/// the accessibility key changes and the tree is published again: otherwise
+/// the screen reader keeps ids that now name nothing and never gets the new
+/// ones. The key also follows what else the bound nodes depend on.
+#[test]
+fn the_accessibility_key_follows_what_picker_rows_are_bound_to() {
+    use std::hash::Hasher as _;
+    let launcher = |target: &str| {
+        let hosts = [("work".to_string(), target.to_string())];
+        picker_context_menu(
+            ssh_picker_list("", 0, &hosts, &[], &EN_TEXT),
+            (1280.0, 820.0),
+            (7.8, 16.25),
+            (7.8, 16.25),
+            32.0,
+        )
+        .unwrap()
+    };
+    let (old, new) = (launcher("me@old.test"), launcher("me@new.test"));
+    assert_eq!(
+        old.rows.iter().map(|row| &row.label).collect::<Vec<_>>(),
+        new.rows.iter().map(|row| &row.label).collect::<Vec<_>>(),
+        "the painted rows are the same"
+    );
+    assert_ne!(
+        super::accessibility_picker_option_ids(super::MODAL_KIND_SSH, &old.rows),
+        super::accessibility_picker_option_ids(super::MODAL_KIND_SSH, &new.rows),
+        "the ids follow the target"
+    );
+    let key = |rows: &[kettle_render::ContextMenuRow]| {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        super::hash_accessible_menu_rows(rows, &mut hasher);
+        hasher.finish()
+    };
+    assert_ne!(key(&old.rows), key(&new.rows), "the tree is published again");
+    assert_eq!(key(&old.rows), key(&launcher("me@old.test").rows));
+    // The whole name a fitted row is read by counts too.
+    let mut named = launcher("me@old.test");
+    named.rows[0].a11y_name = Some("work, renamed".into());
+    assert_ne!(key(&old.rows), key(&named.rows));
+    let source = production_source()
+        .split_once("fn accessibility_key(&self, ws: &WindowState, overlay: &Overlay) -> u64")
+        .unwrap()
+        .1
+        .split("fn publish_accessibility_if_due")
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .collect::<String>();
+    for part in [
+        // The open menu's rows, picker options among them.
+        "hash_accessible_menu_rows(&menu.rows,&muthasher);",
+        // The Change button's key and its unavailability during capture.
+        "settings_change_key(row.control).hash(&muthasher);",
+        "ws.settings_nav.as_ref().map(|nav|nav.capturing).hash(&muthasher);",
+        // Quick-select labels' bound ids, purpose included.
+        "accessibility_hint_id(target,ws.hint_preview).hash(&muthasher);",
+        // The hovered link's id comes from its status's target and bounds.
+        "status.target.hash(&muthasher);",
+        "ifletSome(bounds)=status.link_bounds{",
+    ] {
+        assert!(source.contains(part), "{part}");
+    }
+}
