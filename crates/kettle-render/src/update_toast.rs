@@ -6,13 +6,16 @@ pub(crate) struct Palette {
     /// A button under the pointer, and its label on it.
     hover: Rgb,
     pub hover_text: Rgb,
+    /// A body that acts on a click, under the pointer, and its message on it.
+    body_hover: Rgb,
+    body_hover_text: Rgb,
     border: Rgb,
     focus: Rgb,
     pub text: [Rgb; 3],
 }
 
-/// A hovered toast button's fill: its own moved 9% toward black or white,
-/// as a confirmation dialog's buttons are.
+/// A hovered toast button's or actionable body's fill: its own moved 9%
+/// toward black or white, as a confirmation dialog's buttons are.
 fn hover_fill(control: Rgb) -> Rgb {
     let target = if crate::color::relative_luminance(control) > 0.4 {
         Rgb::new(0, 0, 0)
@@ -24,12 +27,12 @@ fn hover_fill(control: Rgb) -> Rgb {
 
 impl Palette {
     /// The label colour of toast part `part` (0 the message, 1 details, 2
-    /// close) while `hovered` is the button under the pointer.
+    /// close) while `hovered` is the part under the pointer.
     pub(crate) fn text_for(&self, part: usize, hovered: Option<usize>) -> Rgb {
-        if part > 0 && hovered == Some(part) {
-            self.hover_text
-        } else {
-            self.text[part.min(2)]
+        match (part, hovered == Some(part)) {
+            (0, true) => self.body_hover_text,
+            (_, true) => self.hover_text,
+            _ => self.text[part.min(2)],
         }
     }
 }
@@ -44,11 +47,14 @@ pub(crate) fn palette(
     let text = colors.text(theme.foreground, background);
     let control_text = colors.text(theme.foreground, control);
     let hover = hover_fill(control);
+    let body_hover = hover_fill(background);
     Palette {
         background,
         control,
         hover,
         hover_text: colors.text(theme.foreground, hover),
+        body_hover,
+        body_hover_text: colors.text(theme.foreground, body_hover),
         border: solid_blend(theme.foreground, theme.background, 30),
         focus: colors.icon(accent, control),
         text: [text, control_text, control_text],
@@ -84,7 +90,11 @@ pub(crate) fn surfaces(toast: &UpdateToastOverlay, palette: &Palette) -> Vec<Rou
     let surfaces = [
         shape(
             geometry.rect,
-            palette.background,
+            if toast.hovered == Some(0) {
+                palette.body_hover
+            } else {
+                palette.background
+            },
             palette.border,
             geometry.radius,
             geometry.unit,
@@ -185,12 +195,25 @@ mod tests {
                 );
             }
         }
+        // An actionable body lights alone, as its buttons do.
+        toast.hovered = Some(0);
+        let lit = surfaces(&toast, &palette);
+        for (index, (rest, lit)) in rest.iter().zip(&lit).enumerate() {
+            assert_eq!(rest.fill != lit.fill, index == 0, "body, surface {index}");
+        }
+        assert_eq!(palette.text_for(0, Some(0)), palette.body_hover_text);
         let mut colors = chrome::Colors::default();
         for name in kettle_config::Theme::list() {
             let theme = kettle_config::Theme::by_name(name);
             for accent in theme.palette {
                 let p = super::palette(&theme, accent, &mut colors);
                 assert_ne!(p.hover, p.control, "{name}");
+                assert_ne!(p.body_hover, p.background, "{name}");
+                assert!(
+                    crate::color::contrast_ratio(p.text_for(0, Some(0)), p.body_hover) + 1e-6
+                        >= 4.5,
+                    "{name}"
+                );
                 assert!(
                     crate::color::contrast_ratio(p.text_for(1, Some(1)), p.hover) + 1e-6 >= 4.5,
                     "{name}"

@@ -133,7 +133,7 @@ impl App {
                 Some(ACCESSIBILITY_UPDATE_DISMISS_ID) => Some(2),
                 _ => None,
             },
-            hovered: self.toast_control_hover(ws, &geometry),
+            hovered: self.toast_control_hover(ws, &geometry, false),
             opacity: toast.opacity(self.motion_allowed()),
         })
     }

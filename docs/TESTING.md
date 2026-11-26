@@ -180,7 +180,8 @@ button's tooltip names against the lane's own key handling, and
 timing and names; `the_fullscreen_viewer_names_no_key_that_does_something_else`
 ties the Esc a tooltip names to Esc's dispatch. `the_toast_button_under_the_pointer_lights_alone`
 (`kettle-render`) and `toast_and_notice_buttons_light_under_the_pointer`
-(`kettle-ui`) cover the toast and notice buttons' hover.
+(`kettle-ui`) cover the toast and notice buttons' hover, and
+`an_actionable_toast_body_lights_under_the_pointer` the notification toast's body.
 `a_tab_drag_resting_on_an_overflow_arrow_scrolls_the_strip` covers the
 400 ms drag auto-scroll; the drag itself needs a desktop.
 Full render/UI suites and clippy remain required; native focus changes,

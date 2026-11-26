@@ -384,7 +384,9 @@ impl App {
                     Some(ACCESSIBILITY_NOTIFICATION_DISMISS_ID) => Some(2),
                     _ => None,
                 },
-                hovered: self.toast_control_hover(ws, &geometry),
+                // A click on the body does what Show does, or dismisses a
+                // toast with nowhere to go: it lights too.
+                hovered: self.toast_control_hover(ws, &geometry, true),
             },
             source: toast.source,
             show,

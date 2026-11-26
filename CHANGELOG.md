@@ -1581,8 +1581,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   short lane's buttons no longer overlap the edge that resizes it.
 - Those buttons have tooltips naming what they do and the key that does the
   same.
-- A toast's Show and × buttons, and the bad-config notice's Open Config and
-  Dismiss, light up under the pointer.
+- A toast's Show and × buttons and its body, which a click answers as Show
+  does, and the bad-config notice's Open Config and Dismiss, light up under
+  the pointer.
 - A tab dragged onto a tab-strip overflow arrow and held there scrolls the
   strip, so it can be moved past the tabs shown.
 

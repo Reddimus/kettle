@@ -2126,22 +2126,23 @@ fn toast_and_notice_buttons_light_under_the_pointer() {
     )
     .unwrap();
     let centre = |rect: kettle_render::Rect4| (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0);
-    let (x, y) = centre(geometry.details);
-    assert_eq!(toast_button_at(&geometry, x, y), Some(1));
-    let (x, y) = centre(geometry.close);
-    assert_eq!(toast_button_at(&geometry, x, y), Some(2));
-    let (x, y) = centre(geometry.message);
-    assert_eq!(toast_button_at(&geometry, x, y), None, "the body is no button");
+    assert_eq!(toast_button_at(&geometry, centre(geometry.details), false), Some(1));
+    assert_eq!(toast_button_at(&geometry, centre(geometry.close), false), Some(2));
+    assert_eq!(
+        toast_button_at(&geometry, centre(geometry.message), false),
+        None,
+        "a body a click does nothing on"
+    );
     let source = super::production_source()
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
     assert_eq!(
         source
-            .matches("hovered: self.toast_control_hover(ws, &geometry),")
+            .matches("hovered: self.toast_control_hover(ws, &geometry, false),")
             .count(),
-        4,
-        "both notices, the notification toast and the update toast"
+        3,
+        "both notices and the update toast"
     );
     assert!(source.contains(
         "if hovered != ws.toast_control_hover { ws.toast_control_hover = hovered; if let Some(window) = &ws.window { window.request_redraw(); } }"
@@ -2203,4 +2204,36 @@ fn a_tab_drag_resting_on_an_overflow_arrow_scrolls_the_strip() {
     assert!(source.contains(
         "if let Some(next) = tab_drag_scroll_wait { wait = Some(wait.map_or(next, |current| current.min(next))); }"
     ));
+}
+
+/// Defect 7 of the 6.0 final review: a click on a notification toast's body
+/// does what Show does (or dismisses a toast with nowhere to go), but the
+/// body did not light under the pointer. Its body now lights as its buttons
+/// do; the bodies of notices and the update toast, which a click does not
+/// act on, stay as they are.
+#[test]
+fn an_actionable_toast_body_lights_under_the_pointer() {
+    use super::notices::toast_button_at;
+    let geometry = kettle_render::persistent_notice_geometry(
+        (0.0, 0.0, 800.0, 600.0),
+        (8.0, 16.0),
+        2,
+        12,
+        7,
+    )
+    .unwrap();
+    let centre = |rect: kettle_render::Rect4| (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0);
+    assert_eq!(toast_button_at(&geometry, centre(geometry.message), true), Some(0));
+    assert_eq!(toast_button_at(&geometry, centre(geometry.details), true), Some(1));
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(source.contains(
+        "// toast with nowhere to go: it lights too. hovered: self.toast_control_hover(ws, &geometry, true),"
+    ));
+    assert!(source.contains(
+        "kettle_render::UpdateToastHit::Details | kettle_render::UpdateToastHit::Body => { self.activate_notification_toast(ws, true) }"
+    ));
+    assert!(source.contains("Some(0) => Some(toast.geometry.rect),"));
 }

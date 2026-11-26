@@ -790,7 +790,8 @@ or OSC 777 (`printf '\e]777;notify;Title;Body\a'`), and a Lua script with
   a dialog or under the pointer, and fades out only when motion is allowed.
   Screen readers announce it politely. With assistive focus on its Show or
   Dismiss button, Enter, Space, Tab and Escape answer the toast. Show and ×
-  light up under the pointer, as a dialog's buttons do.
+  light up under the pointer, as a dialog's buttons do, and so does the rest
+  of the toast, which a click answers as Show does.
 - **No Kettle window has focus**: a desktop notification, as before, and
   the window asks for attention. If the desktop refuses it or the delivery
   fails (a D-Bus error on Linux, a toast error on Windows), the toast is
