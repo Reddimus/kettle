@@ -996,7 +996,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   Duplicate Tab, Move Tab Left, Move Tab Right, Close Tab and Close Other
   Tabs, instead of the terminal's menu. Each acts on the tab you clicked, not
   the active one. Close Other Tabs asks once, under `ask-before-closing`, for
-  all the tabs it would close.
+  all the tabs it would close, and closes only the panes it asked about, not
+  a tab or split opened while the question was up.
 - `kettle ctl ui_geometry` reports a context menu's `anchor` as what the
   menu was placed around (the pointer, or for a menu opened from the
   keyboard the text cursor's line) instead of the panel's corner, which

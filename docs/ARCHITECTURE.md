@@ -5463,9 +5463,11 @@ while the pointer crosses its parent's other rows inside the triangle from the
 pointer's last position to the side of the submenu it faces (the two corners
 that bound the submenu seen from there, so a submenu that opened over its
 parent, or that the pointer approaches from below, counts too), giving way
-300 ms after the pointer leaves that triangle or comes to rest. A pointer off every panel
-starts the same wait, and at its end every submenu closes; a submenu opened
-from the keyboard, with a pointer that was never over the menu, stays. A
+300 ms after the pointer leaves that triangle or comes to rest. A pointer off
+every panel (off the window included, until it moves in the window again,
+whatever its last position there was over) starts the same wait, and at its
+end every submenu closes; a submenu opened from the keyboard, with a pointer
+that was never over the menu, stays. A
 pointer at rest sends no events, so `about_to_wait` wakes once at the pending
 deadline
 (`context_menu_pointer_tick`); nothing redraws until the hover changes.
@@ -5486,7 +5488,9 @@ side, it takes the roomier one and is held short enough to leave the line in
 view (`ContextMenuSession::root_max_h`), and scrolls; with not one complete row
 of room beside the line it does not open, rather than cover the line or run
 off the window. A resize places it again beside the cursor's line once the
-terminals have reflowed (`follow_line_menu`), closing it if no row fits.
+terminals have reflowed (`follow_line_menu`), closing it if no row fits; a
+move closes its open submenus, which hung off its rows where they were, and
+leaves lit the row that opened them (`place_menu_root`).
 A right-click on a tab segment, native or through `ctl`, opens that tab's
 menu (`open_tab_menu`): Rename Tab…, Duplicate Tab, Move Tab Left/Right and
 Close Tab, as ordinary action rows. Like the terminal's menu it leaves an open
@@ -5500,9 +5504,11 @@ runs the row on it: Close asks as the tab's ✕ does, Move uses
 and Rename and Duplicate bring the tab forward first. Close Other Tabs, a row
 no action runs (`ContextMenuItem::CloseOtherTabs`), asks once with
 `confirm_close` over all the other tabs' panes and busy count
-(`other_tabs_close_scope`, `ConfirmAction::CloseOtherTabs`), then
-`Mux::close_tabs_except` closes them, last first, and leaves the kept tab
-active.
+(`other_tabs_close_scope`). The question records those panes
+(`ConfirmAction::CloseOtherTabs { keep, panes }`), and on acceptance
+`Mux::close_tabs_except` closes only them: a tab all of whose panes were asked
+about closes whole, last first, a tab split since loses only its old panes, and
+a tab opened since stays. The kept tab ends active.
 
 Other additions:
 

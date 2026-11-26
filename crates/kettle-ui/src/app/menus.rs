@@ -944,11 +944,11 @@ impl App {
             ws.context_menu_session.root_max_h = placement.max_h;
             ws.context_menu_session.line = true;
             ws.context_menu_session.anchor = Some(anchor);
-            if let Some(menu) = ws.context_menu.as_mut() {
-                match menu.drill_stack.first_mut() {
-                    Some(level) => level.anchor = placement.origin,
-                    None => menu.anchor = placement.origin,
-                }
+            if let Some(menu) = ws.context_menu.as_mut()
+                && place_menu_root(menu, placement.origin)
+            {
+                ws.context_menu_session.pointer.cancel_pending();
+                ws.accessibility_pending = true;
             }
             self.reclamp_context_menu(ws, surface);
         } else {
@@ -1130,19 +1130,30 @@ impl App {
             TabMenuStep::CloseOthers(idx) => {
                 // One question for them all, about everything that would
                 // close (`confirm_close`'s rule over the other tabs' panes).
+                // The question, and the close, are about these panes only.
+                let keep = ws.mux.tab_anchor_panes(idx);
+                let others = other_tabs_panes(ws, idx);
                 let (panes, busy) = other_tabs_close_scope(ws, idx);
-                if panes == 0
-                    || self.confirm_close(
-                        ws,
-                        panes,
-                        busy,
-                        ConfirmAction::CloseOtherTabs(ws.mux.tab_anchor_panes(idx)),
-                    )
-                {
+                if panes == 0 {
+                    // The other tabs went while the menu was up. The menu
+                    // is gone too, and nothing else would repaint it away.
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
                     return;
                 }
-                let keep = ws.mux.tab_anchor_panes(idx);
-                self.close_other_tabs_now(ws, &keep);
+                if self.confirm_close(
+                    ws,
+                    panes,
+                    busy,
+                    ConfirmAction::CloseOtherTabs {
+                        keep: keep.clone(),
+                        panes: others.clone(),
+                    },
+                ) {
+                    return;
+                }
+                self.close_other_tabs_now(ws, &keep, &others);
             }
             TabMenuStep::Moved(moved) => {
                 if moved {
@@ -1161,14 +1172,23 @@ impl App {
         }
     }
 
-    /// Close every tab of the window but the one holding the panes `keep`,
+    /// Close the panes `others` outside the tab holding the panes `keep`,
     /// which becomes the active tab, as Close Other Tabs and its confirmation
-    /// do. Nothing closes when that tab is gone.
-    pub(super) fn close_other_tabs_now(&mut self, ws: &mut WindowState, keep: &[u64]) {
+    /// do: those it asked about, and none that opened since. Nothing closes
+    /// when that tab is gone.
+    pub(super) fn close_other_tabs_now(
+        &mut self,
+        ws: &mut WindowState,
+        keep: &[u64],
+        others: &[u64],
+    ) {
         let pre = self.focus_key(ws);
         if let Some(idx) = ws.mux.tab_index_of_any_pane(keep) {
-            for closed in ws.mux.close_tabs_except(idx) {
-                self.fire_tab_close_event(ws, closed);
+            for closed in ws.mux.close_tabs_except(idx, others) {
+                match closed {
+                    crate::mux::BulkClosed::Tab(closed) => self.fire_tab_close_event(ws, closed),
+                    crate::mux::BulkClosed::Pane(pane) => self.fire_pane_close_event(ws, pane),
+                }
             }
             self.note_focus_change(ws, pre);
             self.save_session(ws);
@@ -1383,6 +1403,7 @@ impl App {
     /// `CursorMoved`. Requests a redraw only when the hover changed
     /// something, so sub-pixel motion does not churn the GPU.
     pub(super) fn update_menu_highlight_from_cursor(&mut self, ws: &mut WindowState) {
+        ws.context_menu_session.pointer.moved_in_window();
         if let Some(delta) = self.context_menu_scroll_edge(ws) {
             self.scroll_context_menu(ws, delta);
             return;
@@ -1406,6 +1427,7 @@ impl App {
 
     /// The pointer left the window, so it is over no row of the menu.
     pub(super) fn context_menu_pointer_left(&self, ws: &mut WindowState) {
+        ws.context_menu_session.pointer.left_window();
         let at = (ws.cursor.x as f32, ws.cursor.y as f32);
         let Some(menu) = ws.context_menu.as_mut() else {
             return;
@@ -1440,7 +1462,11 @@ impl App {
             .is_some_and(|due| due <= now)
         {
             let panels = self.context_menu_panels(ws);
-            let hit = self.context_menu_pointer_hit(ws, &panels);
+            // Off the window, the last position in it is no hit.
+            let hit = ws
+                .context_menu_session
+                .pointer
+                .due_hit(self.context_menu_pointer_hit(ws, &panels));
             let at = (ws.cursor.x as f32, ws.cursor.y as f32);
             if let Some(menu) = ws.context_menu.as_mut() {
                 let effect = menu_pointer_moved(

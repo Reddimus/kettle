@@ -2976,22 +2976,26 @@ fn close_other_tabs_closes_every_tab_but_its_own_and_asks_once() {
     // names, as when closing that tab.
     let ws_two = WindowState::new(1, fake_tabs(&[1, 2]));
     assert_eq!(
-        lone_pane_in_scope(&ws_two, 1, &ConfirmAction::CloseOtherTabs(vec![1])),
+        lone_pane_in_scope(
+            &ws_two,
+            1,
+            &ConfirmAction::CloseOtherTabs {
+                keep: vec![1],
+                panes: super::other_tabs_panes(&ws_two, 0),
+            }
+        ),
         Some(2)
     );
-    assert_eq!(
-        lone_pane_in_scope(&ws, 1, &ConfirmAction::CloseOtherTabs(vec![9])),
-        None,
-        "its tab is gone"
-    );
+    assert_eq!(super::other_tabs_panes(&ws, 0), vec![2, 3, 4]);
 
     // Closing them leaves the kept tab, active.
     let mut mux = fake_tabs(&[1, 2, 3, 4]);
     mux.active = 3;
-    assert_eq!(mux.close_tabs_except(1), vec![3, 2, 0]);
+    use crate::mux::BulkClosed::Tab;
+    assert_eq!(mux.close_tabs_except(1, &[1, 3, 4]), vec![Tab(3), Tab(2), Tab(0)]);
     assert_eq!(mux.tabs.iter().map(|tab| tab.focus).collect::<Vec<_>>(), vec![2]);
     assert_eq!(mux.active, 0);
-    assert!(fake_tabs(&[1]).close_tabs_except(0).is_empty());
+    assert!(fake_tabs(&[1]).close_tabs_except(0, &[]).is_empty());
 
     // The row and its confirmation share the close, and the row asks first.
     let src = production_source();
@@ -3001,13 +3005,78 @@ fn close_other_tabs_closes_every_tab_but_its_own_and_asks_once() {
         .nth(1)
         .and_then(|arm| arm.split("TabMenuStep::Moved(moved) => {").next())
         .expect("the Close Other Tabs arm");
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let others = flat(others);
     let asked = others
-        .find("ConfirmAction::CloseOtherTabs(ws.mux.tab_anchor_panes(idx)),")
-        .expect("asks first");
-    assert!(asked < others.find("self.close_other_tabs_now(ws, &keep);").unwrap());
-    assert!(src.contains("ConfirmAction::CloseOtherTabs(keep) => self.close_other_tabs_now(ws, &keep),"));
-    let close = finding_body(&src, "close_other_tabs_now");
-    assert!(close.contains("for closed in ws.mux.close_tabs_except(idx) {"));
-    assert!(close.contains("self.fire_tab_close_event(ws, closed);"));
+        .find("ConfirmAction::CloseOtherTabs { keep: keep.clone(), panes: others.clone(), },")
+        .expect("asks first, about the panes it found");
+    assert!(asked < others.find("self.close_other_tabs_now(ws, &keep, &others);").unwrap());
+    assert!(flat(&src).contains(
+        "ConfirmAction::CloseOtherTabs { keep, panes } => { self.close_other_tabs_now(ws, &keep, &panes); }"
+    ));
+    let close = flat(finding_body(&src, "close_other_tabs_now"));
+    assert!(close.contains("for closed in ws.mux.close_tabs_except(idx, others) {"));
+    assert!(close.contains("crate::mux::BulkClosed::Tab(closed) => self.fire_tab_close_event(ws, closed),"));
+    assert!(close.contains("crate::mux::BulkClosed::Pane(pane) => self.fire_pane_close_event(ws, pane),"));
+}
+
+#[test]
+fn close_other_tabs_closes_only_the_panes_its_question_was_about() {
+    use crate::mux::BulkClosed::{Pane, Tab};
+    use crate::mux::{Dir, Node};
+    let order = |mux: &Mux| mux.tabs.iter().map(|tab| tab.focus).collect::<Vec<_>>();
+    // The audit's case: from A's menu, the question is about B and C. While
+    // it is on screen a new tab, D, opens and gets to work.
+    let mut mux = fake_tabs(&[1, 2, 3]);
+    let asked = [2, 3];
+    mux.tabs.push(fake_tab(4));
+    mux.active = 3;
+    assert_eq!(mux.close_tabs_except(0, &asked), vec![Tab(2), Tab(1)]);
+    assert_eq!((order(&mux), mux.active), (vec![1, 4], 0), "D was not asked about");
+    // B is split while the question is up: the new pane stays, in B.
+    let mut mux = fake_tabs(&[1, 2, 3]);
+    mux.tabs[1].root = Node::Split {
+        dir: Dir::Horizontal,
+        ratio: 0.5,
+        a: Box::new(Node::Leaf(2)),
+        b: Box::new(Node::Leaf(5)),
+    };
+    assert_eq!(mux.close_tabs_except(0, &asked), vec![Tab(2), Pane(2)]);
+    assert_eq!(mux.tabs.len(), 2);
+    assert_eq!(mux.tabs[1].root.leaf_ids(), vec![5]);
+    assert_eq!(mux.active, 0, "A stays active");
+    // A pane already gone, or moved into the kept tab, closes nothing.
+    let mut mux = fake_tabs(&[1, 2]);
+    mux.tabs[0].root = Node::Split {
+        dir: Dir::Horizontal,
+        ratio: 0.5,
+        a: Box::new(Node::Leaf(1)),
+        b: Box::new(Node::Leaf(3)),
+    };
+    assert_eq!(mux.close_tabs_except(0, &[3, 9]), vec![]);
+    assert_eq!(order(&mux), vec![1, 2]);
+}
+
+#[test]
+fn a_stale_close_other_tabs_pick_repaints_the_menu_away() {
+    // The other tabs have all gone: nothing to close or ask about, but the
+    // popup the pick dismissed must not stay painted.
+    let src = production_source();
+    let act = finding_body(&src, "act_on_menu_tab");
+    let others = act
+        .split("TabMenuStep::CloseOthers(idx) => {")
+        .nth(1)
+        .and_then(|arm| arm.split("TabMenuStep::Moved(moved) => {").next())
+        .expect("the Close Other Tabs arm");
+    let none_left = others
+        .split("if panes == 0 {")
+        .nth(1)
+        .and_then(|branch| branch.split("return;").next())
+        .expect("the branch with nothing to close");
+    assert!(none_left.contains("window.request_redraw();"));
+    let mut ws = WindowState::new(1, fake_tabs(&[1]));
+    assert_eq!(super::other_tabs_close_scope(&ws, 0), (0, 0));
+    ws.mux.tabs.push(fake_tab(2));
+    assert_eq!(super::other_tabs_close_scope(&ws, 0), (1, 1));
 }
 

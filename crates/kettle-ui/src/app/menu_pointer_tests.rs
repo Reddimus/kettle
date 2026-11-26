@@ -941,3 +941,89 @@ fn ui_geometry_reports_what_a_menu_was_placed_around() {
         .expect("the line placement");
     assert!(line.contains("ws.context_menu_session.anchor = Some(anchor);"));
 }
+
+#[test]
+fn leaving_the_window_from_a_submenu_still_closes_it() {
+    let mut cascade = Cascade::new(false);
+    // Into the submenu, then out of the window in one move: the last
+    // position the window saw is on the submenu's second row.
+    let last = (200.0, 46.0);
+    assert_eq!(
+        cascade.hover(MenuHit::Row(1), last, 16),
+        MenuHoverEffect::Redraw
+    );
+    cascade.pointer.left_window();
+    assert_eq!(
+        cascade.hover(MenuHit::Outside, last, 32),
+        MenuHoverEffect::None
+    );
+    // At the deadline, a fresh hit test of that position finds the row, but
+    // the pointer is not there.
+    let due = cascade.pointer.due_hit(MenuHit::Row(1));
+    assert_eq!(cascade.hover(due, last, 32 + 300), MenuHoverEffect::Redraw);
+    assert!(cascade.menu.drill_stack.is_empty(), "the submenu closed");
+    assert_eq!(due, MenuHit::Outside);
+    // Back in the window, hits count again.
+    cascade.pointer.moved_in_window();
+    assert_eq!(cascade.pointer.due_hit(MenuHit::Row(0)), MenuHit::Row(0));
+
+    let src = super::super::production_source();
+    let tick = src
+        .split("fn context_menu_pointer_tick(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("the deadline");
+    assert!(
+        tick.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains(".pointer .due_hit(self.context_menu_pointer_hit(ws, &panels));")
+    );
+    let left = src
+        .split("fn context_menu_pointer_left(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("the window exit");
+    assert!(left.contains("ws.context_menu_session.pointer.left_window();"));
+    let moved = src
+        .split("fn update_menu_highlight_from_cursor(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("a motion");
+    assert!(moved.contains("ws.context_menu_session.pointer.moved_in_window();"));
+}
+
+#[test]
+fn moving_a_menu_closes_the_submenus_that_hung_off_it() {
+    // The audit's resize: a keyboard menu flipped above the prompt at y 96,
+    // Split's submenu open beside its row at y 208; the window grows and the
+    // menu now fits below the prompt, at y 516.
+    let mut menu = state(vec![
+        submenu("Split", Action::SplitRight),
+        submenu("Pane", Action::ClosePane),
+    ]);
+    menu.anchor = (100.0, 96.0);
+    menu.highlight = 1;
+    assert!(menu.enter_submenu(1));
+    menu.anchor = (400.0, 208.0);
+    let closed = place_menu_root(&mut menu, (100.0, 516.0));
+    assert!(menu.drill_stack.is_empty(), "no submenu left at y 208");
+    assert!(closed);
+    assert_eq!(menu.anchor, (100.0, 516.0));
+    assert_eq!(menu.highlight, 1, "Pane, whose submenu it was, stays lit");
+    // A menu that stays where it is keeps its submenu.
+    assert!(menu.enter_submenu(1));
+    menu.anchor = (400.0, 540.0);
+    assert!(!place_menu_root(&mut menu, (100.0, 516.0)));
+    assert_eq!(menu.drill_stack.len(), 1);
+    assert_eq!(menu.drill_stack[0].anchor, (100.0, 516.0));
+    assert_eq!(menu.anchor, (400.0, 540.0));
+
+    let src = super::super::production_source();
+    let line = src
+        .split("fn place_context_menu_at_line(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("the line placement");
+    assert!(line.contains("&& place_menu_root(menu, placement.origin)"));
+}
