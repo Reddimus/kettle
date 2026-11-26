@@ -817,7 +817,12 @@ impl SettingsNav {
             return;
         }
         let field = self.field.min(count - 1);
-        let (page, half) = self.page_steps(count);
+        let (page_rows, half) = self.page_steps(count);
+        let applies: Vec<bool> = fields.iter().map(|f| !field_disabled(cfg, f.key)).collect();
+        let page = |delta: usize, down: bool| {
+            let delta = delta as isize;
+            page_target(&applies, field, if down { delta } else { -delta })
+        };
         self.field = match to {
             RowMove::Next => next_enabled_field(cfg, fields, field, 1),
             RowMove::Previous => next_enabled_field(cfg, fields, field, -1),
@@ -825,14 +830,10 @@ impl SettingsNav {
             // row they start from, as ↑/↓ skip the others.
             RowMove::First => nearest_enabled_field(cfg, fields, 0, 1),
             RowMove::Last => nearest_enabled_field(cfg, fields, count - 1, -1),
-            RowMove::PageDown => {
-                nearest_enabled_field(cfg, fields, (field + page).min(count - 1), -1)
-            }
-            RowMove::PageUp => nearest_enabled_field(cfg, fields, field.saturating_sub(page), 1),
-            RowMove::HalfDown => {
-                nearest_enabled_field(cfg, fields, (field + half).min(count - 1), -1)
-            }
-            RowMove::HalfUp => nearest_enabled_field(cfg, fields, field.saturating_sub(half), 1),
+            RowMove::PageDown => page(page_rows, true),
+            RowMove::PageUp => page(page_rows, false),
+            RowMove::HalfDown => page(half, true),
+            RowMove::HalfUp => page(half, false),
         };
     }
 
@@ -2117,6 +2118,36 @@ pub fn next_enabled_field(cfg: &Config, fields: &[Field], start: usize, step: i3
         }
     }
     start.min(n - 1)
+}
+
+/// Where a page move of `delta` rows from `current` lands among rows in
+/// painted order, `applies` saying which of them apply. It aims at
+/// `current + delta`, kept in the list; a row there that does not apply
+/// gives way to the nearest one that does back toward `current`, so the
+/// page keeps its overlap, and failing that to the next one on in the
+/// direction of travel, so a row that does not apply never stops it.
+/// `current` when no row that applies lies that way.
+pub(crate) fn page_target(applies: &[bool], current: usize, delta: isize) -> usize {
+    let Some(last) = applies.len().checked_sub(1) else {
+        return current;
+    };
+    let current = current.min(last);
+    let target = (current as isize)
+        .saturating_add(delta)
+        .clamp(0, last as isize) as usize;
+    let found = if target > current {
+        (current + 1..=target)
+            .rev()
+            .chain(target + 1..=last)
+            .find(|&index| applies[index])
+    } else if target < current {
+        (target..current)
+            .chain((0..target).rev())
+            .find(|&index| applies[index])
+    } else {
+        None
+    };
+    found.unwrap_or(current)
 }
 
 /// The row nearest `target` that is not [`field_disabled`], looking first

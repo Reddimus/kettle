@@ -631,3 +631,42 @@ fn page_keys_move_by_the_rows_in_view() {
     assert_eq!(moves(RowMove::PageUp), 7);
     assert_eq!(moves(RowMove::HalfUp), 5);
 }
+
+/// A page that ends on a row that does not apply, with no row that does
+/// between it and the focus, goes on to the next row that applies in the
+/// direction of travel, as the arrows do: in a window two rows tall, with
+/// Starfield, Page Down and Ctrl+D from Background step over Image file to
+/// Animation, and Page Up and Ctrl+U come back. They stayed put.
+#[test]
+fn a_page_crosses_a_row_that_does_not_apply() {
+    let cats = categories(&[]);
+    let cfg = Config {
+        background_type: kettle_config::BackgroundType::Starfield,
+        ..Config::default()
+    };
+    let background = category(&cats, Text::SettingsCategoryBackground);
+    let fields = &cats[background].fields;
+    assert!(field_disabled(&cfg, fields[1].key), "{}", fields[1].key);
+    assert!(!field_disabled(&cfg, fields[2].key));
+    for (down, up) in [
+        (RowMove::PageDown, RowMove::PageUp),
+        (RowMove::HalfDown, RowMove::HalfUp),
+    ] {
+        let mut nav = SettingsNav {
+            category: background,
+            visible_rows: 2,
+            ..Default::default()
+        };
+        nav.move_focus(&cats, &cfg, down);
+        assert_eq!(nav.field, 2, "{down:?}");
+        nav.move_focus(&cats, &cfg, up);
+        assert_eq!(nav.field, 0, "{up:?}");
+    }
+    // At the ends it stays, and it never lands on a row that does not
+    // apply.
+    assert_eq!(page_target(&[true, false, false], 0, 1), 0);
+    assert_eq!(page_target(&[true, false, true, true], 0, 2), 2);
+    assert_eq!(page_target(&[true, true, false, true], 0, 2), 1);
+    assert_eq!(page_target(&[true, true, true], 2, 5), 2);
+    assert_eq!(page_target(&[false, true, true], 2, -5), 1);
+}
