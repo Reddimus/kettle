@@ -287,12 +287,51 @@ impl GraphicsSettings {
         ])
     }
 
-    /// What runs after a GPU recovery rebuilt the device from `cfg`: its GPU
-    /// policy, while the renderer stays the one Kettle started with.
-    pub(crate) fn after_gpu_rebuild(&self, cfg: &Config) -> Self {
-        let mut running = Self::of(cfg);
-        running.0[0].clone_from(&self.0[0]);
-        running
+    /// What runs after a GPU recovery rebuilt the device from `cfg` on
+    /// `adapter` (`software` when it is a CPU adapter). The recovery tiers
+    /// pass over the saved pin, backend and power preference, and can
+    /// escalate to software, so a saved GPU setting counts as applied only
+    /// where the adapter it got honours it; any other keeps what ran
+    /// before, and a change to it stays pending. The renderer stays the one
+    /// Kettle started with.
+    pub(crate) fn after_gpu_rebuild(
+        &self,
+        cfg: &Config,
+        adapter: &kettle_render::GpuAdapterInfo,
+        software: bool,
+    ) -> Self {
+        use kettle_config::{GpuBackend, GpuPowerPreference};
+        let saved = Self::of(cfg);
+        let honoured = [
+            false,
+            match cfg.gpu_power_preference {
+                GpuPowerPreference::Auto => true,
+                GpuPowerPreference::Low => adapter.kind == "Integrated",
+                GpuPowerPreference::High => adapter.kind == "Discrete",
+            },
+            match cfg.gpu_backend {
+                GpuBackend::Auto => true,
+                GpuBackend::Dx12 => adapter.backend == "DX12",
+                GpuBackend::Vulkan => adapter.backend == "Vulkan",
+                GpuBackend::Metal => adapter.backend == "Metal",
+                GpuBackend::Gl => adapter.backend == "GL",
+            },
+            read_choice(cfg, "gpu") == "auto"
+                || kettle_render::pin_match_rank_fields(
+                    adapter.vendor,
+                    adapter.device,
+                    &adapter.name,
+                    cfg,
+                ) != u8::MAX,
+            software == cfg.gpu_force_software,
+        ];
+        Self(std::array::from_fn(|index| {
+            if honoured[index] {
+                saved.0[index].clone()
+            } else {
+                self.0[index].clone()
+            }
+        }))
     }
 }
 
