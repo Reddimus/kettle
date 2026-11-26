@@ -47,6 +47,10 @@ pub(crate) struct MenuPointer {
     switch: Option<PendingSwitch>,
     /// Whether the pointer was over one of the menu's panels.
     inside: bool,
+    /// Whether the pointer has been over the menu at all. An open submenu
+    /// times out off the panels only then, so one opened from the keyboard
+    /// stays while a pointer that never came near it moves.
+    entered: bool,
     /// The pointer left the menu with no submenu open, so no row is lit,
     /// as in macOS and GTK menus. The pointer back on a row, or a key,
     /// lights one again. A pointer that was never over the menu, as when
@@ -123,7 +127,8 @@ pub(crate) struct ContextMenuSession {
 /// [`SUBMENU_OPEN_DELAY`]. An open submenu stays while the pointer crosses
 /// other rows of its parent inside the triangle from its last position to the
 /// submenu's near edge, as macOS and GTK menus do, and gives way after
-/// [`SUBMENU_SWITCH_DELAY`] outside that triangle or at rest.
+/// [`SUBMENU_SWITCH_DELAY`] outside that triangle or at rest. Off every panel
+/// it gives way the same way, and every submenu closes.
 pub(super) fn menu_pointer_moved(
     menu: &mut ContextMenuState,
     pointer: &mut MenuPointer,
@@ -133,8 +138,9 @@ pub(super) fn menu_pointer_moved(
     now: std::time::Instant,
 ) -> MenuHoverEffect {
     let from = pointer.last.replace(at);
-    let moved = from != Some(at);
-    let was_inside = std::mem::replace(&mut pointer.inside, hit != MenuHit::Outside);
+    let over = hit != MenuHit::Outside;
+    let was_inside = std::mem::replace(&mut pointer.inside, over);
+    pointer.entered |= over;
     let (depth, index) = match hit {
         MenuHit::Row(index) => {
             pointer.switch = None;
@@ -146,14 +152,25 @@ pub(super) fn menu_pointer_moved(
             return MenuHoverEffect::None;
         }
         MenuHit::Outside => {
-            pointer.cancel_pending();
-            // An open submenu keeps its row, and its own highlight, lit.
-            if !was_inside
-                || !menu.drill_stack.is_empty()
-                || std::mem::replace(&mut pointer.away, true)
+            pointer.open = None;
+            if menu.drill_stack.is_empty() {
+                pointer.switch = None;
+                if !was_inside || std::mem::replace(&mut pointer.away, true) {
+                    return MenuHoverEffect::None;
+                }
+                return MenuHoverEffect::Redraw;
+            }
+            // An open submenu the pointer has left for no panel at all gives
+            // way as it would to another row of its parent, unless the
+            // pointer heads for it; then every submenu closes and, the
+            // pointer being off the menu, no row is lit.
+            if !pointer.entered
+                || !submenu_gives_way(pointer, panels.last().copied(), from, at, now)
             {
                 return MenuHoverEffect::None;
             }
+            while menu.leave_submenu() {}
+            pointer.away = true;
             return MenuHoverEffect::Redraw;
         }
     };
@@ -167,10 +184,36 @@ pub(super) fn menu_pointer_moved(
         return MenuHoverEffect::None;
     }
     // Level `depth + 1` is the submenu the parent row opened.
+    if !submenu_gives_way(pointer, panels.get(depth + 1).copied(), from, at, now) {
+        return MenuHoverEffect::None;
+    }
+    while menu.drill_stack.len() > depth {
+        menu.leave_submenu();
+    }
+    menu.highlight = index;
+    // The switch waited longer than a dwell, so a submenu opens at once.
+    if matches!(menu.items.get(index), Some(ContextMenuItem::Submenu { .. })) {
+        MenuHoverEffect::OpenSubmenu(index)
+    } else {
+        MenuHoverEffect::Redraw
+    }
+}
+
+/// Run the wait of an open submenu, whose panel is `submenu`, that the
+/// pointer has turned from, moving from `from` to `at`. True once the wait is
+/// over and the submenu gives way.
+fn submenu_gives_way(
+    pointer: &mut MenuPointer,
+    submenu: Option<kettle_render::Rect4>,
+    from: Option<(f32, f32)>,
+    at: (f32, f32),
+    now: std::time::Instant,
+) -> bool {
+    let moved = from != Some(at);
     let aiming = moved
         && from
-            .zip(panels.get(depth + 1))
-            .is_some_and(|(from, submenu)| aims_at(from, at, *submenu));
+            .zip(submenu)
+            .is_some_and(|(from, submenu)| aims_at(from, at, submenu));
     let switch = pointer.switch.get_or_insert(PendingSwitch {
         moved: now,
         strayed: None,
@@ -184,19 +227,10 @@ pub(super) fn menu_pointer_moved(
         }
     }
     if now < switch.due() {
-        return MenuHoverEffect::None;
+        return false;
     }
     pointer.switch = None;
-    while menu.drill_stack.len() > depth {
-        menu.leave_submenu();
-    }
-    menu.highlight = index;
-    // The switch waited longer than a dwell, so a submenu opens at once.
-    if matches!(menu.items.get(index), Some(ContextMenuItem::Submenu { .. })) {
-        MenuHoverEffect::OpenSubmenu(index)
-    } else {
-        MenuHoverEffect::Redraw
-    }
+    true
 }
 
 /// Hover row `index` of the deepest level. A row that cannot run (a disabled

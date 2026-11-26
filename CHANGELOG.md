@@ -1566,7 +1566,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Context-menu submenus open once the pointer rests on their row for 200 ms
   (a click or Right opens one at once), and an open submenu stays while the
   pointer moves toward it across other rows, so a diagonal move no longer
-  lands on a different submenu.
+  lands on a different submenu. It closes 300 ms after the pointer leaves
+  the menu.
 - Hovering a menu row that cannot run, such as Copy with nothing selected or
   the Shift hint's line, keeps the previous row lit instead of lighting
   nothing, so Enter still runs the row you see.

@@ -5365,8 +5365,11 @@ Hover goes through the pure `app/menu_pointer.rs`: a submenu row opens after a
 200 ms dwell (a click or Right opens it at once), and an open submenu holds
 while the pointer crosses its parent's other rows inside the triangle from the
 pointer's last position to the submenu's near edge, giving way 300 ms after the
-pointer leaves that triangle or comes to rest. A pointer at rest sends no
-events, so `about_to_wait` wakes once at the pending deadline
+pointer leaves that triangle or comes to rest. A pointer off every panel
+starts the same wait, and at its end every submenu closes; a submenu opened
+from the keyboard, with a pointer that was never over the menu, stays. A
+pointer at rest sends no events, so `about_to_wait` wakes once at the pending
+deadline
 (`context_menu_pointer_tick`); nothing redraws until the hover changes.
 Hovering a row that cannot run (a disabled Copy, an information line) leaves
 the highlight where it was, so the lit row is always one Enter can run.

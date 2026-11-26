@@ -622,3 +622,81 @@ fn a_menu_opened_from_the_keyboard_is_placed_for_the_cursor_line() {
     assert!(open < placed);
     assert!(arm.contains("MenuAnchor::line(px, py - cell_h * 0.5, py + cell_h * 0.5)"));
 }
+
+#[test]
+fn an_open_submenu_closes_once_the_pointer_has_left_every_panel() {
+    let mut cascade = Cascade::new(false);
+    // Into Split's submenu, then out over the terminal, and still.
+    assert_eq!(
+        cascade.hover(MenuHit::Row(1), (200.0, 46.0), 16),
+        MenuHoverEffect::Redraw
+    );
+    assert_eq!(
+        cascade.hover(MenuHit::Outside, (420.0, 300.0), 32),
+        MenuHoverEffect::None
+    );
+    assert_eq!(
+        cascade.hover(MenuHit::Outside, (420.0, 300.0), 32 + 299),
+        MenuHoverEffect::None
+    );
+    assert!(cascade.split_still_open(), "not before the delay");
+    // The scheduler's look at the delay's end closes it.
+    assert_eq!(
+        cascade.hover(MenuHit::Outside, (420.0, 300.0), 32 + 300),
+        MenuHoverEffect::Redraw
+    );
+    assert!(cascade.menu.drill_stack.is_empty(), "the submenu closed");
+    assert!(
+        menu_shown_highlight(&cascade.menu, &cascade.pointer) >= cascade.menu.items.len(),
+        "and the pointer, off the menu, lights nothing"
+    );
+}
+
+#[test]
+fn a_pointer_off_the_panels_but_heading_for_the_submenu_keeps_it() {
+    let mut cascade = Cascade::new(false);
+    // From Tab's row, out below the menu, toward the submenu's left edge.
+    let tab = MenuHit::ParentRow { depth: 0, index: 2 };
+    assert_eq!(cascade.hover(tab, (150.0, 74.0), 16), MenuHoverEffect::None);
+    for (step, (x, y)) in [(160.0, 83.0), (166.0, 89.0)].into_iter().enumerate() {
+        let after = 200 + 150 * step as u64;
+        assert_eq!(
+            cascade.hover(MenuHit::Outside, (x, y), after),
+            MenuHoverEffect::None,
+            "step {step}"
+        );
+        assert!(cascade.split_still_open(), "step {step}");
+    }
+    // At rest out there, it gives way like any other wait.
+    assert_eq!(
+        cascade.hover(MenuHit::Outside, (166.0, 89.0), 350 + 300),
+        MenuHoverEffect::Redraw
+    );
+    assert!(cascade.menu.drill_stack.is_empty());
+}
+
+#[test]
+fn a_submenu_opened_from_the_keyboard_ignores_a_pointer_that_never_came_near() {
+    let mut menu = state(vec![
+        submenu("Split", Action::SplitRight),
+        submenu("Pane", Action::ClosePane),
+    ]);
+    assert!(menu.enter_submenu(0));
+    let mut pointer = MenuPointer::default();
+    let panels = [(10.0, 10.0, 160.0, 48.0), (170.0, 10.0, 160.0, 48.0)];
+    let t0 = Instant::now();
+    for (after, x) in [(0, 500.0), (16, 510.0), (2000, 510.0)] {
+        assert_eq!(
+            menu_pointer_moved(
+                &mut menu,
+                &mut pointer,
+                MenuHit::Outside,
+                &panels,
+                (x, 400.0),
+                t0 + ms(after)
+            ),
+            MenuHoverEffect::None
+        );
+    }
+    assert_eq!(menu.drill_stack.len(), 1);
+}
