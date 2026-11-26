@@ -2214,7 +2214,7 @@ fn a_tab_drag_resting_on_an_overflow_arrow_scrolls_the_strip() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(source.contains(
-        "let (step, rest) = tab_drag_arrow_step(ws.tab_drag_arrow, over, can_step, now); ws.tab_drag_arrow = rest; if let Some(forward) = step && ws.mux.move_active_tab(if forward { 1 } else { -1 })"
+        "ws.tab_drag_arrow = rest; if let Some(forward) = step && ws.mux.move_active_tab(if forward { 1 } else { -1 })"
     ));
     assert!(source.contains(
         "let dragging = ws.tab_drag_active && ws.tab_drag_press.is_none(); let over = ws.hovered_scroll_arrow.filter(|_| dragging);"
@@ -2361,4 +2361,44 @@ fn a_clicked_tab_title_rearms_after_the_pointer_crosses_its_close_button() {
         super::chrome::tab_title_region(&bar.segments[0]),
         (100.0, 0.0, 72.0, 28.0)
     );
+}
+
+/// Finding 8 of the second 6.0 review: the step that moved a dragged tab to
+/// the end still kept its rest, so the scheduler woke 400 ms later only to
+/// find nothing to do. Whether another step is possible is now asked from
+/// where the step leaves the tab: the last step to an end keeps no rest.
+#[test]
+fn the_last_drag_step_to_an_end_schedules_no_wake() {
+    use super::windowing::{TAB_DRAG_SCROLL_DWELL, tab_drag_arrow_pass};
+    use std::time::Instant;
+    let t0 = Instant::now();
+    let due = t0 + TAB_DRAG_SCROLL_DWELL;
+    // Third of four tabs, resting on `›`: one step left.
+    assert_eq!(
+        tab_drag_arrow_pass(Some((true, t0)), Some(true), (2, 4), due),
+        (Some(true), None),
+        "the step that reaches the end keeps no rest"
+    );
+    // Second of four: the step leaves room for another, so the rest stays.
+    assert_eq!(
+        tab_drag_arrow_pass(Some((true, t0)), Some(true), (1, 4), due),
+        (Some(true), Some((true, due)))
+    );
+    // The same at the start, going back.
+    assert_eq!(
+        tab_drag_arrow_pass(Some((false, t0)), Some(false), (1, 4), due),
+        (Some(false), None)
+    );
+    // Already at the end: no step and no rest.
+    assert_eq!(
+        tab_drag_arrow_pass(None, Some(true), (3, 4), t0),
+        (None, None)
+    );
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(source.contains(
+        "let (step, rest) = tab_drag_arrow_pass( ws.tab_drag_arrow, over, (ws.mux.active, ws.mux.tabs.len()), now, ); ws.tab_drag_arrow = rest;"
+    ));
 }

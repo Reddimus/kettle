@@ -189,8 +189,9 @@ from naming its Play button. `the_toast_button_under_the_pointer_lights_alone`
 (`kettle-ui`) cover the toast and notice buttons' hover, and
 `an_actionable_toast_body_lights_under_the_pointer` the notification toast's body.
 `a_tab_drag_resting_on_an_overflow_arrow_scrolls_the_strip` covers the
-400 ms drag auto-scroll, and `a_tab_drag_at_the_end_rests_on_nothing` that it
-schedules no wake where the tab can go no further; the drag itself needs a
+400 ms drag auto-scroll, and `a_tab_drag_at_the_end_rests_on_nothing` and
+`the_last_drag_step_to_an_end_schedules_no_wake` that it schedules no wake
+where the tab can go no further; the drag itself needs a
 desktop.
 Full render/UI suites and clippy remain required; native focus changes,
 hover/press feedback, tooltip placement and Spanish acceptance need a desktop.
