@@ -242,6 +242,18 @@ date. Recheck that before upgrading a crate or dropping a patch.
   - Private mode 1048 saves the cursor as DECSC does when set and restores
     it as DECRC does when reset, sharing their saved state. Upstream ignored
     the mode.
+
+  No row of a one-column grid has room for a wide character. Printing one
+  writes a blank in the current attributes in its cell, as Ghostty does, and
+  the cursor moves on as after a narrow character; a cluster that a selector
+  would widen keeps its narrow cell. Narrowing the grid to one column blanks
+  each wide character the same way and drops its spacer. Upstream writes the
+  spacer one column past the end of the row and panics, and its reflow moves
+  the character to the next row, meets it again there, and adds rows until
+  memory runs out. Alacritty itself never sizes a terminal below
+  `MIN_COLUMNS` (2). Upstream `master` at `791efff6` (2026-11-18) still has
+  both bugs. `grid/tests.rs` and `term/mod.rs` cover them, and the
+  compact-history fuzz now includes one-column grids.
 - Kettle's DEC mode 2027 (on by default in Kettle) stores bounded Unicode 18 extended graphemes
   with their leading cell and recorded width. Its streaming boundary context
   is independent of retained scalars; official property inputs, 853 boundary

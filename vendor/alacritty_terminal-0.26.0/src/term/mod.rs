@@ -2278,6 +2278,19 @@ impl<T: EventListener> Term<T> {
             self.wrapline();
         }
 
+        // No row of a one-column grid has room for a wide glyph, wrapped or
+        // not. A blank in the current attributes takes its cell, as in
+        // Ghostty, and the cursor moves on as after any other character.
+        // There is no cluster cell for later scalars to join.
+        if width > 1 && self.columns() == 1 {
+            if self.mode.contains(TermMode::INSERT) {
+                self.insert_blank(1);
+            }
+            self.write_at_cursor(' ');
+            self.grid.cursor.input_needs_wrap = true;
+            return None;
+        }
+
         // Wrap a wide glyph before reserving insertion space on its destination row.
         if width > 1 && self.grid.cursor.point.column + 1 >= self.input_right_edge() {
             if self.mode.contains(TermMode::LINE_WRAP) {
@@ -2560,9 +2573,10 @@ impl<T: EventListener> Term<T> {
 
     fn widen_grapheme(&mut self, anchor: GraphemeAnchor) {
         let fits = anchor.point.column + 1 < self.input_right_edge();
-        if !fits && !self.mode.contains(TermMode::LINE_WRAP) {
+        if !fits && (!self.mode.contains(TermMode::LINE_WRAP) || self.columns() == 1) {
             // The retained text is already updated. Keep the narrow cell when
-            // there is no room for its spacer, for emoji and script clusters alike.
+            // there is no room for its spacer, for emoji and script clusters
+            // alike. A one-column grid has none on any row.
             return;
         }
         self.grid.cursor.point = anchor.point;
@@ -6458,6 +6472,140 @@ mod tests {
             ),
             "    ",
         );
+    }
+
+    /// No row of a one-column grid has room for a wide glyph. A blank in the
+    /// current attributes takes its cell, as in Ghostty, and the cursor moves
+    /// on as after any other character. Printing used to write the glyph's
+    /// second half one column past the end of the row and panic.
+    #[test]
+    fn a_wide_glyph_in_a_one_column_grid_prints_a_blank() {
+        for (label, setup) in [
+            ("autowrap", ""),
+            ("no autowrap", "\x1b[?7l"),
+            ("insert mode", "\x1b[4h"),
+            ("grapheme clusters", "\x1b[?2027h"),
+        ] {
+            let size = TermSize::new(1, 3);
+            let mut term = Term::new(Config::default(), &size, VoidListener);
+            let mut parser: ansi::Processor = ansi::Processor::new();
+            parser.advance(&mut term, setup.as_bytes());
+            parser.advance(&mut term, "\x1b[41m\u{754c}".as_bytes());
+            let cell = &term.grid[Line(0)][Column(0)];
+            assert_eq!(cell.c, ' ', "{label}");
+            assert_eq!(cell.bg, Color::Named(NamedColor::Red), "{label}");
+            assert!(
+                !cell.flags.intersects(
+                    Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER
+                ),
+                "{label}: {:?}",
+                cell.flags
+            );
+            assert_eq!(term.grid.cursor.point, Point::new(Line(0), Column(0)));
+            assert!(term.grid.cursor.input_needs_wrap, "{label}");
+
+            // More wide text, a repeat, an emoji sequence and an accent all
+            // print without a panic and leave no wide cell behind.
+            parser.advance(
+                &mut term,
+                "\u{1f44d}x\u{754c}\x1b[3b\u{1f469}\u{200d}\u{1f4bb}e\u{301}".as_bytes(),
+            );
+            for line in term.grid.topmost_line().0..=term.grid.bottommost_line().0 {
+                let flags = term.grid[Line(line)][Column(0)].flags;
+                assert!(
+                    !flags.intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER),
+                    "{label}: line {line}: {flags:?}"
+                );
+            }
+        }
+
+        // The next character goes to the next row, as after a narrow one.
+        let size = TermSize::new(1, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(&mut term, "\u{754c}a".as_bytes());
+        assert!(term.grid[Line(0)][Column(0)].flags.contains(Flags::WRAPLINE));
+        assert_eq!(term.grid[Line(1)][Column(0)].c, 'a');
+    }
+
+    /// A cluster that a selector would widen keeps its narrow cell in a
+    /// one-column grid, where its spacer has nowhere to go.
+    #[test]
+    fn a_widening_cluster_keeps_its_narrow_cell_in_a_one_column_grid() {
+        let size = TermSize::new(1, 3);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(&mut term, "\x1b[?2027h\u{2764}\u{fe0f}".as_bytes());
+        let cell = &term.grid[Line(0)][Column(0)];
+        assert_eq!(cell.c, '\u{2764}');
+        assert_eq!(cell.zerowidth(), Some(&['\u{fe0f}'][..]));
+        assert!(!cell.flags.contains(Flags::WIDE_CHAR));
+        assert!(term.grid.cursor.input_needs_wrap);
+    }
+
+    /// Narrowing the grid to one column blanks each wide glyph in place and
+    /// drops its spacer. The reflow used to move the glyph to the next row,
+    /// leave a leading spacer behind, and meet the same glyph again on every
+    /// pass, adding rows until memory ran out.
+    #[test]
+    fn narrowing_to_one_column_blanks_wide_glyphs() {
+        let config = Config {
+            scrolling_history: 100,
+            ..Config::default()
+        };
+        let size = TermSize::new(12, 3);
+        let mut term = Term::new(config.clone(), &size, VoidListener);
+        let mut parser: ansi::Processor = ansi::Processor::new();
+        parser.advance(&mut term, "ab\u{754c}cd\r\nshort\r\n".as_bytes());
+        term.resize(TermSize::new(1, 3));
+
+        let grid = &term.grid;
+        let column: String = (grid.topmost_line().0..=grid.bottommost_line().0)
+            .map(|line| grid[Line(line)][Column(0)].c)
+            .collect();
+        assert_eq!(column.trim_end(), "ab cdshort");
+        for line in grid.topmost_line().0..=grid.bottommost_line().0 {
+            let flags = grid[Line(line)][Column(0)].flags;
+            assert!(
+                !flags.intersects(
+                    Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER
+                ),
+                "line {line}: {flags:?}"
+            );
+        }
+        // "ab cd" is one line again at full width.
+        term.resize(TermSize::new(12, 3));
+        let grid = &term.grid;
+        let first: String = grid[grid.topmost_line()][..]
+            .iter()
+            .map(|cell| cell.c)
+            .collect();
+        assert_eq!(first.trim_end(), "ab cd");
+
+        // A wide glyph at the end of a soft-wrapped row, with its leading
+        // spacer, and a wide glyph under the cursor, on both screens.
+        for alternate in [false, true] {
+            let mut term = Term::new(config.clone(), &TermSize::new(5, 3), VoidListener);
+            if alternate {
+                parser.advance(&mut term, b"\x1b[?1049h");
+            }
+            parser.advance(&mut term, "abcd\u{754c}e\r\n\u{1f44d}\x1b[D\x1b[D".as_bytes());
+            term.resize(TermSize::new(1, 3));
+            let grid = &term.grid;
+            for line in grid.topmost_line().0..=grid.bottommost_line().0 {
+                let flags = grid[Line(line)][Column(0)].flags;
+                assert!(
+                    !flags.intersects(
+                        Flags::WIDE_CHAR
+                            | Flags::WIDE_CHAR_SPACER
+                            | Flags::LEADING_WIDE_CHAR_SPACER
+                    ),
+                    "alternate {alternate}: line {line}: {flags:?}"
+                );
+            }
+            assert_eq!(grid.cursor.point.column, Column(0));
+            parser.advance(&mut term, "\u{754c}z".as_bytes());
+        }
     }
 
     #[test]

@@ -1333,10 +1333,9 @@ impl PtyGeometry {
     ///
     /// Columns clamp to [`MIN_COLUMNS`], not to 1. The engine declares that
     /// minimum and then never enforces it, and a one-column grid is not merely
-    /// cramped: writing any double-width character to it indexes past the end
-    /// of the row and panics on the PTY reader thread. The release profile sets
-    /// `panic = "abort"`, so that takes down every pane in every window, and a
-    /// CJK filename in `ls` output is enough to trigger it.
+    /// cramped: no row there has room for a double-width character, so the
+    /// engine prints a blank in its place, and a CJK filename in `ls` output
+    /// comes out empty.
     ///
     /// `kettle exec --cols 1`, a split narrow enough to leave one cell after
     /// padding, and the `(1, 1, 1, 1)` fallbacks for an unresolved geometry all
@@ -3333,7 +3332,7 @@ pub struct TermSize {
 impl TermSize {
     /// Build a size the engine can actually represent.
     ///
-    /// The second guard on the one-column crash. [`PtyGeometry::new`] clamps
+    /// The second guard against a one-column grid. [`PtyGeometry::new`] clamps
     /// too, but its fields are public and the type is re-exported, so a caller
     /// can build `PtyGeometry { columns: 1, .. }` and never pass through it.
     /// The engine consumes this type directly, so clamping here holds however

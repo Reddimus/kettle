@@ -338,6 +338,26 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             }
 
             loop {
+                // A one-column row has no room for a wide character. Blank it
+                // in place and drop its spacer, as Ghostty does; moving it to
+                // the next row would meet it there again on every pass.
+                if columns == 1 && row[Column(0)].flags().contains(Flags::WIDE_CHAR) {
+                    row[Column(0)].clear_wide_char();
+                    if row.len() > 1 && row[Column(1)].flags().contains(Flags::WIDE_CHAR_SPACER) {
+                        let mut head = row.front_split_off(1);
+                        let spacer = row.front_split_off(1);
+                        if spacer[0].flags().contains(Flags::WRAPLINE) {
+                            head[0].flags_mut().insert(Flags::WRAPLINE);
+                        }
+                        row.append_front(head);
+                        let cursor_buffer_line = self.lines - self.cursor.point.line.0 as usize - 1;
+                        // A cursor past the spacer, or on it, moves back one.
+                        if i == cursor_buffer_line && self.cursor.point.column > 0 {
+                            self.cursor.point.column -= 1;
+                        }
+                    }
+                }
+
                 // Remove all cells which require reflowing.
                 let mut wrapped = match row.shrink(columns) {
                     Some(wrapped) if reflow => wrapped,
