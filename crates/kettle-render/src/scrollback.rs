@@ -301,46 +301,65 @@ pub fn vi_mode_chip(
 }
 
 /// Whether `rect` covers any text `snap` shows, its cursor or its selection,
-/// for a grid drawn from `origin` in cells `cell` big. A cell holding only a
-/// space and no marks is not text; the right half of a wide character is.
+/// for a grid drawn from `origin` in cells `cell` big, each where the painter
+/// draws it: a row with right-to-left text is drawn in the visual order
+/// `bidi` holds for it. A cell holding only a space and no marks is not text;
+/// either half of a wide character is.
 pub(crate) fn rect_covers_text(
     snap: &crate::PaneSnapshot,
+    bidi: &crate::bidi_rows::PaneBidi,
     origin: (f32, f32),
     cell: (f32, f32),
     rect: Rect4,
 ) -> bool {
+    use alacritty_terminal::index::{Column, Line, Point};
     use alacritty_terminal::term::cell::Flags;
     let (cw, ch) = cell;
-    let at = |row: i32, col: usize| {
-        (
-            origin.0 + col as f32 * cw,
-            origin.1 + row as f32 * ch,
-            cw,
-            ch,
-        )
-    };
     let offset = snap.display_offset as i32;
+    // The visual columns a logical cell's glyph covers. A wide character
+    // keeps its lead on the left when reordered, so the pair spans its
+    // lead's visual column and the next.
+    let covered = |row: i32, col: usize, wide: bool| {
+        let vcol = bidi.row(row).map_or(col, |map| map.visual(col));
+        let x = origin.0 + vcol as f32 * cw;
+        let span = if wide { 2.0 } else { 1.0 };
+        crate::rects_overlap(rect, (x, origin.1 + row as f32 * ch, span * cw, ch))
+    };
     let cursor = &snap.cursor;
-    if cursor.shape != alacritty_terminal::vte::ansi::CursorShape::Hidden
-        && crate::rects_overlap(
-            rect,
-            at(cursor.point.line.0 + offset, cursor.point.column.0),
-        )
-    {
-        return true;
+    if cursor.shape != alacritty_terminal::vte::ansi::CursorShape::Hidden {
+        let (line, col) = (cursor.point.line.0, cursor.point.column.0);
+        let under = snap
+            .cells
+            .iter()
+            .find(|cell| cell.line == line && cell.col == col)
+            .map_or(Flags::empty(), |cell| cell.flags);
+        // On a wide character's right half the cursor covers the pair.
+        let (lead, wide) = if under.contains(Flags::WIDE_CHAR_SPACER) {
+            (col.saturating_sub(1), true)
+        } else {
+            (col, under.contains(Flags::WIDE_CHAR))
+        };
+        if covered(line + offset, lead, wide) {
+            return true;
+        }
     }
     snap.cells.iter().any(|cell| {
-        let point = alacritty_terminal::index::Point::new(
-            alacritty_terminal::index::Line(cell.line),
-            alacritty_terminal::index::Column(cell.col),
-        );
+        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            // Covered with its lead.
+            return false;
+        }
+        let point = Point::new(Line(cell.line), Column(cell.col));
         let blank = matches!(cell.c, ' ' | '\0' | '\t')
             && cell.zerowidth().is_empty()
-            && !cell.flags.contains(Flags::WIDE_CHAR_SPACER)
             && !snap
                 .selection
                 .is_some_and(|selection| selection.contains(point));
-        !blank && crate::rects_overlap(rect, at(cell.line + offset, cell.col))
+        !blank
+            && covered(
+                cell.line + offset,
+                cell.col,
+                cell.flags.contains(Flags::WIDE_CHAR),
+            )
     })
 }
 

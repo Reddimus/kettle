@@ -306,6 +306,8 @@ impl App {
                 ws.native_pointer = None;
                 ws.card_hover = None;
                 ws.card_settle_wake = None;
+                // Nor is a theme picker row it was resting on.
+                picker_pointer_left(ws);
                 if let Some(receipt) = ws.media_paste_receipt.as_mut() {
                     receipt.set_hover(false, std::time::Instant::now());
                 }

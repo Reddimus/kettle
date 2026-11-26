@@ -2062,9 +2062,12 @@ the picker last saw, set when it opens, on each of its keys
 under a still pointer are never selected and the keyboard's selection holds
 until the pointer really moves. A row a hover may not select is lit instead.
 The keyboard previews the theme it selects at once; a theme the pointer
-selects previews once the pointer has rested 150 ms (`PickerView::preview_at`,
-which `theme_preview_change` waits for and `about_to_wait_inner` wakes for),
-so a sweep across the list does not flash themes. A click runs the row as
+selects previews once the pointer has rested on its row 150 ms
+(`PickerView::pointer_preview`, which `theme_preview_change` waits for and
+`about_to_wait_inner` wakes for), so a sweep across the list does not flash
+themes. Each motion within the row starts the wait again, and leaving the
+row or the window (`picker_pointer_left`) drops it until the pointer rests on
+a row or a key previews. A click runs the row as
 Enter does. Any pointer press cancels a keyboard-only hint. Settings closes
 on a press outside its panel; an active path editor or keybinding capture instead
 cancels only that capture on a press outside its focused row. Confirmation dialogs
@@ -4543,7 +4546,8 @@ selection; its rows fill the panel from the header down, since pickers scroll
 with the keys and the wheel and keep no arrow strips. The wheel scrolls the
 list only (`PickerView::scroll`): the selection stays while it is in view, and
 one the list scrolls past moves to the nearest row in view the wheel may
-select. Each frame records where it drew the list (`remember_picker_scroll`),
+select, or to the first one past a view that holds none, such as a one-row
+view on a group heading, so each detent moves the list on. Each frame records where it drew the list (`remember_picker_scroll`),
 and the keys move it from there only as far as keeps the selection in view
 (`picker_scroll_offset_from`). The panel's
 border is blended over the panel colour and drawn opaque, because the shader
@@ -5371,7 +5375,10 @@ invalidation consistent with the grid. The renderer marks the mode from the
 captured `PaneSnapshot::vi_mode` with a chip (`scrollback::vi_mode_chip`) in the
 kept-history label's lane and style: top right, else bottom right above the
 jump button, placed only where `rect_covers_text` finds no text, cursor or
-selection under it, and left out when both places are covered.
+selection under it, and left out when both places are covered. It looks for
+them where the frame drew them: in a row with right-to-left text, at the
+visual columns of that frame's bidi layout (`PaneBidi`), not at their
+logical cells.
 
 ## Key design choices
 
