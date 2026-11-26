@@ -120,7 +120,11 @@ pub enum FieldKind {
 pub(crate) enum HotkeyCapture {
     Cancel,
     Value(Option<kettle_config::keybinds::Trigger>),
+    /// Still waiting: a modifier on its own.
     Pending,
+    /// Still waiting, after a key without a modifier, which a global
+    /// shortcut cannot be.
+    Refused,
 }
 
 pub(crate) fn capture_hotkey(
@@ -132,7 +136,8 @@ pub(crate) fn capture_hotkey(
         Some(Key::Escape) if mods.is_empty() => HotkeyCapture::Cancel,
         Some(Key::Backspace | Key::Delete) if mods.is_empty() => HotkeyCapture::Value(None),
         Some(key) if !mods.is_empty() => HotkeyCapture::Value(Some(Trigger { mods, key })),
-        _ => HotkeyCapture::Pending,
+        Some(_) => HotkeyCapture::Refused,
+        None => HotkeyCapture::Pending,
     }
 }
 
@@ -447,6 +452,9 @@ pub struct SettingsNav {
     /// user to press a chord to bind. The next non-modifier key press is
     /// captured as the new binding; Esc cancels.
     pub capturing: bool,
+    /// This capture refused a key pressed without a modifier; the row says
+    /// to add one until the capture ends.
+    pub capture_refused: bool,
     pub(crate) query: crate::text_editor::TextEditor,
     pub search_focused: bool,
 }
@@ -1649,7 +1657,8 @@ fn format_number(value: i64, suffix: &str) -> String {
 pub fn column_widths(cfg: &Config, cats: &[Category], tr: &Translator) -> (usize, usize) {
     use kettle_render::display_width as width;
     let mut label_cols = 0;
-    let mut value_cols = width(tr.text(Text::SettingsPressChord));
+    let mut value_cols = width(tr.text(Text::SettingsPressChord))
+        .max(width(tr.text(Text::SettingsCaptureNeedsModifier)));
     for field in cats.iter().flat_map(|cat| &cat.fields) {
         label_cols = label_cols.max(width(tr.text(field.label)));
         value_cols = value_cols.max(field_value_cols(cfg, field, tr));
@@ -2471,7 +2480,12 @@ mod tests {
         );
         assert_eq!(
             capture_hotkey(Some(Key::Char('x')), Mods::empty()),
-            HotkeyCapture::Pending
+            HotkeyCapture::Refused,
+            "the row says a key without a modifier was refused"
+        );
+        assert_eq!(
+            capture_hotkey(Some(Key::F(5)), Mods::empty()),
+            HotkeyCapture::Refused
         );
         assert_eq!(capture_hotkey(None, Mods::CTRL), HotkeyCapture::Pending);
         assert_eq!(
@@ -3991,9 +4005,12 @@ mod control_size_tests {
         let (cw, line) = (8.4_f32, 17.5_f32);
         for language in [Language::En, Language::Es] {
             let tr = Translator::new(language);
-            let prompt = tr.text(Text::SettingsPressChord);
-            assert!(prompt.contains("Esc"), "{language:?}: {prompt}");
-            for surface in [(1280.0_f32, 820.0_f32), (640.0, 820.0)] {
+            for (prompt, surface) in [Text::SettingsPressChord, Text::SettingsCaptureNeedsModifier]
+                .into_iter()
+                .flat_map(|prompt| [(1280.0_f32, 820.0_f32), (640.0, 820.0)].map(|s| (prompt, s)))
+            {
+                let prompt = tr.text(prompt);
+                assert!(prompt.contains("Esc"), "{language:?}: {prompt}");
                 for field in cats
                     .iter()
                     .flat_map(|cat| &cat.fields)

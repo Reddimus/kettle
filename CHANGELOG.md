@@ -1095,6 +1095,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- When Settings refuses a shortcut key pressed without a modifier, the row
+  now says "Add a modifier, Esc to cancel" instead of only sending a desktop
+  notification.
+
 - On macOS, choosing Settings… (Cmd+,) while Settings is open no longer
   sends it back to its first page and drops your search; it stays where it
   is.

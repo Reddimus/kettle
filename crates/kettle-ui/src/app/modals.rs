@@ -867,8 +867,14 @@ impl App {
                     } else if editing {
                         String::new()
                     } else if category == cat && i == fld && nav.capturing {
-                        // Capture prompt on the focused keybind row.
-                        tr.text(kettle_i18n::Text::SettingsPressChord).to_string()
+                        // Capture prompt on the focused keybind row, or why
+                        // its last key was refused.
+                        tr.text(if nav.capture_refused {
+                            kettle_i18n::Text::SettingsCaptureNeedsModifier
+                        } else {
+                            kettle_i18n::Text::SettingsPressChord
+                        })
+                        .to_string()
                     } else {
                         crate::settings::row_value(f, context.clone(), &self.cfg, tr)
                     };
@@ -1947,6 +1953,10 @@ impl App {
             use crate::settings::HotkeyCapture;
             match capture_global_hotkey(key, unmodified_key, held_modifiers(ws), ws.mods) {
                 HotkeyCapture::Pending => return,
+                HotkeyCapture::Refused => {
+                    self.refuse_settings_chord(ws);
+                    return;
+                }
                 HotkeyCapture::Cancel => {}
                 HotkeyCapture::Value(trigger) => {
                     let value =
@@ -1976,12 +1986,7 @@ impl App {
                 // everywhere, persisted, with no in-overlay unbind. Stay in
                 // capture mode and tell the user instead of soft-bricking.
                 if !keybind_chord_is_safe(mods, kk) {
-                    fire_notify(
-                        self.ui_text
-                            .text(kettle_i18n::Text::NotifyTitleKeybindNeedsModifier),
-                        self.ui_text
-                            .text(kettle_i18n::Text::NotifyBodyKeybindModifier),
-                    );
+                    self.refuse_settings_chord(ws);
                     return;
                 }
                 if let Some(action) = crate::settings::keybind_action(&cats[cat].fields[fld])
@@ -2085,6 +2090,28 @@ impl App {
         }
     }
 
+    /// A chord capture refused a key without a modifier and goes on
+    /// waiting. The row says so, and assistive technology reads it from the
+    /// row's value; a window not in front, where nobody sees the row, also
+    /// gets a desktop notification.
+    fn refuse_settings_chord(&mut self, ws: &mut WindowState) {
+        if let Some(nav) = ws.settings_nav.as_mut() {
+            nav.capture_refused = true;
+        }
+        if !ws.window_focused {
+            fire_notify(
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyTitleKeybindNeedsModifier),
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyBodyKeybindModifier),
+            );
+        }
+        ws.accessibility_pending = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
     /// Search owns text only while focused; results use catalogue identities.
     pub(super) fn settings_search_key(
         &mut self,
@@ -2163,6 +2190,7 @@ impl App {
                 n.category = cat;
                 n.field = fld;
                 n.capturing = true;
+                n.capture_refused = false;
             }
             return;
         }

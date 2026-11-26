@@ -1430,3 +1430,44 @@ fn a_modal_field_says_why_clipboard_text_did_not_come() {
         Err(Text::NotifyBodyClipboardTimeout)
     );
 }
+
+/// A key refused during chord capture (one without a modifier) is
+/// reported in the Settings row itself, which assistive technology reads
+/// as the row's value, and not only by a desktop notification, which
+/// notifications off, Do Not Disturb or an unbundled macOS binary hide.
+#[test]
+fn a_refused_capture_key_is_reported_in_the_settings_row() {
+    let src = production_source();
+    let flat: String = src.split_whitespace().collect();
+    assert!(flat.contains(
+        "if!keybind_chord_is_safe(mods,kk){self.refuse_settings_chord(ws);return;}"
+    ));
+    assert!(flat.contains(
+        "HotkeyCapture::Refused=>{self.refuse_settings_chord(ws);return;}"
+    ));
+    let refuse = src
+        .split("fn refuse_settings_chord(&mut self, ws: &mut WindowState) {")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("refuse_settings_chord");
+    let refuse: String = refuse.split_whitespace().collect();
+    assert!(refuse.contains("nav.capture_refused=true;"));
+    assert!(
+        refuse.contains("if!ws.window_focused{fire_notify("),
+        "only a window out of sight needs the notification"
+    );
+    assert!(flat.contains(
+        "tr.text(ifnav.capture_refused{kettle_i18n::Text::SettingsCaptureNeedsModifier}else{kettle_i18n::Text::SettingsPressChord})"
+    ));
+    assert!(flat.contains("n.capturing=true;n.capture_refused=false;"));
+    for (language, text) in [
+        (kettle_i18n::Language::En, "Add a modifier, Esc to cancel"),
+        (kettle_i18n::Language::Es, "Agregar modificador; Esc para cancelar"),
+    ] {
+        assert_eq!(
+            kettle_i18n::Translator::new(language)
+                .text(kettle_i18n::Text::SettingsCaptureNeedsModifier),
+            text
+        );
+    }
+}

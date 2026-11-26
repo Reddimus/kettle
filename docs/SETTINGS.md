@@ -284,7 +284,10 @@ launch.
 Rebind common actions interactively. Each row shows the chord
 currently bound to that action; press **Enter** on a row, then press the new
 chord you want (any modifier combination). It binds immediately (replacing the
-action's previous chord) and is saved to your config as a `keybind = …` line. Press **Esc** to cancel a capture. Covered
+action's previous chord) and is saved to your config as a `keybind = …` line. Press **Esc** to cancel a capture.
+A key pressed without a modifier is refused (a Keybinds row takes a bare F-key
+or Menu key): the row reads **Add a modifier, Esc to cancel** and keeps
+waiting. Covered
 actions are grouped in this order:
 
 #### Panes

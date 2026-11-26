@@ -1677,6 +1677,9 @@ context = "crates/kettle-ui/src/app.rs settings_footer_note: a change needs a ne
 [messages.settings_press_chord]
 context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: shown in a Keybinds row while it waits for a key combination. Keep Esc."
 
+[messages.settings_capture_needs_modifier]
+context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: replaces settings_press_chord in a Keybinds or global hotkey row after a key pressed without Ctrl, Alt, Shift or Cmd was refused; the row still waits for a combination. A modifier is a key held with another, such as Ctrl. Keep Esc. Fits about 38 columns."
+
 [messages.settings_value_always]
 context = "crates/kettle-ui/src/settings.rs read(): Settings value."
 
