@@ -1277,6 +1277,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   wrote a picture. These one-shot decodes now run one filter thread and one
   encoder thread, as playback already did.
 
+- A Mermaid diagram previewed from a Codex reply could come out changed: a
+  space where Codex broke a word after a `/`, as in `/very/long`, or a line
+  of its own where Codex wrapped before `-->`. Kettle now asks for `/copy`
+  when the rows could be read either way.
+
 - The one-character form of the bracketed-paste end marker (U+009B followed
   by `201~`) opened the Confirm paste dialog and was then sent on by Paste
   and by Paste as one line. Both markers are now removed in that form too, in
