@@ -989,6 +989,14 @@ settings_description_field_builtin_box_drawing = "Draw lines, blocks and Powerli
 
 tab_new_options = "New Tab Options"
 
+tab_scroll_previous = "Previous Tab"
+
+tab_scroll_next = "Next Tab"
+
+tab_scroll_left = "Scroll Tabs Left"
+
+tab_scroll_right = "Scroll Tabs Right"
+
 menu_new_window_profile = "New Window with Profile"
 
 menu_broadcast_input = "Broadcast Input"

@@ -30,6 +30,10 @@ pub(crate) enum TooltipTarget {
     Search,
     /// A Linux header bar's window button.
     WindowControl(kettle_render::WindowControl),
+    /// The tab strip's back overflow arrow.
+    ScrollBack,
+    /// The tab strip's forward overflow arrow.
+    ScrollForward,
 }
 
 /// The pointer's tooltip state in one window.

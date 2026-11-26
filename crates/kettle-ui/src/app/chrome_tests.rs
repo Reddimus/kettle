@@ -1830,16 +1830,21 @@ fn compact_header_rtl_and_wide_literal_titles_fit_the_lone_tab() {
 /// release alone never brings it back.
 #[test]
 fn strip_tooltips_wait_for_a_rest_and_a_press_hides_them() {
-    use super::chrome::{shown_strip_tooltip, strip_tooltip_target};
+    use super::chrome::{StripTooltipContext, shown_strip_tooltip, strip_tooltip_target};
     use std::time::{Duration, Instant};
     let bindings = kettle_config::keybinds::defaults();
     let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
-    let text = (&bindings, &tr);
+    let context = StripTooltipContext {
+        modal_open: false,
+        bindings: &bindings,
+        tr: &tr,
+    };
+    let bar = kettle_render::TabBar::hidden();
     let shown = |ws: &crate::window_state::WindowState, at| {
-        shown_strip_tooltip(ws, &[], false, text, at)
+        shown_strip_tooltip(ws, &bar, &context, at).map(|tip| tip.text)
     };
     let hover = |ws: &mut crate::window_state::WindowState, at| {
-        let target = strip_tooltip_target(ws, &[], false, text).map(|(target, _)| target);
+        let target = strip_tooltip_target(ws, &bar, &context).map(|tip| tip.target);
         ws.tooltip.hover(target, at);
     };
     let ms = Duration::from_millis;
@@ -1890,7 +1895,7 @@ fn the_tooltip_clock_follows_moves_presses_leaves_and_one_scheduled_wake() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(source.contains(
-        "let (new_tab_hover, hover_changed) = hover_tab_bar(ws, &bar); self.sync_tooltip(ws, &bar.window_controls);"
+        "let (new_tab_hover, hover_changed) = hover_tab_bar(ws, &bar); self.sync_tooltip(ws, &bar);"
     ));
     assert!(source.contains(
         "ws.resume_native_pointer(); // A press hides the tooltip until the pointer leaves its // control. if ws.tooltip.press(std::time::Instant::now())"
@@ -1907,4 +1912,88 @@ fn the_tooltip_clock_follows_moves_presses_leaves_and_one_scheduled_wake() {
     assert!(source.contains(
         "if let Some(next) = tooltip_wait { wait = Some(wait.map_or(next, |current| current.min(next))); }"
     ));
+}
+
+/// Should 11 and Must 4 of the 6.0 UI review: the overflow arrows had no
+/// hover, a plain arrow cursor and no tooltip. The pointer over one now
+/// lights it, from the same rect a press uses, turns the cursor into the
+/// pointing hand, and after a rest names what a press does: the previous or
+/// next tab with its shortcut, or, in a macOS title bar that scrolls without
+/// selecting, which way the strip scrolls. The tooltip hangs from the arrow.
+#[test]
+fn overflow_arrows_light_point_and_name_what_a_press_does() {
+    use super::chrome::{
+        StripTooltipContext, hover_tab_bar, scroll_arrow_at, shown_strip_tooltip,
+        strip_tooltip_target,
+    };
+    use std::time::{Duration, Instant};
+    let bindings = kettle_config::keybinds::defaults();
+    let mut bar = kettle_render::TabBar::hidden();
+    bar.height = 28.0;
+    bar.band = (0.0, 0.0, 640.0, 28.0);
+    bar.scroll_left = (0.0, 0.0, 20.0, 28.0);
+    bar.scroll_right = (580.0, 0.0, 20.0, 28.0);
+    assert_eq!(scroll_arrow_at(&bar, 10.0, 14.0), Some(false));
+    assert_eq!(scroll_arrow_at(&bar, 590.0, 14.0), Some(true));
+    assert_eq!(scroll_arrow_at(&bar, 300.0, 14.0), None);
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    ws.window_focused = true;
+    ws.cursor = winit::dpi::PhysicalPosition::new(590.0, 14.0);
+    assert_eq!(hover_tab_bar(&mut ws, &bar), (None, true), "entering repaints");
+    assert_eq!(ws.hovered_scroll_arrow, Some(true));
+    ws.cursor = winit::dpi::PhysicalPosition::new(300.0, 14.0);
+    assert_eq!(hover_tab_bar(&mut ws, &bar), (None, true), "leaving repaints");
+    assert_eq!(ws.hovered_scroll_arrow, None);
+    ws.leave_tab_bar();
+    let start = Instant::now();
+    for (round, (language, titlebar, forward, label)) in [
+        (kettle_i18n::Language::En, false, false, "Previous Tab"),
+        (kettle_i18n::Language::En, false, true, "Next Tab"),
+        (kettle_i18n::Language::En, true, false, "Scroll Tabs Left"),
+        (kettle_i18n::Language::En, true, true, "Scroll Tabs Right"),
+        (kettle_i18n::Language::Es, false, true, "Pestaña siguiente"),
+        (
+            kettle_i18n::Language::Es,
+            true,
+            false,
+            "Desplazar pestañas a la izquierda",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let tr = kettle_i18n::Translator::new(language);
+        let context = StripTooltipContext {
+            modal_open: false,
+            bindings: &bindings,
+            tr: &tr,
+        };
+        bar.in_titlebar = titlebar;
+        ws.hovered_scroll_arrow = Some(forward);
+        // Each round starts long after the last tooltip went away.
+        let t0 = start + Duration::from_secs(20 * round as u64);
+        let target = strip_tooltip_target(&ws, &bar, &context).map(|tip| tip.target);
+        ws.tooltip.hover(target, t0);
+        assert_eq!(shown_strip_tooltip(&ws, &bar, &context, t0), None);
+        let tip = shown_strip_tooltip(&ws, &bar, &context, t0 + Duration::from_millis(500))
+            .expect("named after a rest");
+        let arrow = if forward { bar.scroll_right } else { bar.scroll_left };
+        assert_eq!(tip.anchor, Some(arrow));
+        let action = if forward { Action::NextTab } else { Action::PrevTab };
+        let expected = match (titlebar, kettle_config::keybinds::ui_hint_label(&bindings, &action)) {
+            (false, Some(key)) => format!("{label}  {key}"),
+            _ => label.to_owned(),
+        };
+        assert_eq!(tip.text, expected);
+        ws.tooltip.hover(None, t0 + Duration::from_secs(10));
+    }
+    // The hand, as the strip's other buttons show.
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(source.contains(
+        "let new_tab_hover_icon = (new_tab_hover.is_some() || ws.hovered_scroll_arrow.is_some()) .then_some(CursorIcon::Pointer);"
+    ));
+    assert!(source.contains("hovered_scroll_right: ws.hovered_scroll_arrow == Some(true),"));
 }

@@ -1425,6 +1425,9 @@ pub(crate) struct WindowState {
     /// press opens or closes Find; the press only shows until its release.
     pub(crate) hovered_search: bool,
     pub(crate) pressed_search: bool,
+    /// The tab strip's overflow arrow under the pointer: `Some(true)` for
+    /// forward, `Some(false)` for back.
+    pub(crate) hovered_scroll_arrow: Option<bool>,
     /// When the tooltip of the control under the pointer shows.
     pub(crate) tooltip: crate::tooltip::TooltipClock,
     /// The pointer is over the tab bar's update chip.
@@ -1694,6 +1697,7 @@ impl WindowState {
         self.hovered_tab_idx = None;
         self.hovered_new_tab = false;
         self.hovered_new_tab_menu = false;
+        self.hovered_scroll_arrow = None;
     }
 
     /// Scroll the title-bar strip to the active tab at its next layout,
@@ -1980,6 +1984,7 @@ impl WindowState {
             pressed_settings: false,
             hovered_search: false,
             pressed_search: false,
+            hovered_scroll_arrow: None,
             tooltip: crate::tooltip::TooltipClock::default(),
             context_menu_a11y_label: None,
             context_menu_output_row: None,

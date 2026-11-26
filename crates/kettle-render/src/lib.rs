@@ -1770,6 +1770,20 @@ impl Renderer {
                     }
                 }
             }
+            // The overflow arrows prelight like the strip's other flat
+            // buttons while the pointer is over them.
+            for (bounds, fill) in
+                tab_strip::scroll_arrow_fills(tabbar, chrome_strip_bg, theme.foreground)
+            {
+                tab_strip::rounded_fill(
+                    &mut quads,
+                    bounds,
+                    6.0 * self.scale,
+                    (true, true),
+                    (fill, 1.0),
+                    None,
+                );
+            }
             // Drag-in-progress ghost. While the user holds a
             // left button down on the tab bar, paint a
             // translucent overlay copy of the active segment centered
@@ -5017,6 +5031,10 @@ impl Renderer {
                         bottom: tb,
                     }
                 };
+                // Resolved against the hover fill the arrow sits on.
+                let background = tab_strip::scroll_arrow_fills(tabbar, chrome_strip_bg, fg)
+                    .find(|(button, _)| *button == rect)
+                    .map_or(chrome_strip_bg, |(_, fill)| fill);
                 areas.push(TextArea {
                     buffer,
                     left,
@@ -5025,7 +5043,7 @@ impl Renderer {
                     bounds,
                     default_color: gc(self.chrome_colors.tab_text(
                         fg,
-                        chrome_strip_bg,
+                        background,
                         overlay.window_focused,
                     )),
                     custom_glyphs: &[],

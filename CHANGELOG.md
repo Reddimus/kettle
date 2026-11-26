@@ -1567,6 +1567,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   first one shows after the pointer rests for half a second, the next one at
   once while you move along the row, and a click hides it until the pointer
   leaves the button.
+- The tab strip's overflow arrows light up and show the pointing hand under
+  the pointer, and their tooltips say what a press does.
 
 ## Older releases
 

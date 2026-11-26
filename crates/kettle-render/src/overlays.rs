@@ -1579,6 +1579,10 @@ pub struct TabBar {
     pub settings_shortcut: Option<String>,
     /// Localized action and live shortcut for the currently hovered control.
     pub tooltip: Option<String>,
+    /// The control `tooltip` hangs from when it is not one of the strip's
+    /// own buttons, which the renderer finds from their hover state: an
+    /// overflow arrow, a tab whose title is cut, or a media viewer's button.
+    pub tooltip_anchor: Option<Rect4>,
     /// The strip replaces the macOS caption and has a fixed native height.
     pub in_titlebar: bool,
     /// Kettle draws this strip as the Linux (GNOME) header bar: `+` leads
@@ -1683,6 +1687,10 @@ pub struct TabBar {
     pub scroll_left: Rect4,
     /// The forward scroll button, `›` or `⌄` (see `scroll_left`).
     pub scroll_right: Rect4,
+    /// The pointer is over `scroll_left` or `scroll_right`, from the same
+    /// rects the press uses.
+    pub hovered_scroll_left: bool,
+    pub hovered_scroll_right: bool,
 }
 
 impl TabBar {
@@ -1695,6 +1703,7 @@ impl TabBar {
             new_tab_shortcut: None,
             settings_shortcut: None,
             tooltip: None,
+            tooltip_anchor: None,
             in_titlebar: false,
             linux_header: false,
             lone_title: false,
@@ -1723,6 +1732,8 @@ impl TabBar {
             band: (0.0, 0.0, 0.0, 0.0),
             scroll_left: (0.0, 0.0, 0.0, 0.0),
             scroll_right: (0.0, 0.0, 0.0, 0.0),
+            hovered_scroll_left: false,
+            hovered_scroll_right: false,
         }
     }
 }

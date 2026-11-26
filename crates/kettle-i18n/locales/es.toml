@@ -990,6 +990,14 @@ settings_description_field_builtin_box_drawing = "Ajustar líneas, bloques y sep
 
 tab_new_options = "Opciones de nueva pestaña"
 
+tab_scroll_previous = "Pestaña anterior"
+
+tab_scroll_next = "Pestaña siguiente"
+
+tab_scroll_left = "Desplazar pestañas a la izquierda"
+
+tab_scroll_right = "Desplazar pestañas a la derecha"
+
 menu_new_window_profile = "Nueva ventana con perfil"
 
 menu_broadcast_input = "Enviar la entrada a varios paneles"

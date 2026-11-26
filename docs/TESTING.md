@@ -158,6 +158,9 @@ gaps, AccessKit bounds and the production `ui_geometry` serializer.
 tooltip timing: the 500 ms rest, the one-second warm spell, a press hiding the
 tooltip until the pointer leaves, and a single scheduler wake per deadline;
 `the_tooltip_clock_follows_moves_presses_leaves` guards the wiring.
+`overflow_arrows_light_point_and_name_what_a_press_does` (`kettle-ui`) and
+`overflow_arrows_prelight_like_the_other_flat_buttons` (`kettle-render`) cover
+the arrows' hover, hand cursor, translated tooltips and anchor.
 Full render/UI suites and clippy remain required; native focus changes,
 hover/press feedback, tooltip placement and Spanish acceptance need a desktop.
 

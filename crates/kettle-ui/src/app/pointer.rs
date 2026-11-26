@@ -1827,7 +1827,7 @@ impl App {
         // `tab_bar()`).
         let bar = self.tab_bar(ws);
         let (new_tab_hover, hover_changed) = hover_tab_bar(ws, &bar);
-        self.sync_tooltip(ws, &bar.window_controls);
+        self.sync_tooltip(ws, &bar);
         let (cursor_x, cursor_y) = (ws.cursor.x as f32, ws.cursor.y as f32);
         let control_hover = window_control_at(&bar, cursor_x, cursor_y);
         if control_hover != ws.hovered_window_control {
@@ -1841,7 +1841,8 @@ impl App {
             window.request_redraw();
         }
         let close_hover = tab_close_hover_icon(ws.hovered_close_idx.is_some());
-        let new_tab_hover_icon = new_tab_hover.is_some().then_some(CursorIcon::Pointer);
+        let new_tab_hover_icon = (new_tab_hover.is_some() || ws.hovered_scroll_arrow.is_some())
+            .then_some(CursorIcon::Pointer);
         let confirm_hover = if self.confirm_button_hovered(ws) {
             Some(CursorIcon::Pointer)
         } else {
