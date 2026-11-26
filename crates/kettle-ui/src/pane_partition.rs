@@ -87,11 +87,7 @@ pub(crate) fn fraction_at_edge(
         return None;
     }
     let floor = metrics.extent(if vertical { FLOOR.1 } else { FLOOR.0 }, vertical);
-    let lane_min = if vertical {
-        LANE_MIN_CELLS.1 * metrics.cell.1
-    } else {
-        LANE_MIN_CELLS.0 * metrics.cell.0
-    };
+    let lane_min = metrics.lane_min(vertical);
     let least = (lane_min / along).max(MIN_FRACTION);
     let most = ((along - floor) / along).min(MAX_FRACTION);
     if least > most {
@@ -120,6 +116,9 @@ pub(crate) struct Metrics {
     padding: (f32, f32),
     titlebar: f32,
     title_at_bottom: bool,
+    /// The least height a lane's strip, and a bottom lane expanded, needs
+    /// for header buttons a full pointer target tall; zero for none.
+    lane_header: (f32, f32),
 }
 
 impl Metrics {
@@ -146,7 +145,36 @@ impl Metrics {
                 padding,
                 titlebar,
                 title_at_bottom,
+                lane_header: (0.0, 0.0),
             })
+    }
+
+    /// These metrics, with a lane's strip at least `strip` tall and a bottom
+    /// lane expanded at least `expanded` tall, where the terminal keeps its
+    /// floor with that; numbers that are not finite and positive ask for
+    /// nothing.
+    pub(crate) fn with_lane_header(self, (strip, expanded): (f32, f32)) -> Self {
+        let least = |value: f32| {
+            if value.is_finite() {
+                value.max(0.0)
+            } else {
+                0.0
+            }
+        };
+        Self {
+            lane_header: (least(strip), least(expanded)),
+            ..self
+        }
+    }
+
+    /// The least an expanded lane takes along its axis: its cells, and on
+    /// a bottom lane the room its header's buttons need.
+    fn lane_min(self, vertical: bool) -> f32 {
+        if vertical {
+            (LANE_MIN_CELLS.1 * self.cell.1).max(self.lane_header.1)
+        } else {
+            LANE_MIN_CELLS.0 * self.cell.0
+        }
     }
 
     #[cfg(test)]
@@ -222,6 +250,14 @@ impl LayoutStyle {
             .map(|shown| Self { shown })
     }
 
+    /// This style, with lanes keeping the room their header's buttons need
+    /// (see [`Metrics::with_lane_header`]).
+    pub(crate) fn with_lane_header(self, room: (f32, f32)) -> Self {
+        Self {
+            shown: self.shown.with_lane_header(room),
+        }
+    }
+
     /// Cells of 8 by 16 pixels, no padding and no titlebar: the style a
     /// window falls back to when its own numbers are refused.
     pub(crate) fn fallback() -> Self {
@@ -231,6 +267,7 @@ impl LayoutStyle {
                 padding: (0.0, 0.0),
                 titlebar: 0.0,
                 title_at_bottom: false,
+                lane_header: (0.0, 0.0),
             },
         }
     }
@@ -361,11 +398,7 @@ fn carve(body: Rect, metrics: Metrics, request: LaneRequest) -> (Rect, LaneShare
     let along = if vertical { h } else { w };
     // The least the terminal keeps along the lane's axis.
     let floor = metrics.extent(if vertical { FLOOR.1 } else { FLOOR.0 }, vertical);
-    let lane_min = if vertical {
-        LANE_MIN_CELLS.1 * metrics.cell.1
-    } else {
-        LANE_MIN_CELLS.0 * metrics.cell.0
-    };
+    let lane_min = metrics.lane_min(vertical);
     // The terminal keeps whole cells; the lane takes the pixels after them.
     let terminal_for = |lane: f32| -> f32 {
         let cells = metrics.cells_in(along - lane, vertical);
@@ -387,17 +420,21 @@ fn carve(body: Rect, metrics: Metrics, request: LaneRequest) -> (Rect, LaneShare
             return (terminal, LaneShare::Expanded(lane));
         }
     }
-    // The strip is one row along the bottom, whatever the side, and the
-    // terminal above it keeps its whole rows and every column.
-    let row = metrics.cell.1;
-    let above = metrics
-        .extent(metrics.cells_in(h - row, true), true)
-        .clamp(0.0, h);
-    if above >= metrics.extent(FLOOR.1, true) && h - above >= row {
-        return (
-            (x, y, w, above),
-            LaneShare::Strip((x, y + above, w, h - above)),
-        );
+    // The strip runs along the bottom, whatever the side, and the terminal
+    // above it keeps its whole rows and every column. It is as tall as its
+    // header's buttons need where the terminal keeps its floor with that,
+    // and one row where it does not.
+    let floor = metrics.extent(FLOOR.1, true);
+    for row in [metrics.cell.1.max(metrics.lane_header.0), metrics.cell.1] {
+        let above = metrics
+            .extent(metrics.cells_in(h - row, true), true)
+            .clamp(0.0, h);
+        if above >= floor && h - above >= row {
+            return (
+                (x, y, w, above),
+                LaneShare::Strip((x, y + above, w, h - above)),
+            );
+        }
     }
     (body, LaneShare::Badge)
 }
@@ -787,5 +824,58 @@ mod tests {
         assert_eq!(bottom.body(), (0.0, 0.0, 900.0, 576.0));
         let bare = partition_leaf((5.0, 5.0, 900.0, 600.0), metrics(0.0, false), None);
         assert_eq!(bare.body(), (5.0, 5.0, 900.0, 600.0));
+    }
+
+    /// Defect 4 of the 6.0 final review: a collapsed lane was one terminal
+    /// row tall, so with 17.5 px rows its buttons were 17.5 px targets. The
+    /// strip now keeps the room its buttons need where the terminal keeps
+    /// its floor with that, and one row where it does not; a bottom lane
+    /// expanded keeps room for its buttons and its resize edge, as dragging
+    /// that edge does.
+    #[test]
+    fn a_lane_keeps_room_for_full_button_targets() {
+        let metrics = Metrics::new((8.4, 17.5), (0.0, 0.0), 0.0, false)
+            .unwrap()
+            .with_lane_header((24.0, 30.0));
+        let collapsed = LaneRequest::new(LaneSide::Bottom, 0.4, false);
+        let partition = partition_leaf((0.0, 0.0, 400.0, 300.0), metrics, Some(collapsed));
+        let Some(LaneShare::Strip(strip)) = partition.lane else {
+            panic!("a strip: {:?}", partition.lane);
+        };
+        assert!(strip.3 >= 24.0, "{strip:?}");
+        assert!(partition.terminal.3 >= 5.0 * 17.5);
+        assert_eq!(
+            partition.terminal.3 % 17.5,
+            0.0,
+            "the terminal keeps whole rows"
+        );
+        // Where the floor leaves only a row, the strip is that row.
+        let tight = 5.0 * 17.5 + 17.5 + 3.0;
+        let partition = partition_leaf((0.0, 0.0, 400.0, tight), metrics, Some(collapsed));
+        let Some(LaneShare::Strip(strip)) = partition.lane else {
+            panic!("a strip: {:?}", partition.lane);
+        };
+        assert!(strip.3 >= 17.5 && strip.3 < 24.0, "{strip:?}");
+        // Without the room asked for, as before.
+        let plain = Metrics::new((8.4, 17.5), (0.0, 0.0), 0.0, false).unwrap();
+        let partition = partition_leaf((0.0, 0.0, 400.0, 300.0), plain, Some(collapsed));
+        assert_eq!(
+            partition.lane.and_then(LaneShare::rect).map(|r| r.3),
+            Some(300.0 - 16.0 * 17.5)
+        );
+        // An expanded bottom lane of tiny cells keeps its header's room, and
+        // dragging its edge keeps it too.
+        let tiny = Metrics::new((5.0, 5.0), (0.0, 0.0), 0.0, false)
+            .unwrap()
+            .with_lane_header((24.0, 28.0));
+        let expanded = LaneRequest::new(LaneSide::Bottom, 0.1, true);
+        let body = (0.0, 0.0, 400.0, 200.0);
+        let partition = partition_leaf(body, tiny, Some(expanded));
+        let Some(LaneShare::Expanded(lane)) = partition.lane else {
+            panic!("expanded: {:?}", partition.lane);
+        };
+        assert!(lane.3 >= 28.0, "{lane:?}");
+        let fraction = fraction_at_edge(body, tiny, LaneSide::Bottom, 199.0).unwrap();
+        assert!(fraction * 200.0 >= 28.0 - 1e-3, "{fraction}");
     }
 }

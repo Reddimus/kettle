@@ -573,6 +573,14 @@ impl MediaLaneGeometry {
     }
 }
 
+/// The least height a lane needs for header buttons a full pointer target
+/// tall, from the overlay text's cell and the display scale: a strip's, and
+/// an expanded lane's, whose buttons stay clear of the edge it resizes by.
+pub fn media_lane_header_room(text_cell: (f32, f32), scale: f32) -> (f32, f32) {
+    let row = (MIN_CONTROL_TARGET * scale).max(text_cell.1);
+    (row, row + lane_pad(text_cell.0))
+}
+
 /// A row a line of text high, grown toward `target` by what is `spare`.
 fn grow_row(spare: &mut f32, line: f32, target: f32) -> f32 {
     let by = (target - line).max(0.0).min(*spare);
@@ -708,16 +716,15 @@ pub fn media_lane_geometry_scaled(
         let down = (short - up).min(lh);
         (header_y, row, header_y + (row - lh) / 2.0, up, down)
     } else {
-        // A header alone is centred down its strip, as tall as the strip lets
-        // its row be, clear of the padding a drag along the top edge resizes by.
-        let room = if top_band > 0.0 {
-            rect.3 - 2.0 * pad
-        } else {
-            rect.3
-        };
-        let row = min_target.max(lh).min(room).max(lh);
-        let header_y = (rect.1 + (rect.3 - row) / 2.0).floor();
-        (header_y, row, header_y + (row - lh) / 2.0, 0.0, 0.0)
+        // A header alone is centred down its strip, its buttons as tall as
+        // the strip lets them be below any resize edge, never in it.
+        let top = rect.1 + top_band;
+        let bottom = rect.1 + rect.3;
+        let room = (bottom - top).max(0.0);
+        let text_y = (rect.1 + (rect.3 - lh) / 2.0).floor().max(top.ceil());
+        let row = min_target.max(lh).min(room);
+        let header_y = (text_y + lh / 2.0 - row / 2.0).clamp(top, (bottom - row).max(top));
+        (header_y, row, text_y, 0.0, 0.0)
     };
     // Above a gallery's page buttons the header reaches no more than a
     // pixel into the detail line, so a press on a page button reaches it.
@@ -3139,12 +3146,8 @@ mod tests {
                     assert!(chip.3 <= text.1 + 1e-3, "the chip stays a line high");
                     assert!(chip.1 >= rect.1 && chip.1 + chip.3 <= rect.1 + rect.3 + 1e-3);
                 }
-                // The title stays centred on the header row.
-                let close = geometry.close;
-                assert!(
-                    (geometry.title.1 + geometry.title.3 / 2.0 - (close.1 + close.3 / 2.0)).abs()
-                        < 1e-3
-                );
+                // The title shares the line the buttons' chips are drawn on.
+                assert_eq!(geometry.chip(geometry.close).1, geometry.title.1);
             }
         }
     }
@@ -3256,5 +3259,69 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Defect 4 of the 6.0 final review: a short expanded lane at a
+    /// fractional origin floored its centred header into the padding a drag
+    /// resizes it by, so a press at y = 104.25 in the lane at (0, 100.5,
+    /// 400, 22) closed it instead of starting a resize. Its buttons now stay
+    /// below that edge at any origin, as tall as the lane lets them, and a
+    /// strip with the room has full targets.
+    #[test]
+    fn a_short_lanes_buttons_never_reach_its_resize_edge() {
+        let mut lane = viewer((1, 2), Some((64, 48)));
+        lane.copy = true;
+        lane.rect = (0.0, 100.5, 400.0, 22.0);
+        lane.edge = Some(MediaLaneEdge::Top);
+        let (cell, text) = ((5.0, 5.0), (5.0, 10.0));
+        let geometry = media_lane_geometry_scaled(&lane, cell, text, 1.0).unwrap();
+        assert!(!geometry.full);
+        let close = geometry.close;
+        assert_eq!(
+            geometry.hit_test(close.0 + close.2 / 2.0, 104.25),
+            Some(MediaLaneHit::Resize),
+            "a press on the edge resizes"
+        );
+        for origin in [100.0, 100.25, 100.5, 100.75, 101.3] {
+            for height in [12.0, 22.0, 30.0, 40.0] {
+                lane.rect = (0.0, origin, 400.0, height);
+                let geometry = media_lane_geometry_scaled(&lane, cell, text, 1.0).unwrap();
+                let edge = geometry.resize.expect("an expanded lane resizes");
+                for (rect, hit) in geometry
+                    .chip_controls()
+                    .into_iter()
+                    .filter_map(|(rect, hit)| Some((rect?, hit)))
+                {
+                    let case = format!("{hit:?} {rect:?} at {origin}, {height}");
+                    assert!(rect.1 >= edge.1 + edge.3, "{case} reaches the edge");
+                    assert!(rect.1 + rect.3 <= origin + height + 1e-3, "{case}");
+                    let room = origin + height - (edge.1 + edge.3);
+                    assert!(rect.3 >= MIN_CONTROL_TARGET.min(room) - 1e-3, "{case}");
+                    assert_eq!(
+                        geometry.hit_test(rect.0 + 1.0, rect.1 + 0.25),
+                        Some(hit),
+                        "{case}"
+                    );
+                }
+            }
+        }
+        // A strip as tall as its room asks for has full targets.
+        let (strip, expanded) = media_lane_header_room(text, 1.0);
+        assert_eq!(
+            (strip, expanded),
+            (MIN_CONTROL_TARGET, MIN_CONTROL_TARGET + 4.0)
+        );
+        lane.edge = None;
+        lane.collapsed = true;
+        lane.rect = (0.0, 100.5, 400.0, strip);
+        let geometry = media_lane_geometry_scaled(&lane, cell, text, 1.0).unwrap();
+        assert!(geometry.close.3 >= MIN_CONTROL_TARGET - 1e-3);
+        // So has a short expanded lane with the room for its edge as well.
+        lane.edge = Some(MediaLaneEdge::Top);
+        lane.collapsed = false;
+        lane.rect = (0.0, 100.5, 400.0, expanded);
+        let geometry = media_lane_geometry_scaled(&lane, cell, text, 1.0).unwrap();
+        assert!(geometry.close.3 >= MIN_CONTROL_TARGET - 1e-3);
+        assert!(geometry.close.1 >= 100.5 + 4.0);
     }
 }

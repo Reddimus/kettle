@@ -1037,7 +1037,10 @@ Choose **Pin** (or P) to keep the same item, zoom and playback in a lane.
 Only then does the terminal resize. `media-open-mode = lane` opens directly
 in that layout. A lane takes about 40% of the pane on `preview-lane-side`,
 leaving at least 20 terminal columns and 5 rows. With less room it becomes
-a one-row strip; a pane too small even for that gets a notice.
+a strip along the bottom, tall enough for 24-point buttons where the terminal
+keeps its 5 rows with that and one row where it does not; a pane too small
+even for that gets a notice. A bottom lane's buttons never reach the edge it
+resizes by.
 Keys still go to the terminal while a lane shows. Drag the lane's edge
 beside the terminal, marked by a short grip, to give it more or less of the
 pane: the terminal keeps its 20 columns and 5 rows and the lane its least,

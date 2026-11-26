@@ -1574,7 +1574,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - The media viewer's and preview lane's header buttons light up under the
   pointer and take a press anywhere in a 24 by 24 point target, up from 25
   by 17.5 pixels. The header row grows only where the viewer has room; a
-  viewer or lane that fitted before still fits.
+  viewer or lane that fitted before still fits. A collapsed lane's strip is
+  tall enough for those targets where the terminal keeps its 5 rows, and a
+  short lane's buttons no longer overlap the edge that resizes it.
 - Those buttons have tooltips naming what they do and the key that does the
   same.
 - A toast's Show and × buttons, and the bad-config notice's Open Config and

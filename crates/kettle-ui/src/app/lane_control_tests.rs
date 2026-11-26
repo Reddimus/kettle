@@ -2534,3 +2534,20 @@ fn lane_button_tooltips_share_the_clock_and_the_screen_reader_name() {
     assert!(source.contains("target: crate::tooltip::TooltipTarget::Media(lane.pane, hit),"));
     assert!(source.contains("anchor: button,"));
 }
+
+/// Defect 4 of the 6.0 final review: the window lays its lanes out with the
+/// room their header's buttons need, measured by the cell and scale the lane
+/// lays its header out with.
+#[test]
+fn panes_lay_lanes_out_with_room_for_their_buttons() {
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(source.contains(
+        "let lane_header = kettle_render::media_lane_header_room( ( self.overlay_text_cell_width(ws), self.overlay_text_line_height(ws), ), scale, );"
+    ));
+    assert!(
+        source.contains(".unwrap_or_else(LayoutStyle::fallback) .with_lane_header(lane_header)")
+    );
+}

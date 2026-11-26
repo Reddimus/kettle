@@ -406,7 +406,7 @@ pub use media_lane::{
     MediaCanvas, MediaLaneEdge, MediaLaneFrame, MediaLaneGeometry, MediaLaneHit, MediaLaneMode,
     MediaLanePanel, MediaLanePlay, MediaLaneScrubber, MediaLaneSender, MediaLaneSound,
     MediaLaneSource, MediaLaneTile, media_lane_control_enabled, media_lane_geometry,
-    media_lane_geometry_scaled,
+    media_lane_geometry_scaled, media_lane_header_room,
 };
 
 pub use media_viewport::{MAX_MEDIA_ZOOM, MEDIA_ZOOM_STEP, MIN_MEDIA_ZOOM, MediaViewport};
