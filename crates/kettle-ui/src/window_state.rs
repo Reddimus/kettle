@@ -1016,10 +1016,11 @@ impl SurfaceCaps {
 
     /// Whether `cfg` needs a capability this window was created without, so
     /// only a new window can show it. Lowering the opacity of a window that is
-    /// already translucent, or turning blur off, applies at once.
-    pub(crate) fn lacks_for(self, cfg: &kettle_config::Config) -> bool {
+    /// already translucent, or turning blur off, applies at once. Blur counts
+    /// only where the session `can_blur`: a new window would not blur either.
+    pub(crate) fn lacks_for(self, cfg: &kettle_config::Config, can_blur: bool) -> bool {
         let wanted = Self::for_config(cfg);
-        (wanted.alpha && !self.alpha) || (wanted.blur && !self.blur)
+        (wanted.alpha && !self.alpha) || (can_blur && wanted.blur && !self.blur)
     }
 }
 
@@ -1329,8 +1330,8 @@ pub(crate) struct WindowState {
     /// over the settings panel; keystrokes route to it until Enter (persist) or
     /// Esc (cancel). Only meaningful while `settings_nav` is also `Some`.
     pub(crate) settings_text_edit: Option<crate::settings::SettingsTextEdit>,
-    /// What the pointer was over in Settings when it last moved, so a move
-    /// repaints only when that changes. Painting works it out afresh.
+    /// The Settings hover the last frame painted, so a pointer move repaints
+    /// only when what it is over differs. Each frame works it out afresh.
     pub(crate) settings_hover: Option<kettle_render::SettingsHover>,
     /// What this window's OS surface was created able to show. Settings asks
     /// for a new window while the config needs more than this
@@ -3130,25 +3131,25 @@ mod surface_caps_tests {
         // The Linux default: 99% with blur requested (unavailable on GNOME).
         let created = SurfaceCaps::for_config(&config(0.99, true));
         assert!(created.transparent_window());
-        assert!(!created.lacks_for(&config(0.59, true)));
-        assert!(!created.lacks_for(&config(0.2, false)));
-        assert!(!created.lacks_for(&config(1.0, true)));
+        assert!(!created.lacks_for(&config(0.59, true), true));
+        assert!(!created.lacks_for(&config(0.2, false), true));
+        assert!(!created.lacks_for(&config(1.0, true), true));
     }
 
     #[test]
     fn an_opaque_window_needs_a_new_window_to_turn_translucent() {
         let created = SurfaceCaps::for_config(&config(1.0, false));
         assert!(!created.transparent_window());
-        assert!(created.lacks_for(&config(0.8, false)));
-        assert!(!created.lacks_for(&config(1.0, false)));
+        assert!(created.lacks_for(&config(0.8, false), true));
+        assert!(!created.lacks_for(&config(1.0, false), true));
     }
 
     #[test]
     fn turning_blur_on_needs_a_new_window_and_turning_it_off_does_not() {
         let without_blur = SurfaceCaps::for_config(&config(0.86, false));
-        assert!(without_blur.lacks_for(&config(0.86, true)));
+        assert!(without_blur.lacks_for(&config(0.86, true), true));
         let with_blur = SurfaceCaps::for_config(&config(0.86, true));
-        assert!(!with_blur.lacks_for(&config(0.86, false)));
+        assert!(!with_blur.lacks_for(&config(0.86, false), true));
     }
 
     #[test]
@@ -3157,11 +3158,22 @@ mod surface_caps_tests {
         // which blur does not change, so a 100% window still needs a new one.
         let created = SurfaceCaps::for_config(&config(1.0, true));
         assert!(created.transparent_window());
-        assert!(created.lacks_for(&config(0.7, true)));
+        assert!(created.lacks_for(&config(0.7, true), true));
+    }
+
+    /// Where the session cannot blur (X11 without a blur protocol, GNOME),
+    /// turning blur on asks for no new window: one would not blur either.
+    /// A translucent background it also needs still does.
+    #[test]
+    fn blur_the_session_cannot_show_needs_no_new_window() {
+        let created = SurfaceCaps::for_config(&config(1.0, false));
+        assert!(created.lacks_for(&config(1.0, true), true));
+        assert!(!created.lacks_for(&config(1.0, true), false));
+        assert!(created.lacks_for(&config(0.8, true), false));
     }
 
     #[test]
     fn a_window_state_without_a_window_assumes_no_capabilities() {
-        assert!(SurfaceCaps::default().lacks_for(&config(0.5, false)));
+        assert!(SurfaceCaps::default().lacks_for(&config(0.5, false), true));
     }
 }

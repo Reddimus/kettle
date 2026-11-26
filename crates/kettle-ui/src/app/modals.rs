@@ -973,7 +973,8 @@ impl App {
                     crate::settings::pending_apply(
                         self.running_graphics.as_ref(),
                         &self.cfg,
-                        ws.surface_caps.lacks_for(&self.cfg),
+                        ws.surface_caps
+                            .lacks_for(&self.cfg, blur != crate::settings::BlurState::Unavailable),
                     ),
                     self.language_change_pending(),
                     match active.fields.get(fld).map(|f| f.key) {
@@ -1033,16 +1034,17 @@ impl App {
     }
 
     /// Repaint Settings when the pointer moves onto or off a row, choice,
-    /// Reset or category. Only the paint changes.
+    /// Reset or category, compared with the hover last painted, which a
+    /// redraw for a key or a scroll under a still pointer also sets. Only
+    /// the paint changes.
     pub(super) fn track_settings_hover(&mut self, ws: &mut WindowState) {
         let hover = self
             .settings_overlay_projection(ws)
             .and_then(|set| self.settings_hover(ws, &set));
-        if hover != ws.settings_hover {
-            ws.settings_hover = hover;
-            if let Some(window) = &ws.window {
-                window.request_redraw();
-            }
+        if hover != ws.settings_hover
+            && let Some(window) = &ws.window
+        {
+            window.request_redraw();
         }
     }
 
@@ -2311,8 +2313,9 @@ impl App {
     /// Reset the focused Settings row to the value a config that does not set
     /// it would give: its lines leave the config file, so the row follows the
     /// default from then on, as it changes between releases and platforms.
-    /// Where the default still does not show (the key is also set where
-    /// Kettle does not edit), the default is written as a change would be.
+    /// Where another line still decides the value, the default is written
+    /// after it in the same edit. One atomic edit, then a reload: a failed
+    /// save leaves the file and the value as they were.
     pub(super) fn settings_reset(
         &mut self,
         ws: &mut WindowState,
@@ -2332,13 +2335,23 @@ impl App {
         let Some(value) = crate::settings::default_value(field) else {
             return;
         };
-        if self.unset_prefs(&crate::settings::reset_keys(field)) == Ok(true) {
-            self.reload_config(ws);
-            if crate::settings::holds_default(&self.cfg, field) {
-                return;
-            }
+        let fallback = crate::settings::reset_fallback(field, &value);
+        let fallback: Vec<(&str, &str)> = fallback
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect();
+        match self.reset_pref(&crate::settings::reset_keys(field), &fallback, |cfg| {
+            crate::settings::holds_default(cfg, field)
+        }) {
+            Ok(true) => self.reload_config(ws),
+            Ok(false) => {}
+            Err(()) => fire_notify(
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyTitleSettingNotSaved),
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyBodySettingNotApplied),
+            ),
         }
-        self.settings_store(ws, field.key, value);
     }
 
     /// Reset the selected Settings row, as Delete does: what the Reset

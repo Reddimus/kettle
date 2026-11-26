@@ -286,6 +286,14 @@ impl GraphicsSettings {
             cfg.gpu_force_software.to_string(),
         ])
     }
+
+    /// What runs after a GPU recovery rebuilt the device from `cfg`: its GPU
+    /// policy, while the renderer stays the one Kettle started with.
+    pub(crate) fn after_gpu_rebuild(&self, cfg: &Config) -> Self {
+        let mut running = Self::of(cfg);
+        running.0[0].clone_from(&self.0[0]);
+        running
+    }
 }
 
 /// What the saved settings still wait for in a window: a restart while the
@@ -515,7 +523,7 @@ impl SettingsNav {
     ) -> Option<(usize, usize)> {
         match hit {
             kettle_render::SettingsHit::Search => {
-                self.search_focused = true;
+                self.focus_search();
                 self.capturing = false;
             }
             kettle_render::SettingsHit::Category(index) if index < cats.len() => {
@@ -563,7 +571,7 @@ impl SettingsNav {
             )
             && matches!(key, Key::Character(s) if s == "/");
         if find || slash {
-            self.search_focused = true;
+            self.focus_search();
             return SearchRoute::Handled;
         }
         if matches!(key, Key::Named(NamedKey::Escape)) {
@@ -778,6 +786,16 @@ impl SettingsNav {
             }
             RowMove::PageUp => nearest_enabled_field(cfg, fields, field.saturating_sub(half), 1),
         };
+    }
+
+    /// Focus the search field. Gaining focus, it notes the row focused now,
+    /// a result chosen earlier included, as the one a search cleared from
+    /// the field goes back to.
+    pub(crate) fn focus_search(&mut self) {
+        if !self.search_focused {
+            self.search_origin = Some((self.category, self.field));
+        }
+        self.search_focused = true;
     }
 
     /// Drop the query, and the row the search began on with it.
@@ -1897,10 +1915,23 @@ pub fn default_value(field: &Field) -> Option<String> {
 /// The config keys a Reset of `field` removes: the uniform Window padding
 /// row writes both axes.
 pub(crate) fn reset_keys(field: &Field) -> Vec<&'static str> {
-    match field.key {
+    let mut keys = match field.key {
         "window-padding-x" => vec!["window-padding-x", "window-padding-y"],
         key => vec![key],
-    }
+    };
+    // An older name or a Terminator key that sets the same value goes too.
+    keys.extend(kettle_config::compatibility_keys(field.key));
+    keys
+}
+
+/// The lines a Reset of `field` adds where removing [`reset_keys`] alone
+/// does not give its default `value`: both padding axes for Window padding.
+pub(crate) fn reset_fallback(field: &Field, value: &str) -> Vec<(&'static str, String)> {
+    let keys: &[&'static str] = match field.key {
+        "window-padding-x" => &["window-padding-x", "window-padding-y"],
+        _ => std::slice::from_ref(&field.key),
+    };
+    keys.iter().map(|key| (*key, value.to_string())).collect()
 }
 
 /// Whether `field` already holds its [`default_value`] in `cfg`.
@@ -1910,10 +1941,29 @@ pub fn holds_default(cfg: &Config, field: &Field) -> bool {
         FieldKind::Choice { .. } => {
             read_choice(cfg, field.key) == read_choice(&Config::default(), field.key)
         }
+        // Unrounded: a 13.4 px font from a `font` line shows as 13 px but is
+        // not the 13 px default.
         FieldKind::Number { .. } => {
-            read_number(cfg, field.key) == read_number(&Config::default(), field.key)
+            let defaults = Config::default();
+            exact_number(cfg, field.key) == exact_number(&defaults, field.key)
+                && (field.key != "window-padding-x" || cfg.padding_y == defaults.padding_y)
         }
         _ => true,
+    }
+}
+
+/// A number row's value as the config holds it, before [`read_number`]
+/// rounds it for display.
+fn exact_number(cfg: &Config, key: &str) -> f64 {
+    match key {
+        "font-size" => f64::from(cfg.font_size),
+        "background-opacity" => f64::from(cfg.background_opacity),
+        "window-padding-x" => f64::from(cfg.padding_x),
+        "tab-min-width" => f64::from(cfg.tab_min_width),
+        "scrollbar-width" => f64::from(cfg.scrollbar_width),
+        "scrollback" => cfg.scrollback as f64,
+        "scrollback-bytes" => cfg.scrollback_bytes as f64,
+        key => read_number(cfg, key) as f64,
     }
 }
 
@@ -2531,6 +2581,20 @@ mod tests {
         ] {
             assert_eq!(reset_keys(field(key)), [key]);
         }
+        // Their older names and Terminator keys go with them.
+        assert_eq!(reset_keys(field("osc52")), ["osc52", "clipboard"]);
+        assert_eq!(
+            reset_keys(field("update-policy")),
+            ["update-policy", "update-check", "check-for-updates"]
+        );
+        assert_eq!(
+            reset_keys(field("bell")),
+            ["bell", "visible-bell", "urgent-bell", "force-no-bell"]
+        );
+        assert_eq!(
+            reset_keys(field("scrollback")),
+            ["scrollback", "scrollback-infinite"]
+        );
         let dir = kettle_test_support::private_tempdir("kettle-settings-reset-");
         let path = dir.join("config");
         std::fs::write(
@@ -2539,13 +2603,66 @@ mod tests {
         )
         .unwrap();
         for key in ["font-size", "window-padding-x"] {
-            kettle_config::remove_config_keys(&path, &reset_keys(field(key))).unwrap();
+            kettle_config::reset_config_setting(&path, &reset_keys(field(key)), &[], |_| true)
+                .unwrap();
         }
+        let padding = field("window-padding-x");
+        assert_eq!(
+            reset_fallback(padding, "4"),
+            [
+                ("window-padding-x", "4".to_string()),
+                ("window-padding-y", "4".to_string())
+            ]
+        );
+        assert_eq!(
+            reset_fallback(field("font-size"), "13"),
+            [("font-size", "13".to_string())]
+        );
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text, "");
         let cfg = Config::parse_text(&text);
         assert!(holds_default(&cfg, field("font-size")));
         assert!(holds_default(&cfg, field("window-padding-x")));
+    }
+
+    /// A number holds its default only at full precision. A `font = Mono
+    /// 13.4` line beside `font-size = 18` leaves 13.4 px once Reset removes
+    /// the size line; rounded, that read as the 13 px default and Reset
+    /// stopped there. Reset now adds the real default after the `font` line,
+    /// which keeps its family.
+    #[test]
+    fn reset_reaches_a_numbers_exact_default() {
+        let cats = categories(&[]);
+        let field = cats
+            .iter()
+            .flat_map(|cat| &cat.fields)
+            .find(|field| field.key == "font-size")
+            .unwrap();
+        let near = kettle_config::DEFAULT_FONT_SIZE + 0.4;
+        let font = format!("font = Mono {near}\n");
+        assert_eq!(
+            read(&Config::parse_text(&font), field, &EN),
+            read(&Config::default(), field, &EN)
+        );
+        assert!(!holds_default(&Config::parse_text(&font), field));
+        let dir = kettle_test_support::private_tempdir("kettle-settings-reset-exact-");
+        let path = dir.join("config");
+        std::fs::write(&path, format!("{font}font-size = 18\n")).unwrap();
+        let value = default_value(field).unwrap();
+        let fallback = reset_fallback(field, &value);
+        let fallback: Vec<(&str, &str)> = fallback
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect();
+        kettle_config::reset_config_setting(&path, &reset_keys(field), &fallback, |cfg| {
+            holds_default(cfg, field)
+        })
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let cfg = Config::parse_text(&text);
+        assert_eq!(cfg.font_size, kettle_config::DEFAULT_FONT_SIZE, "{text:?}");
+        assert_eq!(cfg.font_family, "Mono");
+        assert!(text.starts_with(&font));
     }
 
     #[test]

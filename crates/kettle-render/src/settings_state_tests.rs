@@ -152,7 +152,11 @@ fn hover_finds_rows_controls_and_categories() {
         let row = |index: usize| layout.rows.iter().find(|row| row.index == index).unwrap();
         let at = |point| layout.hover_at(&set, point);
         assert_eq!(at(center(row(1).label_rect)), Some(SettingsHover::Row(1)));
-        assert_eq!(at(center(row(1).chip_rect)), Some(SettingsHover::Row(1)));
+        assert_eq!(
+            at(center(row(1).chip_rect)),
+            Some(SettingsHover::Switch(1)),
+            "the focused row's switch"
+        );
         assert_eq!(at(center(row(0).chip_rect)), Some(SettingsHover::Choice(0)));
         assert_eq!(at(center(row(0).label_rect)), Some(SettingsHover::Row(0)));
         let reset = row(2).reset.expect("a changed row shows Reset");
@@ -345,8 +349,74 @@ fn hover_inks_meet_their_floors() {
                         failures.push(format!("{at}: {hover:?} text"));
                     }
                 }
+                // A switch's label on its own hover fill, on and off.
+                for on in [true, false] {
+                    set.rows[1].control = SettingsControl::Toggle(on);
+                    set.hover = Some(SettingsHover::Switch(1));
+                    let ink = settings_text_color(
+                        &set,
+                        SettingsTextKind::Value(1),
+                        &palette,
+                        (&theme, accent, theme.foreground),
+                        &mut colors,
+                    );
+                    let fill = super::settings::settings_pressable(if on { accent } else { bg });
+                    if ratio(ink, fill) + 0.005 < TEXT_CONTRAST {
+                        failures.push(format!("{at}: switch on={on} text"));
+                    }
+                }
             }
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The focused row's switch answers the pointer: the row keeps its focus
+/// fill and bar, and the switch's own fill takes a button's hover mix, on
+/// or off. Before, a switch hit counted as the row, whose prelight the
+/// focus fill hides, so nothing changed.
+#[test]
+fn a_switch_under_the_pointer_answers_it_on_the_focused_row() {
+    use super::color::contrast_ratio as ratio;
+    use super::settings::{
+        SettingsRowFill, settings_pressable, settings_row_fill, settings_row_surfaces,
+    };
+    let theme = kettle_config::Theme::by_name("TokyoNight Night");
+    let (bg, accent) = (theme.background, theme.accent);
+    let mut colors = chrome::Colors::default();
+    let palette = settings_colors(&theme, accent, true, &mut colors);
+    for on in [true, false] {
+        let mut set = hover_panel();
+        set.rows[1].control = SettingsControl::Toggle(on);
+        set.hover = Some(SettingsHover::Switch(1));
+        assert_eq!(settings_row_fill(&set, 1), SettingsRowFill::Focused);
+        let layout = settings_layout(&set, (8.4, 17.5), (1280.0, 820.0), 8.4, 1.0);
+        let row = layout.rows.iter().find(|row| row.index == 1).unwrap();
+        let fill = |hover| {
+            settings_row_surfaces(
+                row,
+                &set.rows[1],
+                &palette,
+                (bg, accent, theme.foreground),
+                (SettingsRowFill::Focused, hover),
+                1.0,
+            )[0]
+            .fill
+        };
+        let resting = if on { accent } else { bg };
+        assert_eq!(fill(None), resting);
+        assert_eq!(
+            fill(Some(SettingsHover::Switch(1))),
+            settings_pressable(resting)
+        );
+        assert_eq!(fill(Some(SettingsHover::Switch(0))), resting);
+        let ink = settings_text_color(
+            &set,
+            SettingsTextKind::Value(1),
+            &palette,
+            (&theme, accent, theme.foreground),
+            &mut colors,
+        );
+        assert!(ratio(ink, settings_pressable(resting)) >= 4.5, "on={on}");
+    }
 }

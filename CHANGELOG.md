@@ -1148,6 +1148,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - A program that tracks the mouse no longer hears the pointer moving over the tab bar, the status bar or another split as motion at its edge.
 
+- A Settings switch under the pointer now reacts like a button, on the
+  highlighted option too, where the row's highlight hid any hover.
+
+- Turning Window blur on where the session cannot blur, such as X11 without
+  a compositor's blur, no longer makes Settings ask for a new window or a
+  restart; the switch reads Unavailable.
+
+- Reset in Settings no longer stops at a font size that only rounds to the
+  default, such as 13.4 px from a font = Mono 13.4 line; it sets the real
+  default and keeps the font family.
+
 - Settings answers the pointer: options and categories light up under it,
   and Reset and choice controls react like dialog buttons, without moving
   the keyboard highlight.
@@ -1166,7 +1177,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Reset in Settings removes the option from your config file instead of
   writing today's default into it, so the option follows the platform's
   default (and later ones) and the file no longer gains a line with each
-  reset.
+  reset. It saves in one step: a reset that cannot be saved leaves the file
+  and the option as they were.
 
 - In Settings search, Tab leaves a search with no matches, and clearing a
   search you didn't move into puts the highlight back on the option it was

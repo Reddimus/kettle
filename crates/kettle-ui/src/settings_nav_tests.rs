@@ -371,3 +371,102 @@ fn a_search_that_chose_nothing_leaves_the_row_it_began_on() {
     assert_eq!((nav.category, nav.field), chosen);
     assert_eq!(focused(&cats, &nav), "font-size");
 }
+
+/// A GPU recovery rebuilds the device from the saved config: its GPU
+/// policy then runs, so a force-software change no longer waits for a
+/// restart, while a renderer change still does, since recovery keeps the
+/// renderer Kettle started with.
+#[test]
+fn a_gpu_recovery_applies_the_saved_gpu_policy() {
+    let launch = Config::default();
+    let running = GraphicsSettings::of(&launch);
+    let software = Config {
+        gpu_force_software: !launch.gpu_force_software,
+        ..Config::default()
+    };
+    assert_eq!(
+        pending_apply(Some(&running), &software, false),
+        SettingsApply::Restart
+    );
+    let recovered = running.after_gpu_rebuild(&software);
+    assert_eq!(
+        pending_apply(Some(&recovered), &software, false),
+        SettingsApply::None
+    );
+    assert_eq!(
+        pending_apply(Some(&recovered), &launch, false),
+        SettingsApply::Restart,
+        "saving the old value back asks for a restart to undo the recovered one"
+    );
+    let renderer = Config {
+        gpu_force_software: software.gpu_force_software,
+        ..Config::parse_text(if read_choice(&launch, "renderer") == "cpu" {
+            "renderer = gpu"
+        } else {
+            "renderer = cpu"
+        })
+    };
+    assert_eq!(
+        pending_apply(
+            Some(&running.after_gpu_rebuild(&renderer)),
+            &renderer,
+            false
+        ),
+        SettingsApply::Restart
+    );
+}
+
+/// Search focused again after a result was chosen starts from that
+/// result: clearing the query then keeps it, rather than going back to
+/// the row the first search began on.
+#[test]
+fn a_search_refocused_after_a_result_keeps_it() {
+    use winit::keyboard::{Key, ModifiersState as Mods, NamedKey};
+    let cats = categories(&[]);
+    let cfg = Config::default();
+    let graphics = category(&cats, Text::SettingsCategoryGraphics);
+    for macos in [true, false] {
+        let find = if macos { Mods::SUPER } else { Mods::CONTROL };
+        let mut nav = SettingsNav {
+            category: graphics,
+            field: 1,
+            ..Default::default()
+        };
+        let press = |nav: &mut SettingsNav, key: Key, mods| {
+            nav.search_key(&cats, &cfg, &EN, &key, mods, macos)
+        };
+        assert_eq!(
+            press(&mut nav, Key::Character("f".into()), find),
+            SearchRoute::Handled
+        );
+        nav.query = "font-size".into();
+        nav.reconcile(&cats, &cfg, &EN);
+        press(&mut nav, Key::Named(NamedKey::Enter), Mods::empty());
+        assert!(!nav.search_focused);
+        assert_eq!(focused(&cats, &nav), "font-size");
+        assert_eq!(
+            press(&mut nav, Key::Character("f".into()), find),
+            SearchRoute::Handled
+        );
+        assert!(nav.search_focused);
+        assert_eq!(
+            press(&mut nav, Key::Named(NamedKey::Escape), Mods::empty()),
+            SearchRoute::Handled
+        );
+        assert!(nav.query.is_empty());
+        assert_eq!(focused(&cats, &nav), "font-size", "macos={macos}");
+    }
+    // A click on the search field does the same.
+    let mut nav = SettingsNav {
+        category: graphics,
+        field: 1,
+        query: "font-size".into(),
+        ..Default::default()
+    };
+    nav.search_origin = Some((0, 0));
+    nav.reconcile(&cats, &cfg, &EN);
+    nav.apply_hit(&cats, &cfg, &EN, kettle_render::SettingsHit::Search);
+    nav.query = Default::default();
+    nav.reconcile(&cats, &cfg, &EN);
+    assert_eq!(focused(&cats, &nav), "font-size");
+}

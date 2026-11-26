@@ -14,8 +14,15 @@ highlighted option has a bar at its left edge as well as a tint, which stands
 out from the panel (at least 1.3:1) in light and dark themes alike. An option
 you have changed shows a **Reset** button beside its value; the highlighted
 option shows it dimmed when it already holds its default. Reset removes the
-option's line from your config file, so the option follows Kettle's default
-from then on, including one that differs by platform, such as the font size.
+option's lines from your config file, older spellings and the Terminator keys
+it reads in their place included (`clipboard` for Clipboard access,
+`update-check` for Updates, `visible_bell`, `urgent_bell` and `force_no_bell`
+for Bell, `scrollback_infinite` for Scrollback lines), so the option follows
+Kettle's default from then on, including one that differs by platform, such as the font size.
+Where another line still decides the value, such as a `theme` line for
+Appearance or a `font` line for Font size, Reset adds the default after it and
+keeps that line. Reset saves in one step: if the file cannot be saved, the
+file and the option stay as they were.
 Where a row is too narrow for the word, Reset shows as an anticlockwise-arrow icon, and on
 the narrowest rows it is left out (Delete still resets). Below a panel width
 of 640 pixels, categories become a
@@ -36,8 +43,8 @@ value editing work there too; Home, End and the page keys stop at the first
 and last results. A search with no matches shows **No settings
 match**; **Tab** then leaves the search for the next category. **Esc** clears
 the query; another **Esc** closes Settings. A search cleared from its field,
-without moving into a result, leaves the highlight where it was before the
-search. Clicking a
+without moving into a result, leaves the highlight where it was when the field
+was focused, on a result chosen before that included. Clicking a
 category clears the search and opens that category. Focusing Search through
 assistive technology cancels any pending keybinding capture.
 
@@ -57,8 +64,9 @@ assistive technology cancels any pending keybinding capture.
 
 The panel is also fully **mouse-driven**. Under the pointer, an option or a
 category lights up with a faint tint of the theme's selection colour, without
-the bar that marks the highlighted option, and Reset and a choice's ‹ › control
-darken or lighten like a dialog button; the highlight itself stays where the
+the bar that marks the highlighted option, and Reset, a choice's ‹ › control
+and a switch darken or lighten like a dialog button, on the highlighted option
+too; the highlight itself stays where the
 keyboard put it. **Left-click** a row to cycle its
 value forward, **right-click** to cycle back, **scroll-wheel** over a row to
 adjust it, **left-click Reset** to restore a changed row's default, **click
@@ -155,7 +163,7 @@ four-logical-pixel gap. Free text and shortcut fields have no Reset.
 | Option | Config key | Notes |
 |---|---|---|
 | Background opacity | `background-opacity` | 20–100% (stored as 0.0–1.0) |
-| Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window. Where the session cannot blur (GNOME and other Wayland compositors without KWin's blur protocol, X11 including KDE Plasma on X11, and Windows without its system backdrop, such as Windows 10), the switch reads **Unavailable** instead of On, unfilled with a hollow knob, the row says "This session cannot blur; saved setting: On. Opacity still applies.", the footer drops its blur hint on this row and Background opacity, and background opacity still works. The switch still turns blur off. On Wayland, for the moment (at most half a second) while Kettle asks the compositor, it reads **Checking…** rather than On. The switch is as wide as the others on macOS, where neither state occurs |
+| Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window. Where the session cannot blur (GNOME and other Wayland compositors without KWin's blur protocol, X11 including KDE Plasma on X11, and Windows without its system backdrop, such as Windows 10), the switch reads **Unavailable** instead of On, unfilled with a hollow knob, the row says "This session cannot blur; saved setting: On. Opacity still applies.", the footer drops its blur hint on this row and Background opacity, and background opacity still works. The switch still turns blur off, and turning it on there asks for no new window, since one would not blur either. On Wayland, for the moment (at most half a second) while Kettle asks the compositor, it reads **Checking…** rather than On. The switch is as wide as the others on macOS, where neither state occurs |
 | Window padding | `window-padding-x` | 0–40 px |
 | Show pane titlebars | `show-titlebar` | On / Off |
 
@@ -275,6 +283,8 @@ launch** (the GPU/surface graph can't hot-swap). While a saved graphics setting
 differs from the one Kettle started with, the footer says "Restart Kettle to
 apply graphics changes.", however the change was made and however often
 Settings is reopened, until Kettle restarts or the setting is put back. A
+recovery from a lost GPU device builds the new device with the saved GPU
+settings, so their note goes then too; a renderer change still waits. A
 background opacity, type or blur change that this window was not opened able
 to show says "Restart Kettle or open a new window to apply pending changes."
 instead. The GPU picker persists the selection per application.

@@ -278,7 +278,7 @@ fn settings_pending_notes_follow_the_running_and_saved_values() {
     let flat: String = src.split_whitespace().collect();
     assert!(
         flat.contains(
-            "crate::settings::pending_apply(self.running_graphics.as_ref(),&self.cfg,ws.surface_caps.lacks_for(&self.cfg),),"
+            "crate::settings::pending_apply(self.running_graphics.as_ref(),&self.cfg,ws.surface_caps.lacks_for(&self.cfg,blur!=crate::settings::BlurState::Unavailable),),"
         ),
         "the footer derives what is pending"
     );
@@ -1472,13 +1472,14 @@ fn a_refused_capture_key_is_reported_in_the_settings_row() {
     }
 }
 
-/// Reset takes the row's keys out of the config file and reloads, instead
-/// of writing the default the running build has (`theme-mode = auto`,
-/// `font-size = 13`), which pinned the row and added a line each time. It
-/// writes the default only when that still does not show, because the key
-/// is set somewhere Kettle does not edit.
+/// Reset takes the row's keys out of the config file, instead of writing
+/// the default the running build has (`theme-mode = auto`, `font-size =
+/// 13`), which pinned the row and added a line each time. Where another line
+/// still decides the value it adds the default in the same atomic edit, and
+/// it reloads only after that edit is saved: two edits could leave the first
+/// saved and the second not, with a value neither the start nor the default.
 #[test]
-fn settings_reset_removes_the_rows_keys_before_writing_a_default() {
+fn settings_reset_is_one_edit_then_a_reload() {
     let src = production_source();
     let reset = src
         .split("fn settings_reset(")
@@ -1488,11 +1489,12 @@ fn settings_reset_removes_the_rows_keys_before_writing_a_default() {
     let flat: String = reset.split_whitespace().collect();
     assert!(
         flat.contains(
-            "ifself.unset_prefs(&crate::settings::reset_keys(field))==Ok(true){self.reload_config(ws);ifcrate::settings::holds_default(&self.cfg,field){return;}}self.settings_store(ws,field.key,value);"
+            "matchself.reset_pref(&crate::settings::reset_keys(field),&fallback,|cfg|{crate::settings::holds_default(cfg,field)}){Ok(true)=>self.reload_config(ws),Ok(false)=>{}Err(())=>fire_notify("
         ),
         "{flat}"
     );
-    assert_eq!(flat.matches("settings_store(").count(), 1);
+    assert_eq!(flat.matches("settings_store(").count(), 0);
+    assert_eq!(flat.matches("reload_config(").count(), 1);
 }
 
 /// The pointer's hover shows in Settings only where a click acts: not
@@ -1532,8 +1534,11 @@ fn settings_hover_shows_only_where_a_click_acts() {
 
 /// Settings paints hover from the window's own pointer, works it out
 /// afresh for every frame (rows move under a still pointer as the keyboard
-/// scrolls), repaints a move only when the target changes, clears it when
-/// the pointer leaves the window, and never moves the keyboard focus.
+/// scrolls), and repaints a move only when its target differs from the one
+/// the last frame painted. A move compared with a cache only moves set
+/// missed a hover a keyboard redraw had painted, which then stayed lit.
+/// Leaving the window clears the pointer, and the hover with it. Hover never
+/// moves the keyboard focus.
 #[test]
 fn settings_hover_follows_the_pointer_and_leaves_the_focus_alone() {
     let src = production_source();
@@ -1541,12 +1546,20 @@ fn settings_hover_follows_the_pointer_and_leaves_the_focus_alone() {
     for needle in [
         "letsettings_overlay=self.settings_overlay_projection(ws).map(|mutset|{set.hover=self.settings_hover(ws,&set);set});",
         "self.update_search_hover(ws);self.track_settings_hover(ws);",
-        "ws.search.hovered_control=None;ws.settings_hover=None;",
+        "ws.native_pointer=None;ws.card_hover=None;",
         "letpointer=ws.native_pointer.filter(|_|settings_hover_shows(ws))?;",
-        "ifhover!=ws.settings_hover{ws.settings_hover=hover;",
+        "ws.settings_hover=overlay.settings.as_ref().and_then(|set|set.hover);",
+        "ifhover!=ws.settings_hover&&letSome(window)=&ws.window{window.request_redraw();}",
     ] {
         assert!(flat.contains(needle), "missing: {needle}");
     }
+    let painted = flat
+        .find("ws.settings_hover=overlay.settings.as_ref().and_then(|set|set.hover);")
+        .unwrap();
+    let built = flat
+        .find("letoverlay=self.overlay(ws,reuse_pane_snapshots);")
+        .unwrap();
+    assert!(built < painted, "the frame's own overlay records the hover");
     for name in ["track_settings_hover", "settings_hover"] {
         let body = src
             .split(&format!("fn {name}("))
@@ -1556,6 +1569,10 @@ fn settings_hover_follows_the_pointer_and_leaves_the_focus_alone() {
         assert!(
             !body.contains("settings_nav"),
             "{name} must not touch the keyboard focus"
+        );
+        assert!(
+            !body.contains("ws.settings_hover ="),
+            "only painting records the painted hover"
         );
     }
 }
