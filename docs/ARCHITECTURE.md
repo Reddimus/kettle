@@ -1465,9 +1465,14 @@ lane request (`Tab::lanes`, by pane: side, share and whether expanded) is
 transient: never saved, cleared from a torn-off tab, and pruned with its
 pane. `partition_leaf` carves the lane in whole terminal cells and keeps
 the terminal at 20 columns and 5 rows at least; a lane without room to
-expand (a right one needs 16 columns for its header) is a one-row strip
-along the body's bottom whichever its side, and one without room for that a
-badge that changes nothing. Opening a lane into a badge is refused with a
+expand (a right one needs 16 columns for its header, a bottom one 4 rows and
+the room its header's buttons need above its resize edge) is a strip along
+the body's bottom whichever its side, and one without room for that a badge
+that changes nothing. The strip is as tall as its header's buttons need to be
+24-point targets (`Metrics::with_lane_header`, from
+`kettle_render::media_lane_header_room`) in whole terminal rows when the
+terminal keeps its 5 rows with that, and one row when it does not; with
+17.5 px rows in a 300 px leaf it takes two rows, leaving 15. Opening a lane into a badge is refused with a
 notice. What a lane shows is `WindowState::preview_panels` (by
 pane, the shelf item); `prune_previews`, on every pass of the event loop,
 closes a lane whose pane closed or left the window or whose item left the

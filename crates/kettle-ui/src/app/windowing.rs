@@ -157,15 +157,12 @@ impl App {
         let over = ws.hovered_scroll_arrow.filter(|_| dragging);
         // The dragged tab is the active one: at either end it can go no
         // further that way, and the drag waits on nothing there.
-        let (active, tabs) = (ws.mux.active, ws.mux.tabs.len());
-        let can_step = |forward: bool| {
-            if forward {
-                active + 1 < tabs
-            } else {
-                active > 0
-            }
-        };
-        let (step, rest) = tab_drag_arrow_step(ws.tab_drag_arrow, over, can_step, now);
+        let (step, rest) = tab_drag_arrow_pass(
+            ws.tab_drag_arrow,
+            over,
+            (ws.mux.active, ws.mux.tabs.len()),
+            now,
+        );
         ws.tab_drag_arrow = rest;
         if let Some(forward) = step
             && ws.mux.move_active_tab(if forward { 1 } else { -1 })
@@ -2410,6 +2407,29 @@ pub(super) fn tab_drag_arrow_step(
         }
         (_, Some(arrow)) => (None, Some((arrow, now))),
     }
+}
+
+/// One scheduler pass of a tab drag over the overflow arrows, with the
+/// dragged tab at `at` of `count` tabs: the step to take now, as
+/// [`tab_drag_arrow_step`] says, and the rest to keep after it. The rest is
+/// kept only while the tab could take another step that way from where the
+/// step leaves it, so the last step to an end schedules no wake.
+pub(super) fn tab_drag_arrow_pass(
+    rest: Option<(bool, std::time::Instant)>,
+    over: Option<bool>,
+    (at, count): (usize, usize),
+    now: std::time::Instant,
+) -> (Option<bool>, Option<(bool, std::time::Instant)>) {
+    let can_step = |at: usize, forward: bool| {
+        if forward { at + 1 < count } else { at > 0 }
+    };
+    let (step, rest) = tab_drag_arrow_step(rest, over, |forward| can_step(at, forward), now);
+    let after = match step {
+        Some(true) => at + 1,
+        Some(false) => at.saturating_sub(1),
+        None => at,
+    };
+    (step, rest.filter(|&(forward, _)| can_step(after, forward)))
 }
 
 /// Pixel distance a held tab press must move before Kettle promotes the click

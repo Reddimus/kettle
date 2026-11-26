@@ -1084,9 +1084,12 @@ press anywhere in a target at least 24 by 24 points. Where the lane has the
 room, the header row (and a gallery's detail line) grows to that height; where
 it has only the room it always needed, the buttons reach into the padding
 above and the line of text below instead, so a lane or viewer that fitted
-before still fits. The button under the pointer lights, unless it would do nothing (browsing
-past either end). Resting the pointer on a button shows its name in a
-tooltip, with the key that does the same while the lane holds the keyboard
+before still fits. One case stays short: in a bottom lane at its least height
+showing a gallery, the buttons above the page buttons are about 18 points
+tall, because the room they would need is the edge that resizes the lane or
+the page buttons themselves. The button under the pointer lights, unless it would do nothing (browsing
+past either end). Resting the pointer on a button (not on a video's
+picture, which a click plays as Play does) shows its name in a tooltip, with the key that does the same while the lane holds the keyboard
 (`+`, `-`, `0`, `C`, `K`, `M`, `T`, `F`, Page Up and Page Down, and in the
 centred viewer `P`, and Esc for × except in fullscreen, where Esc leaves
 fullscreen), or otherwise the shortcut bound to its action. A press or the wheel over a lane never
@@ -1342,8 +1345,10 @@ looks like a path keeps its end. Any other title keeps both ends when at least
 16 columns of it show, and only its start in a narrower tab, so tabs whose
 titles differ near the start still read apart. Resting the pointer on a
 shortened tab shows its whole title, or its whole working directory, in a
-tooltip. A tooltip with more lines than fit beside the control it names, in
-the window, keeps the lines that fit and ends with an ellipsis.
+tooltip. A long tooltip wraps at the window's width and goes on the side of
+the control it names with more room; only one with more lines than fit there
+keeps the lines that fit and ends with an ellipsis. It never covers the
+control or leaves the window.
 
 When a window loses focus on macOS or Linux, tab text and controls dim toward
 their backgrounds while retaining at least 3:1 contrast, and the active accent

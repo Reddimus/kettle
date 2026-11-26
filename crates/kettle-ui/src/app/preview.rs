@@ -3246,6 +3246,10 @@ impl App {
             return None;
         }
         let (lane, button, hit) = self.hovered_lane_button(ws)?;
+        // Only on the button itself: a video's picture plays as its Play
+        // button does, but is no button to name.
+        let pointer = ws.native_pointer?;
+        let button = lane_button_tooltip_region(button, (pointer.x as f32, pointer.y as f32))?;
         let label = self.lane_control_label(ws, &lane, hit)?;
         let shortcut = if self.preview_holds_keyboard(ws, lane.pane) {
             lane_control_key(hit, LaneKeys::of(ws.preview_overlay)).map(|key| {
@@ -3263,8 +3267,8 @@ impl App {
         Some(ChromeTooltip {
             target: crate::tooltip::TooltipTarget::Media(lane.pane, hit),
             text: shortcut.map_or_else(|| label.to_owned(), |key| format!("{label}  {key}")),
-            anchor: button,
-            rect: button.unwrap_or(lane.rect),
+            anchor: Some(button),
+            rect: button,
         })
     }
 

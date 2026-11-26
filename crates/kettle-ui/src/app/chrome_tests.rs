@@ -2355,7 +2355,7 @@ fn a_tab_drag_resting_on_an_overflow_arrow_scrolls_the_strip() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(source.contains(
-        "let (step, rest) = tab_drag_arrow_step(ws.tab_drag_arrow, over, can_step, now); ws.tab_drag_arrow = rest; if let Some(forward) = step && ws.mux.move_active_tab(if forward { 1 } else { -1 })"
+        "ws.tab_drag_arrow = rest; if let Some(forward) = step && ws.mux.move_active_tab(if forward { 1 } else { -1 })"
     ));
     assert!(source.contains(
         "let dragging = ws.tab_drag_active && ws.tab_drag_press.is_none(); let over = ws.hovered_scroll_arrow.filter(|_| dragging);"
@@ -2569,4 +2569,117 @@ fn a_new_primary_press_ends_an_old_strip_press() {
             .unwrap_or_else(|| panic!("{name}: routing"));
         assert!(cancel < routed, "{name}: before the press is routed");
     }
+}
+
+/// Defect 3 of the second 6.0 review: a clicked tab title kept its tooltip
+/// hidden after the pointer went onto the tab's close button and back,
+/// because the press was held against the whole tab, ✕ included, where the
+/// title is not named. The pressed region is now where the title is named,
+/// the tab without its ✕, so passing over the ✕ is a leave.
+#[test]
+fn a_clicked_tab_title_rearms_after_the_pointer_crosses_its_close_button() {
+    use super::chrome::{StripTooltipContext, shown_strip_tooltip, strip_tooltip_target};
+    use std::time::{Duration, Instant};
+    let long = "Tab 2: Build and deploy the production cluster migration script";
+    let mut bar = kettle_render::TabBar::hidden();
+    bar.height = 28.0;
+    bar.band = (0.0, 0.0, 400.0, 28.0);
+    bar.segments = vec![kettle_render::TabSeg {
+        idx: 0,
+        rect: (100.0, 0.0, 100.0, 28.0),
+        title_rect: (108.0, 0.0, 64.0, 28.0),
+        hint: None,
+        close: (172.0, 0.0, 28.0, 28.0),
+        title: long.into(),
+        path: None,
+        active: true,
+        activity: kettle_render::TabActivity::Normal,
+    }];
+    let bindings = kettle_config::keybinds::defaults();
+    let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+    let context = StripTooltipContext {
+        modal_open: false,
+        bindings: &bindings,
+        tr: &tr,
+        tab_format: "{title}",
+        tab_cell_width: 8.0,
+    };
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    ws.window_focused = true;
+    let ms = Duration::from_millis;
+    let t0 = Instant::now();
+    let move_to = |ws: &mut crate::window_state::WindowState, x: f64, at| {
+        ws.native_pointer = Some(winit::dpi::PhysicalPosition::new(x, 14.0));
+        let tip = strip_tooltip_target(ws, &bar, &context);
+        if let Some(tip) = &tip {
+            let (rx, ry, rw, rh) = tip.rect;
+            assert!(
+                (rx..rx + rw).contains(&(x as f32)) && (ry..ry + rh).contains(&14.0),
+                "the pressed region holds the pointer"
+            );
+        }
+        ws.tooltip.hover(
+            tip.map(|tip| (tip.target, tip.rect)),
+            Some((x as f32, 14.0)),
+            at,
+        );
+    };
+    move_to(&mut ws, 120.0, t0);
+    let shown = |ws: &crate::window_state::WindowState, at| {
+        shown_strip_tooltip(ws, &bar, &context, at).map(|tip| tip.text)
+    };
+    assert_eq!(shown(&ws, t0 + ms(500)).as_deref(), Some(long));
+    // Click the tab: hidden, and it stays hidden on the title.
+    ws.tooltip.press(t0 + ms(600));
+    move_to(&mut ws, 130.0, t0 + ms(700));
+    assert_eq!(shown(&ws, t0 + ms(3000)), None);
+    // Over its ✕, which names nothing, and back: a leave.
+    move_to(&mut ws, 185.0, t0 + ms(3100));
+    move_to(&mut ws, 120.0, t0 + ms(3200));
+    assert_eq!(shown(&ws, t0 + ms(3200)), None, "a rest first");
+    assert_eq!(shown(&ws, t0 + ms(3700)).as_deref(), Some(long));
+    assert_eq!(
+        super::chrome::tab_title_region(&bar.segments[0]),
+        (100.0, 0.0, 72.0, 28.0)
+    );
+}
+
+/// Finding 8 of the second 6.0 review: the step that moved a dragged tab to
+/// the end still kept its rest, so the scheduler woke 400 ms later only to
+/// find nothing to do. Whether another step is possible is now asked from
+/// where the step leaves the tab: the last step to an end keeps no rest.
+#[test]
+fn the_last_drag_step_to_an_end_schedules_no_wake() {
+    use super::windowing::{TAB_DRAG_SCROLL_DWELL, tab_drag_arrow_pass};
+    use std::time::Instant;
+    let t0 = Instant::now();
+    let due = t0 + TAB_DRAG_SCROLL_DWELL;
+    // Third of four tabs, resting on `›`: one step left.
+    assert_eq!(
+        tab_drag_arrow_pass(Some((true, t0)), Some(true), (2, 4), due),
+        (Some(true), None),
+        "the step that reaches the end keeps no rest"
+    );
+    // Second of four: the step leaves room for another, so the rest stays.
+    assert_eq!(
+        tab_drag_arrow_pass(Some((true, t0)), Some(true), (1, 4), due),
+        (Some(true), Some((true, due)))
+    );
+    // The same at the start, going back.
+    assert_eq!(
+        tab_drag_arrow_pass(Some((false, t0)), Some(false), (1, 4), due),
+        (Some(false), None)
+    );
+    // Already at the end: no step and no rest.
+    assert_eq!(
+        tab_drag_arrow_pass(None, Some(true), (3, 4), t0),
+        (None, None)
+    );
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(source.contains(
+        "let (step, rest) = tab_drag_arrow_pass( ws.tab_drag_arrow, over, (ws.mux.active, ws.mux.tabs.len()), now, ); ws.tab_drag_arrow = rest;"
+    ));
 }

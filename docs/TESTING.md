@@ -159,6 +159,8 @@ tooltip timing: the 500 ms rest, the one-second warm spell, a press hiding the
 tooltip until the pointer leaves the control's place (a moment with no control
 to name, while the press is held or a dropdown is open, is no leave), and a
 single scheduler wake per deadline;
+`a_clicked_tab_title_rearms_after_the_pointer_crosses_its_close_button` checks
+that the place a press is held against is where its control is named;
 `the_tooltip_clock_follows_moves_presses_leaves` guards the wiring.
 `overflow_arrows_light_point_and_name_what_a_press_does` (`kettle-ui`) and
 `overflow_arrows_prelight_like_the_other_flat_buttons` (`kettle-render`) cover
@@ -166,11 +168,13 @@ the arrows' hover, hand cursor, translated tooltips and anchor.
 `a_cut_tab_title_shows_whole_in_a_tooltip` (`kettle-ui`) and
 `a_tab_label_is_cut_only_when_the_strip_shortens_it` (`kettle-render`) cover
 the full-title tooltip, `a_long_tooltip_ends_in_an_ellipsis_beside_its_control`
-its line cap, and `narrow_tab_titles_keep_the_start_that_tells_them_apart`
+its line cap, `a_long_tooltip_takes_the_side_with_more_room_and_the_whole_width`
+its placement, and `narrow_tab_titles_keep_the_start_that_tells_them_apart`
 the end ellipsis below 16 columns.
 `every_lane_button_is_a_24_pixel_target`,
 `a_viewer_that_fitted_before_still_fits_with_full_targets`,
 `a_short_lanes_buttons_never_reach_its_resize_edge`,
+`a_minimum_bottom_gallery_keeps_its_edge_and_page_buttons`,
 `a_lane_keeps_room_for_full_button_targets` (`kettle-ui`),
 `a_hovered_lane_button_lights_its_chip`
 and `browsing_past_an_end_is_not_a_live_button` (`kettle-render`) and
@@ -180,13 +184,16 @@ lane buttons' WCAG 2.5.8 targets and hover fill.
 button's tooltip names against the lane's own key handling, and
 `lane_button_tooltips_share_the_clock_and_the_screen_reader_name` guards their
 timing and names; `the_fullscreen_viewer_names_no_key_that_does_something_else`
-ties the Esc a tooltip names to Esc's dispatch. `the_toast_button_under_the_pointer_lights_alone`
+ties the Esc a tooltip names to Esc's dispatch, and
+`a_lane_buttons_tooltip_is_named_only_on_the_button` keeps a video picture
+from naming its Play button. `the_toast_button_under_the_pointer_lights_alone`
 (`kettle-render`) and `toast_and_notice_buttons_light_under_the_pointer`
 (`kettle-ui`) cover the toast and notice buttons' hover, and
 `an_actionable_toast_body_lights_under_the_pointer` the notification toast's body.
 `a_tab_drag_resting_on_an_overflow_arrow_scrolls_the_strip` covers the
-400 ms drag auto-scroll, and `a_tab_drag_at_the_end_rests_on_nothing` that it
-schedules no wake where the tab can go no further; the drag itself needs a
+400 ms drag auto-scroll, and `a_tab_drag_at_the_end_rests_on_nothing` and
+`the_last_drag_step_to_an_end_schedules_no_wake` that it schedules no wake
+where the tab can go no further; the drag itself needs a
 desktop.
 Full render/UI suites and clippy remain required; native focus changes,
 hover/press feedback, tooltip placement and Spanish acceptance need a desktop.
