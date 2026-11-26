@@ -1133,17 +1133,23 @@ impl App {
                 let keep = ws.mux.tab_anchor_panes(idx);
                 let others = other_tabs_panes(ws, idx);
                 let (panes, busy) = other_tabs_close_scope(ws, idx);
-                if panes == 0
-                    || self.confirm_close(
-                        ws,
-                        panes,
-                        busy,
-                        ConfirmAction::CloseOtherTabs {
-                            keep: keep.clone(),
-                            panes: others.clone(),
-                        },
-                    )
-                {
+                if panes == 0 {
+                    // The other tabs went while the menu was up. The menu
+                    // is gone too, and nothing else would repaint it away.
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
+                    return;
+                }
+                if self.confirm_close(
+                    ws,
+                    panes,
+                    busy,
+                    ConfirmAction::CloseOtherTabs {
+                        keep: keep.clone(),
+                        panes: others.clone(),
+                    },
+                ) {
                     return;
                 }
                 self.close_other_tabs_now(ws, &keep, &others);

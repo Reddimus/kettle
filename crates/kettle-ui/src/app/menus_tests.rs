@@ -3057,3 +3057,26 @@ fn close_other_tabs_closes_only_the_panes_its_question_was_about() {
     assert_eq!(order(&mux), vec![1, 2]);
 }
 
+#[test]
+fn a_stale_close_other_tabs_pick_repaints_the_menu_away() {
+    // The other tabs have all gone: nothing to close or ask about, but the
+    // popup the pick dismissed must not stay painted.
+    let src = production_source();
+    let act = finding_body(&src, "act_on_menu_tab");
+    let others = act
+        .split("TabMenuStep::CloseOthers(idx) => {")
+        .nth(1)
+        .and_then(|arm| arm.split("TabMenuStep::Moved(moved) => {").next())
+        .expect("the Close Other Tabs arm");
+    let none_left = others
+        .split("if panes == 0 {")
+        .nth(1)
+        .and_then(|branch| branch.split("return;").next())
+        .expect("the branch with nothing to close");
+    assert!(none_left.contains("window.request_redraw();"));
+    let mut ws = WindowState::new(1, fake_tabs(&[1]));
+    assert_eq!(super::other_tabs_close_scope(&ws, 0), (0, 0));
+    ws.mux.tabs.push(fake_tab(2));
+    assert_eq!(super::other_tabs_close_scope(&ws, 0), (1, 1));
+}
+
