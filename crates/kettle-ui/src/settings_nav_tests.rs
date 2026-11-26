@@ -112,3 +112,100 @@ fn a_new_category_opens_on_its_first_row_that_applies() {
         assert_eq!((nav.category, nav.field), (1, 1));
     }
 }
+
+/// Home, End, PageUp and PageDown move as `g`, `G`, Ctrl+U and Ctrl+D do,
+/// with or without `vim-menu-nav`; Shift+←/→ (and Shift+h/l) take ten of a
+/// number's steps.
+#[test]
+fn list_keys_move_and_shift_steps_numbers_coarsely() {
+    use winit::keyboard::{Key, ModifiersState as Mods, NamedKey};
+    for vim in [false, true] {
+        for (key, to) in [
+            (NamedKey::Home, RowMove::First),
+            (NamedKey::End, RowMove::Last),
+            (NamedKey::PageUp, RowMove::PageUp),
+            (NamedKey::PageDown, RowMove::PageDown),
+        ] {
+            assert_eq!(
+                row_command(&Key::Named(key), Mods::empty(), vim),
+                Some(RowCommand::Move(to)),
+                "{key:?} vim={vim}"
+            );
+        }
+    }
+    let step = |key: &Key, mods| match row_command(key, mods, true) {
+        Some(RowCommand::Value(value)) => value,
+        other => panic!("{key:?} {mods:?}: {other:?}"),
+    };
+    let right = Key::Named(NamedKey::ArrowRight);
+    let left = Key::Named(NamedKey::ArrowLeft);
+    let l = Key::Character("L".into());
+    let cats = categories(&[]);
+    let field = |key: &str| {
+        cats.iter()
+            .flat_map(|cat| &cat.fields)
+            .find(|field| field.key == key)
+            .unwrap()
+    };
+    let cfg = Config {
+        cursor_blink_timeout: 100,
+        ..Config::default()
+    };
+    let timeout = field("cursor-blink-timeout");
+    let dir = |key: &Key, mods| value_key_dir(&cfg, timeout, step(key, mods)).unwrap();
+    assert_eq!(dir(&right, Mods::empty()), 1);
+    assert_eq!(dir(&right, Mods::SHIFT), COARSE_STEPS);
+    assert_eq!(dir(&left, Mods::SHIFT), -COARSE_STEPS);
+    assert_eq!(dir(&l, Mods::SHIFT), COARSE_STEPS);
+    assert_eq!(
+        next_value(&cfg, timeout, dir(&right, Mods::SHIFT)),
+        "150",
+        "ten 5 s steps"
+    );
+    assert_eq!(next_value(&cfg, timeout, dir(&left, Mods::SHIFT)), "50");
+    // A choice moves one choice, Shift or not.
+    let bell = field("bell");
+    assert_eq!(
+        value_key_dir(&cfg, bell, step(&right, Mods::SHIFT)),
+        Some(1)
+    );
+}
+
+/// In search results, Home and End jump to the first and last result that
+/// applies, and page moves stop at the ends instead of wrapping.
+#[test]
+fn list_keys_move_through_search_results() {
+    use winit::keyboard::{Key, ModifiersState as Mods, NamedKey};
+    let cats = categories(&[]);
+    let cfg = Config::default();
+    let mut nav = SettingsNav {
+        query: "tab".into(),
+        ..Default::default()
+    };
+    nav.reconcile(&cats, &cfg, &EN);
+    let results: Vec<_> = nav
+        .visible_fields(&cats, &EN)
+        .into_iter()
+        .filter(|&(c, f)| !field_disabled(&cfg, cats[c].fields[f].key))
+        .collect();
+    assert!(results.len() > 4);
+    for vim in [false, true] {
+        let cfg = Config {
+            vim_menu_nav: vim,
+            ..Config::default()
+        };
+        let mut press = |key| {
+            assert_eq!(
+                nav.search_key(&cats, &cfg, &EN, &Key::Named(key), Mods::empty(), false),
+                SearchRoute::Handled,
+                "{key:?}"
+            );
+            (nav.category, nav.field)
+        };
+        assert_eq!(press(NamedKey::End), *results.last().unwrap());
+        assert_eq!(press(NamedKey::PageDown), *results.last().unwrap());
+        assert_eq!(press(NamedKey::Home), results[0]);
+        assert_eq!(press(NamedKey::PageUp), results[0]);
+        assert_ne!(press(NamedKey::PageDown), results[0]);
+    }
+}

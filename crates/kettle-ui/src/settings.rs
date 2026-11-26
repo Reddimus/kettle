@@ -550,41 +550,35 @@ impl SettingsNav {
                 SearchRoute::Handled
             };
         }
-        let delta = match key {
-            Key::Named(NamedKey::ArrowDown) => Some(1),
-            Key::Named(NamedKey::ArrowUp) => Some(-1),
+        let half = (count / 2).max(1) as isize;
+        // Arrows wrap; page moves and jumps stop at the first and last
+        // results, as they do on a category's rows.
+        let (delta, wrap) = match key {
+            Key::Named(NamedKey::ArrowDown) => (1, true),
+            Key::Named(NamedKey::ArrowUp) => (-1, true),
+            Key::Named(NamedKey::PageDown) => (half, false),
+            Key::Named(NamedKey::PageUp) => (-half, false),
+            Key::Named(NamedKey::End) => (isize::MAX, false),
+            Key::Named(NamedKey::Home) => (isize::MIN, false),
             Key::Character(s) if cfg.vim_menu_nav && !mods.alt_key() && !mods.super_key() => {
                 match (s.to_ascii_lowercase().as_str(), mods.control_key()) {
-                    ("j", false) => Some(1),
-                    ("k", false) => Some(-1),
-                    ("d", true) => Some((count / 2).max(1) as isize),
-                    ("u", true) => Some(-((count / 2).max(1) as isize)),
-                    ("g", false) => {
-                        let enabled: Vec<_> = self
-                            .visible_fields(cats, tr)
-                            .into_iter()
-                            .filter(|&(c, f)| !field_disabled(cfg, cats[c].fields[f].key))
-                            .collect();
-                        if let Some(&(cat, field)) = if mods.shift_key() {
-                            enabled.last()
-                        } else {
-                            enabled.first()
-                        } {
-                            (self.category, self.field) = (cat, field);
-                        }
-                        return SearchRoute::Handled;
-                    }
-                    _ => None,
+                    ("j", false) => (1, true),
+                    ("k", false) => (-1, true),
+                    ("d", true) => (half, false),
+                    ("u", true) => (-half, false),
+                    ("g", false) if mods.shift_key() => (isize::MAX, false),
+                    ("g", false) => (isize::MIN, false),
+                    _ => return SearchRoute::Pass,
                 }
             }
-            _ => None,
+            _ => return SearchRoute::Pass,
         };
-        if let Some(delta) = delta {
+        if wrap {
             self.move_result(cats, cfg, tr, delta);
-            SearchRoute::Handled
         } else {
-            SearchRoute::Pass
+            self.page_result(cats, cfg, tr, delta);
         }
+        SearchRoute::Handled
     }
 
     /// Stable catalogue identities, grouped in catalogue order during search.
@@ -670,6 +664,27 @@ impl SettingsNav {
         (self.category, self.field) = fields[next];
     }
 
+    /// Move `delta` results through the ones that apply, stopping at the
+    /// first and the last.
+    pub fn page_result(&mut self, cats: &[Category], cfg: &Config, tr: &Translator, delta: isize) {
+        let fields: Vec<_> = self
+            .visible_fields(cats, tr)
+            .into_iter()
+            .filter(|&(c, f)| !field_disabled(cfg, cats[c].fields[f].key))
+            .collect();
+        let Some(last) = fields.len().checked_sub(1) else {
+            return;
+        };
+        let current = fields
+            .iter()
+            .position(|pair| *pair == (self.category, self.field))
+            .unwrap_or(0);
+        let next = (current as isize)
+            .saturating_add(delta)
+            .clamp(0, last as isize) as usize;
+        (self.category, self.field) = fields[next];
+    }
+
     /// Move the focused row within its category.
     pub(crate) fn move_focus(&mut self, cats: &[Category], cfg: &Config, to: RowMove) {
         let Some(fields) = cats.get(self.category).map(|cat| &cat.fields[..]) else {
@@ -728,10 +743,17 @@ pub(crate) enum RowMove {
 /// Space/Enter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ValueKey {
-    Left,
-    Right,
+    /// `-1` for ←, `+1` for →; with Shift, a number takes
+    /// [`COARSE_STEPS`] steps at once.
+    Step {
+        dir: i32,
+        coarse: bool,
+    },
     Activate,
 }
+
+/// How many of its steps a number takes for Shift+←/→.
+pub(crate) const COARSE_STEPS: i32 = 10;
 
 /// What a key does on Settings' rows once chord capture and search have
 /// passed it on.
@@ -758,10 +780,20 @@ pub(crate) fn row_command(
         Key::Named(NamedKey::Escape) => RowCommand::Close,
         Key::Named(NamedKey::ArrowDown) => RowCommand::Move(RowMove::Next),
         Key::Named(NamedKey::ArrowUp) => RowCommand::Move(RowMove::Previous),
+        Key::Named(NamedKey::Home) => RowCommand::Move(RowMove::First),
+        Key::Named(NamedKey::End) => RowCommand::Move(RowMove::Last),
+        Key::Named(NamedKey::PageDown) => RowCommand::Move(RowMove::PageDown),
+        Key::Named(NamedKey::PageUp) => RowCommand::Move(RowMove::PageUp),
         Key::Named(NamedKey::Tab) => RowCommand::Category(!mods.shift_key()),
         Key::Named(NamedKey::Space | NamedKey::Enter) => RowCommand::Value(ValueKey::Activate),
-        Key::Named(NamedKey::ArrowRight) => RowCommand::Value(ValueKey::Right),
-        Key::Named(NamedKey::ArrowLeft) => RowCommand::Value(ValueKey::Left),
+        Key::Named(NamedKey::ArrowRight) => RowCommand::Value(ValueKey::Step {
+            dir: 1,
+            coarse: mods.shift_key(),
+        }),
+        Key::Named(NamedKey::ArrowLeft) => RowCommand::Value(ValueKey::Step {
+            dir: -1,
+            coarse: mods.shift_key(),
+        }),
         Key::Named(NamedKey::Delete | NamedKey::Backspace) => RowCommand::Reset,
         // Case-fold so CapsLock can't kill the nav layer; g-vs-G derives
         // from the physical Shift state.
@@ -771,8 +803,14 @@ pub(crate) fn row_command(
                 ("k", false) => RowCommand::Move(RowMove::Previous),
                 ("g", false) if mods.shift_key() => RowCommand::Move(RowMove::Last),
                 ("g", false) => RowCommand::Move(RowMove::First),
-                ("h", false) => RowCommand::Value(ValueKey::Left),
-                ("l", false) => RowCommand::Value(ValueKey::Right),
+                ("h", false) => RowCommand::Value(ValueKey::Step {
+                    dir: -1,
+                    coarse: mods.shift_key(),
+                }),
+                ("l", false) => RowCommand::Value(ValueKey::Step {
+                    dir: 1,
+                    coarse: mods.shift_key(),
+                }),
                 ("d", true) => RowCommand::Move(RowMove::PageDown),
                 ("u", true) => RowCommand::Move(RowMove::PageUp),
                 _ => return None,
@@ -782,11 +820,14 @@ pub(crate) fn row_command(
     })
 }
 
-/// The direction `settings_adjust` takes for a value key on `field`.
-pub(crate) fn value_key_dir(_cfg: &Config, _field: &Field, key: ValueKey) -> Option<i32> {
+/// The direction `settings_adjust` takes for a value key on `field`: the
+/// number of steps for a number, which Shift multiplies.
+pub(crate) fn value_key_dir(_cfg: &Config, field: &Field, key: ValueKey) -> Option<i32> {
     Some(match key {
-        ValueKey::Left => -1,
-        ValueKey::Right => 1,
+        ValueKey::Step { dir, coarse: true } if matches!(field.kind, FieldKind::Number { .. }) => {
+            dir * COARSE_STEPS
+        }
+        ValueKey::Step { dir, .. } => dir,
         ValueKey::Activate => 0,
     })
 }

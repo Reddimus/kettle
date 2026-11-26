@@ -27,7 +27,8 @@ With `vim-menu-nav` enabled, **/** also focuses the search field. Type to match
 labels, descriptions or config keys across every category. Matching ignores
 case and Spanish accents. Results stay grouped by category; **Enter** or
 **Down** moves from the search field into the results. Normal navigation and
-value editing work there too. A search with no matches shows **No settings
+value editing work there too; Home, End and the page keys stop at the first
+and last results. A search with no matches shows **No settings
 match**. **Esc** clears the query; another **Esc** closes Settings. Clicking a
 category clears the search and opens that category. Focusing Search through
 assistive technology cancels any pending keybinding capture.
@@ -37,7 +38,10 @@ assistive technology cancels any pending keybinding capture.
 | Key | Action |
 |---|---|
 | ↑ / ↓ | Move between options (skips options that don't apply) |
+| Home / End | First / last option |
+| Page Up / Page Down | Move half a page |
 | ← / → | Change the highlighted option |
+| Shift+← / Shift+→ | Change a number ten steps at a time |
 | Delete / Backspace | Reset the highlighted setting to its default, as its Reset button does (not the theme, GPU, shortcut or text rows) |
 | Space / Enter | Toggle / cycle the highlighted option; on the Theme row, open the theme picker |
 | Tab / Shift+Tab | Next / previous category |
@@ -55,7 +59,8 @@ an inline text prompt, and the Theme row opens the theme picker.)
 
 With **`vim-menu-nav`** on (the default), the panel also takes vim keys:
 `j`/`k` move between options, `h`/`l` change the highlighted option, `g`/`G`
-jump to the first/last option, and `Ctrl+d`/`Ctrl+u` move half a page. Like
+jump to the first/last option, `Ctrl+d`/`Ctrl+u` move half a page, and
+Shift+`h`/`l` change a number ten steps at a time. Like
 the arrows, these jumps skip options that don't apply, as does a new category
 opened with Tab or a click. The
 same scheme works in the right-click context menu and the new-tab dropdown,

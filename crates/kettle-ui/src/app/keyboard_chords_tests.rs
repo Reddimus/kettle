@@ -519,7 +519,15 @@ fn parse_ui_key_allows_app_shortcuts_and_rejects_inert_tokens() {
         parse_ui_key("down"),
         Some((ModifiersState::empty(), Key::Named(NamedKey::ArrowDown)))
     );
-    assert_eq!(parse_ui_key("page_down"), None);
+    // Settings moves a page with them.
+    assert_eq!(
+        parse_ui_key("page_down"),
+        Some((ModifiersState::empty(), Key::Named(NamedKey::PageDown)))
+    );
+    assert_eq!(
+        parse_ui_key("pageup"),
+        Some((ModifiersState::empty(), Key::Named(NamedKey::PageUp)))
+    );
     assert_eq!(parse_ui_key("insert"), None);
 }
 

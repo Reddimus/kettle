@@ -1095,6 +1095,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Settings takes Home, End, Page Up and Page Down to move through options
+  and search results, and Shift+←/→ changes a number ten steps at a time.
+
 - In Settings, `G`, `Ctrl+D` and `Ctrl+U` no longer land on a dimmed option
   that doesn't apply; like the arrows, they skip it.
 
