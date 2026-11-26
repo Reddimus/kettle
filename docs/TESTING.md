@@ -4049,8 +4049,10 @@ and that only a pending first answer holds it back. Unix tests drive the local
 GNOME read with `/bin/sh` stand-ins for `gsettings`: its parsing and output
 cap, a `gsettings` its owner may not run (mode 0010) skipped for a working one
 later in `PATH`, an overrunning and a stopped read killed and reaped, a watch that follows
-a change and is dropped mid-read without leaving a child or thread, and a
-switch only GNOME itself reports holding motion back.
+a change and is dropped mid-read without leaving a child or thread, a drop
+that returns at once while the lookup is held and starts no child after it,
+a held lookup that stops counting as pending once the first answer's time is
+up, and a switch only GNOME itself reports holding motion back.
 Native acceptance still requires light/dark switching on macOS and Linux
 (Wayland and X11), including multiple windows, open overlays, custom side
 palettes, material/titlebar contrast, IME, and OSC 996/2031 subscribers.

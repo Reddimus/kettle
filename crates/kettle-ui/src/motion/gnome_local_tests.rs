@@ -168,10 +168,11 @@ fn a_gsettings_this_process_may_not_run_does_not_hide_a_working_one() {
     );
     // A refresh well inside the wait retries a spawn another test's fork
     // happened to make busy.
-    let watch = LocalWatch::start_every(
+    let watch = LocalWatch::start_with(
         move || find_gsettings(Some(&path)).map(gsettings_get),
         Arc::new(|| {}),
         Duration::from_millis(20),
+        TIMEOUT,
     );
     wait_for("the working gsettings's answer", || {
         watch.reading() == Reading::Value(false)
@@ -181,7 +182,8 @@ fn a_gsettings_this_process_may_not_run_does_not_hide_a_working_one() {
 #[test]
 fn a_read_takes_true_or_false_from_a_successful_run_and_nothing_else() {
     let (_open, stop) = mpsc::channel();
-    let read = |script: &str| read(&mut sh(script), Duration::from_secs(5), &stop);
+    let soon = || Instant::now() + Duration::from_secs(5);
+    let read = |script: &str| read(&mut sh(script), soon(), &stop);
     assert_eq!(read("printf 'true\\n'"), Some(true));
     assert_eq!(read("printf 'false\\n'"), Some(false));
     assert_eq!(read("printf \"'yes'\""), None);
@@ -189,9 +191,18 @@ fn a_read_takes_true_or_false_from_a_successful_run_and_nothing_else() {
     assert_eq!(read("echo 'No such schema' >&2; exit 1"), None);
     assert_eq!(read("head -c 4096 /dev/zero"), None, "output is bounded");
     let mut missing = Command::new("/nonexistent/gsettings");
+    assert_eq!(super::read(&mut missing, soon(), &stop), None);
+    // Past its deadline a read starts nothing.
+    let sleeper = Sleeper::new();
     assert_eq!(
-        super::read(&mut missing, Duration::from_secs(5), &stop),
+        super::read(&mut sleeper.command(), Instant::now(), &stop),
         None
+    );
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        sleeper.pid(),
+        None,
+        "a read past its deadline started a child"
     );
 }
 
@@ -203,7 +214,11 @@ fn an_overrunning_read_is_killed_and_reaped() {
     let (_open, stop) = mpsc::channel();
     let started = Instant::now();
     assert_eq!(
-        read(&mut sleeper.command(), Duration::from_millis(300), &stop),
+        read(
+            &mut sleeper.command(),
+            Instant::now() + Duration::from_millis(300),
+            &stop
+        ),
         None
     );
     assert!(started.elapsed() < Duration::from_secs(3));
@@ -223,7 +238,11 @@ fn a_stopped_read_is_killed_and_reaped_at_once() {
     });
     let started = Instant::now();
     assert_eq!(
-        read(&mut sleeper.command(), Duration::from_secs(30), &stopped),
+        read(
+            &mut sleeper.command(),
+            Instant::now() + Duration::from_secs(30),
+            &stopped
+        ),
         None
     );
     stopper.join().unwrap();
@@ -241,7 +260,7 @@ fn the_watch_follows_gnomes_switch_and_keeps_its_last_answer() {
     let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counted = wakes.clone();
     let file = value.clone();
-    let watch = LocalWatch::start_every(
+    let watch = LocalWatch::start_with(
         move || {
             let mut command = sh("cat \"$1\"");
             command.arg("stub").arg(file);
@@ -251,6 +270,7 @@ fn the_watch_follows_gnomes_switch_and_keeps_its_last_answer() {
             counted.fetch_add(1, Ordering::AcqRel);
         }),
         Duration::from_millis(20),
+        TIMEOUT,
     );
     wait_for("GNOME's switch off", || {
         watch.reading() == Reading::Value(false)
@@ -316,4 +336,75 @@ fn a_gnome_switch_only_gnome_itself_reports_holds_motion_back() {
         Preference::linux(Reading::Unavailable, unavailable, unavailable),
         Preference::Unknown
     );
+}
+
+/// Dropping the watch never waits on the filesystem: with the thread held
+/// in its lookup (a hung network mount on `PATH`, here a resolver that does
+/// not return), the drop returns at once. Once the lookup returns, the
+/// thread starts no child and ends.
+#[test]
+fn dropping_the_watch_during_a_held_lookup_returns_at_once() {
+    let sleeper = Sleeper::new();
+    let command = sleeper.command();
+    let (release, held) = mpsc::channel::<()>();
+    let (entered, looking) = mpsc::channel::<()>();
+    let wake: kettle_core::Waker = Arc::new(|| {});
+    let worker = Arc::downgrade(&wake);
+    let watch = LocalWatch::start(
+        move || {
+            entered.send(()).unwrap();
+            let _ = held.recv_timeout(Duration::from_secs(20));
+            Some(command)
+        },
+        wake,
+    );
+    looking
+        .recv_timeout(Duration::from_secs(6))
+        .expect("the lookup started");
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(3));
+        let _ = release.send(());
+    });
+    let started = Instant::now();
+    drop(watch);
+    let waited = started.elapsed();
+    releaser.join().unwrap();
+    assert!(
+        waited < Duration::from_secs(2),
+        "the drop waited {waited:?} for the lookup"
+    );
+    wait_for("the thread ended after its lookup", || {
+        worker.upgrade().is_none()
+    });
+    assert_eq!(sleeper.pid(), None, "a child was started after the stop");
+}
+
+/// The first answer's time starts before the lookup: a lookup held past it
+/// leaves the switch unavailable, not pending, while it is still held, and
+/// no read starts once it returns.
+#[test]
+fn a_held_lookup_counts_against_the_first_answers_time() {
+    let sleeper = Sleeper::new();
+    let command = sleeper.command();
+    let (release, held) = mpsc::channel::<()>();
+    let watch = LocalWatch::start_with(
+        move || {
+            let _ = held.recv_timeout(Duration::from_secs(20));
+            Some(command)
+        },
+        Arc::new(|| {}),
+        Duration::from_secs(30),
+        Duration::from_millis(300),
+    );
+    assert_eq!(watch.reading(), Reading::Pending);
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        watch.reading(),
+        Reading::Unavailable,
+        "the wait for a first answer outlasted its time"
+    );
+    release.send(()).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(sleeper.pid(), None, "a read started after its time ran out");
+    assert_eq!(watch.reading(), Reading::Unavailable);
 }
