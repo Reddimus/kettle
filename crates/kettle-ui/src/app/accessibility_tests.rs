@@ -3004,7 +3004,7 @@ fn quick_select_labels_offer_a_press_that_acts_on_their_target() {
     );
     let targets = ws.hint_state.as_ref().unwrap().0.clone();
     for (index, (label, live)) in [("aa", true), ("ab", true), ("ba", false)].into_iter().enumerate() {
-        let id = super::accessibility_hint_id(&targets[index]);
+        let id = super::accessibility_hint_id(&targets[index], false);
         let node = &projection.nodes.iter().find(|(at, _)| *at == id).unwrap().1;
         assert_eq!(node.supports_action(Action::Click), live, "{label}");
         assert_eq!(
@@ -3020,7 +3020,7 @@ fn quick_select_labels_offer_a_press_that_acts_on_their_target() {
     ] {
         assert!(super::accessibility_hint_target(stale, &ws).is_none());
     }
-    let first = super::accessibility_hint_id(&targets[0]);
+    let first = super::accessibility_hint_id(&targets[0], false);
     ws.hint_state = None;
     assert!(super::accessibility_hint_target(first, &ws).is_none());
     let handler = production_source()
@@ -3676,7 +3676,7 @@ fn accessibility_requests_are_bound_to_their_targets() {
         1.0,
         &EN_TEXT,
     );
-    let id = super::accessibility_hint_id(&first);
+    let id = super::accessibility_hint_id(&first, false);
     let node = &projection.nodes.iter().find(|(at, _)| *at == id).expect("the bound label").1;
     assert!(node.supports_action(accesskit::Action::Click));
     let list = &projection
@@ -3929,7 +3929,7 @@ fn the_accessibility_key_follows_quick_select_targets() {
         .split_whitespace()
         .collect::<String>();
     assert!(key.contains(
-        "ifletSome((targets,_))=&ws.hint_state{fortargetintargets{accessibility_hint_id(target).hash(&muthasher);}}"
+        "ifletSome((targets,_))=&ws.hint_state{fortargetintargets{accessibility_hint_id(target,ws.hint_preview).hash(&muthasher);}}"
     ));
 }
 
@@ -4080,7 +4080,7 @@ fn the_window_quick_select_tree_stays_valid_at_65536_targets() {
     let children: Vec<_> = list.children().map(|child| child.id()).collect();
     assert_eq!(children.len(), count - 1);
     for (index, target) in targets.iter().take(count - 1).enumerate() {
-        let id = super::accessibility_hint_id(target);
+        let id = super::accessibility_hint_id(target, false);
         let node = state
             .node_by_tree_local_id(id, accesskit::TreeId::ROOT)
             .unwrap_or_else(|| panic!("label {index} is bound"));
@@ -4088,7 +4088,7 @@ fn the_window_quick_select_tree_stays_valid_at_65536_targets() {
     }
     assert!(
         state
-            .node_by_tree_local_id(super::accessibility_hint_id(&targets[count - 1]), accesskit::TreeId::ROOT)
+            .node_by_tree_local_id(super::accessibility_hint_id(&targets[count - 1], false), accesskit::TreeId::ROOT)
             .is_none(),
         "the label past the cap is left out"
     );
@@ -4311,5 +4311,35 @@ fn the_change_button_is_unavailable_while_a_chord_is_captured() {
             |_, _, _, _| changed = true,
         );
         assert_eq!((handled, changed), (!capturing, !capturing));
+    }
+}
+
+/// A quick-select label is bound to the purpose its quick select was opened
+/// for too: a press queued on a label of a plain quick select names nothing
+/// once a quick select for previews shows the same label on the same text,
+/// as acting on it would preview instead of open or copy, and the other way
+/// round.
+#[test]
+fn quick_select_labels_are_bound_to_their_quick_selects_purpose() {
+    let target = super::HintTarget {
+        row: 1,
+        col: 2,
+        label: "a".into(),
+        pane: 1,
+        what: super::HintWhat::Text {
+            kind: kettle_core::hints::Kind::Url,
+            text: "https://x.test".into(),
+            bounded: true,
+        },
+    };
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.hint_state = Some((vec![target.clone()], String::new()));
+    for preview in [false, true] {
+        ws.hint_preview = preview;
+        let here = super::accessibility_hint_id(&target, preview);
+        let there = super::accessibility_hint_id(&target, !preview);
+        assert_ne!(here, there);
+        assert!(super::accessibility_hint_target(here, &ws).is_some(), "preview {preview}");
+        assert!(super::accessibility_hint_target(there, &ws).is_none(), "preview {preview}");
     }
 }

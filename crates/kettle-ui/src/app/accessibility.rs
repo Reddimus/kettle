@@ -1066,7 +1066,7 @@ impl App {
         // the last one's did, over other text, still republishes the tree.
         if let Some((targets, _)) = &ws.hint_state {
             for target in targets {
-                accessibility_hint_id(target).hash(&mut hasher);
+                accessibility_hint_id(target, ws.hint_preview).hash(&mut hasher);
             }
         }
         if let Some(toast) = &overlay.update_toast {
@@ -2133,15 +2133,24 @@ pub(super) fn accessibility_picker_choose_id(option: NodeId) -> NodeId {
 /// The node id of a quick-select label: bound to the label, the pane and
 /// cell it sits on and what it points at, so a label of an earlier quick
 /// select, or of text that has since moved, names nothing. A card's target
-/// is its cell, never its nonce.
-pub(super) fn accessibility_hint_id(target: &HintTarget) -> NodeId {
+/// is its cell, never its nonce. `preview` is the quick select's purpose
+/// (`WindowState::hint_preview`): a label of one opened to preview is not
+/// one of a plain quick select's, as acting on it does something else.
+pub(super) fn accessibility_hint_id(target: &HintTarget, preview: bool) -> NodeId {
     let what = match &target.what {
         HintWhat::Text { kind, text, .. } => (*kind as u8, text.as_str()),
         HintWhat::Card(_) => (u8::MAX, ""),
     };
     accessibility_bound_id(
         BoundTarget::Hint,
-        (&target.label, target.pane, target.row, target.col, what),
+        (
+            &target.label,
+            target.pane,
+            target.row,
+            target.col,
+            what,
+            preview,
+        ),
     )
 }
 
@@ -2639,7 +2648,7 @@ pub(super) fn accessibility_hint_target(id: NodeId, ws: &WindowState) -> Option<
     let (targets, typed) = ws.hint_state.as_ref()?;
     targets
         .iter()
-        .find(|target| accessibility_hint_id(target) == id)
+        .find(|target| accessibility_hint_id(target, ws.hint_preview) == id)
         .filter(|target| target.label.starts_with(typed.as_str()))
         .cloned()
 }
@@ -2652,6 +2661,7 @@ fn bind_hint_accessibility(
     projection: &mut ModalAccessibilityProjection,
     overlay: &Overlay,
     targets: &[HintTarget],
+    preview: bool,
 ) {
     let at: std::collections::HashMap<NodeId, usize> = projection
         .nodes
@@ -2678,7 +2688,7 @@ fn bind_hint_accessibility(
             .filter(|target| target.label == hint.label)
         {
             Some(target) => {
-                *id = accessibility_hint_id(target);
+                *id = accessibility_hint_id(target, preview);
                 renamed.insert(place, *id);
             }
             None => node.remove_action(AccessibilityAction::Click),
@@ -3278,7 +3288,7 @@ pub(super) fn modal_accessibility_projection_for_window(
     let mut projection =
         modal_accessibility_projection(overlay, surface, metrics, scale_factor, tr);
     if let Some((targets, _)) = ws.hint_state.as_ref() {
-        bind_hint_accessibility(&mut projection, overlay, targets);
+        bind_hint_accessibility(&mut projection, overlay, targets, ws.hint_preview);
     }
     // While a shortcut row captures a chord, keys go to the capture and
     // the Change button's press is refused, so it shows as unavailable.

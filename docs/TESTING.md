@@ -3525,6 +3525,9 @@ speech:
   narrow for the Reset chip, AccessKit's consumer hit test on the value control
   finds the Change button. Reset stays in the tree as a zero-width line at the
   control's left edge.
+- `quick_select_labels_are_bound_to_their_quick_selects_purpose`: a label of
+  a plain quick select names nothing in a quick select for previews over the
+  same text, and the other way round.
 - `the_window_quick_select_tree_stays_valid_at_65536_targets` binds 65,536
   quick-select labels through the window projection and hands the tree to
   AccessKit's consumer. The list keeps its id and holds the 65,535 bound

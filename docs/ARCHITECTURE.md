@@ -2105,7 +2105,8 @@ It is bound before the label is fitted to the panel, so two long names that fit
 to one painted label stay two results, and the option and its Choose button
 are named with the whole name (`ContextMenuRow::a11y_name`). A
 quick-select label's from its label, pane, cell and text (a card's cell, never
-its nonce; `bind_hint_accessibility` gives the window's labels these ids), and
+its nonce) and whether its quick select is for previews
+(`bind_hint_accessibility` gives the window's labels these ids), and
 the hovered link's from its status target and painted bounds. Adapters queue
 requests against the tree they last received, so a request that arrives after
 the view changed names a node the current view does not hold and is dropped,
