@@ -2087,8 +2087,10 @@ on a `Click`: AccessKit's adapters turn selecting a selectable item (macOS
 `DeselectChild` and `DeselectSelectedChild`, UIA `SelectionItem`, which needs
 no Click support) into the same `Click` a press sends, with nothing to tell
 them apart. Every enabled picker option has Focus and Click, and both only
-highlight it, as the arrow keys do; the theme picker previews it as they do
-(`select_picker_option`). The picker acts on its highlighted result only from
+highlight it, as the arrow keys do; the theme picker previews it as they do,
+at once, since the selection takes the keyboard's bookkeeping
+(`select_accessible_picker_option` calls `note_picker_keys`), so a hover
+preview the pointer left pending never holds it back. The picker acts on its highlighted result only from
 its Choose button ("Choose Split right"), a `Button` with no selected state
 beside the list, bound to that result and painted nowhere, as a zero-width
 line at the row's end: its Click gives the picker its own Enter
@@ -2096,7 +2098,8 @@ line at the row's end: its Click gives the picker its own Enter
 the SSH launcher's Save and Remove still open their own steps. Settings
 follows the same rule: Focus and Click on a row only select it, and the
 selected row's Change button (bound to the row's category and label, over its
-painted control) changes it through `settings_adjust` as Space does, beside
+painted control) changes it through `settings_adjust` as a left-click on the
+row does, beside
 the Reset button.
 `accessibility_picker_request` maps a request to the value the picker's
 selection holds (a command for the palette, a row elsewhere). Each
@@ -2108,10 +2111,16 @@ the pointer through `open_pane_link`, as the click its status names does.
 
 A node a screen reader can act on is bound to its target, not to its place:
 its AccessKit id is a hash of the target (`accessibility_bound_id`), above
-every modal kind's ids. A picker option's id comes from its label and how many
-options above it share that label (`accessibility_picker_option_ids`), a
+every modal kind's ids. A picker option's id comes from what it acts on, as
+its builder names it in `ContextMenuRow::a11y_key` (the command, the layout,
+the theme, the SSH row's kind and host or target), else from its whole name,
+and how many options above it share that (`accessibility_picker_option_ids`).
+It is bound before the label is fitted to the panel, so two long names that fit
+to one painted label stay two results, and the option and its Choose button
+are named with the whole name (`ContextMenuRow::a11y_name`). A
 quick-select label's from its label, pane, cell and text (a card's cell, never
-its nonce; `bind_hint_accessibility` gives the window's labels these ids), and
+its nonce) and whether its quick select is for previews
+(`bind_hint_accessibility` gives the window's labels these ids), and
 the hovered link's from its status target and painted bounds. Adapters queue
 requests against the tree they last received, so a request that arrives after
 the view changed names a node the current view does not hold and is dropped,

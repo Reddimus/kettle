@@ -1113,6 +1113,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Screen readers can open the link under the pointer by pressing it, as a
   Ctrl or Cmd click does.
 
+- Screen readers hear a picker result's whole name when the panel is too
+  narrow to show it.
+
 - Screen readers treat the command palette, the pickers, Settings and title
   editing as modal dialogs, as they already treated confirmations.
 
@@ -1127,7 +1130,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - Selecting a Settings row with a screen reader no longer changes its value:
   the platforms send selection as a press. The row's Change button changes it,
-  as Space does.
+  as a click on the row does.
 
 - Screen readers find only tabs in the tab list; New Tab, the New Tab menu,
   Settings and the header buttons are in a toolbar beside it.

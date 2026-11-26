@@ -970,7 +970,7 @@ impl App {
         // the last one's did, over other text, still republishes the tree.
         if let Some((targets, _)) = &ws.hint_state {
             for target in targets {
-                accessibility_hint_id(target).hash(&mut hasher);
+                accessibility_hint_id(target, ws.hint_preview).hash(&mut hasher);
             }
         }
         if let Some(toast) = &overlay.update_toast {
@@ -1238,18 +1238,9 @@ impl App {
     /// selection, as the arrow keys make it, and the theme picker previews
     /// it as they do. Nothing runs.
     fn select_picker_option(&mut self, ws: &mut WindowState, selected: usize) {
-        let selection = if let Some((_, selection)) = ws.palette_input.as_mut() {
-            selection
-        } else if let Some(state) = ws.theme_picker_input.as_mut() {
-            &mut state.selected
-        } else if let Some((_, selection)) = ws.layout_picker_input.as_mut() {
-            selection
-        } else if let Some((_, selection)) = ws.ssh_input.as_mut() {
-            selection
-        } else {
+        if !select_accessible_picker_option(ws, selected) {
             return;
-        };
-        *selection = selected;
+        }
         // Keys get this after every window event; a screen reader's request
         // arrives as a user event instead.
         self.sync_theme_preview(ws);
@@ -1960,28 +1951,76 @@ pub(super) fn accessibility_bound_class(id: NodeId, class: BoundTarget) -> bool 
         == (ACCESSIBILITY_BOUND_ID_MASK >> ACCESSIBILITY_BOUND_KEY_BITS) | class as u64
 }
 
+/// What a screen reader hears as a picker row's name: its whole name, not
+/// the label fitted to the panel.
+pub(super) fn picker_row_name(row: &ContextMenuRow) -> &str {
+    row.a11y_name.as_deref().unwrap_or(&row.label)
+}
+
 /// The node id of each of a picker's `rows` (of `kind`), `None` for headings
-/// and separators: bound to the row's label and how many option rows above it
-/// share that label, so filtering keeps an option's id and never gives it to
-/// another result.
+/// and separators: bound to what the row acts on (`ContextMenuRow::a11y_key`,
+/// else its whole name) and how many option rows above it share that, so
+/// filtering keeps an option's id and never gives it to another result, even
+/// one whose fitted label is the same.
 pub(super) fn accessibility_picker_option_ids(
     kind: u64,
     rows: &[ContextMenuRow],
 ) -> Vec<Option<NodeId>> {
-    let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    let mut seen: std::collections::HashMap<(bool, &str), usize> = std::collections::HashMap::new();
     rows.iter()
         .map(|row| {
             (!row.heading && !row.separator).then(|| {
-                let occurrence = seen.entry(row.label.as_str()).or_default();
-                let id = accessibility_bound_id(
-                    BoundTarget::PickerOption,
-                    (kind, &row.label, *occurrence),
-                );
+                let key = match row.a11y_key.as_deref() {
+                    Some(key) => (true, key),
+                    None => (false, picker_row_name(row)),
+                };
+                let occurrence = seen.entry(key).or_default();
+                let id =
+                    accessibility_bound_id(BoundTarget::PickerOption, (kind, key, *occurrence));
                 *occurrence += 1;
                 id
             })
         })
         .collect()
+}
+
+/// What an SSH launcher row acts on (`ContextMenuRow::a11y_key`): the host
+/// it connects to or removes, the target it connects to or saves. A
+/// placeholder acts on nothing.
+pub(super) fn ssh_row_a11y_key(
+    row: SshRow,
+    query: &str,
+    hosts: &[(String, String)],
+    imported: &[String],
+) -> Option<String> {
+    let host = |index: usize| {
+        hosts
+            .get(index)
+            .map(|(name, target)| format!("{name}\0{target}"))
+    };
+    match row {
+        SshRow::Configured(index) => host(index).map(|host| format!("host\0{host}")),
+        SshRow::Imported(index) => imported
+            .get(index)
+            .map(|alias| format!("imported\0{alias}")),
+        SshRow::ConnectTyped => Some(format!("connect\0{}", query.trim())),
+        SshRow::SaveTyped => Some(format!("save\0{}", query.trim())),
+        SshRow::Remove(index) => host(index).map(|host| format!("remove\0{host}")),
+        SshRow::Placeholder => None,
+    }
+}
+
+/// The key that changes a Settings row of `control` as its Change button
+/// does: Space for a switch, a choice or a text row. `None` for any other
+/// value row: a number there steps with the arrows, and Space leaves it.
+pub(super) fn settings_change_key(control: kettle_render::SettingsControl) -> Option<&'static str> {
+    use kettle_render::SettingsControl;
+    match control {
+        SettingsControl::Toggle(_) | SettingsControl::Choice | SettingsControl::Text => {
+            Some("Space")
+        }
+        SettingsControl::Value => None,
+    }
 }
 
 /// The id of the Change button for the Settings `row`: bound to its
@@ -1998,15 +2037,24 @@ pub(super) fn accessibility_picker_choose_id(option: NodeId) -> NodeId {
 /// The node id of a quick-select label: bound to the label, the pane and
 /// cell it sits on and what it points at, so a label of an earlier quick
 /// select, or of text that has since moved, names nothing. A card's target
-/// is its cell, never its nonce.
-pub(super) fn accessibility_hint_id(target: &HintTarget) -> NodeId {
+/// is its cell, never its nonce. `preview` is the quick select's purpose
+/// (`WindowState::hint_preview`): a label of one opened to preview is not
+/// one of a plain quick select's, as acting on it does something else.
+pub(super) fn accessibility_hint_id(target: &HintTarget, preview: bool) -> NodeId {
     let what = match &target.what {
         HintWhat::Text { kind, text, .. } => (*kind as u8, text.as_str()),
         HintWhat::Card(_) => (u8::MAX, ""),
     };
     accessibility_bound_id(
         BoundTarget::Hint,
-        (&target.label, target.pane, target.row, target.col, what),
+        (
+            &target.label,
+            target.pane,
+            target.row,
+            target.col,
+            what,
+            preview,
+        ),
     )
 }
 
@@ -2411,7 +2459,7 @@ pub(super) fn card_accessibility_node(
 /// Focus or Click on a row only selects it: the adapters send that Click
 /// when a screen reader selects the row too. Only a Click on the selected
 /// row's Change button (`change`: its id and the row's field) changes it,
-/// through `adjust`, as Space does.
+/// through `adjust`, as a left-click on the row does.
 pub(super) fn handle_accessibility_action(
     ws: &mut WindowState,
     request: &ActionRequest,
@@ -2504,7 +2552,7 @@ pub(super) fn accessibility_hint_target(id: NodeId, ws: &WindowState) -> Option<
     let (targets, typed) = ws.hint_state.as_ref()?;
     targets
         .iter()
-        .find(|target| accessibility_hint_id(target) == id)
+        .find(|target| accessibility_hint_id(target, ws.hint_preview) == id)
         .filter(|target| target.label.starts_with(typed.as_str()))
         .cloned()
 }
@@ -2517,40 +2565,51 @@ fn bind_hint_accessibility(
     projection: &mut ModalAccessibilityProjection,
     overlay: &Overlay,
     targets: &[HintTarget],
+    preview: bool,
 ) {
-    let mut renamed = Vec::new();
-    for (index, hint) in overlay.hint_labels.iter().enumerate() {
+    let at: std::collections::HashMap<NodeId, usize> = projection
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(position, (id, _))| (*id, position))
+        .collect();
+    let mut renamed: std::collections::HashMap<NodeId, NodeId> = std::collections::HashMap::new();
+    // The projection holds only the labels its ids can number; a place past
+    // them would be another node's id (the list's own, at 65,536 labels).
+    for (index, hint) in overlay
+        .hint_labels
+        .iter()
+        .enumerate()
+        .take(MODAL_INDEXED_ROWS)
+    {
         let place = accessibility_modal_id(3, index + 1);
-        let Some((id, node)) = projection.nodes.iter_mut().find(|(id, _)| *id == place) else {
+        let Some(&position) = at.get(&place) else {
             continue;
         };
+        let (id, node) = &mut projection.nodes[position];
         match targets
             .get(index)
             .filter(|target| target.label == hint.label)
         {
             Some(target) => {
-                *id = accessibility_hint_id(target);
-                renamed.push((place, *id));
+                *id = accessibility_hint_id(target, preview);
+                renamed.insert(place, *id);
             }
             None => node.remove_action(AccessibilityAction::Click),
         }
     }
     let container = accessibility_modal_id(3, 0);
-    if let Some((_, list)) = projection.nodes.iter_mut().find(|(id, _)| *id == container) {
+    if let Some(&position) = at.get(&container) {
+        let list = &mut projection.nodes[position].1;
         let children: Vec<NodeId> = list
             .children()
             .iter()
-            .map(|child| {
-                renamed
-                    .iter()
-                    .find(|(place, _)| place == child)
-                    .map_or(*child, |(_, bound)| *bound)
-            })
+            .map(|child| renamed.get(child).copied().unwrap_or(*child))
             .collect();
         list.set_children(children);
     }
     if let Some(focus) = projection.focus.as_mut()
-        && let Some((_, bound)) = renamed.iter().find(|(place, _)| place == focus)
+        && let Some(bound) = renamed.get(focus)
     {
         *focus = *bound;
     }
@@ -2787,6 +2846,28 @@ pub(super) const PICKER_CONTRAST_A11Y_INDEX: usize = PICKER_FOOTER_A11Y_INDEX - 
 /// write. It is the lowest of these fixed indices.
 pub(super) const PICKER_STATUS_A11Y_INDEX: usize = PICKER_FOOTER_A11Y_INDEX - 5;
 
+/// Make `selected` the open picker's selection for a screen reader's
+/// request, as a key does: the keyboard's bookkeeping (`note_picker_keys`)
+/// drops what the pointer left pending, a cancelled hover preview among it, so
+/// the theme picker previews the new selection at once. `false` when no
+/// picker is open.
+pub(super) fn select_accessible_picker_option(ws: &mut WindowState, selected: usize) -> bool {
+    let selection = if let Some((_, selection)) = ws.palette_input.as_mut() {
+        selection
+    } else if let Some(state) = ws.theme_picker_input.as_mut() {
+        &mut state.selected
+    } else if let Some((_, selection)) = ws.layout_picker_input.as_mut() {
+        selection
+    } else if let Some((_, selection)) = ws.ssh_input.as_mut() {
+        selection
+    } else {
+        return false;
+    };
+    *selection = selected;
+    note_picker_keys(ws);
+    true
+}
+
 /// The kind of the picker that has the keyboard, as `picker_pointer` finds
 /// it, while no menu or confirmation covers it.
 pub(super) fn accessibility_picker_kind(ws: &WindowState) -> Option<u64> {
@@ -2932,7 +3013,7 @@ fn push_picker_accessibility(
                 continue;
             };
             let mut option = Node::new(Role::ListBoxOption);
-            option.set_label(row.label.clone());
+            option.set_label(picker_row_name(row));
             if let Some(rect) = menu.visible_row_rect(index) {
                 option.set_bounds(bounds(rect));
             } else {
@@ -2998,7 +3079,7 @@ fn push_picker_accessibility(
     {
         let choose_id = accessibility_picker_choose_id(option);
         let mut button = Node::new(Role::Button);
-        button.set_label(tr.picker_a11y_choose(&menu.rows[row].label));
+        button.set_label(tr.picker_a11y_choose(picker_row_name(&menu.rows[row])));
         button.add_action(AccessibilityAction::Click);
         match menu.visible_row_rect(row) {
             Some((x, y, w, h)) => button.set_bounds(bounds((x + w, y, 0.0, h))),
@@ -3111,7 +3192,18 @@ pub(super) fn modal_accessibility_projection_for_window(
     let mut projection =
         modal_accessibility_projection(overlay, surface, metrics, scale_factor, tr);
     if let Some((targets, _)) = ws.hint_state.as_ref() {
-        bind_hint_accessibility(&mut projection, overlay, targets);
+        bind_hint_accessibility(&mut projection, overlay, targets, ws.hint_preview);
+    }
+    // While a shortcut row captures a chord, keys go to the capture and
+    // the Change button's press is refused, so it shows as unavailable.
+    if ws.settings_nav.as_ref().is_some_and(|nav| nav.capturing)
+        && let Some((_, change)) = projection
+            .nodes
+            .iter_mut()
+            .find(|(id, _)| accessibility_bound_class(*id, BoundTarget::SettingsChange))
+    {
+        change.set_disabled();
+        change.remove_action(AccessibilityAction::Click);
     }
     let Some(status) = palette_profile_accessibility_status(overlay, ws, tr) else {
         return projection;
@@ -3609,7 +3701,7 @@ pub(super) fn modal_accessibility_projection(
         projection.nodes.push((list_id, list));
         let mut dialog_children = vec![search_id, list_id];
         // One Change button, for the selected row: the node that changes it,
-        // as Space does. A row has a selected state, and the adapters turn
+        // as a left-click on the row does. A row has a selected state, and the adapters turn
         // selecting it into the Click a press sends, so a row's own Click
         // only selects it. The button has none, is bound to the row and
         // covers its painted control. The inline editor, when open, is the
@@ -3626,7 +3718,12 @@ pub(super) fn modal_accessibility_projection(
             let id = accessibility_settings_change_id(row);
             let mut button = Node::new(Role::Button);
             button.set_label(tr.settings_a11y_change(&row.label));
-            button.set_keyboard_shortcut("Space");
+            // Space does the same to a switch, a choice or a text row. A
+            // number steps with the arrows, not Space, and another value row
+            // may be a number, so it names no key.
+            if let Some(key) = settings_change_key(row.control) {
+                button.set_keyboard_shortcut(key);
+            }
             button.add_action(AccessibilityAction::Click);
             match layout.rows.iter().find(|r| r.index == settings.focused_row) {
                 Some(geometry) => button.set_bounds(bounds(geometry.chip_rect)),
@@ -3654,11 +3751,15 @@ pub(super) fn modal_accessibility_projection(
                 button.set_disabled();
             }
             match layout.rows.iter().find(|r| r.index == settings.focused_row) {
+                // Where its chip is painted. A panel too narrow for the chip
+                // paints none: Reset is then a line at the value control's
+                // left edge, where the chip sits when it fits, so exploring
+                // by pointer finds the Change button over the control and
+                // navigation still reaches Reset.
                 Some(geometry) => {
+                    let (x, y, _, h) = geometry.chip_rect;
                     button.set_bounds(bounds(
-                        geometry
-                            .reset
-                            .map_or(geometry.chip_rect, |reset| reset.rect),
+                        geometry.reset.map_or((x, y, 0.0, h), |reset| reset.rect),
                     ));
                 }
                 None => button.set_hidden(),

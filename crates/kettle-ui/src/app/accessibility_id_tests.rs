@@ -148,17 +148,20 @@ fn accessibility_ids_do_not_collide() {
     }
     add(
         "hint".into(),
-        accessibility_hint_id(&HintTarget {
-            row: 0,
-            col: 0,
-            label: "a".into(),
-            pane: 1,
-            what: HintWhat::Text {
-                kind: kettle_core::hints::Kind::Url,
-                text: "https://x.test".into(),
-                bounded: true,
+        accessibility_hint_id(
+            &HintTarget {
+                row: 0,
+                col: 0,
+                label: "a".into(),
+                pane: 1,
+                what: HintWhat::Text {
+                    kind: kettle_core::hints::Kind::Url,
+                    text: "https://x.test".into(),
+                    bounded: true,
+                },
             },
-        }),
+            false,
+        ),
     );
     add(
         "link".into(),

@@ -566,6 +566,7 @@ pub(super) fn command_picker_list(
                         .collect()
                 }),
                 label: command.label.shown(tr).to_string(),
+                a11y_key: Some(format!("{:?}", command.action)),
                 separator: false,
                 enabled: true,
                 description: kettle_config::palette::description(&command.action)
@@ -662,6 +663,7 @@ pub(super) fn layout_picker_list(
             swatches: None,
             matched_chars: None,
             label: layouts[index].clone(),
+            a11y_key: Some(layouts[index].clone()),
             separator: false,
             enabled: true,
             hint: String::new(),
@@ -818,6 +820,7 @@ pub(super) fn theme_picker_list(
                 ),
                 matched_chars: None,
                 label: tr.theme_name(name).to_string(),
+                a11y_key: Some(name.to_string()),
                 separator: false,
                 enabled: true,
                 hint: format!("{tick}{appearance}"),
@@ -1194,6 +1197,11 @@ pub(super) fn ssh_picker_list(
             SshRow::Remove(index) => {
                 row(tr.picker_ssh_remove(&hosts[index].0), String::new(), true)
             }
+        })
+        .zip(&rows)
+        .map(|(mut built, entry)| {
+            built.a11y_key = ssh_row_a11y_key(*entry, query, hosts, imported);
+            built
         })
         .collect();
     PickerList {
@@ -1609,7 +1617,13 @@ pub(super) fn picker_context_menu_at(
         }
     }
     for row in &mut list.rows {
+        let built = row.a11y_name.is_none().then(|| row.label.clone());
         fit_context_menu_row(row, max_columns);
+        // A screen reader still hears the whole name.
+        row.a11y_name = row
+            .a11y_name
+            .take()
+            .or(built.filter(|built| *built != row.label));
     }
     let (_, content_h) = kettle_render::menu::picker_scroll_content(height);
     let scroll_offset = picker_scroll_offset_from(

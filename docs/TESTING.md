@@ -3554,6 +3554,26 @@ speech:
   nothing. `settings_accessibility_click_dispatches_configure_and_retry` checks
   that the Change button, not the row, reaches the global hotkey's configure
   and retry.
+- `an_accessibility_selection_previews_its_theme_after_a_held_hover`: after
+  the pointer leaves a theme's row before its preview is due, a screen
+  reader's selection of another theme still previews it at once.
+- `the_change_button_names_space_only_where_space_changes_the_row`: the
+  Change button names Space as its key on a switch, a choice and a text row,
+  and no key on a value row, which may be a number that Space leaves alone.
+- `the_change_button_is_unavailable_while_a_chord_is_captured`: in the window
+  projection the Change button is disabled and offers no press while a
+  shortcut row captures a chord, and is available again afterwards.
+- `an_unpainted_reset_leaves_the_value_control_to_change`: in a panel too
+  narrow for the Reset chip, AccessKit's consumer hit test on the value control
+  finds the Change button. Reset stays in the tree as a zero-width line at the
+  control's left edge.
+- `quick_select_labels_are_bound_to_their_quick_selects_purpose`: a label of
+  a plain quick select names nothing in a quick select for previews over the
+  same text, and the other way round.
+- `the_window_quick_select_tree_stays_valid_at_65536_targets` binds 65,536
+  quick-select labels through the window projection and hands the tree to
+  AccessKit's consumer. The list keeps its id and holds the 65,535 bound
+  labels the projection numbers.
 - `indexed_modal_lists_stop_short_of_the_next_kinds_ids`: a 70,000-row
   context menu and quick select keep 65,535 rows each in the tree, every id
   distinct, where row 65,535 of the menu would have taken the quick-select
@@ -3564,6 +3584,10 @@ speech:
 - `a_hovered_link_offers_a_press_that_opens_it`: the hovered link's node has
   a Click action that opens the link under the pointer through
   `open_pane_link`. Its status text has none.
+- `picker_options_bind_to_their_result_not_their_fitted_label`: two layouts
+  whose long names fit to one painted label keep separate ids and whole spoken
+  names. After filtering, a Choose press queued for the one filtered out acts
+  on nothing. SSH rows bind to the host or target they act on.
 - `accessibility_requests_are_bound_to_their_targets`: after the layout
   picker is filtered from dev and ops to ops, the id published for dev names
   nothing while ops keeps its id. A quick-select label from an earlier session,

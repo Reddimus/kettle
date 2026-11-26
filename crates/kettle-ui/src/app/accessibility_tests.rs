@@ -3006,7 +3006,7 @@ fn quick_select_labels_offer_a_press_that_acts_on_their_target() {
     );
     let targets = ws.hint_state.as_ref().unwrap().0.clone();
     for (index, (label, live)) in [("aa", true), ("ab", true), ("ba", false)].into_iter().enumerate() {
-        let id = super::accessibility_hint_id(&targets[index]);
+        let id = super::accessibility_hint_id(&targets[index], false);
         let node = &projection.nodes.iter().find(|(at, _)| *at == id).unwrap().1;
         assert_eq!(node.supports_action(Action::Click), live, "{label}");
         assert_eq!(
@@ -3022,7 +3022,7 @@ fn quick_select_labels_offer_a_press_that_acts_on_their_target() {
     ] {
         assert!(super::accessibility_hint_target(stale, &ws).is_none());
     }
-    let first = super::accessibility_hint_id(&targets[0]);
+    let first = super::accessibility_hint_id(&targets[0], false);
     ws.hint_state = None;
     assert!(super::accessibility_hint_target(first, &ws).is_none());
     let handler = production_source()
@@ -3678,7 +3678,7 @@ fn accessibility_requests_are_bound_to_their_targets() {
         1.0,
         &EN_TEXT,
     );
-    let id = super::accessibility_hint_id(&first);
+    let id = super::accessibility_hint_id(&first, false);
     let node = &projection.nodes.iter().find(|(at, _)| *at == id).expect("the bound label").1;
     assert!(node.supports_action(accesskit::Action::Click));
     let list = &projection
@@ -3931,6 +3931,417 @@ fn the_accessibility_key_follows_quick_select_targets() {
         .split_whitespace()
         .collect::<String>();
     assert!(key.contains(
-        "ifletSome((targets,_))=&ws.hint_state{fortargetintargets{accessibility_hint_id(target).hash(&muthasher);}}"
+        "ifletSome((targets,_))=&ws.hint_state{fortargetintargets{accessibility_hint_id(target,ws.hint_preview).hash(&muthasher);}}"
     ));
+}
+
+/// A picker option and its Choose button are bound to what the row acts on,
+/// before its label is fitted to the panel. Two layouts whose long names fit
+/// to one painted label keep apart: each has its own id and is named in full,
+/// so filtering to one never hands it the other's id, and a Choose press
+/// queued for the one filtered out acts on nothing. SSH rows bind to the host
+/// or target they act on.
+#[test]
+fn picker_options_bind_to_their_result_not_their_fitted_label() {
+    use super::accessibility::PickerRequest;
+    let prefix = "shared-prefix-".repeat(5);
+    let names = [format!("{prefix}dev"), format!("{prefix}ops")];
+    let menu = |query: &str| {
+        picker_context_menu(
+            layout_picker_list(query, 0, &names, &EN_TEXT),
+            (800.0, 820.0),
+            (8.0, 16.0),
+            (8.0, 16.0),
+            32.0,
+        )
+        .unwrap()
+    };
+    let both = menu("");
+    assert_eq!(both.rows[0].label, both.rows[1].label, "the two fit to one label");
+    assert_ne!(both.rows[0].label, names[0], "fitted");
+    assert_eq!(super::picker_row_name(&both.rows[0]), names[0]);
+    assert_eq!(super::picker_row_name(&both.rows[1]), names[1]);
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.layout_picker_input = Some((Default::default(), 0));
+    let ids = super::accessibility_picker_option_ids(super::MODAL_KIND_LAYOUTS, &both.rows);
+    let (dev, ops) = (ids[0].unwrap(), ids[1].unwrap());
+    assert_ne!(dev, ops);
+    let overlay = kettle_render::Overlay {
+        layout_picker_query: Some(String::new()),
+        context_menu: Some(both),
+        ..Default::default()
+    };
+    let projection =
+        super::modal_accessibility_projection(&overlay, (800.0, 820.0), (8.0, 16.0), 1.0, &EN_TEXT);
+    let name = |id| {
+        projection
+            .nodes
+            .iter()
+            .find(|(at, _)| *at == id)
+            .and_then(|(_, node)| node.label().map(str::to_string))
+    };
+    assert_eq!(name(dev).as_deref(), Some(names[0].as_str()));
+    assert_eq!(name(ops).as_deref(), Some(names[1].as_str()));
+    let choose_dev = super::accessibility_picker_choose_id(dev);
+    assert_eq!(name(choose_dev), Some(EN_TEXT.picker_a11y_choose(&names[0])));
+    let filtered = menu("ops");
+    assert_eq!(filtered.rows.len(), 1);
+    let after = super::accessibility_picker_option_ids(super::MODAL_KIND_LAYOUTS, &filtered.rows);
+    assert_eq!(after[0], Some(ops), "ops keeps its id");
+    let click = accesskit::Action::Click;
+    assert_eq!(super::accessibility_picker_request(&ws, &filtered, choose_dev, click), None);
+    assert_eq!(super::accessibility_picker_request(&ws, &filtered, dev, click), None);
+    assert_eq!(
+        super::accessibility_picker_request(
+            &ws,
+            &filtered,
+            super::accessibility_picker_choose_id(ops),
+            click
+        ),
+        Some(PickerRequest::Choose(0))
+    );
+    // SSH rows: the host or target each acts on.
+    let hosts = [
+        ("web".to_string(), "me@web.test".to_string()),
+        ("db".to_string(), "me@db.test".to_string()),
+    ];
+    let keys = |query: &str| -> Vec<Option<String>> {
+        ssh_picker_list(query, 0, &hosts, &[], &EN_TEXT)
+            .rows
+            .into_iter()
+            .map(|row| row.a11y_key)
+            .collect()
+    };
+    let save = keys("me@box.test");
+    assert!(save.contains(&Some("save\0me@box.test".into())), "{save:?}");
+    assert!(save.contains(&Some("connect\0me@box.test".into())), "{save:?}");
+    let remove = keys("web");
+    assert!(remove.contains(&Some("host\0web\0me@web.test".into())), "{remove:?}");
+    assert!(remove.contains(&Some("remove\0web\0me@web.test".into())), "{remove:?}");
+    assert_ne!(keys("me@box.test"), keys("me@box2.test"));
+}
+
+/// The window's quick-select projection, labels bound to their targets,
+/// stays a valid tree past what 16-bit places can number: at 65,536 labels
+/// the binder leaves the 65,536th out with the projection, where binding it
+/// would have renamed the list itself, and AccessKit's consumer, as the
+/// adapters use it, takes the tree. Every label in it is bound and the list
+/// holds exactly those.
+#[test]
+fn the_window_quick_select_tree_stays_valid_at_65536_targets() {
+    let count = 1 << 16;
+    let labels: Vec<String> = (0..count).map(|i| format!("h{i}")).collect();
+    let targets: Vec<super::HintTarget> = labels
+        .iter()
+        .enumerate()
+        .map(|(i, label)| super::HintTarget {
+            row: i / 80,
+            col: i % 80,
+            label: label.clone(),
+            pane: 1,
+            what: super::HintWhat::Text {
+                kind: kettle_core::hints::Kind::Url,
+                text: format!("https://{i}.test"),
+                bounded: true,
+            },
+        })
+        .collect();
+    let overlay = kettle_render::Overlay {
+        hint_labels: targets
+            .iter()
+            .map(|target| kettle_render::HintLabel {
+                row: target.row,
+                col: target.col,
+                label: target.label.clone(),
+                dim: false,
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.hint_state = Some((targets.clone(), String::new()));
+    let projection = super::modal_accessibility_projection_for_window(
+        &overlay,
+        &ws,
+        (800.0, 600.0),
+        (8.0, 16.0),
+        1.0,
+        &EN_TEXT,
+    );
+    let list_id = super::accessibility_modal_id(3, 0);
+    assert_eq!(projection.focus, Some(list_id));
+    let tree = accesskit_consumer::Tree::new(
+        super::mouse_override_hint_tests::finished_tree(projection),
+        true,
+    );
+    let state = tree.state();
+    let list = state
+        .node_by_tree_local_id(list_id, accesskit::TreeId::ROOT)
+        .expect("the list keeps its id");
+    assert_eq!(list.role(), accesskit::Role::ListBox);
+    let children: Vec<_> = list.children().map(|child| child.id()).collect();
+    assert_eq!(children.len(), count - 1);
+    for (index, target) in targets.iter().take(count - 1).enumerate() {
+        let id = super::accessibility_hint_id(target, false);
+        let node = state
+            .node_by_tree_local_id(id, accesskit::TreeId::ROOT)
+            .unwrap_or_else(|| panic!("label {index} is bound"));
+        assert_eq!(node.label().as_deref(), Some(target.label.as_str()));
+    }
+    assert!(
+        state
+            .node_by_tree_local_id(super::accessibility_hint_id(&targets[count - 1], false), accesskit::TreeId::ROOT)
+            .is_none(),
+        "the label past the cap is left out"
+    );
+}
+
+/// In a panel too narrow for the Reset chip, the value control belongs to the
+/// Change button: a point on it finds Change, as AccessKit's consumer hit
+/// tests for the adapters, and Reset, painted nowhere, stays in the tree as a
+/// line at the control's left edge, where its chip sits when it fits.
+#[test]
+fn an_unpainted_reset_leaves_the_value_control_to_change() {
+    let settings = kettle_render::SettingsOverlay {
+        categories: vec!["Appearance".into()],
+        rows: vec![kettle_render::SettingsRow {
+            label: "Font size".into(),
+            value: "16 px".into(),
+            reset: Some(true),
+            ..Default::default()
+        }],
+        reset_label: "Reset".into(),
+        reset_name: EN_TEXT.settings_a11y_reset("Font size", "14 px"),
+        ..Default::default()
+    };
+    let surface = (240.0, 480.0);
+    let metrics = (8.4, 17.5);
+    let layout = kettle_render::settings_layout(&settings, metrics, surface, metrics.0, 1.0);
+    let row = &layout.rows[0];
+    assert!(row.reset.is_none(), "the narrow panel paints no Reset chip");
+    let change = super::accessibility_settings_change_id(&settings.rows[0]);
+    let overlay = kettle_render::Overlay {
+        settings: Some(settings),
+        ..Default::default()
+    };
+    let projection = super::modal_accessibility_projection(&overlay, surface, metrics, 1.0, &EN_TEXT);
+    let tree = accesskit_consumer::Tree::new(
+        super::mouse_override_hint_tests::finished_tree(projection),
+        true,
+    );
+    let state = tree.state();
+    let (x, y, w, h) = row.chip_rect;
+    let hit = state
+        .root()
+        .node_at_point(
+            accesskit::Point::new(f64::from(x + w * 0.5), f64::from(y + h * 0.5)),
+            &accesskit_consumer::common_filter,
+        )
+        .expect("something is under the value control");
+    assert_eq!(hit.id(), state.node_by_tree_local_id(change, accesskit::TreeId::ROOT).unwrap().id());
+    let reset = state
+        .node_by_tree_local_id(super::accessibility_settings_reset_id(), accesskit::TreeId::ROOT)
+        .expect("Reset stays in the tree");
+    assert_eq!(
+        accesskit_consumer::common_filter(&reset),
+        accesskit_consumer::FilterResult::Include
+    );
+    assert!(reset.is_clickable(&accesskit_consumer::common_filter));
+    let bounds = reset.data().bounds().unwrap();
+    assert_eq!((bounds.x0, bounds.x1), (f64::from(x), f64::from(x)));
+    assert_eq!((bounds.y0, bounds.y1), (f64::from(y), f64::from(y + h)));
+}
+
+/// A theme a screen reader selects previews at once, as one a key selects
+/// does, even after the pointer left a row before its hover preview was due
+/// (the pointer's preview held): the selection takes the keyboard's
+/// bookkeeping, which drops what the pointer left pending.
+#[test]
+fn an_accessibility_selection_previews_its_theme_after_a_held_hover() {
+    use super::{
+        PickerPointer, apply_picker_pointer, begin_theme_picker, picker_context_menu,
+        theme_picker_list, theme_picker_selection, theme_preview_change,
+    };
+    use crate::window_state::PointerPreview;
+    let tr = kettle_i18n::Translator::default();
+    let cfg = kettle_config::Config {
+        theme_name: "Dracula".into(),
+        ..Default::default()
+    };
+    let mut ws = WindowState::new(0, Mux::new());
+    begin_theme_picker(&mut ws, ("Dracula".into(), cfg.theme.clone()));
+    let state = ws.theme_picker_input.clone().unwrap();
+    let menu = picker_context_menu(
+        theme_picker_list(&state.query, state.selected, &state.opened_on, &tr),
+        (800.0, 600.0),
+        (8.0, 16.0),
+        (8.0, 16.0),
+        0.0,
+    )
+    .unwrap();
+    let row_h = kettle_render::menu::row_height(16.0);
+    let (inset, _) = kettle_render::menu::picker_scroll_content(menu.panel_h_clamped);
+    let row_y = |row: usize| menu.anchor.1 + inset + row_h * ((row - menu.scroll_offset) as f32 + 0.5);
+    let move_to = |ws: &mut WindowState, x: f32, y: f32| {
+        ws.cursor.x = f64::from(x);
+        ws.cursor.y = f64::from(y);
+        apply_picker_pointer(ws, &cfg, &menu, 16.0, PickerPointer::Hover);
+    };
+    // Hover another theme, then leave its row before the preview is due.
+    let hovered = (menu.scroll_offset..menu.rows.len())
+        .find(|&row| row != menu.highlight && menu.visible_row_rect(row).is_some())
+        .unwrap();
+    move_to(&mut ws, menu.anchor.0 + 20.0, row_y(hovered));
+    assert!(matches!(ws.picker_view.pointer_preview, PointerPreview::At(_)));
+    move_to(&mut ws, menu.anchor.0 + 20.0, menu.anchor.1 + menu.panel_h_clamped + 4.0);
+    assert_eq!(ws.picker_view.pointer_preview, PointerPreview::Held);
+    assert!(theme_preview_change(&mut ws, &cfg, &tr).is_none(), "the held hover previews nothing");
+    // A screen reader selects a third theme.
+    let chosen = (menu.scroll_offset..menu.rows.len())
+        .find(|&row| row != menu.highlight && row != hovered && menu.rows[row].enabled)
+        .unwrap();
+    let id = super::accessibility_picker_option_ids(super::MODAL_KIND_THEMES, &menu.rows)[chosen].unwrap();
+    let Some(super::accessibility::PickerRequest::Select(selected)) =
+        super::accessibility_picker_request(&ws, &menu, id, accesskit::Action::Focus)
+    else {
+        panic!("a focus request selects the theme");
+    };
+    assert!(super::select_accessible_picker_option(&mut ws, selected));
+    assert_eq!(ws.picker_view.pointer_preview, PointerPreview::None);
+    let (preview, _) =
+        theme_preview_change(&mut ws, &cfg, &tr).expect("the selected theme previews at once");
+    assert_eq!(
+        Some(preview.as_str()),
+        theme_picker_selection(ws.theme_picker_input.as_ref().unwrap(), &tr)
+    );
+    let select = production_source()
+        .split_once("fn select_picker_option(")
+        .unwrap()
+        .1
+        .split("\n    }\n")
+        .next()
+        .unwrap()
+        .to_string();
+    let bookkeeping = select.find("select_accessible_picker_option(ws, selected)").unwrap();
+    assert!(bookkeeping < select.find("self.sync_theme_preview(ws);").unwrap());
+}
+
+/// The Change button names the key that does what it does only where there
+/// is one: Space changes a switch, a choice and a text row as the button
+/// does, but leaves a number, which steps with the arrows, so a value row,
+/// which may be a number, names no key.
+#[test]
+fn the_change_button_names_space_only_where_space_changes_the_row() {
+    use kettle_render::SettingsControl;
+    for (control, key) in [
+        (SettingsControl::Toggle(true), Some("Space")),
+        (SettingsControl::Choice, Some("Space")),
+        (SettingsControl::Text, Some("Space")),
+        (SettingsControl::Value, None),
+    ] {
+        let row = kettle_render::SettingsRow {
+            label: "Font size".into(),
+            value: "16 px".into(),
+            control,
+            ..Default::default()
+        };
+        let change = super::accessibility_settings_change_id(&row);
+        let overlay = kettle_render::Overlay {
+            settings: Some(kettle_render::SettingsOverlay {
+                categories: vec!["Appearance".into()],
+                rows: vec![row],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let projection =
+            super::modal_accessibility_projection(&overlay, (1280.0, 820.0), (8.4, 17.5), 1.0, &EN_TEXT);
+        let button = &projection.nodes.iter().find(|(id, _)| *id == change).unwrap().1;
+        assert_eq!(button.keyboard_shortcut(), key, "{control:?}");
+    }
+}
+
+/// While a shortcut row captures a chord, its Change button, whose press the
+/// dispatch then refuses, shows as unavailable and offers no press; once the
+/// capture ends it is available again.
+#[test]
+fn the_change_button_is_unavailable_while_a_chord_is_captured() {
+    let row = kettle_render::SettingsRow {
+        label: "New tab".into(),
+        value: "Press a chord".into(),
+        ..Default::default()
+    };
+    let change = super::accessibility_settings_change_id(&row);
+    let overlay = kettle_render::Overlay {
+        settings: Some(kettle_render::SettingsOverlay {
+            categories: vec!["Keybinds".into()],
+            rows: vec![row],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    for capturing in [true, false] {
+        let mut ws = WindowState::new(0, Mux::new());
+        ws.settings_nav = Some(crate::settings::SettingsNav {
+            capturing,
+            ..Default::default()
+        });
+        let projection = super::modal_accessibility_projection_for_window(
+            &overlay,
+            &ws,
+            (1280.0, 820.0),
+            (8.4, 17.5),
+            1.0,
+            &EN_TEXT,
+        );
+        let button = &projection.nodes.iter().find(|(id, _)| *id == change).unwrap().1;
+        assert_eq!(button.is_disabled(), capturing, "capturing {capturing}");
+        assert_eq!(button.supports_action(accesskit::Action::Click), !capturing);
+        // The dispatch refuses it while capturing, as before.
+        let press = accesskit::ActionRequest {
+            action: accesskit::Action::Click,
+            target_tree: accesskit::TreeId::ROOT,
+            target_node: change,
+            data: None,
+        };
+        let mut changed = false;
+        let handled = super::accessibility::handle_accessibility_action(
+            &mut ws,
+            &press,
+            &[Some((0, 0))],
+            Some((change, (0, 0))),
+            |_, _, _, _| changed = true,
+        );
+        assert_eq!((handled, changed), (!capturing, !capturing));
+    }
+}
+
+/// A quick-select label is bound to the purpose its quick select was opened
+/// for too: a press queued on a label of a plain quick select names nothing
+/// once a quick select for previews shows the same label on the same text,
+/// as acting on it would preview instead of open or copy, and the other way
+/// round.
+#[test]
+fn quick_select_labels_are_bound_to_their_quick_selects_purpose() {
+    let target = super::HintTarget {
+        row: 1,
+        col: 2,
+        label: "a".into(),
+        pane: 1,
+        what: super::HintWhat::Text {
+            kind: kettle_core::hints::Kind::Url,
+            text: "https://x.test".into(),
+            bounded: true,
+        },
+    };
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.hint_state = Some((vec![target.clone()], String::new()));
+    for preview in [false, true] {
+        ws.hint_preview = preview;
+        let here = super::accessibility_hint_id(&target, preview);
+        let there = super::accessibility_hint_id(&target, !preview);
+        assert_ne!(here, there);
+        assert!(super::accessibility_hint_target(here, &ws).is_some(), "preview {preview}");
+        assert!(super::accessibility_hint_target(there, &ws).is_none(), "preview {preview}");
+    }
 }

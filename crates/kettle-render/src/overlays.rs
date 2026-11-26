@@ -74,6 +74,14 @@ pub struct ContextMenuRow {
     /// hint: the shortcut in words, then the description. `None` reads the
     /// hint as it is painted.
     pub a11y_description: Option<String>,
+    /// The row's name as built, when fitting the label to the panel
+    /// shortened it: what a screen reader hears. `None` hears `label`.
+    pub a11y_name: Option<String>,
+    /// What the row acts on, as the picker that built it names it: a
+    /// command, a layout, a theme, an SSH row's kind and host. Accessibility
+    /// binds the row's node to it, so rows whose fitted labels match are
+    /// never one result. `None` binds the row by its name.
+    pub a11y_key: Option<String>,
     /// A group heading, such as the empty palette's "Tabs": painted as a
     /// disabled row in secondary text, with a divider above it unless it is
     /// the first row. It is never selected, pressed, or announced as an
