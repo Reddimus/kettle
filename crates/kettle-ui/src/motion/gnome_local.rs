@@ -49,14 +49,17 @@ pub(crate) fn gnome_like(desktop: Option<&OsStr>) -> bool {
     })
 }
 
-/// The first `gsettings` file in the absolute entries of `path` (`PATH`)
-/// that this process may run; relative entries are skipped, and so is a
-/// file it may not run, so one earlier in `PATH` cannot hide a working one.
-pub(crate) fn find_gsettings(path: Option<&OsStr>) -> Option<PathBuf> {
-    std::env::split_paths(path?)
+/// Each `gsettings` file in the absolute entries of `path` (`PATH`) that
+/// this process may run, in order and looked at only as the caller asks
+/// for the next; relative entries are skipped, and so is a file it may not
+/// run, so one earlier in `PATH` cannot hide a working one.
+pub(crate) fn gsettings_candidates(path: Option<&OsStr>) -> impl Iterator<Item = PathBuf> + use<> {
+    let dirs: Vec<PathBuf> =
+        path.map_or_else(Vec::new, |path| std::env::split_paths(path).collect());
+    dirs.into_iter()
         .filter(|dir| dir.is_absolute())
         .map(|dir| dir.join("gsettings"))
-        .find(|file| std::fs::metadata(file).is_ok_and(|meta| meta.is_file()) && runnable(file))
+        .filter(|file| std::fs::metadata(file).is_ok_and(|meta| meta.is_file()) && runnable(file))
 }
 
 /// Whether this process may execute `file`, as the kernel decides it for
@@ -108,25 +111,34 @@ fn ready(pipe: &std::process::ChildStdout) -> std::io::Result<bool> {
     }
 }
 
-/// Run `command` and read the switch from its output: `Some` for a `true`
-/// or `false` answer from a successful run. `None` for anything else, and
-/// once `deadline` passes or `stop` says to; a child it has started is then
-/// killed and reaped, and past either it starts none. Nothing here blocks
-/// on the child.
-pub(crate) fn read(
-    command: &mut Command,
-    deadline: Instant,
-    stop: &mpsc::Receiver<()>,
-) -> Option<bool> {
+/// What one read came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Read {
+    /// The command ran: `Some` for a `true` or `false` answer from a
+    /// successful run, `None` for anything else or one cut short.
+    Ran(Option<bool>),
+    /// The command could not be started: a missing interpreter, a file the
+    /// kernel refuses to run, or any other spawn error.
+    Unstartable,
+    /// The deadline had passed or the stop had come, so nothing started.
+    Late,
+}
+
+/// Run `command` and read the switch from its output. Once `deadline`
+/// passes or `stop` says to, a child it has started is killed and reaped,
+/// and past either it starts none. Nothing here blocks on the child.
+pub(crate) fn read(command: &mut Command, deadline: Instant, stop: &mpsc::Receiver<()>) -> Read {
     if Instant::now() >= deadline || stopped(stop) {
-        return None;
+        return Read::Late;
     }
-    let mut child = command
+    let Ok(mut child) = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .ok()?;
+    else {
+        return Read::Unstartable;
+    };
     let mut output = Vec::new();
     let answer = child.stdout.take().and_then(|mut pipe| {
         let mut buffer = [0; MAX_OUTPUT + 1];
@@ -160,7 +172,7 @@ pub(crate) fn read(
             }
         }
     });
-    match answer {
+    Read::Ran(match answer {
         Some(status) if status.success() => parse(&output),
         Some(_) => None,
         None => {
@@ -168,7 +180,7 @@ pub(crate) fn read(
             let _ = child.wait();
             None
         }
-    }
+    })
 }
 
 /// GNOME's switch as its own thread last read it, again every `REFRESH`.
@@ -197,23 +209,31 @@ impl LocalWatch {
         }
     }
 
-    /// Read the switch on a thread with the command `command` builds there,
-    /// so finding `gsettings` stays off the caller's thread too; with no
-    /// command, or no thread, the switch is unavailable. `wake` runs when
-    /// the reading changes.
-    pub(crate) fn start(
-        command: impl FnOnce() -> Option<Command> + Send + 'static,
-        wake: kettle_core::Waker,
-    ) -> Self {
-        Self::start_with(command, wake, REFRESH, TIMEOUT)
+    /// Read the switch on a thread with the commands `candidates` yields
+    /// there, so finding `gsettings` stays off the caller's thread too. A
+    /// read tries them in order, moving on from one that cannot be started,
+    /// all within its deadline and stop; the first that runs is kept for the
+    /// refreshes until it cannot be started either, and then the search
+    /// runs again. With no candidate, or no thread, the switch is
+    /// unavailable. `wake` runs when the reading changes.
+    pub(crate) fn start<C, I>(candidates: C, wake: kettle_core::Waker) -> Self
+    where
+        C: FnMut() -> I + Send + 'static,
+        I: IntoIterator<Item = Command>,
+    {
+        Self::start_with(candidates, wake, REFRESH, TIMEOUT)
     }
 
-    fn start_with(
-        command: impl FnOnce() -> Option<Command> + Send + 'static,
+    fn start_with<C, I>(
+        mut candidates: C,
         wake: kettle_core::Waker,
         refresh: Duration,
         timeout: Duration,
-    ) -> Self {
+    ) -> Self
+    where
+        C: FnMut() -> I + Send + 'static,
+        I: IntoIterator<Item = Command>,
+    {
         let started = Instant::now();
         let state = Arc::new(AtomicU8::new(PENDING));
         let worker_state = state.clone();
@@ -229,13 +249,30 @@ impl LocalWatch {
             .spawn(move || {
                 let _finished = finished;
                 let mut deadline = started + timeout;
-                let Some(mut command) = command() else {
-                    publish(UNAVAILABLE);
-                    return;
-                };
+                let mut kept: Option<Command> = None;
                 let mut answered = false;
                 loop {
-                    match read(&mut command, deadline, &stopped) {
+                    let answer = 'read: {
+                        if let Some(command) = kept.as_mut() {
+                            match read(command, deadline, &stopped) {
+                                Read::Ran(answer) => break 'read answer,
+                                Read::Late => break 'read None,
+                                Read::Unstartable => kept = None,
+                            }
+                        }
+                        for mut command in candidates() {
+                            match read(&mut command, deadline, &stopped) {
+                                Read::Ran(answer) => {
+                                    kept = Some(command);
+                                    break 'read answer;
+                                }
+                                Read::Late => break 'read None,
+                                Read::Unstartable => {}
+                            }
+                        }
+                        None
+                    };
+                    match answer {
                         Some(enabled) => {
                             answered = true;
                             publish(if enabled { ON } else { OFF });

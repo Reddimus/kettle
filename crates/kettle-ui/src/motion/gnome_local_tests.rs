@@ -163,12 +163,15 @@ fn gsettings_is_found_only_as_an_executable_file_on_an_absolute_path() {
         plain,
         folder.clone(),
         first.clone(),
-        second,
+        second.clone(),
     ])
     .unwrap();
-    assert_eq!(find_gsettings(Some(&path)), Some(first.join("gsettings")));
-    assert_eq!(find_gsettings(Some(folder.as_os_str())), None);
-    assert_eq!(find_gsettings(None), None);
+    assert_eq!(
+        gsettings_candidates(Some(&path)).collect::<Vec<_>>(),
+        [first.join("gsettings"), second.join("gsettings")]
+    );
+    assert_eq!(gsettings_candidates(Some(folder.as_os_str())).next(), None);
+    assert_eq!(gsettings_candidates(None).next(), None);
     assert_eq!(
         gsettings_get(first.join("gsettings"))
             .get_args()
@@ -201,14 +204,14 @@ fn a_gsettings_this_process_may_not_run_does_not_hide_a_working_one() {
     let working = script("working", "printf 'false\\n'", 0o700);
     let path = std::env::join_paths([blocked, working.clone()]).unwrap();
     assert_eq!(
-        find_gsettings(Some(&path)),
+        gsettings_candidates(Some(&path)).next(),
         Some(working.join("gsettings")),
         "the file its owner may not run hid the working one"
     );
     // A refresh well inside the wait retries a spawn another test's fork
     // happened to make busy.
     let watch = LocalWatch::start_with(
-        move || find_gsettings(Some(&path)).map(gsettings_get),
+        move || gsettings_candidates(Some(&path)).map(gsettings_get),
         Arc::new(|| {}),
         Duration::from_millis(20),
         TIMEOUT,
@@ -223,26 +226,30 @@ fn a_read_takes_true_or_false_from_a_successful_run_and_nothing_else() {
     let (_open, stop) = mpsc::channel();
     let soon = || Instant::now() + Duration::from_secs(5);
     let read = |script: &str| read(&mut sh(script), soon(), &stop);
-    assert_eq!(read("printf 'true\\n'"), Some(true));
-    assert_eq!(read("printf 'false\\n'"), Some(false));
-    assert_eq!(read("printf \"'yes'\""), None);
-    assert_eq!(read("printf false; exit 1"), None);
-    assert_eq!(read("echo 'No such schema' >&2; exit 1"), None);
-    assert_eq!(read("head -c 4096 /dev/zero"), None, "output is bounded");
+    assert_eq!(read("printf 'true\\n'"), Read::Ran(Some(true)));
+    assert_eq!(read("printf 'false\\n'"), Read::Ran(Some(false)));
+    assert_eq!(read("printf \"'yes'\""), Read::Ran(None));
+    assert_eq!(read("printf false; exit 1"), Read::Ran(None));
+    assert_eq!(read("echo 'No such schema' >&2; exit 1"), Read::Ran(None));
+    assert_eq!(
+        read("head -c 4096 /dev/zero"),
+        Read::Ran(None),
+        "output is bounded"
+    );
     let mut missing = Command::new("/nonexistent/gsettings");
-    assert_eq!(super::read(&mut missing, soon(), &stop), None);
+    assert_eq!(super::read(&mut missing, soon(), &stop), Read::Unstartable);
     // Past its deadline, or once stopped, a read starts nothing.
     let (mut late, starts) = counted(sh("exit 0"));
-    assert_eq!(super::read(&mut late, Instant::now(), &stop), None);
+    assert_eq!(super::read(&mut late, Instant::now(), &stop), Read::Late);
     assert!(
         !started(&starts),
         "a read past its deadline started a child"
     );
     let (closed, gone) = mpsc::channel::<()>();
     drop(closed);
-    assert_eq!(super::read(&mut late, soon(), &gone), None);
+    assert_eq!(super::read(&mut late, soon(), &gone), Read::Late);
     assert!(!started(&starts), "a stopped read started a child");
-    assert_eq!(super::read(&mut late, soon(), &stop), None);
+    assert_eq!(super::read(&mut late, soon(), &stop), Read::Ran(None));
     assert!(started(&starts), "the counter sees a start");
 }
 
@@ -259,7 +266,7 @@ fn an_overrunning_read_is_killed_and_reaped() {
             Instant::now() + Duration::from_millis(300),
             &stop
         ),
-        None
+        Read::Ran(None)
     );
     assert!(since.elapsed() < Duration::from_secs(3));
     assert!(sleeper.reaped(), "the overrunning child was left behind");
@@ -283,7 +290,7 @@ fn a_stopped_read_is_killed_and_reaped_at_once() {
             Instant::now() + Duration::from_secs(30),
             &stopped
         ),
-        None
+        Read::Ran(None)
     );
     stopper.join().unwrap();
     assert!(since.elapsed() < Duration::from_secs(5));
@@ -303,7 +310,7 @@ fn the_watch_follows_gnomes_switch_and_keeps_its_last_answer() {
     let watch = LocalWatch::start_with(
         move || {
             let mut command = sh("cat \"$1\"");
-            command.arg("stub").arg(file);
+            command.arg("stub").arg(&file);
             Some(command)
         },
         Arc::new(move || {
@@ -324,7 +331,7 @@ fn the_watch_follows_gnomes_switch_and_keeps_its_last_answer() {
     assert_eq!(watch.reading(), Reading::Value(true));
     assert_eq!(wakes.load(Ordering::Acquire), 2);
     drop(watch);
-    let none = LocalWatch::start(|| None, Arc::new(|| {}));
+    let none = LocalWatch::start(|| None::<Command>, Arc::new(|| {}));
     wait_for("no gsettings", || none.reading() == Reading::Unavailable);
     let failing = LocalWatch::start(|| Some(sh("exit 1")), Arc::new(|| {}));
     wait_for("a failed first read", || {
@@ -338,8 +345,8 @@ fn the_watch_follows_gnomes_switch_and_keeps_its_last_answer() {
 #[test]
 fn dropping_the_watch_mid_read_leaves_no_child_or_thread() {
     let sleeper = Sleeper::new();
-    let command = sleeper.command();
-    let watch = LocalWatch::start(move || Some(command), Arc::new(|| {}));
+    let mut command = Some(sleeper.command());
+    let watch = LocalWatch::start(move || command.take(), Arc::new(|| {}));
     wait_for("the child started", || sleeper.pid().is_some());
     assert_eq!(watch.reading(), Reading::Pending);
     let since = Instant::now();
@@ -386,15 +393,16 @@ fn a_gnome_switch_only_gnome_itself_reports_holds_motion_back() {
 fn dropping_the_watch_during_a_held_lookup_returns_at_once() {
     let sleeper = Sleeper::new();
     let (command, starts) = counted(sleeper.command());
+    let mut command = Some(command);
     let (release, held) = mpsc::channel::<()>();
     let (entered, looking) = mpsc::channel::<()>();
     let wake: kettle_core::Waker = Arc::new(|| {});
     let worker = Arc::downgrade(&wake);
     let watch = LocalWatch::start(
         move || {
-            entered.send(()).unwrap();
+            let _ = entered.send(());
             let _ = held.recv_timeout(Duration::from_secs(20));
-            Some(command)
+            command.take()
         },
         wake,
     );
@@ -426,11 +434,12 @@ fn dropping_the_watch_during_a_held_lookup_returns_at_once() {
 fn a_held_lookup_counts_against_the_first_answers_time() {
     let sleeper = Sleeper::new();
     let (command, starts) = counted(sleeper.command());
+    let mut command = Some(command);
     let (release, held) = mpsc::channel::<()>();
     let watch = LocalWatch::start_with(
         move || {
             let _ = held.recv_timeout(Duration::from_secs(20));
-            Some(command)
+            command.take()
         },
         Arc::new(|| {}),
         Duration::from_secs(30),
@@ -449,4 +458,142 @@ fn a_held_lookup_counts_against_the_first_answers_time() {
     });
     assert!(!started(&starts), "a read started after its time ran out");
     assert_eq!(watch.reading(), Reading::Unavailable);
+}
+
+/// A `gsettings` in `dir` running `body` with mode 0755, as a script whose
+/// interpreter is `interpreter`.
+fn script(dir: &std::path::Path, interpreter: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::create_dir_all(dir).unwrap();
+    let file = dir.join("gsettings");
+    // Replace, not rewrite in place, so a reader never sees half a script.
+    let staged = dir.join(".gsettings.new");
+    std::fs::write(&staged, format!("#!{interpreter}\n{body}\n")).unwrap();
+    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::rename(&staged, &file).unwrap();
+    file
+}
+
+/// The review's setup: first on `PATH`, a mode-0755 `gsettings` script
+/// whose interpreter does not exist, which passes the permission check but
+/// cannot be started; second, a working one. The search moves on to the
+/// working one.
+#[test]
+fn a_gsettings_that_cannot_start_does_not_hide_a_working_one() {
+    let root = kettle_test_support::private_tempdir("kettle-gnome-motion-start-");
+    let broken = script(
+        &root.path().join("broken"),
+        "/nonexistent/interpreter",
+        "printf 'true\\n'",
+    );
+    let working = script(&root.path().join("working"), "/bin/sh", "printf 'false\\n'");
+    let path = std::env::join_paths([broken.parent().unwrap(), working.parent().unwrap()]).unwrap();
+    assert_eq!(
+        gsettings_candidates(Some(&path)).collect::<Vec<_>>(),
+        [broken.clone(), working]
+    );
+    let (_open, stop) = mpsc::channel();
+    assert_eq!(
+        read(
+            &mut gsettings_get(broken),
+            Instant::now() + Duration::from_secs(5),
+            &stop
+        ),
+        Read::Unstartable
+    );
+    // A refresh well inside the wait retries a spawn another test's fork
+    // happened to make busy.
+    let watch = LocalWatch::start_with(
+        move || gsettings_candidates(Some(&path)).map(gsettings_get),
+        Arc::new(|| {}),
+        Duration::from_millis(20),
+        TIMEOUT,
+    );
+    wait_for("the working gsettings's answer", || {
+        watch.reading() == Reading::Value(false)
+    });
+}
+
+/// A candidate that cannot be started is never kept: the next refresh
+/// searches `PATH` again and finds one the user has fixed since. A kept
+/// candidate that stops starting sends the search on as well.
+#[test]
+fn the_search_runs_again_rather_than_keeping_what_cannot_start() {
+    let root = kettle_test_support::private_tempdir("kettle-gnome-motion-again-");
+    let (first, second) = (root.path().join("first"), root.path().join("second"));
+    script(&first, "/nonexistent/interpreter", "printf 'true\\n'");
+    std::fs::create_dir(&second).unwrap();
+    let path = std::env::join_paths([&first, &second]).unwrap();
+    let watch = LocalWatch::start_with(
+        move || gsettings_candidates(Some(&path)).map(gsettings_get),
+        Arc::new(|| {}),
+        Duration::from_millis(20),
+        TIMEOUT,
+    );
+    wait_for("nothing starts", || {
+        watch.state.load(Ordering::Acquire) == UNAVAILABLE
+    });
+    script(&second, "/bin/sh", "printf 'false\\n'");
+    wait_for("the gsettings added later", || {
+        watch.reading() == Reading::Value(false)
+    });
+    // The kept one breaks and a working one appears before it.
+    script(&second, "/nonexistent/interpreter", "printf 'false\\n'");
+    script(&first, "/bin/sh", "printf 'true\\n'");
+    wait_for("the search after the kept one stopped starting", || {
+        watch.reading() == Reading::Value(true)
+    });
+}
+
+/// The read's deadline and stop hold across the whole search: a candidate
+/// the search reaches only after the deadline, or after the stop, is not
+/// started.
+#[test]
+fn the_deadline_and_the_stop_hold_across_the_whole_search() {
+    let slow_search = |command: Command, delay: Duration| {
+        let mut command = Some(command);
+        move || {
+            let mut slow = command.take();
+            let mut first = true;
+            std::iter::from_fn(move || {
+                if std::mem::take(&mut first) {
+                    return Some(Command::new("/nonexistent/gsettings"));
+                }
+                let command = slow.take()?;
+                std::thread::sleep(delay);
+                Some(command)
+            })
+        }
+    };
+    let sleeper = Sleeper::new();
+    let (command, starts) = counted(sleeper.command());
+    let watch = LocalWatch::start_with(
+        slow_search(command, Duration::from_millis(400)),
+        Arc::new(|| {}),
+        Duration::from_secs(30),
+        Duration::from_millis(200),
+    );
+    wait_for("the search gave up", || {
+        watch.state.load(Ordering::Acquire) == UNAVAILABLE
+    });
+    assert!(
+        !started(&starts),
+        "a candidate past the deadline was started"
+    );
+    drop(watch);
+    let (command, starts) = counted(sleeper.command());
+    let wake: kettle_core::Waker = Arc::new(|| {});
+    let worker = Arc::downgrade(&wake);
+    let watch = LocalWatch::start_with(
+        slow_search(command, Duration::from_millis(1500)),
+        wake,
+        Duration::from_secs(30),
+        Duration::from_secs(30),
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    drop(watch);
+    wait_for("the thread ended after its search", || {
+        worker.upgrade().is_none()
+    });
+    assert!(!started(&starts), "a candidate after the stop was started");
 }

@@ -145,7 +145,8 @@ impl SystemMotion {
     }
 
     /// GNOME's own switch, read only in a GNOME session, with the first
-    /// `gsettings` on `PATH`, which the reader's thread looks for.
+    /// `gsettings` on `PATH` that starts, which the reader's thread looks
+    /// for.
     #[cfg(target_os = "linux")]
     fn local(&self) -> &gnome_local::LocalWatch {
         self.local.get_or_init(|| {
@@ -155,7 +156,8 @@ impl SystemMotion {
             let path = std::env::var_os("PATH");
             gnome_local::LocalWatch::start(
                 move || {
-                    gnome_local::find_gsettings(path.as_deref()).map(gnome_local::gsettings_get)
+                    gnome_local::gsettings_candidates(path.as_deref())
+                        .map(gnome_local::gsettings_get)
                 },
                 self.wake.clone(),
             )

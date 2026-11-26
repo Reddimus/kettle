@@ -6445,9 +6445,13 @@ portal has none does `motion::SystemMotion` start a second watch, on GNOME's
 (`Preference::resolve`). Where the portal has neither key, or there is no
 portal, a GNOME-like session (`XDG_CURRENT_DESKTOP`) reads GNOME's own switch
 with the first `gsettings` on an absolute `PATH` entry that the process may
-run, as `faccessat` decides it for the effective user, so an unusable one
-earlier in `PATH` cannot hide it (`motion/gnome_local.rs`,
-`Preference::linux`). Finding `gsettings` and the read run on the watch's
+run (as `faccessat` decides it for the effective user) and that starts: the
+search moves past one that cannot be started, such as a script whose
+interpreter is missing, all within the read's deadline and stop, so an
+unusable one earlier in `PATH` cannot hide a working one. The one that ran
+is kept for the refreshes until it no longer starts; one that never started
+is not kept, so each refresh searches again and finds a later fix
+(`motion/gnome_local.rs`, `Preference::linux`). Finding `gsettings` and the read run on the watch's
 own thread. The first answer is due two seconds after the watch starts,
 lookup included, and is no longer pending then even if the thread is still
 held in the filesystem; each later read has two seconds and 64 bytes of
