@@ -1095,6 +1095,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- The pointer shows the arrow, not the text cursor, over a scrollbar and while dragging it.
+
 - The pointer shows the text cursor over the command palette's field, the picker filters, the title editor and the Settings search and value fields, as it already did in Find.
 
 - The pointer turns into a hand over a link only while a click would open it (Cmd or Ctrl held, or `link-single-click` on); a plain hover keeps the text cursor.

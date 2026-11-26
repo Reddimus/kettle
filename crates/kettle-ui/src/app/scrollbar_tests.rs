@@ -154,3 +154,21 @@ fn the_pointer_and_accessibility_read_the_painted_bar() {
     );
     assert!(!source.contains("scrollbar_width*scale).max(1.0)"));
 }
+
+/// The pointer shows the arrow, not the I-beam, over a scrollbar a press
+/// would grab, and keeps it while the bar is dragged. The hover strip is the
+/// one the press and the brighten use (`scrollbar_pane_at`), and a program
+/// that takes the press, or a pane with no history, leaves the I-beam. A link
+/// whose click opens it, which the press reaches first, keeps the hand.
+#[test]
+fn the_scrollbar_shows_the_arrow_where_a_press_grabs_it() {
+    let source: String = production_source().split_whitespace().collect();
+    for needle in [
+        "ifws.scrollbar_drag_offset.is_some(){returntrue;}letarea=self.area(ws);letSome(pane)=self.scrollbar_pane_at(ws,area,ws.cursor.xasf32,ws.cursor.yasf32)else{returnfalse;};",
+        "scrollbar_grabs_press(term.grid().history_size(),track,ws.mods.shift_key(),p.read_only,)",
+        "history>0&&(track==input::MouseTracking::Off||shift||read_only)",
+        "ifwant_pointer{CursorIcon::Pointer}elseifself.scrollbar_takes_pointer(ws){//Ascrollbarisacontrol,nottext:thearrow,as//overthechrome.CursorIcon::Default}else{CursorIcon::Text}",
+    ] {
+        assert!(source.contains(needle), "missing: {needle}");
+    }
+}

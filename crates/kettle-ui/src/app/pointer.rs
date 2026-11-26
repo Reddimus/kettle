@@ -1184,6 +1184,53 @@ pub(super) fn scrollbar_hit_contains((x, y, w, h): Rect, px: f32, py: f32) -> bo
     px >= x && px <= x + w && py >= y && py <= y + h
 }
 
+/// Whether a primary press on a pane's scrollbar strip grabs the bar: the
+/// pane has `history` to scroll, so the bar is drawn, and its program does
+/// not take the press first. A program reporting the mouse (`track`) gets it,
+/// unless Shift keeps it Kettle's or the pane is read-only, as `send_mouse_to`
+/// decides.
+pub(super) fn scrollbar_grabs_press(
+    history: usize,
+    track: input::MouseTracking,
+    shift: bool,
+    read_only: bool,
+) -> bool {
+    history > 0 && (track == input::MouseTracking::Off || shift || read_only)
+}
+
+#[cfg(test)]
+mod scrollbar_press_tests {
+    use super::scrollbar_grabs_press;
+    use crate::input::MouseTracking;
+
+    /// The bar takes a press once there is history; a program in mouse mode
+    /// takes it first, unless Shift is held or the pane is read-only.
+    #[test]
+    fn a_press_grabs_the_scrollbar_only_where_the_program_does_not_take_it() {
+        assert!(!scrollbar_grabs_press(0, MouseTracking::Off, false, false));
+        assert!(scrollbar_grabs_press(1, MouseTracking::Off, false, false));
+        for (mode, track) in [
+            (1000, MouseTracking::Click),
+            (1002, MouseTracking::Drag),
+            (1003, MouseTracking::Motion),
+        ] {
+            assert!(!scrollbar_grabs_press(40, track, false, false), "{mode}");
+            assert!(
+                scrollbar_grabs_press(40, track, true, false),
+                "{mode}: Shift"
+            );
+            assert!(
+                scrollbar_grabs_press(40, track, false, true),
+                "{mode}: read-only"
+            );
+            assert!(
+                !scrollbar_grabs_press(0, track, true, true),
+                "{mode}: no history"
+            );
+        }
+    }
+}
+
 /// A press or drag at `py` on `bar`: where the pointer holds the thumb and
 /// the display offset that puts the thumb there. A press on the thumb keeps
 /// the pointer where it took hold; one beside it centres the thumb on the
@@ -1819,6 +1866,33 @@ impl App {
         Some(Self::resize_cursor_for(seams[i].dir))
     }
 
+    /// Whether the pointer is dragging a scrollbar, or is on one a primary
+    /// press would grab: the pane under it has history to scroll, and its
+    /// program does not take the press first (`scrollbar_grabs_press`).
+    fn scrollbar_takes_pointer(&self, ws: &WindowState) -> bool {
+        if ws.scrollbar_drag_offset.is_some() {
+            return true;
+        }
+        let area = self.area(ws);
+        let Some(pane) = self.scrollbar_pane_at(ws, area, ws.cursor.x as f32, ws.cursor.y as f32)
+        else {
+            return false;
+        };
+        let Some(p) = ws.mux.panes.get(&pane) else {
+            return false;
+        };
+        let Ok(term) = p.term.term.lock() else {
+            return false;
+        };
+        let (track, _) = input::mouse_tracking(*term.mode());
+        scrollbar_grabs_press(
+            term.grid().history_size(),
+            track,
+            ws.mods.shift_key(),
+            p.read_only,
+        )
+    }
+
     /// The I-beam over a modal's text field: the palette's, a picker's, title
     /// edit's or a Settings value's, wherever a press places its caret, and
     /// open Settings' search box, which a press focuses. The find bar's
@@ -2016,6 +2090,10 @@ impl App {
                     && link_click_opens(self.cfg.link_single_click, ws.mods);
                 if want_pointer {
                     CursorIcon::Pointer
+                } else if self.scrollbar_takes_pointer(ws) {
+                    // A scrollbar is a control, not text: the arrow, as
+                    // over the chrome.
+                    CursorIcon::Default
                 } else {
                     CursorIcon::Text
                 }

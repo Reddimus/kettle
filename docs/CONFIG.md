@@ -766,7 +766,9 @@ logical pixels while the pane is scrolled back or the pointer hovers or drags
 it, in a channel as wide as the thumb; with `scrollbar = always` it keeps that
 width whenever there is history. Its thumb is at least 40 logical pixels long,
 and its hit strip is at least 12 logical pixels wide and reaches the pane's
-edge. All sizes scale with display DPI. The bar is painted solid only when, at
+edge. Over that strip, and while dragging the bar, the pointer is the arrow
+rather than the text cursor, except where a program using the mouse takes the
+click. All sizes scale with display DPI. The bar is painted solid only when, at
 its widest and with its 2-pixel edge, it fits in `window-padding-x` and the
 window is opaque (`background-opacity = 1`). Otherwise it is translucent, at
 most 90% cover, so text under it stays visible; it still shows in the same
