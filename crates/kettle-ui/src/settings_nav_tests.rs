@@ -34,7 +34,12 @@ fn jumps_skip_rows_that_do_not_apply() {
     assert_eq!(focused(&cats, &nav), "cursor-blink");
     nav.move_focus(&cats, &cfg, RowMove::First);
     assert_eq!(nav.field, 0);
-    for to in [RowMove::PageDown, RowMove::PageUp] {
+    for to in [
+        RowMove::PageDown,
+        RowMove::PageUp,
+        RowMove::HalfDown,
+        RowMove::HalfUp,
+    ] {
         for _ in 0..cats[appearance].fields.len() {
             nav.move_focus(&cats, &cfg, to);
             assert!(
@@ -554,4 +559,75 @@ fn a_search_refocused_after_a_result_keeps_it() {
     nav.query = Default::default();
     nav.reconcile(&cats, &cfg, &EN);
     assert_eq!(focused(&cats, &nav), "font-size");
+}
+
+/// Page Down and Page Up move a page as the panel shows it, less one row
+/// kept in view, through a category's rows and through search results, and
+/// vim's Ctrl+D and Ctrl+U half that, still skipping rows that do not
+/// apply. With 73 results and 11 rows in view, Page Down went 0, 40, 72:
+/// half the list each time.
+#[test]
+fn page_keys_move_by_the_rows_in_view() {
+    use winit::keyboard::{Key, ModifiersState as Mods, NamedKey};
+    assert_eq!(
+        row_command(&Key::Named(NamedKey::PageDown), Mods::empty(), true),
+        Some(RowCommand::Move(RowMove::PageDown))
+    );
+    assert_eq!(
+        row_command(&Key::Character("d".into()), Mods::CONTROL, true),
+        Some(RowCommand::Move(RowMove::HalfDown))
+    );
+    let cats = categories(&[]);
+    let cfg = Config::default();
+    let mut nav = SettingsNav {
+        query: "o".into(),
+        visible_rows: 11,
+        ..Default::default()
+    };
+    nav.reconcile(&cats, &cfg, &EN);
+    let results: Vec<_> = nav
+        .visible_fields(&cats, &EN)
+        .into_iter()
+        .filter(|&(c, f)| !field_disabled(&cfg, cats[c].fields[f].key))
+        .collect();
+    assert!(results.len() > 40, "{} results", results.len());
+    let mut press = |key: Key, mods| {
+        assert_eq!(
+            nav.search_key(&cats, &cfg, &EN, &key, mods, false),
+            SearchRoute::Handled,
+            "{key:?}"
+        );
+        let at = (nav.category, nav.field);
+        results.iter().position(|result| *result == at).unwrap()
+    };
+    assert_eq!(press(Key::Named(NamedKey::PageDown), Mods::empty()), 10);
+    assert_eq!(press(Key::Named(NamedKey::PageDown), Mods::empty()), 20);
+    assert_eq!(press(Key::Named(NamedKey::PageUp), Mods::empty()), 10);
+    assert_eq!(press(Key::Character("d".into()), Mods::CONTROL), 15);
+    assert_eq!(press(Key::Character("u".into()), Mods::CONTROL), 10);
+
+    let cfg = Config {
+        cursor_blink: false,
+        ..Config::default()
+    };
+    let appearance = category(&cats, Text::SettingsCategoryAppearance);
+    let mut nav = SettingsNav {
+        category: appearance,
+        visible_rows: 4,
+        ..Default::default()
+    };
+    let mut moves = |to| {
+        nav.move_focus(&cats, &cfg, to);
+        nav.field
+    };
+    assert_eq!(moves(RowMove::PageDown), 3);
+    assert_eq!(moves(RowMove::PageDown), 6);
+    assert_eq!(moves(RowMove::HalfDown), 8);
+    assert_eq!(
+        moves(RowMove::PageDown),
+        10,
+        "the page ends on a row that does not apply, so it stops before it"
+    );
+    assert_eq!(moves(RowMove::PageUp), 7);
+    assert_eq!(moves(RowMove::HalfUp), 5);
 }

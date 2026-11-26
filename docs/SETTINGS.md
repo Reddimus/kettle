@@ -58,7 +58,7 @@ assistive technology cancels any pending keybinding capture.
 |---|---|
 | ↑ / ↓ | Move between options (skips options that don't apply) |
 | Home / End | First / last option |
-| Page Up / Page Down | Move half a page |
+| Page Up / Page Down | Move a page: the options in view, less one |
 | ← / → | Change the highlighted option; ← turns a switch off and → turns it on |
 | Shift+← / Shift+→ | Change a number ten steps at a time |
 | Delete / Backspace | Reset the highlighted setting to its default, as its Reset button does (not the theme, GPU, shortcut or text rows) |
@@ -83,7 +83,7 @@ an inline text prompt, and the Theme row opens the theme picker.)
 
 With **`vim-menu-nav`** on (the default), the panel also takes vim keys:
 `j`/`k` move between options, `h`/`l` change the highlighted option, `g`/`G`
-jump to the first/last option, `Ctrl+d`/`Ctrl+u` move half a page, and
+jump to the first/last option, `Ctrl+d`/`Ctrl+u` move half the options in view, and
 Shift+`h`/`l` change a number ten steps at a time. Like
 the arrows, these jumps skip options that don't apply, as does a new category
 opened with Tab or a click. The
