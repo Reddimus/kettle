@@ -959,6 +959,16 @@ mod tests {
         assert_eq!(found("see src/main.rs:12"), ["src/main.rs:12"]);
     }
 
+    /// A closing bracket that pairs with an open before it ends the link,
+    /// whatever stray close came earlier in the query.
+    #[test]
+    fn a_paired_closing_bracket_stays_in_the_link() {
+        let term = term_with(30, &["see https://x.test/a)b(c) end"], &[]);
+        let found = links(&term);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].uri, "https://x.test/a)b(c)");
+    }
+
     #[test]
     fn parent_directory_path_does_not_become_a_link_to_its_prefix() {
         let term = term_with(80, &["/tmp/.."], &[]);
