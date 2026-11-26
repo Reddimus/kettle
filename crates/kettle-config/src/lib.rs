@@ -2755,8 +2755,10 @@ pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io
 /// [`without_config_keys`] says what else stays. Where the rest of the file
 /// still does not give the default (`restores` judges the candidate as
 /// Kettle reads it), each `fallback` line is added as
-/// [`persist_config_toggle`] adds a key it does not find. The candidate
-/// must then restore the default and add no malformed value, and it is
+/// [`persist_config_toggle`] adds a key it does not find; each line added
+/// must be a valid value by itself, and lines not needed are not checked.
+/// The candidate must then restore the default and add no malformed value,
+/// and it is
 /// committed once, under the edit's lock: on an error the file keeps its
 /// bytes, and its value. Returns what was saved, or `None` when the file
 /// already gave the default and nothing was written. A saved file whose
@@ -2802,29 +2804,30 @@ fn reset_config_setting_with(
     for key in keys {
         validate_single_line("config key", key)?;
     }
-    for (key, value) in fallback {
-        validate_single_line("config key", key)?;
-        validate_single_line("config value", value)?;
-    }
-    // Each line Reset may add must be valid by itself, as each line
-    // `persist_config_toggle` writes is: a count of diagnostics alone would
-    // let a new one take the place of an old one the removal clears.
-    let added: String = fallback
-        .iter()
-        .map(|(key, value)| format!("{key} = {value}\n"))
-        .collect();
-    if !Config::detect_malformed_values(&added).is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "refusing to reset {keys:?}: a default it would add is not a valid config value"
-            ),
-        ));
-    }
     let edit = ConfigEdit::begin(path)?;
     let existing = &edit.document.text;
     let mut out = without_config_keys(existing, keys).unwrap_or_else(|| existing.clone());
     if !restores(&Config::parse_text(&out)) {
+        // Each line Reset adds must be valid by itself, as each line
+        // `persist_config_toggle` writes is: a count of diagnostics alone
+        // would let a new one take the place of an old one the removal
+        // clears. Lines a removal alone makes unneeded are not checked.
+        for (key, value) in fallback {
+            validate_single_line("config key", key)?;
+            validate_single_line("config value", value)?;
+        }
+        let added: String = fallback
+            .iter()
+            .map(|(key, value)| format!("{key} = {value}\n"))
+            .collect();
+        if !Config::detect_malformed_values(&added).is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "refusing to reset {keys:?}: a default it would add is not a valid config value"
+                ),
+            ));
+        }
         let line_ending = preferred_line_ending(existing);
         for (key, value) in fallback {
             append_config_line(&mut out, key, value, line_ending);
@@ -13523,6 +13526,20 @@ split_horiz = <Control><Shift>j
             .is_err()
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), malformed);
+        // The same lines, unneeded once removal alone restores the default,
+        // are not checked: the reset goes ahead.
+        write_private_fixture(&path, "font-size = 18\n");
+        assert!(
+            super::reset_config_setting(
+                &path,
+                &["font-size"],
+                &[("font-size", size.as_str()), ("cursor-blink", "invalid")],
+                |cfg| cfg.font_size == DEFAULT_FONT_SIZE,
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
         write_private_fixture(&path, &before);
         // A default that cannot be reached is refused, the file untouched.
         assert!(super::reset_config_setting(&path, &["theme-mode"], &[], |_| false).is_err());
