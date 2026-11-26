@@ -1556,7 +1556,7 @@ pub(super) fn hover_tab_bar(
     ws.hovered_new_tab_menu = target == Some(NewTabHoverTarget::Menu);
     ws.hovered_settings = target == Some(NewTabHoverTarget::Settings);
     ws.hovered_search = target == Some(NewTabHoverTarget::Search);
-    ws.hovered_scroll_arrow = scroll_arrow_at(bar, x, y);
+    ws.hovered_scroll_arrow = scroll_arrow_at(bar, x, y).filter(|_| !modal);
     (target, tab_bar_hover(ws) != before)
 }
 

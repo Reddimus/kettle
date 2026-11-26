@@ -1601,7 +1601,7 @@ fn the_strip_under_a_modal_shows_no_hover() {
     assert_eq!((ws.hovered_tab_idx, ws.hovered_close_idx), (Some(0), Some(0)));
 
     let strip_hover = |ws: &crate::window_state::WindowState| {
-        super::chrome::tab_bar_hover(ws) != (None, None, false, false, false, false)
+        super::chrome::tab_bar_hover(ws) != (None, None, false, false, false, false, None)
     };
     fn dialog() -> super::ConfirmDialogState {
         super::ConfirmDialogState {
@@ -2068,6 +2068,17 @@ fn overflow_arrows_light_point_and_name_what_a_press_does() {
     ws.cursor = winit::dpi::PhysicalPosition::new(300.0, 14.0);
     assert_eq!(hover_tab_bar(&mut ws, &bar), (None, true), "leaving repaints");
     assert_eq!(ws.hovered_scroll_arrow, None);
+    // Under a modal the arrows stay dark, as the rest of the strip does:
+    // the modal takes the press.
+    ws.cursor = winit::dpi::PhysicalPosition::new(590.0, 14.0);
+    ws.palette_input = Some((crate::text_editor::TextEditor::default(), 0));
+    assert_eq!(hover_tab_bar(&mut ws, &bar), (None, false), "no hover under a modal");
+    assert_eq!(ws.hovered_scroll_arrow, None);
+    ws.palette_input = None;
+    assert_eq!(hover_tab_bar(&mut ws, &bar), (None, true));
+    assert_eq!(ws.hovered_scroll_arrow, Some(true));
+    ws.cursor = winit::dpi::PhysicalPosition::new(300.0, 14.0);
+    hover_tab_bar(&mut ws, &bar);
     ws.leave_tab_bar();
     let start = Instant::now();
     for (round, (language, titlebar, forward, label)) in [
