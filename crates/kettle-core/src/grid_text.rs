@@ -300,6 +300,7 @@ pub fn rows_text_bounded(grid: &Grid<Cell>, first: i32, end: i32, cap: usize) ->
                         trimmed_end = out.len();
                     }
                 } else if !ch.is_whitespace() {
+                    out.truncate(trimmed_end);
                     return (out, true);
                 } else {
                     // Whitespace beyond the cap can still be trimmed at row end.
@@ -495,6 +496,20 @@ mod tests {
             ("\u{754c}\u{301}y".into(), false)
         );
         assert_eq!(rows_text_bounded(&grid, 1, 2, 4), ("\u{754c}".into(), true));
+    }
+
+    /// A row the cap cuts after blanks inside it comes back right-trimmed,
+    /// like a row that fits.
+    #[test]
+    fn bounded_rows_trim_a_row_the_cap_cuts_after_blanks() {
+        let mut grid: Grid<Cell> = Grid::new(1, 8, 0);
+        for (column, ch) in "ab   c  ".chars().enumerate() {
+            grid[Point::new(Line(0), Column(column))].c = ch;
+        }
+        // "ab" and three blanks fill the cap, and 'c' does not fit.
+        assert_eq!(rows_text_bounded(&grid, 0, 1, 5), ("ab".into(), true));
+        // One blank fits, the next one does not, and then 'c' is cut.
+        assert_eq!(rows_text_bounded(&grid, 0, 1, 3), ("ab".into(), true));
     }
 
     /// A logical line joins rows only across soft wraps, only while the next
