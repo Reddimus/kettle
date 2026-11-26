@@ -47,6 +47,9 @@ pub(crate) struct MenuPointer {
     switch: Option<PendingSwitch>,
     /// Whether the pointer was over one of the menu's panels.
     inside: bool,
+    /// The pointer left the window and has not moved in it since. Its last
+    /// position in the window may lie on a row, but it is over nothing.
+    off_window: bool,
     /// Whether the pointer has been over the menu at all. An open submenu
     /// times out off the panels only then, so one opened from the keyboard
     /// stays while a pointer that never came near it moves.
@@ -96,6 +99,27 @@ impl MenuPointer {
     pub(super) fn cancel_pending(&mut self) {
         self.open = None;
         self.switch = None;
+    }
+
+    /// The pointer left the window: until it next moves in the window, it is
+    /// over nothing, wherever its last position in the window was.
+    pub(super) fn left_window(&mut self) {
+        self.off_window = true;
+    }
+
+    /// The pointer moved in the window.
+    pub(super) fn moved_in_window(&mut self) {
+        self.off_window = false;
+    }
+
+    /// What the pointer is over for a look at a deadline, given what its last
+    /// position in the window, `last`, would hit.
+    pub(super) fn due_hit(&self, last: MenuHit) -> MenuHit {
+        if self.off_window {
+            MenuHit::Outside
+        } else {
+            last
+        }
     }
 
     /// A key moved the highlight, or opened a level: it shows again.

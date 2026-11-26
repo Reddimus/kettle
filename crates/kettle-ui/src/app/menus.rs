@@ -1396,6 +1396,7 @@ impl App {
     /// `CursorMoved`. Requests a redraw only when the hover changed
     /// something, so sub-pixel motion does not churn the GPU.
     pub(super) fn update_menu_highlight_from_cursor(&mut self, ws: &mut WindowState) {
+        ws.context_menu_session.pointer.moved_in_window();
         if let Some(delta) = self.context_menu_scroll_edge(ws) {
             self.scroll_context_menu(ws, delta);
             return;
@@ -1419,6 +1420,7 @@ impl App {
 
     /// The pointer left the window, so it is over no row of the menu.
     pub(super) fn context_menu_pointer_left(&self, ws: &mut WindowState) {
+        ws.context_menu_session.pointer.left_window();
         let at = (ws.cursor.x as f32, ws.cursor.y as f32);
         let Some(menu) = ws.context_menu.as_mut() else {
             return;
@@ -1453,7 +1455,11 @@ impl App {
             .is_some_and(|due| due <= now)
         {
             let panels = self.context_menu_panels(ws);
-            let hit = self.context_menu_pointer_hit(ws, &panels);
+            // Off the window, the last position in it is no hit.
+            let hit = ws
+                .context_menu_session
+                .pointer
+                .due_hit(self.context_menu_pointer_hit(ws, &panels));
             let at = (ws.cursor.x as f32, ws.cursor.y as f32);
             if let Some(menu) = ws.context_menu.as_mut() {
                 let effect = menu_pointer_moved(

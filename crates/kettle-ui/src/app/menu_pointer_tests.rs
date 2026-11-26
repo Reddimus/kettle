@@ -941,3 +941,54 @@ fn ui_geometry_reports_what_a_menu_was_placed_around() {
         .expect("the line placement");
     assert!(line.contains("ws.context_menu_session.anchor = Some(anchor);"));
 }
+
+#[test]
+fn leaving_the_window_from_a_submenu_still_closes_it() {
+    let mut cascade = Cascade::new(false);
+    // Into the submenu, then out of the window in one move: the last
+    // position the window saw is on the submenu's second row.
+    let last = (200.0, 46.0);
+    assert_eq!(
+        cascade.hover(MenuHit::Row(1), last, 16),
+        MenuHoverEffect::Redraw
+    );
+    cascade.pointer.left_window();
+    assert_eq!(
+        cascade.hover(MenuHit::Outside, last, 32),
+        MenuHoverEffect::None
+    );
+    // At the deadline, a fresh hit test of that position finds the row, but
+    // the pointer is not there.
+    let due = cascade.pointer.due_hit(MenuHit::Row(1));
+    assert_eq!(cascade.hover(due, last, 32 + 300), MenuHoverEffect::Redraw);
+    assert!(cascade.menu.drill_stack.is_empty(), "the submenu closed");
+    assert_eq!(due, MenuHit::Outside);
+    // Back in the window, hits count again.
+    cascade.pointer.moved_in_window();
+    assert_eq!(cascade.pointer.due_hit(MenuHit::Row(0)), MenuHit::Row(0));
+
+    let src = super::super::production_source();
+    let tick = src
+        .split("fn context_menu_pointer_tick(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("the deadline");
+    assert!(
+        tick.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains(".pointer .due_hit(self.context_menu_pointer_hit(ws, &panels));")
+    );
+    let left = src
+        .split("fn context_menu_pointer_left(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("the window exit");
+    assert!(left.contains("ws.context_menu_session.pointer.left_window();"));
+    let moved = src
+        .split("fn update_menu_highlight_from_cursor(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("a motion");
+    assert!(moved.contains("ws.context_menu_session.pointer.moved_in_window();"));
+}

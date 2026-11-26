@@ -5367,9 +5367,11 @@ while the pointer crosses its parent's other rows inside the triangle from the
 pointer's last position to the side of the submenu it faces (the two corners
 that bound the submenu seen from there, so a submenu that opened over its
 parent, or that the pointer approaches from below, counts too), giving way
-300 ms after the pointer leaves that triangle or comes to rest. A pointer off every panel
-starts the same wait, and at its end every submenu closes; a submenu opened
-from the keyboard, with a pointer that was never over the menu, stays. A
+300 ms after the pointer leaves that triangle or comes to rest. A pointer off
+every panel (off the window included, until it moves in the window again,
+whatever its last position there was over) starts the same wait, and at its
+end every submenu closes; a submenu opened from the keyboard, with a pointer
+that was never over the menu, stays. A
 pointer at rest sends no events, so `about_to_wait` wakes once at the pending
 deadline
 (`context_menu_pointer_tick`); nothing redraws until the hover changes.
