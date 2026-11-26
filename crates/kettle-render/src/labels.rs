@@ -161,11 +161,20 @@ pub(crate) fn middle_ellipsis(s: &str, n: usize) -> String {
     format!("{head}…{tail}")
 }
 
+/// The fewest columns a non-path tab title keeps both of its ends in. With
+/// fewer, a middle ellipsis leaves a few columns of each end, and titles that
+/// share their start and end (`Tab 1: Build … eu-west-1`, `Tab 2: Build …`)
+/// all read `Tab …t-1`. Below this the title keeps its start instead, where
+/// programs and shells put what tells one tab from another, and the full
+/// title is in the tab's tooltip.
+pub(crate) const TAB_TITLE_MIDDLE_ELLIPSIS_COLUMNS: usize = 16;
+
 /// Build a tab title that fits `n` display columns. Unlike pane titles, tabs
 /// favor the *right* side of path-like strings when they must truncate: in a
 /// path, the tail is normally the project/leaf (`...flight-event-line-server-go`)
 /// and is more useful than the home or drive prefix. Non-path titles use a
-/// middle ellipsis.
+/// middle ellipsis from [`TAB_TITLE_MIDDLE_ELLIPSIS_COLUMNS`] up, and an end
+/// ellipsis in fewer columns.
 pub(crate) fn fit_tab_title(s: &str, n: usize) -> String {
     if n == 0 {
         return String::new();
@@ -174,7 +183,11 @@ pub(crate) fn fit_tab_title(s: &str, n: usize) -> String {
         return s.to_string();
     }
     if !s.contains(['/', '\\']) {
-        return middle_ellipsis(s, n);
+        return if n < TAB_TITLE_MIDDLE_ELLIPSIS_COLUMNS {
+            fit_single_line_label(s, n)
+        } else {
+            middle_ellipsis(s, n)
+        };
     }
     if n < 3 {
         return take_cols_back(s, n);

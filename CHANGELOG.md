@@ -1560,6 +1560,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   leave a truncated file when they fail, GPU setup keeps trying other
   backends when one device fails to open, and macOS audio decoding moved off
   the sound-control thread.
+- In a narrow window, tabs whose titles share a start and an end no longer
+  all read alike (`Tab …t-1`): a title with fewer than 16 columns to show
+  keeps its start and ends with an ellipsis.
 
 ## Older releases
 

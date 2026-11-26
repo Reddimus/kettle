@@ -312,11 +312,38 @@ fn tab_title_uses_tail_only_for_tiny_path_budget() {
 #[test]
 fn tab_title_keeps_middle_ellipsis_for_non_paths() {
     let title = "abcdefghijklmnopqrstuvwxyz";
-    let cut = fit_tab_title(title, 11);
+    let cut = fit_tab_title(title, 20);
     assert!(cut.contains('…'));
     assert!(cut.starts_with('a'), "front kept: {cut}");
     assert!(cut.ends_with('z'), "back kept: {cut}");
-    assert!(display_width(&cut) <= 11);
+    assert!(display_width(&cut) <= 20);
+}
+
+/// The review's case: four tabs titled `Tab N: Build and deploy …` in a
+/// narrow window. A middle ellipsis kept `Tab ` and the shared end, so every
+/// tab read `Tab …t-1`; in fewer than 16 columns the start is kept, and the
+/// tabs read apart. From 16 columns the middle ellipsis is back.
+#[test]
+fn narrow_tab_titles_keep_the_start_that_tells_them_apart() {
+    let long = "Build and deploy the production cluster migration script for region eu-west-1";
+    let titles: Vec<String> = (1..=4).map(|n| format!("Tab {n}: {long}")).collect();
+    for n in 8..super::labels::TAB_TITLE_MIDDLE_ELLIPSIS_COLUMNS {
+        let fitted: Vec<String> = titles.iter().map(|t| fit_tab_title(t, n)).collect();
+        for (i, cut) in fitted.iter().enumerate() {
+            assert!(display_width(cut) <= n, "{cut:?} at {n}");
+            assert!(cut.starts_with(&format!("Tab {}", i + 1)), "{cut:?} at {n}");
+            assert!(cut.ends_with('…'), "{cut:?} at {n}");
+        }
+        let distinct: std::collections::HashSet<&String> = fitted.iter().collect();
+        assert_eq!(distinct.len(), 4, "tabs read alike at {n}: {fitted:?}");
+    }
+    let wide = fit_tab_title(&titles[0], super::labels::TAB_TITLE_MIDDLE_ELLIPSIS_COLUMNS);
+    assert_eq!(wide, "Tab 1: B…-west-1");
+    // The whole budget path the strip paints goes the same way.
+    assert_eq!(
+        fit_tab_segment_title(&titles[1], None, 1, "{title}", 9.0 * 8.0, 8.0),
+        "Tab 2: B…"
+    );
 }
 
 #[test]

@@ -1304,6 +1304,12 @@ its current configured shortcut. At 420 by 260 points, overflow keeps the
 active title visible alongside both controls. Closing or renaming tabs uses
 the same layout as pointer actions and accessibility.
 
+A tab title too long for its tab is shortened with an ellipsis. A title
+derived from the working directory keeps its last folder, and a title that
+looks like a path keeps its end. Any other title keeps both ends when at least
+16 columns of it show, and only its start in a narrower tab, so tabs whose
+titles differ near the start still read apart.
+
 When a window loses focus on macOS or Linux, tab text and controls dim toward
 their backgrounds while retaining at least 3:1 contrast, and the active accent
 line becomes neutral. Focused labels and controls retain at least 4.5:1;
