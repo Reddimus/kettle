@@ -2168,7 +2168,11 @@ starts the strip, and clamps the grab offset inside that tab.
 The menu owns its origin through shell-discovery replacement and submenu
 navigation. Only the macOS new-tab menu omits Settings through About; its
 origin also supplies the accessible name and expanded/pressed state, and
-clears with the menu. AccessKit children follow each strip's screen order.
+clears with the menu. The AccessKit tab list holds only the tabs; the
+strip's own buttons (New tab, the new-tab menu, the gear, and in the GNOME
+header Find, the main menu and the window buttons) sit beside it in a
+`Toolbar` named "Tab bar controls" (`tab_strip_roots`), and each container's
+children follow the strip's screen order.
 On macOS the dropdown uses the ComboBox role, mapped to AXPopUpButton, and a
 toggled value for open state because this adapter drops HasPopup/expanded.
 While the menu is open, only its popup remains in the strip's accessibility

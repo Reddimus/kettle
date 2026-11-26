@@ -3503,6 +3503,10 @@ speech:
   have none.
 - `every_modal_surface_is_a_modal_dialog`: the palette, the theme, layout and
   SSH pickers, Settings and title editing each project one modal dialog.
+- `the_tab_list_holds_only_tabs_beside_a_toolbar_of_the_strips_buttons`: the
+  tab list's children are tabs only. New tab, the new-tab menu, the gear and
+  the GNOME header's Find, main menu and window buttons sit in a "Tab bar
+  controls" toolbar beside it, in screen order, in English and Spanish.
 
 VoiceOver and Orca have not yet been run against these changes.
 

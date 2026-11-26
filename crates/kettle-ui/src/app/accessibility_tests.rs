@@ -3151,3 +3151,127 @@ fn off_screen_settings_rows_stay_reachable_at_the_list_edges() {
         }
     }
 }
+
+/// The tab list holds only tabs. The strip's own buttons (New tab, the
+/// new-tab menu, the macOS Settings gear, and in the GNOME header Find, the
+/// main menu and the window buttons) sit beside it in a named toolbar, in
+/// screen order, and both are children of the window's node. A strip with
+/// no tab shown has no tab list, and one with no button no toolbar.
+#[test]
+fn the_tab_list_holds_only_tabs_beside_a_toolbar_of_the_strips_buttons() {
+    use accesskit::Role;
+    // The macOS title-bar strip, or the GNOME header with Find and a window
+    // button; two tabs either way.
+    let strip = |header: bool, tr: &kettle_i18n::Translator| {
+        let mut bar = kettle_render::TabBar::hidden();
+        bar.height = 32.0;
+        for index in 0..2 {
+            let rect = (120.0 + index as f32 * 160.0, 0.0, 160.0, 32.0);
+            bar.segments.push(kettle_render::TabSeg {
+                idx: index,
+                rect,
+                title_rect: rect,
+                hint: None,
+                close: (rect.0 + rect.2 - 28.0, 0.0, 28.0, 32.0),
+                title: format!("shell {index}"),
+                path: None,
+                active: index == 0,
+                activity: kettle_render::TabActivity::Normal,
+            });
+        }
+        bar.settings = (1172.0, 0.0, 32.0, 32.0);
+        bar.new_tab = (1212.0, 0.0, 32.0, 32.0);
+        bar.new_tab_menu = (1244.0, 0.0, 28.0, 32.0);
+        if header {
+            bar.linux_header = true;
+            bar.settings = (0.0, 0.0, 0.0, 0.0);
+            bar.new_tab = (7.0, 0.0, 34.0, 34.0);
+            bar.search = (1100.0, 0.0, 34.0, 34.0);
+            bar.window_controls.push(kettle_render::WindowControlButton {
+                action: kettle_render::WindowControl::Close,
+                rect: (1280.0, 0.0, 34.0, 34.0),
+                label: tr.text(kettle_i18n::Text::A11yWindowClose).into(),
+                hovered: false,
+                pressed: false,
+            });
+        }
+        bar
+    };
+    for (language, toolbar_name) in [
+        (kettle_i18n::Language::En, "Tab bar controls"),
+        (kettle_i18n::Language::Es, "Controles de la barra de pestañas"),
+    ] {
+        let tr = kettle_i18n::Translator::new(language);
+        for header in [false, true] {
+            let bar = strip(header, &tr);
+            let nodes = super::tab_accessibility_projection(&bar, &[10, 20], false, &tr);
+            let node = |id: accesskit::NodeId| &nodes.iter().find(|(at, _)| *at == id).unwrap().1;
+            assert_eq!(
+                super::tab_strip_roots(&nodes),
+                [super::ACCESSIBILITY_TAB_LIST_ID, super::ACCESSIBILITY_TAB_TOOLBAR_ID]
+            );
+            let list = node(super::ACCESSIBILITY_TAB_LIST_ID);
+            assert_eq!(list.role(), Role::TabList);
+            assert_eq!(
+                list.children(),
+                [super::accessibility_tab_id(10, false), super::accessibility_tab_id(20, false)],
+                "header {header}"
+            );
+            let toolbar = node(super::ACCESSIBILITY_TAB_TOOLBAR_ID);
+            assert_eq!(toolbar.role(), Role::Toolbar);
+            assert_eq!(toolbar.label(), Some(toolbar_name));
+            assert_eq!(toolbar.orientation(), Some(accesskit::Orientation::Horizontal));
+            let expected = if header {
+                vec![
+                    super::ACCESSIBILITY_TAB_NEW_ID,
+                    super::ACCESSIBILITY_HEADER_FIND_ID,
+                    super::ACCESSIBILITY_TAB_MENU_ID,
+                    super::window_control_accessibility_id(kettle_render::WindowControl::Close),
+                ]
+            } else {
+                vec![
+                    super::ACCESSIBILITY_TAB_SETTINGS_ID,
+                    super::ACCESSIBILITY_TAB_NEW_ID,
+                    super::ACCESSIBILITY_TAB_MENU_ID,
+                ]
+            };
+            assert_eq!(toolbar.children(), expected, "header {header}");
+            // Every node in the strip is in one of the two, or a tab's, once.
+            let mut held: Vec<_> = list.children().to_vec();
+            held.extend(toolbar.children());
+            for (_, tab) in &nodes {
+                if tab.role() == Role::Tab {
+                    held.extend(tab.children());
+                }
+            }
+            for (id, _) in &nodes {
+                if ![super::ACCESSIBILITY_TAB_LIST_ID, super::ACCESSIBILITY_TAB_TOOLBAR_ID].contains(id) {
+                    assert_eq!(held.iter().filter(|held| *held == id).count(), 1, "{id:?}");
+                }
+            }
+        }
+    }
+    let tr = kettle_i18n::Translator::default();
+    // The new-tab menu open: its button alone, so no tab list.
+    let mut open = strip(false, &tr);
+    open.new_tab_menu_open = true;
+    let nodes = super::tab_accessibility_projection(&open, &[10, 20], false, &tr);
+    assert_eq!(super::tab_strip_roots(&nodes), [super::ACCESSIBILITY_TAB_TOOLBAR_ID]);
+    // No button: no toolbar.
+    let mut bare = strip(false, &tr);
+    bare.settings = (0.0, 0.0, 0.0, 0.0);
+    bare.new_tab = (0.0, 0.0, 0.0, 0.0);
+    bare.new_tab_menu = (0.0, 0.0, 0.0, 0.0);
+    let nodes = super::tab_accessibility_projection(&bare, &[10, 20], false, &tr);
+    assert_eq!(super::tab_strip_roots(&nodes), [super::ACCESSIBILITY_TAB_LIST_ID]);
+    // The window's node takes the strip's containers.
+    let tree = production_source()
+        .split_once("fn accessibility_tree(&self, ws: &WindowState, overlay: &Overlay)")
+        .unwrap()
+        .1
+        .split("fn accessibility_key(")
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(tree.contains("children.extend(tab_strip_roots(&tabs));"));
+}

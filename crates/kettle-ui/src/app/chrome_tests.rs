@@ -1256,11 +1256,11 @@ fn macos_titlebar_settings_gear_is_a_named_button_for_accesskit_and_ctl() {
         assert_eq!(node.role(), accesskit::Role::Button);
         assert_eq!(node.bounds(), Some(bounds));
         assert!(node.supports_action(accesskit::Action::Click));
-        let list = nodes
+        let toolbar = nodes
             .iter()
-            .find(|(_, node)| node.role() == accesskit::Role::TabList)
+            .find(|(_, node)| node.role() == accesskit::Role::Toolbar)
             .unwrap();
-        assert!(list.1.children().contains(&buttons[0].0));
+        assert!(toolbar.1.children().contains(&buttons[0].0));
     }
     let json = super::ctl::tab_bar_geometry_json(&bar, Vec::new());
     assert_eq!(
@@ -1595,7 +1595,7 @@ fn compact_header_accessible_names_follow_tooltips_and_screen_order() {
     for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
         let tr = kettle_i18n::Translator::new(language);
         let nodes = tab_accessibility_projection(&bar, &[], false, &tr);
-        let list = nodes.iter().find(|(_, n)| n.role() == accesskit::Role::TabList).unwrap();
+        let list = nodes.iter().find(|(_, n)| n.role() == accesskit::Role::Toolbar).unwrap();
         let labels: Vec<_> = list.1.children().iter().filter_map(|id| nodes.iter().find(|(node, _)| node == id)).map(|(_, n)| n.label().unwrap()).collect();
         assert_eq!(labels, [tr.text(kettle_i18n::Text::SettingsA11yTitle), tr.text(kettle_i18n::Text::MenuNewTab), tr.text(kettle_i18n::Text::TabNewOptions)]);
     }
@@ -1704,7 +1704,7 @@ fn compact_header_ax_popup_shortcuts_and_all_layout_orders() {
         bar.new_tab_menu = (1200.0, 0.0, 32.0, 32.0);
         bar.search = if linux { (1160.0, 0.0, 34.0, 34.0) } else { (0.0, 0.0, 0.0, 0.0) };
         let nodes = tab_accessibility_projection(&bar, &[], false, &tr);
-        let list = nodes.iter().find(|(_, n)| n.role() == accesskit::Role::TabList).unwrap();
+        let list = nodes.iter().find(|(_, n)| n.role() == accesskit::Role::Toolbar).unwrap();
         let expected = if linux { vec![ACCESSIBILITY_TAB_NEW_ID, ACCESSIBILITY_HEADER_FIND_ID, ACCESSIBILITY_TAB_MENU_ID] } else { vec![ACCESSIBILITY_TAB_MENU_ID, ACCESSIBILITY_TAB_NEW_ID] };
         assert_eq!(list.1.children(), expected);
         if linux { assert_eq!(nodes.iter().find(|(id, _)| *id == ACCESSIBILITY_TAB_MENU_ID).unwrap().1.label(), Some(tr.text(kettle_i18n::Text::A11yMainMenu))); }
@@ -1788,8 +1788,9 @@ fn compact_header_open_popup_has_no_inert_background_actions_and_can_dismiss() {
     });
     let tr = kettle_i18n::Translator::default();
     let nodes = tab_accessibility_projection(&bar, &[7], false, &tr);
+    // The open menu's button alone, in the toolbar; no tab list.
     assert_eq!(nodes.len(), 2);
-    let list = nodes.iter().find(|(_, n)| n.role() == accesskit::Role::TabList).unwrap();
+    let list = nodes.iter().find(|(_, n)| n.role() == accesskit::Role::Toolbar).unwrap();
     assert_eq!(list.1.children(), [ACCESSIBILITY_TAB_MENU_ID]);
     let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
     ws.context_menu = Some(ContextMenuState {

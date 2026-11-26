@@ -1110,6 +1110,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - A screen reader's cursor can reach Settings rows scrolled out of the panel;
   moving to one scrolls it into view.
 
+- Screen readers find only tabs in the tab list; New Tab, the New Tab menu,
+  Settings and the header buttons are in a toolbar beside it.
+
 - `tab-min-width` is measured in logical pixels, as documented. On a display
   with a scale above 100% tabs could shrink to a fraction of the width set
   (half on a Retina display) before the tab bar started to scroll.

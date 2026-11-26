@@ -112,6 +112,7 @@ fn accessibility_ids_do_not_collide() {
         ("update details", ACCESSIBILITY_UPDATE_DETAILS_ID),
         ("update dismiss", ACCESSIBILITY_UPDATE_DISMISS_ID),
         ("header find", ACCESSIBILITY_HEADER_FIND_ID),
+        ("tab toolbar", ACCESSIBILITY_TAB_TOOLBAR_ID),
         ("notification status", ACCESSIBILITY_NOTIFICATION_STATUS_ID),
         ("notification show", ACCESSIBILITY_NOTIFICATION_SHOW_ID),
         (

@@ -923,11 +923,11 @@ fn gnome_header_find_agrees_everywhere() {
                             ),
                             "{case}"
                         );
-                        let list = nodes
+                        let toolbar = nodes
                             .iter()
-                            .find(|(_, n)| n.role() == Role::TabList)
+                            .find(|(_, n)| n.role() == Role::Toolbar)
                             .unwrap();
-                        assert!(list.1.children().contains(id), "{case}");
+                        assert!(toolbar.1.children().contains(id), "{case}");
                     }
                     let json = super::ctl::tab_bar_geometry_json(&bar, Vec::new());
                     assert_eq!(json["search_button"], super::ctl_snapshot::rect_json(find));

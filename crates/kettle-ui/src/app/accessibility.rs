@@ -185,10 +185,8 @@ impl App {
                 self.cfg.tab_bar_pos.is_vertical(),
                 &self.ui_text,
             );
-            if !tabs.is_empty() {
-                children.push(ACCESSIBILITY_TAB_LIST_ID);
-                nodes.extend(tabs);
-            }
+            children.extend(tab_strip_roots(&tabs));
+            nodes.extend(tabs);
         }
         if !self.pointer_modal_open(ws) {
             for (pane, toast) in self.persistent_notices(ws) {
@@ -4261,7 +4259,7 @@ pub(super) fn command_mark_accessibility_node(
     node
 }
 
-fn window_control_accessibility_id(action: kettle_render::WindowControl) -> NodeId {
+pub(super) fn window_control_accessibility_id(action: kettle_render::WindowControl) -> NodeId {
     use kettle_render::WindowControl as C;
     NodeId(
         (1 << 51)
@@ -4275,7 +4273,9 @@ fn window_control_accessibility_id(action: kettle_render::WindowControl) -> Node
 
 /// The GNOME header's Find button, beside its window buttons' ids.
 pub(super) const ACCESSIBILITY_HEADER_FIND_ID: NodeId = NodeId((1 << 51) | 3);
-const ACCESSIBILITY_TAB_LIST_ID: NodeId = NodeId(1 << 54);
+/// The toolbar that holds the strip's own buttons, beside the tab list.
+pub(super) const ACCESSIBILITY_TAB_TOOLBAR_ID: NodeId = NodeId((1 << 51) | 4);
+pub(super) const ACCESSIBILITY_TAB_LIST_ID: NodeId = NodeId(1 << 54);
 pub(super) const ACCESSIBILITY_TAB_NEW_ID: NodeId = NodeId((1 << 54) | 1);
 pub(super) const ACCESSIBILITY_TAB_MENU_ID: NodeId = NodeId((1 << 54) | 2);
 /// Tab ids start at 4 (`accessibility_tab_id`), so 3 is free.
@@ -4307,6 +4307,11 @@ fn accessibility_rect(rect: Rect) -> accesskit::Rect {
     )
 }
 
+/// The tab strip's nodes: a tab list that holds only its tabs, and beside
+/// it a toolbar with the strip's own buttons (New tab, the new-tab menu, the
+/// macOS Settings gear, the GNOME header's Find, main menu and window
+/// buttons). Either is left out when it would be empty; `tab_strip_roots`
+/// names those that are there, for the window's node.
 pub(super) fn tab_accessibility_projection(
     bar: &TabBar,
     anchors: &[u64],
@@ -4317,7 +4322,8 @@ pub(super) fn tab_accessibility_projection(
         return Vec::new();
     }
     let mut nodes = Vec::new();
-    let mut children = Vec::new();
+    let mut tabs = Vec::new();
+    let mut controls = Vec::new();
     for seg in bar.segments.iter().filter(|_| !bar.new_tab_menu_open) {
         let Some(anchor) = anchors.get(seg.idx).copied() else {
             continue;
@@ -4348,7 +4354,7 @@ pub(super) fn tab_accessibility_projection(
             }
         }
         nodes.push((id, tab));
-        children.push(id);
+        tabs.push(id);
     }
     for (id, rect, label) in [
         (
@@ -4401,7 +4407,7 @@ pub(super) fn tab_accessibility_projection(
             button.add_action(AccessibilityAction::Click);
             button.set_bounds(accessibility_rect(rect));
             nodes.push((id, button));
-            children.push(id);
+            controls.push(id);
         }
     }
     // GNOME's Find button: a toggle, pressed while Find is open.
@@ -4412,7 +4418,7 @@ pub(super) fn tab_accessibility_projection(
         button.set_bounds(accessibility_rect(bar.search));
         button.set_toggled(accesskit::Toggled::from(bar.search_open));
         nodes.push((ACCESSIBILITY_HEADER_FIND_ID, button));
-        children.push(ACCESSIBILITY_HEADER_FIND_ID);
+        controls.push(ACCESSIBILITY_HEADER_FIND_ID);
     }
     for control in bar
         .window_controls
@@ -4425,28 +4431,57 @@ pub(super) fn tab_accessibility_projection(
         button.set_bounds(accessibility_rect(control.rect));
         button.add_action(AccessibilityAction::Click);
         nodes.push((id, button));
-        children.push(id);
+        controls.push(id);
     }
-    children.sort_by(|a, b| {
-        let position = |id: &NodeId| {
-            nodes
-                .iter()
-                .find(|(node, _)| node == id)
-                .and_then(|(_, n)| n.bounds())
-                .map_or(f64::INFINITY, |r| if vertical { r.y0 } else { r.x0 })
-        };
-        position(a).total_cmp(&position(b))
-    });
-    let mut list = Node::new(Role::TabList);
-    list.set_orientation(if vertical {
+    let orientation = if vertical {
         accesskit::Orientation::Vertical
     } else {
         accesskit::Orientation::Horizontal
-    });
-    list.set_label(tr.text(kettle_i18n::Text::A11yTabList));
-    list.set_children(children);
-    nodes.push((ACCESSIBILITY_TAB_LIST_ID, list));
+    };
+    // Each container's children follow the strip's screen order.
+    for (role, id, mut members, label) in [
+        (
+            Role::TabList,
+            ACCESSIBILITY_TAB_LIST_ID,
+            tabs,
+            kettle_i18n::Text::A11yTabList,
+        ),
+        (
+            Role::Toolbar,
+            ACCESSIBILITY_TAB_TOOLBAR_ID,
+            controls,
+            kettle_i18n::Text::A11yTabToolbar,
+        ),
+    ] {
+        if members.is_empty() {
+            continue;
+        }
+        members.sort_by(|a, b| {
+            let position = |id: &NodeId| {
+                nodes
+                    .iter()
+                    .find(|(node, _)| node == id)
+                    .and_then(|(_, n)| n.bounds())
+                    .map_or(f64::INFINITY, |r| if vertical { r.y0 } else { r.x0 })
+            };
+            position(a).total_cmp(&position(b))
+        });
+        let mut container = Node::new(role);
+        container.set_orientation(orientation);
+        container.set_label(tr.text(label));
+        container.set_children(members);
+        nodes.push((id, container));
+    }
     nodes
+}
+
+/// The tab strip's containers among `nodes`, `tab_accessibility_projection`'s
+/// output, as children of the window's node: the tab list, then the toolbar.
+pub(super) fn tab_strip_roots(nodes: &[(NodeId, Node)]) -> Vec<NodeId> {
+    [ACCESSIBILITY_TAB_LIST_ID, ACCESSIBILITY_TAB_TOOLBAR_ID]
+        .into_iter()
+        .filter(|root| nodes.iter().any(|(id, _)| id == root))
+        .collect()
 }
 
 pub(super) fn persistent_notice_id(pane: Option<u64>, part: u64) -> NodeId {
