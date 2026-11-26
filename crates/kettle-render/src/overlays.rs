@@ -725,6 +725,9 @@ pub struct UpdateToastOverlay {
     pub close: String,
     pub opacity: f32,
     pub focused: Option<usize>,
+    /// The button under the pointer, numbered as `focused`: 1 the details
+    /// action (Show, Open config), 2 the close action (×, Dismiss).
+    pub hovered: Option<usize>,
 }
 
 impl UpdateToastOverlay {

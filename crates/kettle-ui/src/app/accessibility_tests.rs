@@ -1562,6 +1562,7 @@ fn persistent_notice_accessibility_matches_both_control_rectangles() {
         close: EN_TEXT.text(kettle_i18n::Text::ProcessClose).into(),
         opacity: 1.0,
         focused: None,
+        hovered: None,
     };
     let nodes = super::persistent_notice_nodes(Some(10), &toast);
     assert_eq!(nodes.len(), 3);
@@ -1610,6 +1611,7 @@ fn config_notice_exposes_open_config_and_dismiss_with_the_shared_hit_rects() {
             close,
             opacity: 1.0,
             focused: None,
+            hovered: None,
         };
         let nodes = super::persistent_notice_nodes(None, &toast);
         for (part, rect, label, hit) in [

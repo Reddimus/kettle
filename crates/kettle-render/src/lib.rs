@@ -3946,12 +3946,10 @@ impl Renderer {
                         right: (ax + aw).floor() as i32,
                         bottom: (ay + ah).floor() as i32,
                     },
-                    default_color: GColor::rgba(
-                        palette.text[i].r,
-                        palette.text[i].g,
-                        palette.text[i].b,
-                        (alpha * 255.0).round() as u8,
-                    ),
+                    default_color: {
+                        let ink = palette.text_for(i, toast.hovered);
+                        GColor::rgba(ink.r, ink.g, ink.b, (alpha * 255.0).round() as u8)
+                    },
                     custom_glyphs: &[],
                 });
             }

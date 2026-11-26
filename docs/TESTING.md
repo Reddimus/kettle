@@ -172,7 +172,9 @@ lane buttons' WCAG 2.5.8 targets and hover fill.
 `lane_button_tooltips_name_the_keys_the_lane_acts_on` checks every key a lane
 button's tooltip names against the lane's own key handling, and
 `lane_button_tooltips_share_the_clock_and_the_screen_reader_name` guards their
-timing and names.
+timing and names. `the_toast_button_under_the_pointer_lights_alone`
+(`kettle-render`) and `toast_and_notice_buttons_light_under_the_pointer`
+(`kettle-ui`) cover the toast and notice buttons' hover.
 Full render/UI suites and clippy remain required; native focus changes,
 hover/press feedback, tooltip placement and Spanish acceptance need a desktop.
 

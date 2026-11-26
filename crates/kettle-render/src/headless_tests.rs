@@ -5241,6 +5241,7 @@ fn toast_redesign_corners_reveal_terminal_while_center_is_opaque() {
             close: "\u{00d7}".into(),
             opacity: 1.0,
             focused: None,
+            hovered: None,
         }),
         ..Overlay::default()
     };
@@ -5293,6 +5294,7 @@ fn toast_redesign_text_focus_fade_and_dismissal_preserve_retained_layers() {
             close: "\u{00d7}".into(),
             opacity: 1.0,
             focused: Some(2),
+            hovered: None,
         }),
         ..Overlay::default()
     };
@@ -6912,6 +6914,7 @@ fn an_open_menu_covers_a_toast_beneath_it() {
             close: "\u{00d7}".into(),
             opacity: 1.0,
             focused: None,
+            hovered: None,
         }),
         context_menu: Some(menu),
         ..focused(false)

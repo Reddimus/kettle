@@ -1828,6 +1828,7 @@ impl App {
         let bar = self.tab_bar(ws);
         let (new_tab_hover, hover_changed) = hover_tab_bar(ws, &bar);
         self.sync_lane_control_hover(ws);
+        self.sync_toast_control_hover(ws);
         self.sync_tooltip(ws, &bar);
         let (cursor_x, cursor_y) = (ws.cursor.x as f32, ws.cursor.y as f32);
         let control_hover = window_control_at(&bar, cursor_x, cursor_y);

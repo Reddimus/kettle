@@ -1897,7 +1897,7 @@ fn the_tooltip_clock_follows_moves_presses_leaves_and_one_scheduled_wake() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(source.contains(
-        "let (new_tab_hover, hover_changed) = hover_tab_bar(ws, &bar); self.sync_lane_control_hover(ws); self.sync_tooltip(ws, &bar);"
+        "let (new_tab_hover, hover_changed) = hover_tab_bar(ws, &bar); self.sync_lane_control_hover(ws); self.sync_toast_control_hover(ws); self.sync_tooltip(ws, &bar);"
     ));
     assert!(source.contains(
         "ws.resume_native_pointer(); // A press hides the tooltip until the pointer leaves its // control. if ws.tooltip.press(std::time::Instant::now())"
@@ -2096,7 +2096,7 @@ fn moving_onto_a_lane_button_repaints_to_light_it() {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    assert!(source.contains("self.sync_lane_control_hover(ws); self.sync_tooltip(ws, &bar);"));
+    assert!(source.contains("self.sync_lane_control_hover(ws); self.sync_toast_control_hover(ws);"));
     assert!(source.contains(
         "let hovered = self.hovered_lane_control(ws); if hovered != ws.lane_control_hover { ws.lane_control_hover = hovered; if let Some(window) = &ws.window { window.request_redraw(); } }"
     ));
@@ -2107,4 +2107,47 @@ fn moving_onto_a_lane_button_repaints_to_light_it() {
     ws.lane_control_hover = Some((1, kettle_render::MediaLaneHit::ZoomIn));
     ws.leave_tab_bar();
     assert_eq!(ws.lane_control_hover, None);
+}
+
+/// Should 12 of the 6.0 UI review: a toast's Show and Dismiss, and the
+/// bad-config notice's Open config and Dismiss, gave no hover. Every toast
+/// and notice projection now says which of its buttons the real pointer is
+/// on, from the same hit test a press uses, and the window repaints as that
+/// changes.
+#[test]
+fn toast_and_notice_buttons_light_under_the_pointer() {
+    use super::notices::toast_button_at;
+    let geometry = kettle_render::persistent_notice_geometry(
+        (0.0, 0.0, 800.0, 600.0),
+        (8.0, 16.0),
+        2,
+        12,
+        7,
+    )
+    .unwrap();
+    let centre = |rect: kettle_render::Rect4| (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0);
+    let (x, y) = centre(geometry.details);
+    assert_eq!(toast_button_at(&geometry, x, y), Some(1));
+    let (x, y) = centre(geometry.close);
+    assert_eq!(toast_button_at(&geometry, x, y), Some(2));
+    let (x, y) = centre(geometry.message);
+    assert_eq!(toast_button_at(&geometry, x, y), None, "the body is no button");
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(
+        source
+            .matches("hovered: self.toast_control_hover(ws, &geometry),")
+            .count(),
+        4,
+        "both notices, the notification toast and the update toast"
+    );
+    assert!(source.contains(
+        "if hovered != ws.toast_control_hover { ws.toast_control_hover = hovered; if let Some(window) = &ws.window { window.request_redraw(); } }"
+    ));
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    ws.toast_control_hover = Some(geometry.close);
+    ws.leave_tab_bar();
+    assert_eq!(ws.toast_control_hover, None);
 }

@@ -119,8 +119,9 @@ impl App {
         if !self.toast_visible(ws) || toast.remaining().is_zero() || expired_claim {
             return None;
         }
+        let geometry = self.update_toast_geometry(ws)?;
         Some(kettle_render::UpdateToastOverlay {
-            geometry: self.update_toast_geometry(ws)?,
+            geometry,
             message: self.update_toast_message(&toast.claim.notice),
             details: self
                 .ui_text
@@ -132,6 +133,7 @@ impl App {
                 Some(ACCESSIBILITY_UPDATE_DISMISS_ID) => Some(2),
                 _ => None,
             },
+            hovered: self.toast_control_hover(ws, &geometry),
             opacity: toast.opacity(self.motion_allowed()),
         })
     }

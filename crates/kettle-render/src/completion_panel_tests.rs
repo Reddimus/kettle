@@ -1316,6 +1316,7 @@ fn persistent_config_and_exit_notices_displace_or_hide_paste_receipts() {
         close: "x".into(),
         opacity: 1.0,
         focused: None,
+        hovered: None,
     }];
     let hidden = super::notification_geometry_with_notices(
         None,

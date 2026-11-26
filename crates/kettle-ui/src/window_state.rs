@@ -1168,6 +1168,8 @@ pub(crate) struct WindowState {
     pub(crate) lane_hover: Option<LaneHover>,
     /// The lane button under the real pointer, by pane, whose chip is lit.
     pub(crate) lane_control_hover: Option<(u64, kettle_render::MediaLaneHit)>,
+    /// The toast or notice button under the real pointer, which is lit.
+    pub(crate) toast_control_hover: Option<kettle_render::Rect4>,
     pub(crate) selecting: bool,
     pub(crate) selection_hint_plain: bool,
     /// Pane that owns the active pointer selection gesture. Focus can
@@ -1690,11 +1692,13 @@ impl WindowState {
     }
 
     /// When the pointer leaves the window, nothing in the tab bar is under
-    /// it or pressed any more, no tooltip shows and no lane button is lit.
+    /// it or pressed any more, no tooltip shows and no lane or toast button
+    /// is lit.
     pub(crate) fn leave_tab_bar(&mut self) {
         self.release_tab_hold();
         self.tooltip.hover(None, std::time::Instant::now());
         self.lane_control_hover = None;
+        self.toast_control_hover = None;
         self.release_titlebar_buttons();
         self.hovered_close_idx = None;
         self.hovered_tab_idx = None;
@@ -1913,6 +1917,7 @@ impl WindowState {
             lane_playbacks: std::collections::HashMap::new(),
             lane_hover: None,
             lane_control_hover: None,
+            toast_control_hover: None,
             selecting: false,
             selection_hint_plain: false,
             selecting_pane: None,

@@ -789,7 +789,8 @@ or OSC 777 (`printf '\e]777;notify;Title;Body\a'`), and a Lua script with
   you can see it, not counting time the window is in the background, behind
   a dialog or under the pointer, and fades out only when motion is allowed.
   Screen readers announce it politely. With assistive focus on its Show or
-  Dismiss button, Enter, Space, Tab and Escape answer the toast.
+  Dismiss button, Enter, Space, Tab and Escape answer the toast. Show and ×
+  light up under the pointer, as a dialog's buttons do.
 - **No Kettle window has focus**: a desktop notification, as before, and
   the window asks for attention. If the desktop refuses it or the delivery
   fails (a D-Bus error on Linux, a toast error on Windows), the toast is
@@ -1288,7 +1289,8 @@ Values are omitted, including environment values. Filenames and keys have
 control characters removed and are limited to 64 characters each.
 
 **Open Config** opens the file named by the notice with the operating system's
-default app, using the same mechanism as **Advanced…**. If a screen reader
+default app, using the same mechanism as **Advanced…**. It and **Dismiss**
+light up under the pointer. If a screen reader
 moves focus to the notice, Enter opens the file and Escape dismisses it. While
 the terminal retains focus, those keys go to the running shell or program. Both
 buttons remain available to screen readers. The terminal grid and IME cursor

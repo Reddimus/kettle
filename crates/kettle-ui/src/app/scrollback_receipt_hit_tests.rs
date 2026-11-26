@@ -182,6 +182,7 @@ fn placement(height: f32, expanded: bool, notice: Option<Rect4>) -> MediaPasteRe
             close: "Dismiss".into(),
             opacity: 1.0,
             focused: None,
+            hovered: None,
         })
         .collect();
     MediaPasteReceiptPlacement {
