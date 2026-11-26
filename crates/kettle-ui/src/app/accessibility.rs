@@ -2561,6 +2561,11 @@ pub(super) fn accessibility_modal_id(kind: u64, index: usize) -> NodeId {
     NodeId(ACCESSIBILITY_MODAL_ID_MASK | (kind << 16) | index as u64)
 }
 
+/// How many rows of a list placed by index (`accessibility_modal_id(kind,
+/// row + 1)`) the tree holds: an index past 16 bits would take the next
+/// kind's ids. A menu or quick select longer than this leaves the rest out.
+const MODAL_INDEXED_ROWS: usize = (1 << 16) - 1;
+
 pub(super) fn accessibility_confirm_button_index(id: NodeId) -> Option<usize> {
     let first = accessibility_modal_id(1, 1).0;
     let raw = id.0.checked_sub(first)?;
@@ -3356,7 +3361,7 @@ pub(super) fn modal_accessibility_projection(
         let container_id = accessibility_modal_id(2, 0);
         let mut children = Vec::new();
         let mut highlighted = None;
-        for (index, row) in menu.rows.iter().enumerate() {
+        for (index, row) in menu.rows.iter().enumerate().take(MODAL_INDEXED_ROWS) {
             if row.separator {
                 continue;
             }
@@ -3427,7 +3432,12 @@ pub(super) fn modal_accessibility_projection(
     if !overlay.hint_labels.is_empty() {
         let container_id = accessibility_modal_id(3, 0);
         let mut children = Vec::with_capacity(overlay.hint_labels.len());
-        for (index, hint) in overlay.hint_labels.iter().enumerate() {
+        for (index, hint) in overlay
+            .hint_labels
+            .iter()
+            .enumerate()
+            .take(MODAL_INDEXED_ROWS)
+        {
             let id = accessibility_modal_id(3, index + 1);
             let mut node = Node::new(Role::ListBoxOption);
             node.set_label(hint.label.clone());
@@ -4071,7 +4081,7 @@ pub(super) fn nest_context_menu_accessibility(
     {
         let kind = 40 + depth as u64;
         let mut children = Vec::new();
-        for (index, row) in panel.rows.iter().enumerate() {
+        for (index, row) in panel.rows.iter().enumerate().take(MODAL_INDEXED_ROWS) {
             if row.separator {
                 continue;
             }

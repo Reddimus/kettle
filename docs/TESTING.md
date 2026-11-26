@@ -3512,6 +3512,10 @@ speech:
   nothing. `settings_accessibility_click_dispatches_configure_and_retry` checks
   that the Change button, not the row, reaches the global hotkey's configure
   and retry.
+- `indexed_modal_lists_stop_short_of_the_next_kinds_ids`: a 70,000-row
+  context menu and quick select keep 65,535 rows each in the tree, every id
+  distinct, where row 65,535 of the menu would have taken the quick-select
+  list's id.
 - `quick_select_labels_offer_a_press_that_acts_on_their_target`: matching
   quick-select labels have a Click action that runs `act_hint`. Dimmed labels
   have none.

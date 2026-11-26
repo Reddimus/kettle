@@ -3857,3 +3857,58 @@ fn settings_selection_requests_never_change_a_row() {
     assert!(handler.contains("accessibility_bound_class(*id, BoundTarget::SettingsChange)"));
     assert!(handler.contains(".zip(fields.get(focused_row))"));
 }
+
+/// A list whose rows take their ids from their index holds at most as many
+/// rows as 16 bits can number: a longer context menu or quick select leaves
+/// the rest out of the tree, where the next row would take the next modal
+/// kind's ids (row 65,535 of the menu would be the quick-select list).
+#[test]
+fn indexed_modal_lists_stop_short_of_the_next_kinds_ids() {
+    let rows = 70_000;
+    let overlay = kettle_render::Overlay {
+        context_menu: Some(kettle_render::ContextMenu {
+            anchor: (0.0, 0.0),
+            a11y_label: None,
+            status: None,
+            picker_header_height: 0.0,
+            picker_footer: None,
+            rows: (0..rows)
+                .map(|i| kettle_render::ContextMenuRow {
+                    label: format!("host {i}"),
+                    enabled: true,
+                    ..Default::default()
+                })
+                .collect(),
+            highlight: 0,
+            scroll_offset: 0,
+            panel_w_clamped: 200.0,
+            panel_h_clamped: 400.0,
+        }),
+        hint_labels: (0..rows)
+            .map(|i| kettle_render::HintLabel {
+                row: i,
+                col: 0,
+                label: format!("h{i}"),
+                dim: false,
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let projection =
+        super::modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, &EN_TEXT);
+    let mut seen = std::collections::HashSet::new();
+    for (id, _) in &projection.nodes {
+        assert!(seen.insert(id.0), "{id:?} twice");
+    }
+    for (kind, limit) in [(2_u64, (1 << 16) - 1), (3, (1 << 16) - 1)] {
+        let held = projection
+            .nodes
+            .iter()
+            .filter(|(id, _)| {
+                id.0 > super::accessibility_modal_id(kind, 0).0
+                    && id.0 < super::accessibility_modal_id(kind + 1, 0).0
+            })
+            .count();
+        assert_eq!(held, limit, "kind {kind}");
+    }
+}
