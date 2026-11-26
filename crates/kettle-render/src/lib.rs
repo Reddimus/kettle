@@ -5214,8 +5214,9 @@ impl Renderer {
                 if row.separator {
                     continue;
                 }
-                let background = overlays::menu_row_background(
-                    overlays::menu_row_selected(menu, i),
+                let background = overlays::menu_row_fill(
+                    menu,
+                    i,
                     theme,
                     accent,
                     &mut self.chrome_colors,
