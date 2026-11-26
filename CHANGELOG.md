@@ -1122,7 +1122,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - The find bar's match count and status reach screen readers as one named
   status, with no unnamed second one.
 
-- The pointer shows the arrow, not the text cursor, over a scrollbar and while dragging it.
+- A scrollbar no longer stays lit and wide after the pointer leaves it for a pane whose program tracks pointer motion.
+
+- The pointer shows the arrow, not the text cursor, over a scrollbar and while dragging it, and the text cursor comes back as soon as a drag ends over text.
 
 - The pointer shows the text cursor over the command palette's field, the picker filters, the title editor and the Settings search and value fields, as it already did in Find.
 

@@ -172,3 +172,53 @@ fn the_scrollbar_shows_the_arrow_where_a_press_grabs_it() {
         assert!(source.contains(needle), "missing: {needle}");
     }
 }
+
+/// A drag holds the arrow wherever the pointer takes it, so releasing it over
+/// text must give the pointer its I-beam back at once, and narrow the bar it
+/// held wide, rather than leave both for the next event in an idle window.
+/// The native release works the cursor out again as the drag ends, and both
+/// releases end the drag through the helper that asks for the frame.
+#[test]
+fn releasing_a_scrollbar_drag_restores_the_cursor_at_once() {
+    let source: String = production_source().split_whitespace().collect();
+    for needle in [
+        "ifend_scrollbar_drag(ws){self.sync_cursor_icon(ws);}",
+        "ifbcode==0{end_scrollbar_drag(ws);ws.tab_drag_active=false;",
+        "fnend_scrollbar_drag(ws:&mutWindowState)->bool{ifws.scrollbar_drag_offset.take().is_none(){returnfalse;}ifletSome(window)=&ws.window{window.request_redraw();}true}",
+    ] {
+        assert!(source.contains(needle), "missing: {needle}");
+    }
+}
+
+/// A program reporting motion (DEC 1003) takes the motion and returns before
+/// the rest of the hover work, so the scrollbar hover is updated first: moving
+/// from one pane's bar into a split whose program reports motion, or off a bar
+/// reached with Shift held, no longer leaves that bar lit and wide. A drag
+/// keeps the hover it started with.
+#[test]
+fn a_program_taking_motion_leaves_no_scrollbar_lit() {
+    let source: String = production_source().split_whitespace().collect();
+    let moved = source
+        .split("WindowEvent::CursorMoved{position,..}=>{")
+        .nth(1)
+        .and_then(|rest| rest.split("WindowEvent::MouseInput{").next())
+        .expect("CursorMoved arm");
+    let hover = moved
+        .find("self.update_scrollbar_hover(ws);")
+        .expect("the scrollbar hover is updated on motion");
+    let report = moved
+        .find("self.send_mouse(ws,input::MOUSE_NO_BUTTON,true,true)")
+        .expect("motion is reported");
+    assert!(
+        hover < report,
+        "the hover is updated before a program takes the motion"
+    );
+    assert_eq!(
+        moved.matches("scrollbar_pane_at(").count(),
+        0,
+        "one hover update"
+    );
+    assert!(source.contains(
+        "fnupdate_scrollbar_hover(&self,ws:&mutWindowState){ifws.scrollbar_drag_offset.is_some(){return;}letarea=self.area(ws);let(px,py)=(ws.cursor.xasf32,ws.cursor.yasf32);lethover=self.scrollbar_pane_at(ws,area,px,py);ifhover!=ws.scrollbar_hover{ws.scrollbar_hover=hover;"
+    ));
+}
