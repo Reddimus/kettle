@@ -2084,7 +2084,8 @@ line at the row's end: its Click gives the picker its own Enter
 the SSH launcher's Save and Remove still open their own steps. Settings
 follows the same rule: Focus and Click on a row only select it, and the
 selected row's Change button (bound to the row's category and label, over its
-painted control) changes it through `settings_adjust` as Space does, beside
+painted control) changes it through `settings_adjust` as a left-click on the
+row does, beside
 the Reset button.
 `accessibility_picker_request` maps a request to the value the picker's
 selection holds (a command for the palette, a row elsewhere). Each

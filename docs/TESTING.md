@@ -3515,6 +3515,9 @@ speech:
 - `an_accessibility_selection_previews_its_theme_after_a_held_hover`: after
   the pointer leaves a theme's row before its preview is due, a screen
   reader's selection of another theme still previews it at once.
+- `the_change_button_names_space_only_where_space_changes_the_row`: the
+  Change button names Space as its key on a switch, a choice and a text row,
+  and no key on a value row, which may be a number that Space leaves alone.
 - `an_unpainted_reset_leaves_the_value_control_to_change`: in a panel too
   narrow for the Reset chip, AccessKit's consumer hit test on the value control
   finds the Change button. Reset stays in the tree as a zero-width line at the

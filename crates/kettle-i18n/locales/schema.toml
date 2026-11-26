@@ -1780,7 +1780,7 @@ context = "crates/kettle-ui/src/app/accessibility.rs: screen-reader name of the 
 args = [{ name = "setting", type = "str" }, { name = "value", type = "str" }]
 
 [messages.settings_a11y_change]
-context = "crates/kettle-ui/src/app/accessibility.rs: screen-reader name of the button over the selected Settings row's value control that changes it as Space does: turns a switch on or off, moves a choice to its next value, or opens the row's editor, theme picker or shortcut capture. setting is the row's label. Needs screen-reader second pass."
+context = "crates/kettle-ui/src/app/accessibility.rs: screen-reader name of the button over the selected Settings row's value control that changes it as a left-click on the row does: turns a switch on or off, moves a choice to its next value, steps a number up, or opens the row's editor, theme picker or shortcut capture. setting is the row's label. Needs screen-reader second pass."
 args = [{ name = "setting", type = "str" }]
 
 [messages.settings_value_right]

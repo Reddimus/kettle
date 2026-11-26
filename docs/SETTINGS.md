@@ -49,8 +49,9 @@ adjust it, **left-click Reset** to restore a changed row's default, **click
 a category** to switch pages, and **click outside** the panel to close. A
 right-click or the wheel over Reset acts on the row as anywhere else on it.
 Screen readers get one Change button for the highlighted row ("Change Font
-size"), over its value control, which changes the row as Space does, and one
-Reset button, named for the row and the default it restores ("Reset Font size
+size"), over its value control, which changes the row as a left-click on it
+does (Space does the same to a switch, a choice or a text row; a number steps
+up, as → steps it), and one Reset button, named for the row and the default it restores ("Reset Font size
 to 14 px") and marked unavailable while the row holds that default. Pressing,
 focusing or selecting a row with a screen reader only highlights it: the
 platforms send the same request for selecting a row as for pressing it, so a
@@ -61,8 +62,9 @@ carry that state on a list row, so VoiceOver and Narrator hear the On or Off.
 On Linux and Windows each row also gives its place among the rows the list
 shows, such as 3 of 12; the locked macOS adapter does not pass that on.
 Rows scrolled out of the panel stay reachable with a screen reader's cursor;
-moving to one selects it and scrolls it into view. (A keybind row starts capture on click, the image-path row opens
-an inline text prompt, and the Theme row opens the theme picker.)
+moving to one selects it and scrolls it into view. (A left-click on a keybind
+row, or its Change button, starts capture; on the image-path row it opens an
+inline text prompt, and on the Theme row the theme picker.)
 
 With **`vim-menu-nav`** on (the default), the panel also takes vim keys:
 `j`/`k` move between options, `h`/`l` change the highlighted option, `g`/`G`

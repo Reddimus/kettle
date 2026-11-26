@@ -2106,6 +2106,19 @@ pub(super) fn ssh_row_a11y_key(
     }
 }
 
+/// The key that changes a Settings row of `control` as its Change button
+/// does: Space for a switch, a choice or a text row. `None` for any other
+/// value row: a number there steps with the arrows, and Space leaves it.
+pub(super) fn settings_change_key(control: kettle_render::SettingsControl) -> Option<&'static str> {
+    use kettle_render::SettingsControl;
+    match control {
+        SettingsControl::Toggle(_) | SettingsControl::Choice | SettingsControl::Text => {
+            Some("Space")
+        }
+        SettingsControl::Value => None,
+    }
+}
+
 /// The id of the Change button for the Settings `row`: bound to its
 /// category and label, so a press queued for one row never changes another.
 pub(super) fn accessibility_settings_change_id(row: &kettle_render::SettingsRow) -> NodeId {
@@ -2533,7 +2546,7 @@ pub(super) fn card_accessibility_node(
 /// Focus or Click on a row only selects it: the adapters send that Click
 /// when a screen reader selects the row too. Only a Click on the selected
 /// row's Change button (`change`: its id and the row's field) changes it,
-/// through `adjust`, as Space does.
+/// through `adjust`, as a left-click on the row does.
 pub(super) fn handle_accessibility_action(
     ws: &mut WindowState,
     request: &ActionRequest,
@@ -3763,7 +3776,7 @@ pub(super) fn modal_accessibility_projection(
         projection.nodes.push((list_id, list));
         let mut dialog_children = vec![search_id, list_id];
         // One Change button, for the selected row: the node that changes it,
-        // as Space does. A row has a selected state, and the adapters turn
+        // as a left-click on the row does. A row has a selected state, and the adapters turn
         // selecting it into the Click a press sends, so a row's own Click
         // only selects it. The button has none, is bound to the row and
         // covers its painted control. The inline editor, when open, is the
@@ -3780,7 +3793,12 @@ pub(super) fn modal_accessibility_projection(
             let id = accessibility_settings_change_id(row);
             let mut button = Node::new(Role::Button);
             button.set_label(tr.settings_a11y_change(&row.label));
-            button.set_keyboard_shortcut("Space");
+            // Space does the same to a switch, a choice or a text row. A
+            // number steps with the arrows, not Space, and another value row
+            // may be a number, so it names no key.
+            if let Some(key) = settings_change_key(row.control) {
+                button.set_keyboard_shortcut(key);
+            }
             button.add_action(AccessibilityAction::Click);
             match layout.rows.iter().find(|r| r.index == settings.focused_row) {
                 Some(geometry) => button.set_bounds(bounds(geometry.chip_rect)),

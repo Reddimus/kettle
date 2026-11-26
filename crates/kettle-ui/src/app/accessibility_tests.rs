@@ -4223,3 +4223,38 @@ fn an_accessibility_selection_previews_its_theme_after_a_held_hover() {
     let bookkeeping = select.find("select_accessible_picker_option(ws, selected)").unwrap();
     assert!(bookkeeping < select.find("self.sync_theme_preview(ws);").unwrap());
 }
+
+/// The Change button names the key that does what it does only where there
+/// is one: Space changes a switch, a choice and a text row as the button
+/// does, but leaves a number, which steps with the arrows, so a value row,
+/// which may be a number, names no key.
+#[test]
+fn the_change_button_names_space_only_where_space_changes_the_row() {
+    use kettle_render::SettingsControl;
+    for (control, key) in [
+        (SettingsControl::Toggle(true), Some("Space")),
+        (SettingsControl::Choice, Some("Space")),
+        (SettingsControl::Text, Some("Space")),
+        (SettingsControl::Value, None),
+    ] {
+        let row = kettle_render::SettingsRow {
+            label: "Font size".into(),
+            value: "16 px".into(),
+            control,
+            ..Default::default()
+        };
+        let change = super::accessibility_settings_change_id(&row);
+        let overlay = kettle_render::Overlay {
+            settings: Some(kettle_render::SettingsOverlay {
+                categories: vec!["Appearance".into()],
+                rows: vec![row],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let projection =
+            super::modal_accessibility_projection(&overlay, (1280.0, 820.0), (8.4, 17.5), 1.0, &EN_TEXT);
+        let button = &projection.nodes.iter().find(|(id, _)| *id == change).unwrap().1;
+        assert_eq!(button.keyboard_shortcut(), key, "{control:?}");
+    }
+}
