@@ -1257,15 +1257,6 @@ fn clamp_point<T>(term: &Term<T>, point: SearchPoint) -> SearchPoint {
     )
 }
 
-/// A match expressed in absolute grid coordinates (line can be negative for
-/// scrollback).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Match {
-    pub line: i32,
-    pub start_col: usize,
-    pub end_col: usize,
-}
-
 /// Terminator parity (terminatorlib/config.py:117
 /// `case_sensitive`): override the default smart-case policy
 /// at search time. `Smart` keeps ripgrep/vim's smart-case
@@ -1308,7 +1299,7 @@ pub fn build_regex_with(pattern: &str, mode: CaseSensitivity) -> Option<Regex> {
         .ok()
 }
 
-pub fn search(term: &Term<EventProxy>, pattern: &str) -> Vec<Match> {
+pub fn search(term: &Term<EventProxy>, pattern: &str) -> Vec<SearchSpan> {
     search_with(term, pattern, CaseSensitivity::Smart)
 }
 
@@ -1317,9 +1308,13 @@ pub fn search(term: &Term<EventProxy>, pattern: &str) -> Vec<Match> {
 /// This legacy whole-buffer scan returns at most [`MAX_SEARCH_MATCHES`] matches, the same hard
 /// ceiling the chunked [`CompiledSearch`] scanner enforces. Without it, a pattern that matches
 /// pathologically often across a large scrollback (a single common character, or repetitive
-/// hostile program output) would push one [`Match`] per hit into an unbounded `Vec` and block the
-/// calling thread.
-pub fn search_with(term: &Term<EventProxy>, pattern: &str, mode: CaseSensitivity) -> Vec<Match> {
+/// hostile program output) would push one [`SearchSpan`] per hit into an unbounded `Vec` and block
+/// the calling thread.
+pub fn search_with(
+    term: &Term<EventProxy>,
+    pattern: &str,
+    mode: CaseSensitivity,
+) -> Vec<SearchSpan> {
     let Some(re) = build_regex_with(pattern, mode) else {
         return Vec::new();
     };
@@ -1353,11 +1348,10 @@ pub fn search_with(term: &Term<EventProxy>, pattern: &str, mode: CaseSensitivity
                 .get(m.end().saturating_sub(1))
                 .copied()
                 .unwrap_or(start_col);
-            matches.push(Match {
-                line,
-                start_col,
-                end_col,
-            });
+            matches.push(SearchSpan::new(
+                SearchPoint::new(line, start_col),
+                SearchPoint::new(line, end_col),
+            ));
             if matches.len() >= MAX_SEARCH_MATCHES {
                 break 'lines;
             }
@@ -2827,23 +2821,15 @@ mod tests {
         assert_eq!(
             matches,
             vec![
-                Match {
-                    line: -1,
-                    start_col: 0,
-                    end_col: 5,
-                },
-                Match {
-                    line: 1,
-                    start_col: 1,
-                    end_col: 6,
-                },
+                SearchSpan::new(SearchPoint::new(-1, 0), SearchPoint::new(-1, 5)),
+                SearchSpan::new(SearchPoint::new(1, 1), SearchPoint::new(1, 6)),
             ]
         );
     }
 
     /// Regression guard for the audit finding that `search`/`search_with` had no ceiling of any
     /// kind: a pattern matching pathologically often across the buffer must stop accumulating
-    /// results at [`MAX_SEARCH_MATCHES`] instead of growing an unbounded `Vec<Match>`.
+    /// results at [`MAX_SEARCH_MATCHES`] instead of growing an unbounded `Vec<SearchSpan>`.
     #[test]
     fn search_with_stops_at_the_hard_match_ceiling() {
         // Size the grid to hold more cells than `MAX_SEARCH_MATCHES`, so a pattern matching

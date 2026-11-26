@@ -443,9 +443,11 @@ fn search_within_bounds(term: &SharedTerm, pattern: &str) {
     assert!(matches.len() <= crate::search::MAX_SEARCH_MATCHES);
     for found in matches {
         assert!(
-            (-history..rows).contains(&found.line)
-                && found.start_col <= found.end_col
-                && found.end_col < columns,
+            (-history..rows).contains(&found.start.line)
+                && (-history..rows).contains(&found.end.line)
+                && found.start <= found.end
+                && found.start.column < columns
+                && found.end.column < columns,
             "{pattern:?} matched {found:?} in a {columns}x{rows} grid with {history} history"
         );
     }
