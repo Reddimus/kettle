@@ -6429,6 +6429,15 @@ System appearance is observed independently of a window's rendered palette.
 Linux appearance and reduced motion share a bounded XDG Settings worker
 transport (`kettle-ui/src/portal_settings.rs`): subscriptions precede snapshots,
 owner changes invalidate state, and retries and shutdown stay off the UI thread.
+Reduced motion reads `org.freedesktop.appearance reduced-motion`; only where the
+portal has none does `motion::SystemMotion` start a second watch, on GNOME's
+`org.gnome.desktop.interface enable-animations` through the same portal
+(`Preference::resolve`). A watch distinguishes a pending first answer, which
+holds motion back until the desktop answers or a bounded call fails, from an
+unavailable one. Under `auto` the portal watch starts on the first event-loop
+turn and GNOME's as soon as the portal says it has none
+(`SystemMotion::prepare`), so that wait ends before the first motion. A
+desktop with neither setting allows motion.
 That worker and every other session-bus connection Kettle opens itself (global
 shortcuts, notifications, the image viewer and file-manager hand-offs) connect
 through `kettle-ui/src/dbus_bound.rs`, which reads each message's 16-byte

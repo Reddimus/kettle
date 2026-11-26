@@ -4041,7 +4041,10 @@ that Kettle Day keeps TokyoNight Day's surfaces, darkens each text colour
 without turning its hue, and credits its sources in its header. Portable
 tests cover portal value/filter policy and macOS appearance selection; Linux
 private-bus tests cover color-scheme snapshots,
-SettingChanged and owner loss using the shared reduced-motion transport.
+SettingChanged and owner loss using the shared reduced-motion transport, and
+the fallback to GNOME's `enable-animations` for a portal without
+`reduced-motion`. Portable tests pin that a desktop with neither allows motion
+and that only a pending first answer holds it back.
 Native acceptance still requires light/dark switching on macOS and Linux
 (Wayland and X11), including multiple windows, open overlays, custom side
 palettes, material/titlebar contrast, IME, and OSC 996/2031 subscribers.

@@ -1017,3 +1017,27 @@ fn echo_settle_releases_a_real_panes_split_echo_at_the_wake_of_its_second_public
     ws.mux.panes.insert(id, closed);
     ws.mux.kill_children();
 }
+
+/// Under `auto` the system's motion preference is asked for from the first
+/// turn of the event loop, so the first bell, toast fade or slide does not
+/// wait on the desktop's first answer, which holds motion back.
+#[test]
+fn the_motion_preference_is_asked_for_from_the_first_turn() {
+    let src = production_source();
+    let wait = src
+        .split("fn about_to_wait_inner(")
+        .nth(1)
+        .expect("about_to_wait_inner");
+    let asked = wait
+        .find("self.watch_system_motion();")
+        .expect("asked on every turn");
+    let toasts = wait.find("self.tick_update_toast(ws, now)").unwrap();
+    assert!(asked < toasts, "before anything that moves");
+    let watch = src
+        .split("fn watch_system_motion(&self) {")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("watch_system_motion");
+    assert!(watch.contains("self.cfg.reduce_motion == kettle_config::ReduceMotion::Auto"));
+    assert!(watch.contains(".prepare();"));
+}

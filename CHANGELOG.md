@@ -1562,6 +1562,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   the sound-control thread.
 - A toast you hover, or focus with a screen reader, while it fades now shows
   at full strength, and afterwards stays at least three seconds more.
+- On Linux, `reduce-motion = auto` now allows motion when the desktop has no
+  reduced-motion setting, and follows GNOME's animations setting otherwise.
 
 ## Older releases
 

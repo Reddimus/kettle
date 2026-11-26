@@ -1287,8 +1287,9 @@ impl LinkUnderline {
 /// starts plays either way, and the bell mark on the tab shows either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReduceMotion {
-    /// Follow macOS Reduce Motion or the Linux Settings portal. If the
-    /// system preference is unavailable, motion is avoided.
+    /// Follow macOS Reduce Motion, or the Linux Settings portal and, where
+    /// it has no preference, GNOME's `enable-animations`. If the desktop says
+    /// neither, motion is allowed.
     #[default]
     Auto,
     /// Always avoid it.

@@ -241,6 +241,7 @@ impl App {
         event_loop: &ActiveEventLoop,
     ) -> Option<std::time::Instant> {
         self.poll_system_appearance(ws);
+        self.watch_system_motion();
         if take_window_lifecycle_wakes(ws) {
             self.drain_events(ws);
         }
