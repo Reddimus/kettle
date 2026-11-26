@@ -728,6 +728,12 @@ pub fn media_lane_geometry_scaled(
     };
     // Above a gallery's page buttons the header reaches no more than a
     // pixel into the detail line, so a press on a page button reaches it.
+    // So in a bottom lane at its least height showing a gallery, the buttons
+    // above the page buttons stay short of a full target (18.5 px against
+    // 24 at the audited 17.5 px line): the room they would need is the edge
+    // that resizes the lane, the page buttons' own chips, or height the lane
+    // has never needed, and taking any of those would cost a resize, a press
+    // on a page button, or a lane that fits today.
     let page_columns = page_start.map(|start| (start, right));
     let down_over_pages = down.min(scale);
     let button_rect = |x: f32, width: f32| {
@@ -790,9 +796,10 @@ pub fn media_lane_geometry_scaled(
     };
     let (previous, next) = if lane.position.1 > 1 {
         match take(2.0 * button, false) {
+            // Each of the pair reaches as far as its own column lets it.
             Some(pair) => (
-                Some((pair.0, pair.1, button, pair.3)),
-                Some((pair.0 + button, pair.1, button, pair.3)),
+                Some(button_rect(pair.0, button)),
+                Some(button_rect(pair.0 + button, button)),
             ),
             None => (None, None),
         }
@@ -3323,5 +3330,48 @@ mod tests {
         let geometry = media_lane_geometry_scaled(&lane, cell, text, 1.0).unwrap();
         assert!(geometry.close.3 >= MIN_CONTROL_TARGET - 1e-3);
         assert!(geometry.close.1 >= 100.5 + 4.0);
+    }
+
+    /// The one lane whose buttons stay short of a full target, a bottom lane
+    /// at its least height showing a gallery: the buttons above the page
+    /// buttons reach a pixel into the detail line, every other button is a
+    /// full target, and none reaches the resize edge or another button.
+    #[test]
+    fn a_minimum_bottom_gallery_keeps_its_edge_and_page_buttons() {
+        let text = (8.4, 17.5);
+        let pad = lane_pad(text.0);
+        let mut lane = viewer((2, 3), Some((640, 480)));
+        lane.copy = true;
+        lane.page = Some((2, 4));
+        lane.edge = Some(MediaLaneEdge::Top);
+        lane.rect = (0.0, 100.5, 400.0, 5.0 * text.1 + 4.0 * pad);
+        let geometry = media_lane_geometry_scaled(&lane, (8.0, 16.0), text, 1.0).unwrap();
+        assert!(geometry.full && geometry.image.is_some());
+        let edge = geometry.resize.unwrap();
+        let page = geometry.page_previous.unwrap().0;
+        let buttons: Vec<(Rect4, MediaLaneHit)> = geometry
+            .chip_controls()
+            .into_iter()
+            .filter_map(|(rect, hit)| Some((rect?, hit)))
+            .collect();
+        for (i, &(rect, hit)) in buttons.iter().enumerate() {
+            assert!(rect.1 >= edge.1 + edge.3, "{hit:?} reaches the edge");
+            let short = !matches!(hit, MediaLaneHit::PreviousPage | MediaLaneHit::NextPage)
+                && rect.0 + rect.2 > page;
+            let tall = if short {
+                text.1 + 1.0
+            } else {
+                MIN_CONTROL_TARGET
+            };
+            assert!((rect.3 - tall).abs() < 1e-3, "{hit:?} {rect:?}");
+            for &(other, other_hit) in &buttons[i + 1..] {
+                // Apart, to the rounding of adding widths up.
+                let apart = rect.0 + rect.2 <= other.0 + 1e-3
+                    || other.0 + other.2 <= rect.0 + 1e-3
+                    || rect.1 + rect.3 <= other.1 + 1e-3
+                    || other.1 + other.3 <= rect.1 + 1e-3;
+                assert!(apart, "{hit:?} overlaps {other_hit:?}");
+            }
+        }
     }
 }

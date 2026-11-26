@@ -1079,7 +1079,10 @@ press anywhere in a target at least 24 by 24 points. Where the lane has the
 room, the header row (and a gallery's detail line) grows to that height; where
 it has only the room it always needed, the buttons reach into the padding
 above and the line of text below instead, so a lane or viewer that fitted
-before still fits. The button under the pointer lights, unless it would do nothing (browsing
+before still fits. One case stays short: in a bottom lane at its least height
+showing a gallery, the buttons above the page buttons are about 18 points
+tall, because the room they would need is the edge that resizes the lane or
+the page buttons themselves. The button under the pointer lights, unless it would do nothing (browsing
 past either end). Resting the pointer on a button (not on a video's
 picture, which a click plays as Play does) shows its name in a tooltip, with the key that does the same while the lane holds the keyboard
 (`+`, `-`, `0`, `C`, `K`, `M`, `T`, `F`, Page Up and Page Down, and in the

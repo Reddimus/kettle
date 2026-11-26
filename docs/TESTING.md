@@ -174,6 +174,7 @@ the end ellipsis below 16 columns.
 `every_lane_button_is_a_24_pixel_target`,
 `a_viewer_that_fitted_before_still_fits_with_full_targets`,
 `a_short_lanes_buttons_never_reach_its_resize_edge`,
+`a_minimum_bottom_gallery_keeps_its_edge_and_page_buttons`,
 `a_lane_keeps_room_for_full_button_targets` (`kettle-ui`),
 `a_hovered_lane_button_lights_its_chip`
 and `browsing_past_an_end_is_not_a_live_button` (`kettle-render`) and
