@@ -68,7 +68,8 @@ const GPU_BACKEND_LABELS: &[Label] = &[
 /// How a setting is edited. The overlay maps ←/→ (or Space/Enter) onto these.
 #[derive(Debug, Clone)]
 pub enum FieldKind {
-    /// A boolean. Left/Right/Space flip it. Persisted as `true` / `false`.
+    /// A boolean. Space, Enter and a click flip it; Left turns it off and
+    /// Right on. Persisted as `true` / `false`.
     Toggle,
     /// One of a fixed set of choices. Left/Right cycle. `values[i]` is what's
     /// written to config; `labels[i]` is shown to the user. `None` labels mean
@@ -821,15 +822,23 @@ pub(crate) fn row_command(
 }
 
 /// The direction `settings_adjust` takes for a value key on `field`: the
-/// number of steps for a number, which Shift multiplies.
-pub(crate) fn value_key_dir(_cfg: &Config, field: &Field, key: ValueKey) -> Option<i32> {
-    Some(match key {
-        ValueKey::Step { dir, coarse: true } if matches!(field.kind, FieldKind::Number { .. }) => {
-            dir * COARSE_STEPS
+/// number of steps for a number, which Shift multiplies. `None` where the
+/// key leaves the row as it is.
+pub(crate) fn value_key_dir(cfg: &Config, field: &Field, key: ValueKey) -> Option<i32> {
+    match (&field.kind, key) {
+        // ← turns a switch off and → turns it on, the way its knob moves.
+        (FieldKind::Toggle, ValueKey::Step { dir, .. }) => {
+            (read_bool(cfg, field.key) != (dir > 0)).then_some(dir.signum())
         }
-        ValueKey::Step { dir, .. } => dir,
-        ValueKey::Activate => 0,
-    })
+        // Space and Enter would step a number one way only; the arrows
+        // change it.
+        (FieldKind::Number { .. }, ValueKey::Activate) => None,
+        (FieldKind::Number { .. }, ValueKey::Step { dir, coarse: true }) => {
+            Some(dir * COARSE_STEPS)
+        }
+        (_, ValueKey::Step { dir, .. }) => Some(dir),
+        (_, ValueKey::Activate) => Some(0),
+    }
 }
 
 /// State for the inline text prompt opened by a [`FieldKind::Text`] row (the
@@ -1678,7 +1687,9 @@ pub fn field_value_cols(cfg: &Config, field: &Field, tr: &Translator) -> usize {
 pub fn next_value(cfg: &Config, field: &Field, dir: i32) -> String {
     match &field.kind {
         FieldKind::Toggle => {
-            // Any direction flips a toggle (Space, Left, Right all toggle).
+            // Any direction flips a toggle: a click, the wheel, Space. The
+            // arrow keys reach here only to move the knob their way
+            // (`value_key_dir`).
             (!read_bool(cfg, field.key)).to_string()
         }
         // The theme row steps through the popular themes of the current

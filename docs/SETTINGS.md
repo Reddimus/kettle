@@ -40,10 +40,10 @@ assistive technology cancels any pending keybinding capture.
 | ↑ / ↓ | Move between options (skips options that don't apply) |
 | Home / End | First / last option |
 | Page Up / Page Down | Move half a page |
-| ← / → | Change the highlighted option |
+| ← / → | Change the highlighted option; ← turns a switch off and → turns it on |
 | Shift+← / Shift+→ | Change a number ten steps at a time |
 | Delete / Backspace | Reset the highlighted setting to its default, as its Reset button does (not the theme, GPU, shortcut or text rows) |
-| Space / Enter | Toggle / cycle the highlighted option; on the Theme row, open the theme picker |
+| Space / Enter | Toggle / cycle the highlighted option; on the Theme row, open the theme picker. Numbers change with the arrows only |
 | Tab / Shift+Tab | Next / previous category |
 | Esc | Clear a search query, or close if the query is empty |
 

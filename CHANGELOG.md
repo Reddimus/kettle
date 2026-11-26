@@ -1095,6 +1095,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- In Settings, ← now turns a switch off and → turns it on, instead of both
+  flipping it, and Space or Enter no longer steps a number up with no way
+  back down.
+
 - Settings takes Home, End, Page Up and Page Down to move through options
   and search results, and Shift+←/→ changes a number ten steps at a time.
 

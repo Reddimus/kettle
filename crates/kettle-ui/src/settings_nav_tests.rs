@@ -209,3 +209,48 @@ fn list_keys_move_through_search_results() {
         assert_ne!(press(NamedKey::PageDown), results[0]);
     }
 }
+
+/// ← turns a switch off and → turns it on, and neither changes a switch
+/// already there; Space and Enter flip it. Space and Enter leave a number
+/// alone, since they could only step it up; choices still cycle.
+#[test]
+fn arrows_set_switches_and_space_leaves_numbers_alone() {
+    let cats = categories(&[]);
+    let field = |key: &str| {
+        cats.iter()
+            .flat_map(|cat| &cat.fields)
+            .find(|field| field.key == key)
+            .unwrap()
+    };
+    let left = ValueKey::Step {
+        dir: -1,
+        coarse: false,
+    };
+    let right = ValueKey::Step {
+        dir: 1,
+        coarse: false,
+    };
+    let blink = field("cursor-blink");
+    for on in [true, false] {
+        let cfg = Config {
+            cursor_blink: on,
+            ..Config::default()
+        };
+        assert_eq!(value_key_dir(&cfg, blink, right), (!on).then_some(1));
+        assert_eq!(value_key_dir(&cfg, blink, left), on.then_some(-1));
+        assert_eq!(value_key_dir(&cfg, blink, ValueKey::Activate), Some(0));
+        if let Some(dir) = value_key_dir(&cfg, blink, right) {
+            assert_eq!(next_value(&cfg, blink, dir), "true");
+        }
+        if let Some(dir) = value_key_dir(&cfg, blink, left) {
+            assert_eq!(next_value(&cfg, blink, dir), "false");
+        }
+    }
+    let cfg = Config::default();
+    let opacity = field("background-opacity");
+    assert_eq!(value_key_dir(&cfg, opacity, ValueKey::Activate), None);
+    assert_eq!(value_key_dir(&cfg, opacity, right), Some(1));
+    assert_eq!(value_key_dir(&cfg, opacity, left), Some(-1));
+    let bell = field("bell");
+    assert_eq!(value_key_dir(&cfg, bell, ValueKey::Activate), Some(0));
+}
