@@ -2171,9 +2171,14 @@ impl App {
         if ws.settings_text_edit.is_some() {
             return false;
         }
+        // The page keys move by the rows the panel shows now.
+        let visible_rows = self
+            .settings_overlay_projection(ws)
+            .map_or(0, |set| self.settings_layout_for(ws, &set).rows.len());
         let Some(nav) = ws.settings_nav.as_mut() else {
             return false;
         };
+        nav.visible_rows = visible_rows;
         let cats = crate::settings::categories(&self.gpu_choices);
         match nav.search_key(
             &cats,

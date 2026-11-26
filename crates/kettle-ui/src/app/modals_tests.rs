@@ -1610,3 +1610,21 @@ fn settings_hover_follows_the_pointer_and_leaves_the_focus_alone() {
         );
     }
 }
+
+/// The page keys move by the rows the Settings panel shows now, from the
+/// same layout it paints and hit-tests with.
+#[test]
+fn settings_page_keys_take_the_rows_in_view_from_the_layout() {
+    let src = production_source();
+    let body: String = src
+        .split("fn settings_search_key(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .unwrap()
+        .split_whitespace()
+        .collect();
+    assert!(body.contains(
+        "letvisible_rows=self.settings_overlay_projection(ws).map_or(0,|set|self.settings_layout_for(ws,&set).rows.len());"
+    ));
+    assert!(body.contains("nav.visible_rows=visible_rows;"));
+}

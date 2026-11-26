@@ -507,6 +507,10 @@ pub struct SettingsNav {
     /// The row focused when the query was first typed. A search left from
     /// its field without moving into a result puts the focus back here.
     pub(crate) search_origin: Option<(usize, usize)>,
+    /// How many rows the panel shows, as its layout last placed them: the
+    /// page keys move by that, less one for context. `0` before Settings
+    /// has a layout.
+    pub(crate) visible_rows: usize,
 }
 
 /// Fold Spanish precomposed and decomposed accents without changing stored text.
@@ -652,14 +656,15 @@ impl SettingsNav {
                 SearchRoute::Handled
             };
         }
-        let half = (count / 2).max(1) as isize;
+        let (page, half) = self.page_steps(count);
+        let (page, half) = (page as isize, half as isize);
         // Arrows wrap; page moves and jumps stop at the first and last
         // results, as they do on a category's rows.
         let (delta, wrap) = match key {
             Key::Named(NamedKey::ArrowDown) => (1, true),
             Key::Named(NamedKey::ArrowUp) => (-1, true),
-            Key::Named(NamedKey::PageDown) => (half, false),
-            Key::Named(NamedKey::PageUp) => (-half, false),
+            Key::Named(NamedKey::PageDown) => (page, false),
+            Key::Named(NamedKey::PageUp) => (-page, false),
             Key::Named(NamedKey::End) => (isize::MAX, false),
             Key::Named(NamedKey::Home) => (isize::MIN, false),
             Key::Character(s) if cfg.vim_menu_nav && !mods.alt_key() && !mods.super_key() => {
@@ -812,7 +817,7 @@ impl SettingsNav {
             return;
         }
         let field = self.field.min(count - 1);
-        let half = (count / 2).max(1);
+        let (page, half) = self.page_steps(count);
         self.field = match to {
             RowMove::Next => next_enabled_field(cfg, fields, field, 1),
             RowMove::Previous => next_enabled_field(cfg, fields, field, -1),
@@ -821,10 +826,28 @@ impl SettingsNav {
             RowMove::First => nearest_enabled_field(cfg, fields, 0, 1),
             RowMove::Last => nearest_enabled_field(cfg, fields, count - 1, -1),
             RowMove::PageDown => {
+                nearest_enabled_field(cfg, fields, (field + page).min(count - 1), -1)
+            }
+            RowMove::PageUp => nearest_enabled_field(cfg, fields, field.saturating_sub(page), 1),
+            RowMove::HalfDown => {
                 nearest_enabled_field(cfg, fields, (field + half).min(count - 1), -1)
             }
-            RowMove::PageUp => nearest_enabled_field(cfg, fields, field.saturating_sub(half), 1),
+            RowMove::HalfUp => nearest_enabled_field(cfg, fields, field.saturating_sub(half), 1),
         };
+    }
+
+    /// The rows Page Up/Page Down move through `count` rows or results: a
+    /// page as the panel shows it, less one row kept for context, as list
+    /// views move; and the half page vim's Ctrl+D/Ctrl+U move. Before the
+    /// panel has a layout, half the list for both.
+    fn page_steps(&self, count: usize) -> (usize, usize) {
+        match self.visible_rows {
+            0 => {
+                let half = (count / 2).max(1);
+                (half, half)
+            }
+            rows => (rows.saturating_sub(1).max(1), (rows / 2).max(1)),
+        }
     }
 
     /// Focus the search field. Gaining focus, it notes the row focused now,
@@ -868,8 +891,12 @@ pub(crate) enum RowMove {
     Previous,
     First,
     Last,
+    /// Page Down and Page Up: a page as the panel shows it.
     PageDown,
     PageUp,
+    /// vim's Ctrl+D and Ctrl+U: half that.
+    HalfDown,
+    HalfUp,
 }
 
 /// A value key on the focused Settings row: ←/→ (and vim `h`/`l`), or
@@ -944,8 +971,8 @@ pub(crate) fn row_command(
                     dir: 1,
                     coarse: mods.shift_key(),
                 }),
-                ("d", true) => RowCommand::Move(RowMove::PageDown),
-                ("u", true) => RowCommand::Move(RowMove::PageUp),
+                ("d", true) => RowCommand::Move(RowMove::HalfDown),
+                ("u", true) => RowCommand::Move(RowMove::HalfUp),
                 _ => return None,
             }
         }
