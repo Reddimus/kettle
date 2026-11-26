@@ -993,8 +993,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - A tab with a single pane no longer draws a frame around it; pane borders
   appear once a tab is split, and while broadcast input is on.
 - Right-clicking a tab opens a menu for that tab, with Rename Tab…,
-  Duplicate Tab, Move Tab Left, Move Tab Right and Close Tab, instead of the
-  terminal's menu. Each acts on the tab you clicked, not the active one.
+  Duplicate Tab, Move Tab Left, Move Tab Right, Close Tab and Close Other
+  Tabs, instead of the terminal's menu. Each acts on the tab you clicked, not
+  the active one. Close Other Tabs asks once, under `ask-before-closing`, for
+  all the tabs it would close.
 - `kettle ctl ui_geometry` reports a context menu's `anchor` as what the
   menu was placed around (the pointer, or for a menu opened from the
   keyboard the text cursor's line) instead of the panel's corner, which

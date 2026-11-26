@@ -1252,6 +1252,7 @@ impl App {
                         ContextMenuItem::Media { label, .. }
                         | ContextMenuItem::Preview { label, .. } => *label,
                         ContextMenuItem::Info { label, .. } => label.as_str(),
+                        ContextMenuItem::CloseOtherTabs { label } => label,
                         ContextMenuItem::Separator => "",
                     };
                     let row = serde_json::json!({

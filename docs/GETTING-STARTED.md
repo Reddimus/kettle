@@ -148,7 +148,8 @@ the same thing and stays bound. `Ctrl+Shift+N` / `Ctrl+Shift+P` cycles panes on
 every platform.
 
 Right-click a tab for Rename Tab…, Duplicate Tab, Move Tab Left and Right,
-and Close Tab; each acts on that tab, even when another tab is active.
+Close Tab and Close Other Tabs; each acts on that tab, even when another tab
+is active.
 Right-click a terminal to reach Copy, Paste and Select All first. A link adds
 Open Link and Copy Link before those actions. Split, Pane, Tab, Window, Title,
 Group and Appearance commands live in submenus. Click a category or press Right

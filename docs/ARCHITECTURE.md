@@ -5397,11 +5397,16 @@ Close Tab, as ordinary action rows. Like the terminal's menu it leaves an open
 Find bar, and its search, in place (`close_modals_for_context_menu`). The menu records the tab by the panes it
 holds (`ContextMenuSession::tab`), so a shell exiting meanwhile cannot
 retarget it, and the menu closes once that tab is gone
-(`dismiss_orphaned_tab_menu`, checked each event-loop turn). `step_tab_menu_row`
-finds the tab wherever it has moved and `act_on_menu_tab` runs the row on it: Close asks as
-the tab's ✕ does, Move uses `Mux::nudge_tab` and leaves the active tab active,
-and Rename and Duplicate bring the tab forward first. No action closes the
-other tabs, so the menu has no Close Other Tabs.
+(`dismiss_orphaned_tab_menu`, checked each event-loop turn).
+`step_tab_menu_row` finds the tab wherever it has moved and `act_on_menu_tab`
+runs the row on it: Close asks as the tab's ✕ does, Move uses
+`Mux::nudge_tab` and leaves the active tab active,
+and Rename and Duplicate bring the tab forward first. Close Other Tabs, a row
+no action runs (`ContextMenuItem::CloseOtherTabs`), asks once with
+`confirm_close` over all the other tabs' panes and busy count
+(`other_tabs_close_scope`, `ConfirmAction::CloseOtherTabs`), then
+`Mux::close_tabs_except` closes them, last first, and leaves the kept tab
+active.
 
 Other additions:
 

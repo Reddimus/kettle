@@ -2689,7 +2689,8 @@ fn a_tabs_menu_offers_what_can_be_done_to_that_tab() {
                     label,
                     action,
                     enabled: true,
-                } => Some((label, action)),
+                } => Some((label, Some(action))),
+                ContextMenuItem::CloseOtherTabs { label } => Some((label, None)),
                 ContextMenuItem::Separator => None,
                 _ => panic!("a tab menu row is a plain row"),
             })
@@ -2698,35 +2699,38 @@ fn a_tabs_menu_offers_what_can_be_done_to_that_tab() {
     assert_eq!(
         shape(3, Language::En),
         [
-            Some(("Rename Tab…", Action::EditTabTitle)),
-            Some(("Duplicate Tab", Action::DuplicateTab)),
+            Some(("Rename Tab…", Some(Action::EditTabTitle))),
+            Some(("Duplicate Tab", Some(Action::DuplicateTab))),
             None,
-            Some(("Move Tab Left", Action::MoveTabLeft)),
-            Some(("Move Tab Right", Action::MoveTabRight)),
+            Some(("Move Tab Left", Some(Action::MoveTabLeft))),
+            Some(("Move Tab Right", Some(Action::MoveTabRight))),
             None,
-            Some(("Close Tab", Action::CloseTab)),
+            Some(("Close Tab", Some(Action::CloseTab))),
+            Some(("Close Other Tabs", None)),
         ]
     );
     assert_eq!(
         shape(2, Language::Es),
         [
-            Some(("Cambiar el nombre de la pestaña…", Action::EditTabTitle)),
-            Some(("Duplicar pestaña", Action::DuplicateTab)),
+            Some(("Cambiar el nombre de la pestaña…", Some(Action::EditTabTitle))),
+            Some(("Duplicar pestaña", Some(Action::DuplicateTab))),
             None,
-            Some(("Mover la pestaña a la izquierda", Action::MoveTabLeft)),
-            Some(("Mover la pestaña a la derecha", Action::MoveTabRight)),
+            Some(("Mover la pestaña a la izquierda", Some(Action::MoveTabLeft))),
+            Some(("Mover la pestaña a la derecha", Some(Action::MoveTabRight))),
             None,
-            Some(("Cerrar pestaña", Action::CloseTab)),
+            Some(("Cerrar pestaña", Some(Action::CloseTab))),
+            Some(("Cerrar las otras pestañas", None)),
         ]
     );
-    // A lone tab has nowhere to move, and no separator is left doubled.
+    // A lone tab has nowhere to move and no others to close, and no
+    // separator is left doubled.
     assert_eq!(
         shape(1, Language::En),
         [
-            Some(("Rename Tab…", Action::EditTabTitle)),
-            Some(("Duplicate Tab", Action::DuplicateTab)),
+            Some(("Rename Tab…", Some(Action::EditTabTitle))),
+            Some(("Duplicate Tab", Some(Action::DuplicateTab))),
             None,
-            Some(("Close Tab", Action::CloseTab)),
+            Some(("Close Tab", Some(Action::CloseTab))),
         ]
     );
     // Its width is measured from the same translated labels it paints.
@@ -2933,5 +2937,77 @@ fn a_tab_menu_closes_once_its_tab_has_gone() {
         .and_then(|arm| arm.split("TabMenuStep::Close(idx) => {").next())
         .expect("the stale row");
     assert!(gone.contains("window.request_redraw();"));
+}
+
+#[test]
+fn close_other_tabs_closes_every_tab_but_its_own_and_asks_once() {
+    use super::{
+        ConfirmAction, TabMenuDispatch as D, TabMenuStep as S, lone_pane_in_scope,
+        other_tabs_close_scope, step_tab_menu_row,
+    };
+    use crate::mux::{Dir, Node};
+    // The row, on the tab its menu was opened on, wherever that has moved.
+    let mut mux = fake_tabs(&[1, 2, 3]);
+    let tab = mux.tab_anchor_panes(0);
+    assert!(mux.nudge_tab(0, 1));
+    assert_eq!(step_tab_menu_row(&mut mux, &tab, D::CloseOthers), S::CloseOthers(1));
+    let row = super::tab_menu_items(3, kettle_i18n::Translator::new(kettle_i18n::Language::En))
+        .into_iter()
+        .last()
+        .expect("rows");
+    assert!(matches!(
+        super::item_to_click(&row, 7),
+        Some(super::ContextMenuClick::CloseOtherTabs)
+    ));
+
+    // One question covers every pane that would close: the split tab's two
+    // and the last tab's one.
+    let mut ws = WindowState::new(1, fake_tabs(&[1, 2, 4]));
+    ws.mux.tabs[1].root = Node::Split {
+        dir: Dir::Horizontal,
+        ratio: 0.5,
+        a: Box::new(Node::Leaf(2)),
+        b: Box::new(Node::Leaf(3)),
+    };
+    // No terminal stands behind these panes, so each counts as busy.
+    assert_eq!(other_tabs_close_scope(&ws, 0), (3, 3));
+    assert_eq!(other_tabs_close_scope(&ws, 1), (2, 2));
+    // With one pane left to close, its own program is what the question
+    // names, as when closing that tab.
+    let ws_two = WindowState::new(1, fake_tabs(&[1, 2]));
+    assert_eq!(
+        lone_pane_in_scope(&ws_two, 1, &ConfirmAction::CloseOtherTabs(vec![1])),
+        Some(2)
+    );
+    assert_eq!(
+        lone_pane_in_scope(&ws, 1, &ConfirmAction::CloseOtherTabs(vec![9])),
+        None,
+        "its tab is gone"
+    );
+
+    // Closing them leaves the kept tab, active.
+    let mut mux = fake_tabs(&[1, 2, 3, 4]);
+    mux.active = 3;
+    assert_eq!(mux.close_tabs_except(1), vec![3, 2, 0]);
+    assert_eq!(mux.tabs.iter().map(|tab| tab.focus).collect::<Vec<_>>(), vec![2]);
+    assert_eq!(mux.active, 0);
+    assert!(fake_tabs(&[1]).close_tabs_except(0).is_empty());
+
+    // The row and its confirmation share the close, and the row asks first.
+    let src = production_source();
+    let act = finding_body(&src, "act_on_menu_tab");
+    let others = act
+        .split("TabMenuStep::CloseOthers(idx) => {")
+        .nth(1)
+        .and_then(|arm| arm.split("TabMenuStep::Moved(moved) => {").next())
+        .expect("the Close Other Tabs arm");
+    let asked = others
+        .find("ConfirmAction::CloseOtherTabs(ws.mux.tab_anchor_panes(idx)),")
+        .expect("asks first");
+    assert!(asked < others.find("self.close_other_tabs_now(ws, &keep);").unwrap());
+    assert!(src.contains("ConfirmAction::CloseOtherTabs(keep) => self.close_other_tabs_now(ws, &keep),"));
+    let close = finding_body(&src, "close_other_tabs_now");
+    assert!(close.contains("for closed in ws.mux.close_tabs_except(idx) {"));
+    assert!(close.contains("self.fire_tab_close_event(ws, closed);"));
 }
 

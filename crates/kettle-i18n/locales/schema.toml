@@ -60,6 +60,12 @@ context = "crates/kettle-ui/src/app.rs: Destructive button that closes the focus
 [messages.confirm_button_close_tab]
 context = "crates/kettle-ui/src/app.rs: Destructive button that closes the focused tab."
 
+[messages.confirm_title_close_other_tabs]
+context = "crates/kettle-ui/src/app/modals.rs confirm_close: Heading of confirmation before Close Other Tabs, from a tab's right-click menu, closes every tab of the window but that one."
+
+[messages.confirm_button_close_other_tabs]
+context = "crates/kettle-ui/src/app/modals.rs confirm_close: Destructive button that closes every tab of the window but the one whose menu was opened."
+
 [messages.confirm_button_close_window]
 context = "crates/kettle-ui/src/app.rs: Destructive button that closes the window."
 
@@ -214,6 +220,9 @@ context = "crates/kettle-ui/src/app/menus.rs tab_menu_items: row of the menu a r
 
 [messages.menu_move_tab_left]
 context = "crates/kettle-ui/src/app/menus.rs tab_menu_items: row of the menu a right-click on a tab opens. Moves that tab one place left in the tab bar, wrapping from the first to the last."
+
+[messages.menu_close_other_tabs]
+context = "crates/kettle-ui/src/app/menus.rs tab_menu_items: row of the menu a right-click on a tab opens. Closes every other tab of the window, keeping this one; asks first when programs would stop."
 
 [messages.menu_move_tab_right]
 context = "crates/kettle-ui/src/app/menus.rs tab_menu_items: row of the menu a right-click on a tab opens. Moves that tab one place right in the tab bar, wrapping from the last to the first."

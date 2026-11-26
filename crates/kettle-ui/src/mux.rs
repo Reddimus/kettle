@@ -4526,6 +4526,25 @@ impl Mux {
         self.tabs.is_empty()
     }
 
+    /// Close every tab but `keep`, which becomes the active tab, and return
+    /// the closed tabs' indices, each as it was when that tab closed: the
+    /// last first, so each index still names the tab it was read for.
+    pub fn close_tabs_except(&mut self, keep: usize) -> Vec<usize> {
+        if keep >= self.tabs.len() {
+            return Vec::new();
+        }
+        let closed: Vec<usize> = (0..self.tabs.len())
+            .rev()
+            .filter(|&idx| idx != keep)
+            .collect();
+        for &idx in &closed {
+            self.close_tab_at(idx);
+        }
+        self.active = 0;
+        self.touch_active_tab_seen();
+        closed
+    }
+
     /// Open a new tab that duplicates the focused pane's argv + OSC-7
     /// cwd (iTerm2's "Duplicate Tab" affordance). Falls
     /// back to the configured shell when the focused pane has empty
