@@ -153,7 +153,7 @@ the panel. See [BACKGROUNDS.md](BACKGROUNDS.md).
 |---|---|---|
 | Background | `background-type` | Solid color · Image · Starfield (animated) · Transparent |
 | Image file | `background-image` | the wallpaper path — **editable inline** here (Enter to open the prompt, type a path, Enter to save). Only for `image` |
-| Animation | `background-animation` | Always (default) · When focused · Off — how a starfield / animated image plays |
+| Animation | `background-animation` | Always (default) · When focused · Off — how a starfield / animated image plays; reduced motion holds it still |
 | Interface bar color | `chrome-background` | Theme · Automatic (from wallpaper) · Black · White |
 
 ### Behavior

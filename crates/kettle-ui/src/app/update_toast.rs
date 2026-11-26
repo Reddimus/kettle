@@ -240,6 +240,7 @@ impl App {
             if !visible {
                 self.update_toast_focus = None;
             }
+            let drawn = toast.opacity(motion);
             toast.tick(now, visible, hovered || self.update_toast_focus.is_some());
             let expired = toast.remaining().is_zero()
                 || (!toast.acknowledged
@@ -264,10 +265,7 @@ impl App {
             } else {
                 let wake = toast.wake_after(motion);
                 if visible
-                    && !hovered
-                    && self.update_toast_focus.is_none()
-                    && motion
-                    && toast.remaining() <= std::time::Duration::from_millis(150)
+                    && toast.clock.needs_frame(drawn, motion)
                     && let Some(w) = &ws.window
                 {
                     w.request_redraw();

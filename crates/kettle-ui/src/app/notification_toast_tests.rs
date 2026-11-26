@@ -320,3 +320,23 @@ fn the_notification_toast_respects_motion_sanitizes_its_source_and_logs_no_text(
         }
     }
 }
+
+/// Both toasts repaint when a pause changes how they are drawn: hovered or
+/// focused mid-fade, the toast shows whole at once rather than at the next
+/// unrelated frame. Each tick reads the opacity drawn before it and asks
+/// the clock whether the frame is out of date.
+#[test]
+fn both_toasts_repaint_when_a_pause_changes_their_opacity() {
+    let src = production_source();
+    for name in ["tick_notification_toast", "tick_update_toast"] {
+        let tick = production_fn(&src, name);
+        let drawn = tick.find("let drawn = toast").expect(name);
+        let ticked = tick.find(".tick(now, ").expect(name);
+        assert!(drawn < ticked, "{name}: reads the drawn opacity first");
+        assert!(tick.contains(".needs_frame(drawn, motion)"), "{name}");
+        assert!(
+            !tick.contains("from_millis(150)"),
+            "{name}: the fade's length belongs to the clock"
+        );
+    }
+}

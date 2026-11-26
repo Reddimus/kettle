@@ -1070,13 +1070,42 @@ impl App {
 
     /// Whether Kettle may start motion on its own: `reduce-motion`, and for
     /// `auto` the system's Reduce Motion where it has one; where it has
-    /// none, motion is held back.
+    /// none, motion is allowed.
     pub(super) fn motion_allowed(&self) -> bool {
         crate::motion::allowed(self.cfg.reduce_motion, || {
             self.system_motion
                 .get_or_init(|| crate::motion::SystemMotion::new(self.system_settings_waker()))
                 .allows()
         })
+    }
+
+    /// Under `auto`, ask the system for its motion preference from the
+    /// first turn of the event loop, so the answer is in before the first
+    /// motion Kettle would start: until the Linux desktop answers, motion
+    /// waits.
+    pub(super) fn watch_system_motion(&self) {
+        if self.cfg.reduce_motion == kettle_config::ReduceMotion::Auto {
+            self.system_motion
+                .get_or_init(|| crate::motion::SystemMotion::new(self.system_settings_waker()))
+                .prepare();
+        }
+    }
+
+    /// Hold an animated background on its frame while motion is reduced.
+    /// Only a background that `background-animation` lets play asks.
+    pub(super) fn sync_background_motion(
+        &self,
+        renderer: &mut kettle_render::Renderer,
+        now: std::time::Instant,
+    ) {
+        use kettle_config::{BackgroundAnimation, BackgroundType};
+        if matches!(
+            self.cfg.background_type,
+            BackgroundType::Starfield | BackgroundType::Image
+        ) && self.cfg.background_animation != BackgroundAnimation::Off
+        {
+            renderer.set_background_motion(self.motion_allowed(), now);
+        }
     }
 
     /// Show `pane`'s item as its source, or rendered again; only an item

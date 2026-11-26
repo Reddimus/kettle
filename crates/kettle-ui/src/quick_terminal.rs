@@ -265,12 +265,15 @@ pub(crate) struct Runtime {
     pub attempted_hotkey: Option<Option<kettle_config::keybinds::Trigger>>,
 }
 
+/// Whether the quick terminal slides: `quick-terminal-animation`, then
+/// `reduce-motion` as for any motion Kettle starts on its own, so `off`
+/// slides whatever the system says.
 pub(crate) fn animation_allowed(
     enabled: bool,
     mode: kettle_config::ReduceMotion,
     system: impl FnOnce() -> bool,
 ) -> bool {
-    enabled && mode != kettle_config::ReduceMotion::On && system()
+    enabled && crate::motion::allowed(mode, system)
 }
 
 pub(crate) fn can_slide(wayland: bool, allowed: impl FnOnce() -> bool) -> bool {
@@ -478,12 +481,18 @@ mod tests {
             }
         );
     }
+    /// The slide follows `reduce-motion` like any other motion: `off`
+    /// slides even where the system reduces motion or cannot say.
     #[test]
-    fn reduced_motion_always_wins_over_animation_and_general_override() {
+    fn the_slide_follows_reduce_motion_and_off_always_slides() {
         use kettle_config::ReduceMotion as R;
         assert!(animation_allowed(true, R::Auto, || true));
         assert!(!animation_allowed(true, R::Auto, || false));
-        assert!(!animation_allowed(true, R::Off, || false));
+        assert!(
+            animation_allowed(true, R::Off, || false),
+            "reduce-motion = off must slide"
+        );
+        assert!(animation_allowed(true, R::Off, || panic!("system queried")));
         assert!(!animation_allowed(true, R::On, || panic!("system queried")));
         assert!(!animation_allowed(false, R::Auto, || panic!(
             "system queried"

@@ -3138,7 +3138,8 @@ window fullscreen. Check the accessible names and toggle states for both size
 controls, including Spanish. Preserve the original pane focus and verify that
 player keys do not reach its terminal.
 
-Update-toast tests use injected clocks for foreground expiry and hover pauses,
+Update-toast tests use injected clocks for foreground expiry and hover pauses
+(a toast paused mid-fade is drawn whole and resumes with time to read it),
 and private cache fixtures for concurrent claims, restart persistence, abandoned
 claims, contention recovery and failed writes. An unreadable record must remain
 byte-identical. Native checks must retain terminal grid, cursor and
@@ -3925,7 +3926,8 @@ desktop, verify repeated CLI/global/menu/palette toggles create one quick window
 focus returns on explicit hide, switching apps autohides without stealing focus,
 tabs and splits keep their processes while hidden, monitor selection and all
 five geometries work across mixed-DPI displays, and Reduce Motion disables the
-slide. Also check a taken hotkey, rebind/clear on reload, CapsLock/NumLock on X11,
+slide under `reduce-motion = auto` while `reduce-motion = off` still slides.
+Also check a taken hotkey, rebind/clear on reload, CapsLock/NumLock on X11,
 window-list/cycling exclusion, English/Spanish Settings, and Wayland/Windows
 desktop shortcuts. A GUI-free test run does not establish these native behaviors.
 
@@ -4081,7 +4083,10 @@ that Kettle Day keeps TokyoNight Day's surfaces, darkens each text colour
 without turning its hue, and credits its sources in its header. Portable
 tests cover portal value/filter policy and macOS appearance selection; Linux
 private-bus tests cover color-scheme snapshots,
-SettingChanged and owner loss using the shared reduced-motion transport.
+SettingChanged and owner loss using the shared reduced-motion transport, and
+the fallback to GNOME's `enable-animations` for a portal without
+`reduced-motion`. Portable tests pin that a desktop with neither allows motion
+and that only a pending first answer holds it back.
 Native acceptance still requires light/dark switching on macOS and Linux
 (Wayland and X11), including multiple windows, open overlays, custom side
 palettes, material/titlebar contrast, IME, and OSC 996/2031 subscribers.

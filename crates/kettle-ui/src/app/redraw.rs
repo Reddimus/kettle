@@ -1045,6 +1045,7 @@ impl App {
             live_decorated,
             live_fullscreen,
         ));
+        self.sync_background_motion(renderer, std::time::Instant::now());
         // Any frame while the window server blinks the cursor ends that blink.
         // The frame presents in one Core Animation transaction with hiding the
         // layer, so the screen never shows new content under a stale cursor,

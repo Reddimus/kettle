@@ -1,13 +1,12 @@
 use super::*;
-use crate::motion::Preference;
+use crate::motion::{Preference, Reading};
 
 trait MotionPreference {
     fn preference(&self) -> Preference;
 }
 impl MotionPreference for Watch {
     fn preference(&self) -> Preference {
-        self.value()
-            .map_or(Preference::Unknown, Preference::from_portal)
+        Preference::resolve(self.reading(), || Reading::Unavailable)
     }
 }
 const KEY: &str = "reduced-motion";
@@ -19,6 +18,10 @@ use zbus::zvariant::Value;
 #[derive(Default)]
 struct Settings {
     value: AtomicU32,
+    /// The portal has no `reduced-motion`, like older desktop portals.
+    no_reduced_motion: AtomicBool,
+    /// GNOME's `enable-animations`; `None` for a desktop without it.
+    animations: std::sync::Mutex<Option<bool>>,
     buttons: std::sync::Mutex<String>,
     button_race: AtomicBool,
     button_reads: AtomicUsize,
@@ -50,8 +53,15 @@ impl Portal {
             return OwnedValue::try_from(Value::from(value))
                 .map_err(|e| zbus::fdo::Error::Failed(e.to_string()));
         }
+        if namespace == <Animations as SettingState>::NAMESPACE && key == "enable-animations" {
+            return match *self.0.animations.lock().unwrap() {
+                Some(enabled) => Ok(OwnedValue::from(enabled)),
+                None => Err(zbus::fdo::Error::InvalidArgs("unknown setting".into())),
+            };
+        }
         if namespace != "org.freedesktop.appearance"
             || !matches!(key, "reduced-motion" | "color-scheme")
+            || (key == "reduced-motion" && self.0.no_reduced_motion.load(Ordering::Acquire))
         {
             return Err(zbus::fdo::Error::InvalidArgs("unknown setting".into()));
         }
@@ -169,7 +179,7 @@ fn a_change_during_initial_read_cannot_leave_a_stale_snapshot() {
 }
 
 #[test]
-fn owner_loss_is_conservative_and_a_replacement_is_observed() {
+fn owner_loss_forgets_the_preference_and_a_replacement_is_observed() {
     let bus = Bus::start();
     let old = future::block_on(server(&bus, Arc::new(Settings::default())));
     let watch = Watch::start(Arc::new(|| {}), Some(bus.address.clone()), KEY);
@@ -208,7 +218,7 @@ fn shutdown_does_not_wait_for_a_stalled_portal_method() {
 }
 
 #[test]
-fn a_malformed_preference_is_conservative() {
+fn a_malformed_preference_is_forgotten() {
     let bus = Bus::start();
     let connection = future::block_on(server(&bus, Arc::new(Settings::default())));
     let watch = Watch::start(Arc::new(|| {}), Some(bus.address.clone()), KEY);
@@ -354,6 +364,91 @@ fn color_scheme_snapshot_subscription_and_owner_loss() {
     assert!(crate::appearance::portal_dark(watch.value()));
     assert!(wakes.load(Ordering::Acquire) >= 3);
     stop(watch);
+}
+
+async fn animations_signal(connection: &Connection, enabled: bool) {
+    connection
+        .emit_signal(
+            None::<&str>,
+            PATH,
+            INTERFACE,
+            "SettingChanged",
+            &(
+                <Animations as SettingState>::NAMESPACE,
+                "enable-animations",
+                Value::from(enabled),
+            ),
+        )
+        .await
+        .unwrap();
+}
+
+/// Before the first answer the preference is pending, which holds motion
+/// back; a portal without `reduced-motion` leaves it to GNOME's Animations
+/// switch, read through the same portal and followed live; and a desktop
+/// with neither allows motion.
+#[test]
+fn a_portal_without_reduced_motion_falls_back_to_gnome_animations() {
+    let unanswered: Watch = Watch {
+        state: Arc::new(<AtomicU64 as SettingState>::initial()),
+        stop: None,
+        _thread: None,
+    };
+    assert_eq!(unanswered.reading(), Reading::Pending);
+    assert_eq!(unanswered.value(), None);
+    let unanswered_gnome: AnimationsWatch = Watch {
+        state: Arc::new(Animations::initial()),
+        stop: None,
+        _thread: None,
+    };
+    assert_eq!(unanswered_gnome.reading(), Reading::Pending);
+    let bus = Bus::start();
+    let state = Arc::new(Settings {
+        no_reduced_motion: AtomicBool::new(true),
+        animations: std::sync::Mutex::new(Some(false)),
+        ..Default::default()
+    });
+    let connection = future::block_on(server(&bus, state.clone()));
+    let portal: Watch = Watch::start(Arc::new(|| {}), Some(bus.address.clone()), KEY);
+    let gnome = AnimationsWatch::start(
+        Arc::new(|| {}),
+        Some(bus.address.clone()),
+        "enable-animations",
+    );
+    let preference = || Preference::resolve(portal.reading(), || gnome.reading());
+    wait_for("GNOME animations off", || {
+        preference() == Preference::Reduced
+    });
+    assert_eq!(portal.reading(), Reading::Unavailable);
+    *state.animations.lock().unwrap() = Some(true);
+    future::block_on(animations_signal(&connection, true));
+    wait_for("GNOME animations on", || preference() == Preference::Normal);
+    future::block_on(connection.release_name(DESTINATION)).unwrap();
+    wait_for("owner loss forgets GNOME's switch", || {
+        gnome.reading() == Reading::Unavailable
+    });
+    assert_eq!(preference(), Preference::Unknown);
+    stop(portal);
+    stop(gnome);
+    let bus = Bus::start();
+    let _connection = future::block_on(server(
+        &bus,
+        Arc::new(Settings {
+            no_reduced_motion: AtomicBool::new(true),
+            ..Default::default()
+        }),
+    ));
+    let portal: Watch = Watch::start(Arc::new(|| {}), Some(bus.address.clone()), KEY);
+    let gnome = AnimationsWatch::start(
+        Arc::new(|| {}),
+        Some(bus.address.clone()),
+        "enable-animations",
+    );
+    wait_for("a desktop without either allows motion", || {
+        Preference::resolve(portal.reading(), || gnome.reading()) == Preference::Unknown
+    });
+    stop(portal);
+    stop(gnome);
 }
 
 async fn button_signal(connection: &Connection, value: Value<'_>) {

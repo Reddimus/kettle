@@ -4491,7 +4491,13 @@ at low idle cost. The clock that places the stars stays continuous, so each
 repaint shows the exact position. The animated background (starfield or image)
 plays by default even when unfocused, but the event loop **freezes the wake
 when the window is minimized or occluded** (`window_occluded` +
-`is_minimized`), so a hidden window costs zero idle.
+`is_minimized`), so a hidden window costs zero idle. Reduced motion holds it:
+before it schedules or draws a frame, the app passes `motion_allowed` to
+`Renderer::set_background_motion`, which stops the shared `background_clock`
+at that moment, so a repaint shows the same frame and `background_is_animating`
+asks for no wakes; when motion returns, both clocks shift by the pause and
+playback resumes from the held frame. `background-animation = off` still shows
+frame 0.
 
 The **settings overlay is mouse-driven**: `kettle_render::settings_hit_test`
 recomputes the panel geometry from the SAME `settings_display_lines` + panel math
@@ -4930,8 +4936,12 @@ non-regression claim.
   (one visible, three waiting; repeats and overflow are counted on toasts,
   never by evicting the visible one), is painted through the update toast's
   painter as one of the overlay's notices, and keeps its time in the update
-  toast's `ToastClock`. A desktop delivery is remembered in
-  `PendingDesktop` (64 entries, 60 s) under the id the worker reports
+  toast's `ToastClock`. A paused clock (hover or assistive focus) reports full
+  opacity, and resuming leaves at least three seconds, so a toast caught
+  mid-fade shows whole and later fades from the start; each tick compares
+  the opacity drawn before it with the one after and repaints once when a
+  pause changed it (`ToastClock::needs_frame`). A desktop delivery is
+  remembered in `PendingDesktop` (64 entries, 60 s) under the id the worker reports
   failures with, so a refused or failed one is queued as a toast in its own
   window. No path logs or stores the text.
 - **One process-wide desktop-notification worker** — every OSC 9/777, Lua,
@@ -6119,6 +6129,9 @@ for both size-chip text preparation and drawing, suppressing it under Settings
 or a picker card. After a font-size action kettle-ui sets
 `Overlay::resize_overlay_text` to the translated size and grid; the chip is
 sized from the shaped text, and the same string is a polite live region.
+The chip is static: the resize or font change that shows it draws it, and
+`about_to_wait_inner` wakes once at its expiry (`resize_chip_wait`) for the
+frame that erases it, rather than redrawing it at the ~30 fps animation tick.
 
 ### Paste consent and context-menu nesting
 
@@ -6446,6 +6459,15 @@ System appearance is observed independently of a window's rendered palette.
 Linux appearance and reduced motion share a bounded XDG Settings worker
 transport (`kettle-ui/src/portal_settings.rs`): subscriptions precede snapshots,
 owner changes invalidate state, and retries and shutdown stay off the UI thread.
+Reduced motion reads `org.freedesktop.appearance reduced-motion`; only where the
+portal has none does `motion::SystemMotion` start a second watch, on GNOME's
+`org.gnome.desktop.interface enable-animations` through the same portal
+(`Preference::resolve`). A watch distinguishes a pending first answer, which
+holds motion back until the desktop answers or a bounded call fails, from an
+unavailable one. Under `auto` the portal watch starts on the first event-loop
+turn and GNOME's as soon as the portal says it has none
+(`SystemMotion::prepare`), so that wait ends before the first motion. A
+desktop with neither setting allows motion.
 That worker and every other session-bus connection Kettle opens itself (global
 shortcuts, notifications, the image viewer and file-manager hand-offs) connect
 through `kettle-ui/src/dbus_bound.rs`, which reads each message's 16-byte

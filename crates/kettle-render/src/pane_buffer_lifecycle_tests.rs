@@ -612,7 +612,7 @@ fn bg_image_cache_keys_on_blur_and_frees_on_disable() {
     // Animated backgrounds advance on the media clock, gated for proactive
     // waking on focus (battery), and never index out of bounds.
     assert!(
-        src.contains("bg_image::bg_current_frame(&c.gaps, c.started.elapsed().as_millis())")
+        src.contains("background_clock(held, c.started).as_millis(),")
             && src.contains("idx.min(c.frames.len() - 1)"),
         "animated bg must pick the clock frame, bounded to the frame count"
     );

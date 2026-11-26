@@ -8,6 +8,11 @@ use serde::{Deserialize, Serialize};
 use crate::update_notice::{Notice, NoticeKind};
 
 const LIFETIME: Duration = Duration::from_secs(7);
+/// The fade over a toast's last moments, when motion is allowed.
+const FADE: Duration = Duration::from_millis(150);
+/// The least time a toast has left after a pause ends: enough to read it
+/// again, then its whole fade.
+const AFTER_PAUSE: Duration = Duration::from_secs(3);
 const LEASE_SECONDS: u64 = 30;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,10 +203,15 @@ impl ReceiptWriter {
 /// visible and not paused (hovered or under assistive focus). Time in the
 /// background, behind a dialog or under the pointer does not count. Shared
 /// by the update toast and the notification toast.
+///
+/// A paused toast is drawn whole, even if the pause caught it fading, and
+/// when the pause ends it has at least `AFTER_PAUSE` left, so its fade
+/// starts again from the beginning.
 pub(crate) struct ToastClock {
     elapsed: Duration,
     last_tick: Instant,
     counting: bool,
+    paused: bool,
     /// A frame showing the toast reached the screen.
     pub presented: bool,
 }
@@ -212,6 +222,7 @@ impl ToastClock {
             elapsed: Duration::ZERO,
             last_tick: now,
             counting: false,
+            paused: false,
             presented: false,
         }
     }
@@ -223,6 +234,10 @@ impl ToastClock {
                 .saturating_add(now.saturating_duration_since(self.last_tick));
         }
         self.last_tick = now;
+        if self.paused && !paused {
+            self.elapsed = self.elapsed.min(LIFETIME.saturating_sub(AFTER_PAUSE));
+        }
+        self.paused = paused;
         self.counting = self.presented && visible && !paused;
     }
 
@@ -231,24 +246,32 @@ impl ToastClock {
     }
 
     pub fn opacity(&self, motion: bool) -> f32 {
-        if motion {
-            (self.remaining().as_secs_f32() / 0.15).clamp(0.0, 1.0)
+        if motion && !self.paused {
+            (self.remaining().as_secs_f32() / FADE.as_secs_f32()).clamp(0.0, 1.0)
         } else {
             1.0
         }
     }
 
+    /// Whether the next frames redraw a fade in progress.
+    pub fn fading(&self, motion: bool) -> bool {
+        motion && self.counting && self.remaining() <= FADE
+    }
+
+    /// Whether a toast drawn at opacity `drawn` before the last tick needs
+    /// another frame: its fade is running, or a pause starting or ending
+    /// changed how it is drawn.
+    pub fn needs_frame(&self, drawn: f32, motion: bool) -> bool {
+        self.fading(motion) || self.opacity(motion) != drawn
+    }
+
     pub fn wake_after(&self, motion: bool) -> Option<Duration> {
         self.counting.then(|| {
-            if motion && self.remaining() <= Duration::from_millis(150) {
+            if self.fading(motion) {
                 Duration::from_millis(16)
             } else {
                 self.remaining()
-                    .saturating_sub(if motion {
-                        Duration::from_millis(150)
-                    } else {
-                        Duration::ZERO
-                    })
+                    .saturating_sub(if motion { FADE } else { Duration::ZERO })
                     .max(Duration::from_millis(1))
             }
         })
@@ -443,6 +466,50 @@ mod tests {
         assert_eq!(clock.opacity(false), 1.0);
         assert_eq!(clock.wake_after(true), Some(Duration::from_millis(16)));
         assert_eq!(clock.wake_after(false), Some(Duration::from_millis(50)));
+    }
+
+    /// Hovered or focused by assistive technology during its fade, a toast
+    /// is drawn whole at once, not frozen part-faded. When the pause ends
+    /// it has time to be read again, and then fades from the start.
+    #[test]
+    fn a_toast_paused_while_fading_is_whole_and_fades_again_from_the_start() {
+        let now = Instant::now();
+        let mut clock = ToastClock::new(now);
+        clock.presented = true;
+        clock.tick(now, true, false);
+        let fading = now + LIFETIME - Duration::from_millis(55);
+        clock.tick(fading, true, false);
+        let drawn = clock.opacity(true);
+        assert!(drawn < 0.5, "{drawn}");
+        clock.tick(fading + Duration::from_millis(5), true, true);
+        assert_eq!(clock.opacity(true), 1.0, "a paused toast is drawn whole");
+        assert!(
+            clock.needs_frame(drawn, true),
+            "and gets a frame to show it"
+        );
+        assert_eq!(clock.wake_after(true), None);
+        let resumed = fading + Duration::from_secs(60);
+        clock.tick(resumed, true, true);
+        assert!(!clock.needs_frame(1.0, true), "a held toast draws nothing");
+        clock.tick(resumed, true, false);
+        assert_eq!(clock.remaining(), AFTER_PAUSE);
+        assert_eq!(clock.opacity(true), 1.0);
+        assert!(!clock.needs_frame(1.0, true));
+        assert_eq!(clock.wake_after(true), Some(AFTER_PAUSE - FADE));
+        clock.tick(resumed + AFTER_PAUSE - FADE / 2, true, false);
+        let half = clock.opacity(true);
+        assert!((half - 0.5).abs() < 0.01, "{half}");
+        assert!(clock.needs_frame(1.0, true));
+        // Without motion there is no fade to restart, and the pause still
+        // leaves time to read it.
+        let mut still = ToastClock::new(now);
+        still.presented = true;
+        still.tick(now, true, false);
+        still.tick(now + LIFETIME - Duration::from_millis(10), true, true);
+        still.tick(now + LIFETIME, true, false);
+        assert_eq!(still.remaining(), AFTER_PAUSE);
+        assert_eq!(still.opacity(false), 1.0);
+        assert_eq!(still.wake_after(false), Some(AFTER_PAUSE));
     }
 
     #[test]

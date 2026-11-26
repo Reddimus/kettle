@@ -2751,7 +2751,7 @@ context = "crates/kettle-ui: Settings position description."
 context = "crates/kettle-ui: Settings size description."
 
 [messages.quick_terminal_animation_description]
-context = "crates/kettle-ui: Settings animation description."
+context = "crates/kettle-ui: Settings > Quick terminal > Animation row description. Motion is reduced by the reduce-motion setting or, by default, the system's Reduce Motion."
 
 [messages.quick_terminal_autohide_description]
 context = "crates/kettle-ui: Settings autohide description."

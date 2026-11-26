@@ -66,7 +66,7 @@ pub use theme_picker::{
     theme_footer_layout, theme_footer_min_columns, theme_footer_slots, theme_readability,
 };
 
-use background::{BgImageAnim, BgImageWorker, starfield_time};
+use background::{BgImageAnim, BgImageWorker, background_clock, starfield_time};
 #[cfg(test)]
 use background::{BgImageJob, BgImageResult};
 #[cfg(test)]
@@ -846,10 +846,14 @@ pub struct Renderer {
     /// (just a per-frame uniform); the only state is `starfield_started`.
     starfield: StarfieldLayer,
     presentation: PresentLayer,
-    /// Playback clock for the starfield drift — `elapsed()` feeds the shader's
-    /// continuous `time` so motion is smooth-valued even though we repaint at a
-    /// low fps cap.
+    /// Playback clock for the starfield drift — its `background_clock` feeds
+    /// the shader's continuous `time` so motion is smooth-valued even though
+    /// we repaint at a low fps cap.
     starfield_started: std::time::Instant,
+    /// When reduced motion stopped the animated backgrounds, while it holds
+    /// them (`set_background_motion`): the starfield and an animated image
+    /// show the frame of that moment and ask for no frames.
+    background_held: Option<std::time::Instant>,
     /// Terminator parity, bg-image: decoded background-image cache, keyed on
     /// `(path, blur_radius)` so a `background-blur` toggle re-decodes even when
     /// the image path is unchanged.
@@ -943,6 +947,9 @@ mod bg_image_worker_tests;
 
 #[cfg(test)]
 mod starfield_time_tests;
+
+#[cfg(test)]
+mod background_motion_tests;
 
 impl Renderer {
     pub fn render_frame(
@@ -1359,11 +1366,13 @@ impl Renderer {
             self.apply_bg_image_worker_result(&want, blur_radius);
             // Select the frame to display now. A still image (1 frame) or
             // `background-animation = off` shows frame 0; otherwise the
-            // playback clock loops through frames at their own gaps. Focus does
-            // NOT gate the index (so an output-driven repaint while unfocused
-            // still shows the time-correct frame, no jump); focus only gates
-            // whether the render loop PROACTIVELY wakes to animate, via
+            // playback clock loops through frames at their own gaps, and
+            // reduced motion stops that clock. Focus does NOT gate the index
+            // (so an output-driven repaint while unfocused still shows the
+            // time-correct frame, no jump); focus only gates whether the
+            // render loop PROACTIVELY wakes to animate, via
             // `background_is_animating` feeding the anim tick.
+            let held = self.background_held;
             let bg_frame: Option<(&kettle_core::ImageData, bool)> = self
                 .bg_image_cache
                 .as_ref()
@@ -1372,7 +1381,10 @@ impl Renderer {
                     let idx = if c.frames.len() > 1
                         && cfg.background_animation != kettle_config::BackgroundAnimation::Off
                     {
-                        bg_image::bg_current_frame(&c.gaps, c.started.elapsed().as_millis())
+                        bg_image::bg_current_frame(
+                            &c.gaps,
+                            background_clock(held, c.started).as_millis(),
+                        )
                     } else {
                         0
                     };
@@ -6382,10 +6394,11 @@ impl Renderer {
             cfg.background_type,
             kettle_config::BackgroundType::Starfield
         ) {
+            let clock = background_clock(self.background_held, self.starfield_started);
             self.starfield.upload(
                 self.device.handle(),
                 [sw, sh],
-                starfield_time(cfg.background_animation, self.starfield_started.elapsed()),
+                starfield_time(cfg.background_animation, clock),
             );
         }
         self.imgs.upload(self.device.handle(), [sw, sh], &img_items);
