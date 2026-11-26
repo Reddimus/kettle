@@ -643,9 +643,12 @@ impl App {
                 if bcode == 0 {
                     ws.card_press = None;
                 }
-                // And a jump button's: a new primary press starts over.
+                // And a jump button's or a title-bar button's: a new primary
+                // press starts over, so an old press's release, which went
+                // elsewhere, is never taken for this one's.
                 if bcode == 0 {
                     ws.scrollback_pill_press = None;
+                    ws.cancel_strip_presses();
                 }
                 // Likewise a program still noted as holding this button gets
                 // the release it missed, and the press is Kettle's own

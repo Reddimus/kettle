@@ -6513,7 +6513,8 @@ the originally pressed control, and so do `+`, Find and the Settings gear
 shows pressed while the pointer stays on it, and a release anywhere else
 cancels. A modal that takes the pointer while one is held ends its press
 (`WindowState::cancel_strip_presses`), so the release does nothing even after
-the modal has closed. The `▾` (GNOME's `≡`) is a menu button and opens on press, as GTK's
+the modal has closed, and so does the next primary press, native or ctl, so a
+press whose release never came cannot take a later click's release. The `▾` (GNOME's `≡`) is a menu button and opens on press, as GTK's
 and AppKit's do; the overflow arrows step on press. Close follows the native `CloseRequested`
 confirmation policy; AccessKit exposes the same actions. Synthetic control
 input can activate buttons but does not impersonate a compositor drag serial.

@@ -2064,3 +2064,30 @@ fn a_modal_taking_the_pointer_cancels_a_held_strip_button() {
         assert!(body.contains("ws.cancel_strip_presses();"), "{opener}");
     }
 }
+
+/// A primary press whose release never came (a control client's lone
+/// `press` on `+`) must not take a later click's release: then the tab
+/// click's release went to the strip, and the tab drag it armed stayed armed,
+/// so buttonless motion reordered tabs. Every new primary press, native or
+/// ctl, ends any title-bar button press before it is routed anywhere.
+#[test]
+fn a_new_primary_press_ends_an_old_strip_press() {
+    let src = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let native = src
+        .split("WindowEvent::MouseInput { state: ElementState::Pressed,")
+        .nth(1)
+        .expect("native press");
+    let ctl = src.split("fn ctl_mouse_press(").nth(1).expect("ctl press");
+    for (name, press) in [("native", native), ("ctl", ctl)] {
+        let cancel = press
+            .find("if bcode == 0 { ws.scrollback_pill_press = None; ws.cancel_strip_presses(); }")
+            .unwrap_or_else(|| panic!("{name}: a primary press ends old strip presses"));
+        let routed = press
+            .find("if self.confirm_mouse_press(ws, event_loop, bcode) {")
+            .unwrap_or_else(|| panic!("{name}: routing"));
+        assert!(cancel < routed, "{name}: before the press is routed");
+    }
+}
