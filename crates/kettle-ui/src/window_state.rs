@@ -1432,6 +1432,9 @@ pub(crate) struct WindowState {
     /// The pane and stable row id the terminal menu was opened over, for its
     /// Select Command Output row. Taken by the menu's next action.
     pub(crate) context_menu_output_row: Option<(u64, u64)>,
+    /// The open menu's pointer state and placement limit. Each new menu
+    /// resets it.
+    pub(crate) context_menu_session: crate::app::ContextMenuSession,
     /// Vi-mode (Alacritty parity): `Some(ViState)` while kettle is
     /// intercepting keys for vi-style navigation.
     pub(crate) vi_mode: Option<ViState>,
@@ -1979,6 +1982,7 @@ impl WindowState {
             pressed_search: false,
             context_menu_a11y_label: None,
             context_menu_output_row: None,
+            context_menu_session: Default::default(),
             vi_mode: None,
             scaled_zoom_prev_font_size: None,
             last_emitted_focus: None,

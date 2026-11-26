@@ -882,7 +882,12 @@ impl App {
             return;
         }
         let panel = clamp_context_menu_panel((panel_w, panel_h), (sw, sh));
-        let anchor = clamp_context_menu_anchor((px, py), panel, (sw, sh));
+        let placement = place_context_menu(MenuAnchor::point(px, py), panel, (sw, sh));
+        let anchor = placement.origin;
+        ws.context_menu_session = ContextMenuSession {
+            root_max_h: placement.max_h,
+            ..ContextMenuSession::default()
+        };
         let anchor_scale = ws
             .window
             .as_ref()
@@ -1109,7 +1114,7 @@ impl App {
         let next = ws
             .context_menu
             .as_ref()
-            .map(|m| next_context_menu_highlight(&m.items, m.highlight, delta));
+            .map(|m| menu_step(m, &mut ws.context_menu_session.pointer, delta));
         if let Some(next) = next {
             self.set_context_menu_highlight(ws, next);
         }
@@ -1192,47 +1197,77 @@ impl App {
         )
     }
 
-    /// Set `menu.highlight` to whichever row the cursor is
-    /// over right now; no-op when the cursor is outside the panel or
-    /// on a separator. Called from `CursorMoved`. Requests a redraw
-    /// only when the highlight actually changed so we don't churn the
-    /// GPU on every sub-pixel motion event.
+    /// Move the menu's hover to whatever the cursor is over right now
+    /// (`menu_pointer_moved` decides what that lights). Called from
+    /// `CursorMoved`. Requests a redraw only when the hover changed
+    /// something, so sub-pixel motion does not churn the GPU.
     pub(super) fn update_menu_highlight_from_cursor(&mut self, ws: &mut WindowState) {
         if let Some(delta) = self.context_menu_scroll_edge(ws) {
             self.scroll_context_menu(ws, delta);
             return;
         }
-        let index = if let Some(index) = self.menu_row_at_cursor(ws) {
-            index
-        } else {
-            let Some((depth, index)) = self.parent_menu_row_at_cursor(ws) else {
-                return;
-            };
-            let Some(menu) = ws.context_menu.as_mut() else {
-                return;
-            };
-            if menu.drill_stack[depth].highlight == index {
-                return;
-            }
-            while menu.drill_stack.len() > depth {
-                menu.leave_submenu();
-            }
-            index
-        };
+        let panels = self.context_menu_panels(ws);
+        let hit = self.context_menu_pointer_hit(ws, &panels);
+        let at = (ws.cursor.x as f32, ws.cursor.y as f32);
         let Some(menu) = ws.context_menu.as_mut() else {
             return;
         };
-        let changed = menu.highlight != index;
-        menu.highlight = index;
-        let submenu = matches!(menu.items.get(index), Some(ContextMenuItem::Submenu { .. }));
-        if submenu {
-            self.enter_context_submenu(ws, index);
-        } else if !changed {
-            return;
+        let effect = menu_pointer_moved(
+            menu,
+            &mut ws.context_menu_session.pointer,
+            hit,
+            &panels,
+            at,
+            std::time::Instant::now(),
+        );
+        self.apply_menu_hover(ws, effect);
+    }
+
+    /// Carry out what a hover asked for.
+    fn apply_menu_hover(&self, ws: &mut WindowState, effect: MenuHoverEffect) {
+        match effect {
+            MenuHoverEffect::None => return,
+            MenuHoverEffect::Redraw => {}
+            MenuHoverEffect::OpenSubmenu(index) => self.enter_context_submenu(ws, index),
         }
         ws.reuse_pane_snapshots_once = true;
         if let Some(w) = &ws.window {
             w.request_redraw();
+        }
+    }
+
+    /// Each open level's panel, the menu itself first and the deepest last.
+    fn context_menu_panels(&self, ws: &WindowState) -> Vec<kettle_render::Rect4> {
+        let Some(menu) = ws.context_menu.as_ref() else {
+            return Vec::new();
+        };
+        let rect = |((x, y), (w, h)): ((f32, f32), (f32, f32))| (x, y, w, h);
+        menu.drill_stack
+            .iter()
+            .enumerate()
+            .filter_map(|(depth, parent)| {
+                self.context_menu_level_geometry(ws, &parent.as_state(), depth == 0)
+            })
+            .chain(self.context_menu_geometry(ws))
+            .map(rect)
+            .collect()
+    }
+
+    /// What the cursor is over in the open menu, given its `panels`.
+    fn context_menu_pointer_hit(
+        &self,
+        ws: &WindowState,
+        panels: &[kettle_render::Rect4],
+    ) -> MenuHit {
+        let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        if let Some(index) = self.menu_row_at_cursor(ws) {
+            MenuHit::Row(index)
+        } else if let Some((depth, index)) = self.parent_menu_row_at_cursor(ws) {
+            MenuHit::ParentRow { depth, index }
+        } else if panels.iter().any(|panel| rect_contains(*panel, x, y)) {
+            MenuHit::Panel
+        } else {
+            MenuHit::Outside
         }
     }
 
@@ -1436,13 +1471,17 @@ impl App {
         &self,
         ws: &WindowState,
     ) -> Option<((f32, f32), (f32, f32))> {
-        self.context_menu_level_geometry(ws, ws.context_menu.as_ref()?)
+        let menu = ws.context_menu.as_ref()?;
+        self.context_menu_level_geometry(ws, menu, menu.drill_stack.is_empty())
     }
 
+    /// One level's geometry; `root` is the menu's own panel, which may be
+    /// held shorter (`ContextMenuSession::root_max_h`).
     fn context_menu_level_geometry(
         &self,
         ws: &WindowState,
         menu: &ContextMenuState,
+        root: bool,
     ) -> Option<((f32, f32), (f32, f32))> {
         let (cw, ch) = self.menu_cell(ws);
         let row_h = kettle_render::menu::row_height(ch);
@@ -1474,6 +1513,10 @@ impl App {
         let max_h = (surface_h - kettle_render::menu::PANEL_BREATHING)
             .max(row_h)
             .min((surface_h - 8.0).max(1.0));
+        let max_h = match ws.context_menu_session.root_max_h {
+            Some(cap) if root => max_h.min(cap.max(row_h)),
+            _ => max_h,
+        };
         let panel_h = natural_h.min(max_h);
         // Dropdown parity: include the right-aligned hint budget —
         // kept in lockstep with `show_context_menu` and the renderer's
@@ -1508,9 +1551,10 @@ impl App {
             .map(|menu| {
                 menu.drill_stack
                     .iter()
-                    .filter_map(|parent| {
+                    .enumerate()
+                    .filter_map(|(depth, parent)| {
                         let (_, panel) =
-                            self.context_menu_level_geometry(ws, &parent.as_state())?;
+                            self.context_menu_level_geometry(ws, &parent.as_state(), depth == 0)?;
                         let anchor = scale_context_menu_anchor(
                             parent.anchor,
                             parent.anchor_scale,
@@ -1560,13 +1604,17 @@ impl App {
     /// state. Splits the labels (owned `String`) from the dispatch
     /// actions so the renderer stays Action-agnostic.
     pub(super) fn context_menu_overlay(&self, ws: &WindowState) -> Option<ContextMenu> {
-        self.context_menu_level_overlay(ws, ws.context_menu.as_ref()?)
+        let menu = ws.context_menu.as_ref()?;
+        let mut overlay = self.context_menu_level_overlay(ws, menu, menu.drill_stack.is_empty())?;
+        overlay.highlight = menu_shown_highlight(menu, &ws.context_menu_session.pointer);
+        Some(overlay)
     }
 
     fn context_menu_level_overlay(
         &self,
         ws: &WindowState,
         menu: &ContextMenuState,
+        root: bool,
     ) -> Option<ContextMenu> {
         // Dropdown parity: per-row shortcut hints from the LIVE keybind
         // map (computed per frame; the map only changes on reload).
@@ -1580,7 +1628,7 @@ impl App {
         // Terminator menu UX: pass through the scroll state + clamped panel
         // geometry the renderer needs to draw only the visible slice.
         let (panel_w_clamped, panel_h_clamped) = self
-            .context_menu_level_geometry(ws, menu)
+            .context_menu_level_geometry(ws, menu, root)
             .map(|(_, panel)| panel)
             .unwrap_or((0.0, 0.0));
         let (cell_w, _) = self.menu_cell(ws);
@@ -1612,7 +1660,10 @@ impl App {
             .map(|menu| {
                 menu.drill_stack
                     .iter()
-                    .filter_map(|parent| self.context_menu_level_overlay(ws, &parent.as_state()))
+                    .enumerate()
+                    .filter_map(|(depth, parent)| {
+                        self.context_menu_level_overlay(ws, &parent.as_state(), depth == 0)
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -1667,7 +1718,8 @@ impl App {
         let (_, ch) = self.menu_cell(ws);
         let row_h = kettle_render::menu::row_height(ch);
         for (depth, parent) in menu.drill_stack.iter().enumerate().rev() {
-            let ((x, y), (w, h)) = self.context_menu_level_geometry(ws, &parent.as_state())?;
+            let ((x, y), (w, h)) =
+                self.context_menu_level_geometry(ws, &parent.as_state(), depth == 0)?;
             if px < x || px >= x + w || py < y || py >= y + h {
                 continue;
             }
@@ -1718,11 +1770,10 @@ impl App {
         // command, theme / profile choice, new-tab ▾ shell). The mapper +
         // dispatcher also own the close-or-keep decision, so a submenu Enter
         // keeps the menu open.
-        let chosen = ws.context_menu.as_ref().and_then(|m| {
-            m.items
-                .get(m.highlight)
-                .and_then(|it| item_to_click(it, m.highlight))
-        });
+        let chosen = ws
+            .context_menu
+            .as_ref()
+            .and_then(|m| menu_activate_click(m, &ws.context_menu_session.pointer));
         self.reset_blink_phase(ws);
         match chosen {
             Some(click) => self.dispatch_context_menu_click(ws, click, event_loop),
