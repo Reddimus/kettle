@@ -1945,9 +1945,11 @@ pub(super) fn apply_picker_pointer(
         }
         // The wheel scrolls the list only. The selection stays while it is
         // in view; one the list scrolls past moves to the nearest row in view
-        // the wheel may select. That is never a disabled row (a placeholder)
-        // or a heading, nor the SSH launcher's Save or Remove row, which
-        // takes a deliberate Down or a click on it.
+        // the wheel may select, or, when the view holds none (a one-row view
+        // on a group heading), the first one past it, so the list moves on.
+        // That is never a disabled row (a placeholder) or a heading, nor the
+        // SSH launcher's Save or Remove row, which takes a deliberate Down or
+        // a click on it.
         let limit = picker_pointer_select_limit(ws, cfg);
         let selectable = |index: &usize| {
             *index < limit
@@ -1956,13 +1958,15 @@ pub(super) fn apply_picker_pointer(
                     .get(*index)
                     .is_some_and(|row| row.enabled && !row.separator)
         };
-        let shown = offset..offset + visible;
-        if shown.contains(&menu.highlight) {
+        let end = offset + visible;
+        if (offset..end).contains(&menu.highlight) {
             menu.highlight
         } else if menu.highlight < offset {
-            shown.clone().find(selectable).unwrap_or(menu.highlight)
+            (offset..menu.rows.len())
+                .find(selectable)
+                .unwrap_or(menu.highlight)
         } else {
-            shown.rev().find(selectable).unwrap_or(menu.highlight)
+            (0..end).rev().find(selectable).unwrap_or(menu.highlight)
         }
     };
     let wheel = matches!(event, PickerPointer::Wheel(_));

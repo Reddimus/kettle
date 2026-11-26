@@ -4506,7 +4506,8 @@ selection; its rows fill the panel from the header down, since pickers scroll
 with the keys and the wheel and keep no arrow strips. The wheel scrolls the
 list only (`PickerView::scroll`): the selection stays while it is in view, and
 one the list scrolls past moves to the nearest row in view the wheel may
-select. Each frame records where it drew the list (`remember_picker_scroll`),
+select, or to the first one past a view that holds none, such as a one-row
+view on a group heading, so each detent moves the list on. Each frame records where it drew the list (`remember_picker_scroll`),
 and the keys move it from there only as far as keeps the selection in view
 (`picker_scroll_offset_from`). The panel's
 border is blended over the panel colour and drawn opaque, because the shader

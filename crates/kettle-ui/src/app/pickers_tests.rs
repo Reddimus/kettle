@@ -2291,3 +2291,65 @@ fn the_wheel_scrolls_a_picker_and_keeps_its_selection_in_view() {
         .expect("the frame remembers the picker's scroll");
     assert!(overlay < remember);
 }
+
+/// Review: a palette with room for one row wheels past group headings. With
+/// the last command of a group selected, one detent down shows only the next
+/// heading; the selection moves to the first command past it, so the list
+/// moves on instead of snapping back, and one detent up returns. Detent by
+/// detent the list reaches its end and its top again.
+#[test]
+fn a_one_row_palette_wheels_past_group_headings() {
+    use super::{PickerPointer, apply_picker_pointer, open_picker_menu};
+    let cfg = kettle_config::Config::default();
+    let cell = (8.0, 16.0);
+    let mut ws = WindowState::new(0, Mux::new());
+    super::profiles::open_profile_palette(&mut ws, Some(&[]));
+    let project = |ws: &WindowState, surface: (f32, f32)| {
+        open_picker_menu(ws, &cfg, "dark-theme", &EN_TEXT, None, surface, cell, cell, 0.0)
+    };
+    let shown = |menu: &kettle_render::ContextMenu| {
+        (0..menu.rows.len())
+            .filter(|&index| menu.visible_row_rect(index).is_some())
+            .count()
+    };
+    let surface = (40..400)
+        .map(|height| (800.0, height as f32))
+        .find(|&surface| project(&ws, surface).is_some_and(|menu| shown(&menu) == 1))
+        .expect("a palette one row tall");
+    let first = project(&ws, surface).unwrap();
+    let heading = (1..first.rows.len())
+        .find(|&row| first.rows[row].heading)
+        .expect("a second group");
+    let last = heading - 1;
+    ws.palette_input.as_mut().unwrap().1 = kettle_render::menu_row_option(&first.rows, last).unwrap();
+    let menu = project(&ws, surface).unwrap();
+    assert_eq!((menu.scroll_offset, menu.highlight), (last, last));
+    ws.cursor.x = f64::from(menu.anchor.0 + menu.panel_w_clamped * 0.5);
+    ws.cursor.y = f64::from(menu.anchor.1 + menu.panel_h_clamped * 0.5);
+    let wheel = |ws: &mut WindowState, delta: isize| {
+        let menu = project(ws, surface).unwrap();
+        assert!(apply_picker_pointer(ws, &cfg, &menu, cell.1, PickerPointer::Wheel(delta)));
+        project(ws, surface).unwrap()
+    };
+    let down = wheel(&mut ws, 1);
+    assert_eq!(down.highlight, heading + 1, "the first command past the heading");
+    assert_eq!(down.scroll_offset, heading + 1, "the list moved on");
+    let up = wheel(&mut ws, -1);
+    assert_eq!((up.scroll_offset, up.highlight), (last, last), "and back");
+    for (delta, end) in [(1, first.rows.len() - 1), (-1, 1)] {
+        let mut offset = project(&ws, surface).unwrap().scroll_offset;
+        let mut steps = 0;
+        while offset != end {
+            let next = wheel(&mut ws, delta);
+            assert!(!next.rows[next.highlight].heading);
+            assert_eq!(next.scroll_offset, next.highlight, "the selection is the row shown");
+            assert!(
+                if delta > 0 { next.scroll_offset > offset } else { next.scroll_offset < offset },
+                "a detent {delta} at row {offset} did not move the list"
+            );
+            offset = next.scroll_offset;
+            steps += 1;
+            assert!(steps <= first.rows.len());
+        }
+    }
+}
