@@ -809,37 +809,19 @@ impl App {
                     if press_settings_gear(ws, &bar, (px, py), bcode) {
                         // The Settings gear opens on release, like a native
                         // button; a middle press does nothing.
-                    } else if bcode == 0 && search_button_at(&bar, px, py) {
-                        // GNOME's Find button opens or closes Find, as its
-                        // shortcut does.
-                        ws.pressed_search = true;
-                        self.toggle_header_find(ws);
+                    } else if bcode == 0 && press_strip_button(ws, &bar, (px, py)) {
+                        // `+` and GNOME's Find act on release over themselves,
+                        // like native buttons, so dragging off cancels.
                     } else if bcode == 0
                         && bar.new_tab_menu.2 > 0.0
                         && in_bar(bar.new_tab_menu, px, py)
                     {
                         // The `▾` dropdown — open the shell chooser
-                        // anchored at the arrow's bottom-left. Checked BEFORE the
-                        // `+` so the arrow region isn't swallowed by the button.
+                        // anchored at the arrow's bottom-left. A menu button,
+                        // it opens on press, as GTK's and AppKit's do.
                         ws.pressed_new_tab_menu = true;
                         let (ax, ay, _, ah) = bar.new_tab_menu;
                         self.open_new_tab_menu(ws, ax, ay + ah);
-                    } else if bcode == 0 && in_bar(bar.new_tab, px, py) {
-                        ws.pressed_new_tab = true;
-                        let area = self.area(ws);
-                        let (cols, rows) = self.grid_of(ws, area);
-                        let geometry = self.pty_geometry_for_grid(ws, cols, rows);
-                        // Log a `+`-button new-tab spawn failure rather than
-                        // swallowing it, and fire TabAdd on success so Lua
-                        // `TabAdd` and dev-record see the new tab.
-                        let pre = self.focus_key(ws);
-                        match ws.mux.new_tab_geometry(&self.cfg, geometry, self.waker()) {
-                            Ok(()) => {
-                                self.note_focus_change(ws, pre);
-                                self.fire_tab_add_event(ws);
-                            }
-                            Err(e) => log::warn!("could not open a new tab (+ button): {e}"),
-                        }
                     } else if bcode == 0
                         && bar.scroll_left.2 > 0.0
                         && in_bar(bar.scroll_left, px, py)
@@ -1113,15 +1095,17 @@ impl App {
                     let at = (ws.cursor.x as f32, ws.cursor.y as f32);
                     self.track_titlebar_pointer(ws, TitlebarPointer::Release(at.0, at.1));
                 }
-                if button == MouseButton::Left
-                    && (ws.pressed_new_tab || ws.pressed_new_tab_menu || ws.pressed_search)
-                {
-                    ws.pressed_new_tab = false;
+                if button == MouseButton::Left && ws.pressed_new_tab_menu {
                     ws.pressed_new_tab_menu = false;
-                    ws.pressed_search = false;
                     if let Some(window) = &ws.window {
                         window.request_redraw();
                     }
+                }
+                if button == MouseButton::Left
+                    && let Some(released) = release_strip_button(ws, |ws| self.tab_bar(ws))
+                {
+                    self.act_on_strip_release(ws, released);
+                    return;
                 }
                 if button == MouseButton::Left
                     && let Some(action) = release_settings_gear(ws, |ws| self.tab_bar(ws))

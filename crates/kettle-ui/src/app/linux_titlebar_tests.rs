@@ -947,7 +947,8 @@ fn gnome_header_find_agrees_everywhere() {
         }
     }
     // The window, an agent and a screen reader all toggle Find through the
-    // same call, and the press shows only until its release.
+    // same call. A pointer press arms the button, which shows pressed until
+    // its release, and the release back on Find toggles it.
     let source = super::production_source();
     let native = source
         .split_once("state: ElementState::Pressed,")
@@ -957,21 +958,25 @@ fn gnome_header_find_agrees_everywhere() {
         .unwrap();
     for body in [native.0, fn_body(&source, "ctl_mouse_press")] {
         let flat: String = body.split_whitespace().collect();
-        let (_, press) = flat
-            .split_once("elseifbcode==0&&search_button_at(&bar,px,py){")
-            .expect("a press on Find");
-        let press = press.split("}elseif").next().unwrap();
         assert!(
-            press.ends_with("ws.pressed_search=true;self.toggle_header_find(ws);"),
-            "{press}"
+            flat.contains("elseifbcode==0&&press_strip_button(ws,&bar,(px,py)){"),
+            "a press on Find arms it"
+        );
+        assert!(
+            !flat.contains("self.toggle_header_find(ws)"),
+            "not on press"
         );
     }
-    let release: String = native.1.split_whitespace().collect();
-    assert!(release.contains("ws.pressed_search=false;"));
-    let ctl_release: String = fn_body(&source, "ctl_mouse_release")
-        .split_whitespace()
-        .collect();
-    assert!(ctl_release.contains("ws.pressed_search=false;"));
+    let flat: String = source.split_whitespace().collect();
+    assert!(flat.contains("Some(NewTabHoverTarget::Search)=>ws.pressed_search=true,"));
+    for release in [native.1, fn_body(&source, "ctl_mouse_release")] {
+        let release: String = release.split_whitespace().collect();
+        assert!(release.contains(
+            "letSome(released)=release_strip_button(ws,|ws|self.tab_bar(ws)){self.act_on_strip_release(ws,released);"
+        ));
+    }
+    assert!(flat.contains("ws.pressed_new_tab=false;ws.pressed_search=false;"));
+    assert!(flat.contains("Some(NewTabHoverTarget::Search)=>self.toggle_header_find(ws),"));
     let a11y: String = source.split_whitespace().collect();
     assert!(a11y.contains(
         "}elseifrequest.target_node==ACCESSIBILITY_HEADER_FIND_ID{self.toggle_header_find(ws);"

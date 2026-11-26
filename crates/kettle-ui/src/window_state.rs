@@ -1498,7 +1498,8 @@ pub(crate) struct WindowState {
     pub(crate) hovered_tab_idx: Option<usize>,
     /// Hovered half of the trailing horizontal new-tab control. Stored beside
     /// close hover so pointer motion repaints only when the visual state
-    /// actually changes; `tab_bar()` forwards it to the renderer.
+    /// actually changes; `tab_bar()` forwards it to the renderer. A press on
+    /// `+` arms it, and a release back on it opens the tab.
     pub(crate) pressed_new_tab: bool,
     pub(crate) pressed_new_tab_menu: bool,
     pub(crate) hovered_new_tab: bool,
@@ -1508,7 +1509,7 @@ pub(crate) struct WindowState {
     pub(crate) hovered_settings: bool,
     pub(crate) pressed_settings: bool,
     /// The pointer is over, or pressed, the GNOME header's Find button. A
-    /// press opens or closes Find; the press only shows until its release.
+    /// press arms it; a release back on it opens or closes Find.
     pub(crate) hovered_search: bool,
     pub(crate) pressed_search: bool,
     /// The tab strip's overflow arrow under the pointer: `Some(true)` for

@@ -231,11 +231,19 @@ fn ctl_mouse_press_handles_app_chrome_before_panes() {
         !body.contains("modal_swallows_pointer(self.any_modal_open(ws)"),
         "the search bar is not a pointer-owning modal; ctl_mouse_press must not gate on it"
     );
+    // `+` is armed through `new_tab_hover_target`, which takes the dropdown
+    // arrow first, so the arrow is never swallowed by the button.
+    let target = src
+        .split("fn new_tab_hover_target(")
+        .nth(1)
+        .and_then(|s| s.split("\n}\n").next())
+        .expect("new_tab_hover_target");
     assert!(
         body.contains("rect_contains(bar.new_tab_menu, px, py)")
             && body.contains("self.open_new_tab_menu(ws, ax, ay + ah);")
-            && body.find("rect_contains(bar.new_tab_menu, px, py)")
-                < body.find("rect_contains(bar.new_tab, px, py)"),
+            && body.contains("press_strip_button(ws, &bar, (px, py))")
+            && target.find("rect_contains(bar.new_tab_menu, x, y)")
+                < target.find("rect_contains(bar.new_tab, x, y)"),
         "ctl_mouse_press must check the new-tab dropdown arrow before the + button"
     );
     assert!(
