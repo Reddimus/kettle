@@ -1563,8 +1563,9 @@ fn settings_hover_shows_only_where_a_click_acts() {
 /// Settings paints hover from the window's own pointer, works it out
 /// afresh for every frame (rows move under a still pointer as the keyboard
 /// scrolls), and repaints a move only when its target differs from the one
-/// the last frame painted. A move compared with a cache only moves set
-/// missed a hover a keyboard redraw had painted, which then stayed lit.
+/// the window shows. A move compared with a cache only moves set missed a
+/// hover a keyboard redraw had painted, which then stayed lit; and a frame
+/// that a gate held back or that did not present must not count as shown.
 /// Leaving the window clears the pointer, and the hover with it. Hover never
 /// moves the keyboard focus.
 #[test]
@@ -1581,13 +1582,18 @@ fn settings_hover_follows_the_pointer_and_leaves_the_focus_alone() {
     ] {
         assert!(flat.contains(needle), "missing: {needle}");
     }
-    let painted = flat
-        .find("ws.settings_hover=overlay.settings.as_ref().and_then(|set|set.hover);")
+    let shown = flat
+        .find("ifpresented{ws.settings_hover=overlay.settings.as_ref().and_then(|set|set.hover);}")
+        .expect("only a presented frame records the hover");
+    let presented = flat
+        .find("letpresented=matches!(&frame_result,Ok(FrameOutcome::Presented));")
         .unwrap();
-    let built = flat
-        .find("letoverlay=self.overlay(ws,reuse_pane_snapshots);")
-        .unwrap();
-    assert!(built < painted, "the frame's own overlay records the hover");
+    assert!(presented < shown);
+    assert_eq!(
+        flat.matches("ws.settings_hover=").count(),
+        1,
+        "nothing else records a hover as shown"
+    );
     for name in ["track_settings_hover", "settings_hover"] {
         let body = src
             .split(&format!("fn {name}("))
