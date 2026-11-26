@@ -1,9 +1,9 @@
 # Settings overlay
 
 kettle has a built-in **Settings** panel so you can change the common options
-without editing a config file. Open it with **`Ctrl + ,`** or
-**right-click → Settings…**. Opening it again while it is open leaves it as it
-is, on the same option and search.
+without editing a config file. Open it with **Cmd+,** on macOS or **Ctrl+,**
+elsewhere, or **right-click → Settings…**. Opening it again while it is open
+leaves it as it is, on the same option and search.
 
 The centered window has a category sidebar and a search field. The right pane
 shows the category title, a short description under each option, and a value

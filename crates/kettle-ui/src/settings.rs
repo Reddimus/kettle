@@ -3172,6 +3172,32 @@ mod tests {
         assert_eq!(other, parse_trigger("ctrl+pageup").unwrap());
     }
 
+    /// SETTINGS.md names the shortcut each platform opens Settings with:
+    /// it said Ctrl+, alone, which on macOS is not bound.
+    #[test]
+    fn the_settings_guide_names_each_platforms_shortcut() {
+        let guide = include_str!("../../../docs/SETTINGS.md");
+        let opening = guide.split("\n\n").nth(1).unwrap().replace('\n', " ");
+        assert!(
+            opening.contains("**Cmd+,** on macOS or **Ctrl+,** elsewhere"),
+            "{opening}"
+        );
+        let open = kettle_config::Action::OpenSettings;
+        let bound = kettle_config::keybinds::hint_trigger(
+            &Config::default().keybinds,
+            &open,
+            cfg!(target_os = "macos"),
+        )
+        .unwrap();
+        let shortcut = if cfg!(target_os = "macos") {
+            kettle_config::keybinds::Mods::SUPER
+        } else {
+            kettle_config::keybinds::Mods::CTRL
+        };
+        assert_eq!(bound.mods, shortcut);
+        assert_eq!(bound.key, kettle_config::keybinds::Key::Char(','));
+    }
+
     #[test]
     fn confirmation_action_labels_localize_every_settings_action() {
         for tr in [EN, Translator::new(Language::Es)] {

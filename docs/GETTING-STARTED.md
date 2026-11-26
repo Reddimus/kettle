@@ -78,8 +78,8 @@ host entries.
 
 ## 3. Change settings — no file editing required
 
-Press **`Ctrl + ,`** (or **right-click → Settings…**) to open the **Settings**
-panel. Use the keyboard:
+Press **Cmd+,** on macOS or **Ctrl+,** elsewhere (or **right-click →
+Settings…**) to open the **Settings** panel. Use the keyboard:
 
 - **↑ / ↓** — move between options
 - **← / →** — change the highlighted option (font size, theme opacity,

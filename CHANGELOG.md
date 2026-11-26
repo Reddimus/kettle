@@ -1095,6 +1095,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- The Settings guide and Getting started now give Cmd+, as the macOS
+  shortcut for Settings; they said Ctrl+, on every platform.
+
 - The Settings Language row no longer repeats "Applies when Kettle restarts"
   in the footer while the choice is the running language; the footer speaks
   up once a restart is needed, as documented.
