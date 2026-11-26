@@ -2770,6 +2770,21 @@ pub fn reset_config_setting(
         validate_single_line("config key", key)?;
         validate_single_line("config value", value)?;
     }
+    // Each line Reset may add must be valid by itself, as each line
+    // `persist_config_toggle` writes is: a count of diagnostics alone would
+    // let a new one take the place of an old one the removal clears.
+    let added: String = fallback
+        .iter()
+        .map(|(key, value)| format!("{key} = {value}\n"))
+        .collect();
+    if !Config::detect_malformed_values(&added).is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "refusing to reset {keys:?}: a default it would add is not a valid config value"
+            ),
+        ));
+    }
     let edit = ConfigEdit::begin(path)?;
     let existing = &edit.document.text;
     let mut out = without_config_keys(existing, keys).unwrap_or_else(|| existing.clone());
@@ -13436,11 +13451,27 @@ split_horiz = <Control><Shift>j
         let before = std::fs::read_to_string(&path).unwrap();
         assert_eq!(before, "theme = Dracula\n\ntheme-mode = auto\n");
         assert!(
-            super::reset_config_setting(&path, &["font-size"], &[("font-size", "1")], |_| true)
+            super::reset_config_setting(&path, &["font-size"], &[("font-size", "14")], |_| true)
                 .unwrap()
                 .is_none()
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        // A default line that is not a valid value is refused, even where
+        // the line it would replace was malformed too, the file untouched.
+        let malformed = "font = Mono 18\nfont-size = garbage\n";
+        write_private_fixture(&path, malformed);
+        let size = DEFAULT_FONT_SIZE.to_string();
+        assert!(
+            super::reset_config_setting(
+                &path,
+                &["font-size"],
+                &[("font-size", size.as_str()), ("cursor-blink", "invalid")],
+                |cfg| cfg.font_size == DEFAULT_FONT_SIZE,
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), malformed);
+        write_private_fixture(&path, &before);
         // A default that cannot be reached is refused, the file untouched.
         assert!(super::reset_config_setting(&path, &["theme-mode"], &[], |_| false).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
