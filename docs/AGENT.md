@@ -278,6 +278,13 @@ command's place with headings skipped, the index selection, Enter and the
 accessibility tree use, so that command has `option` 0. A typed query shows no
 headings, so there the two are equal.
 
+When a context menu is open, `ui_geometry.context_menu` reports its panel as
+`rect` and, as `anchor`, what the panel was placed around: the point `x`, `y`
+it was opened at (a right-click's pointer), and for a menu opened from the
+keyboard the text cursor's line as `line` (`top`, `bottom`), `null` otherwise.
+The panel opens below the anchor or flips above it, so the two differ. Its
+`highlight` is `null` while no row is lit.
+
 When a confirmation is open, `ui_geometry.confirmation` reports its centered
 panel, heading, and body rectangles; scroll offset and limit; and each button's
 label, bounds, focus, hover, pressed, and destructive state. It is null otherwise.

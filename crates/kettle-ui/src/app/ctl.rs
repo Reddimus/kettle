@@ -1252,6 +1252,7 @@ impl App {
                         ContextMenuItem::Media { label, .. }
                         | ContextMenuItem::Preview { label, .. } => *label,
                         ContextMenuItem::Info { label, .. } => label.as_str(),
+                        ContextMenuItem::CloseOtherTabs { label } => label,
                         ContextMenuItem::Separator => "",
                     };
                     let row = serde_json::json!({
@@ -1282,7 +1283,8 @@ impl App {
             // `null` while no row is lit: the pointer left the menu.
             let shown = menu_shown_highlight(menu, &target.context_menu_session.pointer);
             Some(serde_json::json!({
-                "anchor": {"x": ax, "y": ay},
+                // What the panel was placed around; `rect` is the panel.
+                "anchor": menu_anchor_json(target.context_menu_session.anchor),
                 "rect": rect_json((ax, ay, panel_w, panel_h)),
                 "highlight": (shown < menu.items.len()).then_some(shown),
                 "scroll_offset": menu.scroll_offset,

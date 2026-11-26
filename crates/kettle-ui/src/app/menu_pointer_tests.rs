@@ -30,6 +30,11 @@ fn state(items: Vec<ContextMenuItem>) -> ContextMenuState {
     }
 }
 
+/// Where a menu with 28 px rows goes; every case here has room for a row.
+fn place(anchor: MenuAnchor, panel: (f32, f32), surface: (f32, f32)) -> MenuPlacement {
+    place_context_menu(anchor, panel, surface, 28.0).expect("a row fits")
+}
+
 fn ms(millis: u64) -> Duration {
     Duration::from_millis(millis)
 }
@@ -102,7 +107,7 @@ fn arrows_skip_separators_and_wrap() {
 
 #[test]
 fn a_menu_with_room_below_its_pointer_opens_there() {
-    let placement = place_context_menu(
+    let placement = place(
         MenuAnchor::point(100.0, 120.0),
         (200.0, 300.0),
         (800.0, 600.0),
@@ -110,7 +115,7 @@ fn a_menu_with_room_below_its_pointer_opens_there() {
     assert_eq!(placement.origin, (100.0, 120.0));
     assert_eq!(placement.max_h, None);
     // A pointer near the right edge moves the menu left to fit.
-    let placement = place_context_menu(
+    let placement = place(
         MenuAnchor::point(700.0, 120.0),
         (200.0, 300.0),
         (800.0, 600.0),
@@ -549,7 +554,7 @@ fn a_menu_for_the_last_line_flips_above_it() {
         top: 700.0,
         bottom: 736.0,
     };
-    let placement = place_context_menu(line, (300.0, 404.0), (1280.0, 820.0));
+    let placement = place(line, (300.0, 404.0), (1280.0, 820.0));
     assert_eq!(placement.origin, (100.0, 296.0));
     assert_eq!(placement.max_h, None);
     // A line with room below opens under it, not over its lower half.
@@ -558,7 +563,7 @@ fn a_menu_for_the_last_line_flips_above_it() {
         top: 100.0,
         bottom: 136.0,
     };
-    let placement = place_context_menu(line, (300.0, 404.0), (1280.0, 820.0));
+    let placement = place(line, (300.0, 404.0), (1280.0, 820.0));
     assert_eq!(placement.origin, (100.0, 136.0));
 }
 
@@ -570,7 +575,7 @@ fn a_menu_too_tall_for_either_side_of_its_line_keeps_the_line_in_view() {
             top,
             bottom,
         };
-        let placement = place_context_menu(line, (300.0, 500.0), (800.0, 600.0));
+        let placement = place(line, (300.0, 500.0), (800.0, 600.0));
         let (_, y) = placement.origin;
         let height = placement.max_h.expect("the menu is held short and scrolls");
         assert!(
@@ -586,14 +591,14 @@ fn a_menu_too_tall_for_either_side_of_its_line_keeps_the_line_in_view() {
 
 #[test]
 fn a_pointer_menu_flips_above_the_pointer_near_the_bottom() {
-    let placement = place_context_menu(
+    let placement = place(
         MenuAnchor::point(100.0, 500.0),
         (200.0, 300.0),
         (800.0, 600.0),
     );
     assert_eq!(placement.origin, (100.0, 200.0));
     // Too tall for either side: it slides onto the window, as before.
-    let placement = place_context_menu(
+    let placement = place(
         MenuAnchor::point(100.0, 300.0),
         (200.0, 590.0),
         (800.0, 600.0),
@@ -601,7 +606,7 @@ fn a_pointer_menu_flips_above_the_pointer_near_the_bottom() {
     assert_eq!(placement.origin, (100.0, 6.0));
     assert_eq!(placement.max_h, None);
     // Asked for above the window's top margin, it stays on the margin.
-    let placement = place_context_menu(MenuAnchor::point(0.0, 0.0), (200.0, 300.0), (800.0, 600.0));
+    let placement = place(MenuAnchor::point(0.0, 0.0), (200.0, 300.0), (800.0, 600.0));
     assert_eq!(placement.origin, (4.0, 4.0));
 }
 
@@ -620,5 +625,319 @@ fn a_menu_opened_from_the_keyboard_is_placed_for_the_cursor_line() {
         .find("self.place_context_menu_at_line(ws, line);")
         .expect("then sits beside the cursor's line");
     assert!(open < placed);
-    assert!(arm.contains("MenuAnchor::line(px, py - cell_h * 0.5, py + cell_h * 0.5)"));
+    assert!(arm.contains("let line = self.text_line_anchor(ws, point);"));
+    let line = src
+        .split("fn text_line_anchor(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("the cursor's line");
+    assert!(line.contains("MenuAnchor::line(x, y - cell_h * 0.5, y + cell_h * 0.5)"));
+}
+
+#[test]
+fn an_open_submenu_closes_once_the_pointer_has_left_every_panel() {
+    let mut cascade = Cascade::new(false);
+    // Into Split's submenu, then out over the terminal, and still.
+    assert_eq!(
+        cascade.hover(MenuHit::Row(1), (200.0, 46.0), 16),
+        MenuHoverEffect::Redraw
+    );
+    assert_eq!(
+        cascade.hover(MenuHit::Outside, (420.0, 300.0), 32),
+        MenuHoverEffect::None
+    );
+    assert_eq!(
+        cascade.hover(MenuHit::Outside, (420.0, 300.0), 32 + 299),
+        MenuHoverEffect::None
+    );
+    assert!(cascade.split_still_open(), "not before the delay");
+    // The scheduler's look at the delay's end closes it.
+    assert_eq!(
+        cascade.hover(MenuHit::Outside, (420.0, 300.0), 32 + 300),
+        MenuHoverEffect::Redraw
+    );
+    assert!(cascade.menu.drill_stack.is_empty(), "the submenu closed");
+    assert!(
+        menu_shown_highlight(&cascade.menu, &cascade.pointer) >= cascade.menu.items.len(),
+        "and the pointer, off the menu, lights nothing"
+    );
+}
+
+#[test]
+fn a_pointer_off_the_panels_but_heading_for_the_submenu_keeps_it() {
+    let mut cascade = Cascade::new(false);
+    // From Tab's row, out below the menu, toward the submenu's left edge.
+    let tab = MenuHit::ParentRow { depth: 0, index: 2 };
+    assert_eq!(cascade.hover(tab, (150.0, 74.0), 16), MenuHoverEffect::None);
+    for (step, (x, y)) in [(160.0, 83.0), (166.0, 89.0)].into_iter().enumerate() {
+        let after = 200 + 150 * step as u64;
+        assert_eq!(
+            cascade.hover(MenuHit::Outside, (x, y), after),
+            MenuHoverEffect::None,
+            "step {step}"
+        );
+        assert!(cascade.split_still_open(), "step {step}");
+    }
+    // At rest out there, it gives way like any other wait.
+    assert_eq!(
+        cascade.hover(MenuHit::Outside, (166.0, 89.0), 350 + 300),
+        MenuHoverEffect::Redraw
+    );
+    assert!(cascade.menu.drill_stack.is_empty());
+}
+
+#[test]
+fn a_submenu_opened_from_the_keyboard_ignores_a_pointer_that_never_came_near() {
+    let mut menu = state(vec![
+        submenu("Split", Action::SplitRight),
+        submenu("Pane", Action::ClosePane),
+    ]);
+    assert!(menu.enter_submenu(0));
+    let mut pointer = MenuPointer::default();
+    let panels = [(10.0, 10.0, 160.0, 48.0), (170.0, 10.0, 160.0, 48.0)];
+    let t0 = Instant::now();
+    for (after, x) in [(0, 500.0), (16, 510.0), (2000, 510.0)] {
+        assert_eq!(
+            menu_pointer_moved(
+                &mut menu,
+                &mut pointer,
+                MenuHit::Outside,
+                &panels,
+                (x, 400.0),
+                t0 + ms(after)
+            ),
+            MenuHoverEffect::None
+        );
+    }
+    assert_eq!(menu.drill_stack.len(), 1);
+}
+
+/// The audit's overlapping left cascade: on a 340 px window a 200 px parent
+/// at x 60 opens its 200 px child at x 4, over the parent, held up to y
+/// 100..180 by the window's bottom, so the pointer on the parent's row below
+/// reaches the child from beneath it.
+fn overlapping_cascade() -> (ContextMenuState, MenuPointer, [kettle_render::Rect4; 2]) {
+    let mut menu = state(
+        (0..8)
+            .map(|row| submenu(&format!("Row {row}"), Action::Paste))
+            .collect(),
+    );
+    menu.highlight = 7;
+    assert!(menu.enter_submenu(7));
+    (
+        menu,
+        MenuPointer::default(),
+        [(60.0, 40.0, 200.0, 192.0), (4.0, 100.0, 200.0, 80.0)],
+    )
+}
+
+#[test]
+fn heading_for_an_overlapping_submenu_from_below_keeps_it() {
+    let (mut menu, mut pointer, panels) = overlapping_cascade();
+    let t0 = Instant::now();
+    let mut hover = |menu: &mut ContextMenuState, hit, at, after| {
+        menu_pointer_moved(menu, &mut pointer, hit, &panels, at, t0 + ms(after))
+    };
+    // On the open row (y 208..232), under the child.
+    let open_row = MenuHit::ParentRow { depth: 0, index: 7 };
+    assert_eq!(
+        hover(&mut menu, open_row, (170.0, 215.0), 0),
+        MenuHoverEffect::None
+    );
+    // Up the row above it toward (204, 147) on the child's right edge, over
+    // 350 ms.
+    let row_above = MenuHit::ParentRow { depth: 0, index: 6 };
+    for (after, at) in [
+        (16, (175.0, 205.0)),
+        (200, (180.0, 195.0)),
+        (350, (185.0, 185.0)),
+    ] {
+        assert_eq!(
+            hover(&mut menu, row_above, at, after),
+            MenuHoverEffect::None,
+            "{at:?} after {after} ms"
+        );
+        assert_eq!(menu.drill_stack.len(), 1, "{at:?} after {after} ms");
+    }
+    // In through its bottom edge.
+    hover(&mut menu, MenuHit::Row(1), (187.0, 170.0), 400);
+    assert_eq!(
+        (menu.drill_stack.len(), menu.drill_stack[0].highlight),
+        (1, 7)
+    );
+}
+
+#[test]
+fn moving_along_the_submenus_edge_line_away_from_it_is_not_aiming() {
+    let (mut menu, mut pointer, panels) = overlapping_cascade();
+    let t0 = Instant::now();
+    let mut hover = |menu: &mut ContextMenuState, hit, at, after| {
+        menu_pointer_moved(menu, &mut pointer, hit, &panels, at, t0 + ms(after))
+    };
+    // Exactly on the line of the child's right edge, x 204, below it, and
+    // down that line: the triangle to that edge would have no area.
+    let open_row = MenuHit::ParentRow { depth: 0, index: 6 };
+    menu.drill_stack[0].highlight = 6;
+    assert_eq!(
+        hover(&mut menu, open_row, (204.0, 205.0), 0),
+        MenuHoverEffect::None
+    );
+    let row_below = MenuHit::ParentRow { depth: 0, index: 7 };
+    for (after, y) in [(16, 212.0), (200, 220.0)] {
+        assert_eq!(
+            hover(&mut menu, row_below, (204.0, y), after),
+            MenuHoverEffect::None
+        );
+    }
+    assert_eq!(
+        hover(&mut menu, row_below, (204.0, 228.0), 350),
+        MenuHoverEffect::OpenSubmenu(7),
+        "300 ms after it turned away, the row below takes over"
+    );
+}
+
+#[test]
+fn a_first_motion_off_a_menu_opened_under_the_pointer_clears_its_highlight() {
+    // Right-click at (300, 200): the menu's corner is the pointer, and the
+    // first motion, one pixel left, is already off it.
+    let mut menu = state(vec![
+        leaf("Copy", Action::Copy),
+        leaf("Paste", Action::Paste),
+    ]);
+    let mut session = ContextMenuSession::opened(None, Some((300.0, 200.0)));
+    let panels = [(300.0, 200.0, 160.0, 48.0)];
+    assert_eq!(
+        menu_pointer_moved(
+            &mut menu,
+            &mut session.pointer,
+            MenuHit::Outside,
+            &panels,
+            (299.0, 200.0),
+            Instant::now()
+        ),
+        MenuHoverEffect::Redraw
+    );
+    assert!(menu_shown_highlight(&menu, &session.pointer) >= menu.items.len());
+    assert!(menu_activate_click(&menu, &session.pointer).is_none());
+    // Opened elsewhere, as from the keyboard, the same motion changes nothing.
+    let mut session = ContextMenuSession::opened(None, None);
+    assert_eq!(
+        menu_pointer_moved(
+            &mut menu,
+            &mut session.pointer,
+            MenuHit::Outside,
+            &panels,
+            (299.0, 200.0),
+            Instant::now()
+        ),
+        MenuHoverEffect::None
+    );
+    assert_eq!(menu_shown_highlight(&menu, &session.pointer), 0);
+}
+
+#[test]
+fn a_menu_opened_at_the_pointer_starts_as_entered() {
+    let src = super::super::production_source();
+    let show = src
+        .split("fn show_context_menu(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("the shared menu transition");
+    assert!(
+        show.contains("let at_pointer = (px, py) == (ws.cursor.x as f32, ws.cursor.y as f32);")
+    );
+    assert!(
+        show.contains(
+            "ContextMenuSession::opened(placement.max_h, at_pointer.then_some((px, py)));"
+        )
+    );
+}
+
+#[test]
+fn a_line_menu_with_no_room_for_a_row_beside_its_line_is_not_placed() {
+    // 16 px cells, so 28 px rows; a 60 px window; the cursor's line at
+    // 18..34. 22 px below and 14 above: the menu would run off the window
+    // at y 62, or cover the line.
+    let line = MenuAnchor {
+        x: 100.0,
+        top: 18.0,
+        bottom: 34.0,
+    };
+    assert_eq!(
+        place_context_menu(line, (300.0, 28.0), (800.0, 60.0), 28.0),
+        None
+    );
+    // One row's room below is enough: the menu fits there and scrolls.
+    let placement =
+        place_context_menu(line, (300.0, 200.0), (800.0, 70.0), 28.0).expect("a row fits below");
+    assert_eq!(placement.origin.1, 34.0);
+    assert_eq!(placement.max_h, Some(32.0));
+    // A pointer's menu always has a place: it slides onto the window.
+    assert!(
+        place_context_menu(
+            MenuAnchor::point(100.0, 30.0),
+            (300.0, 200.0),
+            (800.0, 60.0),
+            28.0
+        )
+        .is_some()
+    );
+}
+
+#[test]
+fn a_keyboard_menu_follows_its_line_through_a_resize_or_closes() {
+    let src = super::super::production_source();
+    let resize = src
+        .split("fn apply_window_resize(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("the resize");
+    let reflow = resize.find("self.resize_all(ws);").expect("the reflow");
+    let follow = resize
+        .find("self.follow_line_menu(ws);")
+        .expect("a keyboard menu follows its line");
+    assert!(reflow < follow, "after the reflow moved the line");
+    let place = src
+        .split("fn place_context_menu_at_line(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("the line placement");
+    assert!(place.contains("ws.context_menu_session.line = true;"));
+    assert!(place.contains("} else {\n            ws.context_menu = None;\n        }"));
+}
+
+#[test]
+fn ui_geometry_reports_what_a_menu_was_placed_around() {
+    // A right-click's point, which the panel may have flipped above.
+    assert_eq!(
+        menu_anchor_json(Some(MenuAnchor::point(300.0, 200.0))),
+        serde_json::json!({"x": 300.0, "y": 200.0, "line": null})
+    );
+    // A keyboard menu's text line, with the point at its middle.
+    assert_eq!(
+        menu_anchor_json(Some(MenuAnchor::line(100.0, 782.0, 799.5))),
+        serde_json::json!({"x": 100.0, "y": 790.75, "line": {"top": 782.0, "bottom": 799.5}})
+    );
+    assert_eq!(menu_anchor_json(None), serde_json::Value::Null);
+
+    let src = super::super::production_source();
+    let menu = src
+        .split("let context_menu = target.context_menu.as_ref().and_then(|menu| {")
+        .nth(1)
+        .and_then(|body| body.split("\n        });").next())
+        .expect("ui_geometry's menu");
+    assert!(menu.contains("\"anchor\": menu_anchor_json(target.context_menu_session.anchor),"));
+    assert!(menu.contains("\"rect\": rect_json((ax, ay, panel_w, panel_h)),"));
+    let show = src
+        .split("fn show_context_menu(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("the shared menu transition");
+    assert!(show.contains("ws.context_menu_session.anchor = Some(MenuAnchor::point(px, py));"));
+    let line = src
+        .split("fn place_context_menu_at_line(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("the line placement");
+    assert!(line.contains("ws.context_menu_session.anchor = Some(anchor);"));
 }

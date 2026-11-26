@@ -993,8 +993,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - A tab with a single pane no longer draws a frame around it; pane borders
   appear once a tab is split, and while broadcast input is on.
 - Right-clicking a tab opens a menu for that tab, with Rename Tab…,
-  Duplicate Tab, Move Tab Left, Move Tab Right and Close Tab, instead of the
-  terminal's menu. Each acts on the tab you clicked, not the active one.
+  Duplicate Tab, Move Tab Left, Move Tab Right, Close Tab and Close Other
+  Tabs, instead of the terminal's menu. Each acts on the tab you clicked, not
+  the active one. Close Other Tabs asks once, under `ask-before-closing`, for
+  all the tabs it would close.
+- `kettle ctl ui_geometry` reports a context menu's `anchor` as what the
+  menu was placed around (the pointer, or for a menu opened from the
+  keyboard the text cursor's line) instead of the panel's corner, which
+  `rect` already gives.
 
 ### Security
 
@@ -1694,7 +1700,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Context-menu submenus open once the pointer rests on their row for 200 ms
   (a click or Right opens one at once), and an open submenu stays while the
   pointer moves toward it across other rows, so a diagonal move no longer
-  lands on a different submenu.
+  lands on a different submenu. It closes 300 ms after the pointer leaves
+  the menu.
 - Hovering a menu row that cannot run, such as Copy with nothing selected or
   the Shift hint's line, keeps the previous row lit instead of lighting
   nothing, so Enter still runs the row you see.

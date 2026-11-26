@@ -47,6 +47,10 @@ pub(crate) struct MenuPointer {
     switch: Option<PendingSwitch>,
     /// Whether the pointer was over one of the menu's panels.
     inside: bool,
+    /// Whether the pointer has been over the menu at all. An open submenu
+    /// times out off the panels only then, so one opened from the keyboard
+    /// stays while a pointer that never came near it moves.
+    entered: bool,
     /// The pointer left the menu with no submenu open, so no row is lit,
     /// as in macOS and GTK menus. The pointer back on a row, or a key,
     /// lights one again. A pointer that was never over the menu, as when
@@ -108,10 +112,36 @@ pub(crate) struct ContextMenuSession {
     /// The tallest the menu's own panel may be, in surface pixels. `None`
     /// leaves it as tall as the surface allows.
     pub(super) root_max_h: Option<f32>,
+    /// The menu was placed beside the text cursor's line, as one opened from
+    /// the keyboard is, and follows that line when the window resizes.
+    pub(super) line: bool,
+    /// What the menu's panel was placed around: the pointer, or the text
+    /// cursor's line. `ui_geometry` reports it beside the panel's own rect.
+    pub(super) anchor: Option<MenuAnchor>,
     /// For a tab's menu, that tab, by the panes it holds
     /// (`Mux::tab_anchor_panes`), so a tab closing meanwhile cannot
     /// retarget it.
     pub(super) tab: Option<Vec<u64>>,
+}
+
+impl ContextMenuSession {
+    /// The state a menu starts with: its height limit, and `pointer`, the
+    /// pointer's position when the menu opened right there, as a right-click
+    /// does. Such a menu counts as entered at that point, so a first motion
+    /// away from it leaves the menu and clears its highlight; a menu opened
+    /// elsewhere, as from the keyboard, waits for the pointer to come over it.
+    pub(super) fn opened(root_max_h: Option<f32>, pointer: Option<(f32, f32)>) -> Self {
+        let mut session = Self {
+            root_max_h,
+            ..Self::default()
+        };
+        if let Some(at) = pointer {
+            session.pointer.last = Some(at);
+            session.pointer.inside = true;
+            session.pointer.entered = true;
+        }
+        session
+    }
 }
 
 /// Move the hover to `hit`. `panels` are the levels' rectangles, the menu
@@ -123,7 +153,8 @@ pub(crate) struct ContextMenuSession {
 /// [`SUBMENU_OPEN_DELAY`]. An open submenu stays while the pointer crosses
 /// other rows of its parent inside the triangle from its last position to the
 /// submenu's near edge, as macOS and GTK menus do, and gives way after
-/// [`SUBMENU_SWITCH_DELAY`] outside that triangle or at rest.
+/// [`SUBMENU_SWITCH_DELAY`] outside that triangle or at rest. Off every panel
+/// it gives way the same way, and every submenu closes.
 pub(super) fn menu_pointer_moved(
     menu: &mut ContextMenuState,
     pointer: &mut MenuPointer,
@@ -133,8 +164,9 @@ pub(super) fn menu_pointer_moved(
     now: std::time::Instant,
 ) -> MenuHoverEffect {
     let from = pointer.last.replace(at);
-    let moved = from != Some(at);
-    let was_inside = std::mem::replace(&mut pointer.inside, hit != MenuHit::Outside);
+    let over = hit != MenuHit::Outside;
+    let was_inside = std::mem::replace(&mut pointer.inside, over);
+    pointer.entered |= over;
     let (depth, index) = match hit {
         MenuHit::Row(index) => {
             pointer.switch = None;
@@ -146,14 +178,25 @@ pub(super) fn menu_pointer_moved(
             return MenuHoverEffect::None;
         }
         MenuHit::Outside => {
-            pointer.cancel_pending();
-            // An open submenu keeps its row, and its own highlight, lit.
-            if !was_inside
-                || !menu.drill_stack.is_empty()
-                || std::mem::replace(&mut pointer.away, true)
+            pointer.open = None;
+            if menu.drill_stack.is_empty() {
+                pointer.switch = None;
+                if !was_inside || std::mem::replace(&mut pointer.away, true) {
+                    return MenuHoverEffect::None;
+                }
+                return MenuHoverEffect::Redraw;
+            }
+            // An open submenu the pointer has left for no panel at all gives
+            // way as it would to another row of its parent, unless the
+            // pointer heads for it; then every submenu closes and, the
+            // pointer being off the menu, no row is lit.
+            if !pointer.entered
+                || !submenu_gives_way(pointer, panels.last().copied(), from, at, now)
             {
                 return MenuHoverEffect::None;
             }
+            while menu.leave_submenu() {}
+            pointer.away = true;
             return MenuHoverEffect::Redraw;
         }
     };
@@ -167,10 +210,36 @@ pub(super) fn menu_pointer_moved(
         return MenuHoverEffect::None;
     }
     // Level `depth + 1` is the submenu the parent row opened.
+    if !submenu_gives_way(pointer, panels.get(depth + 1).copied(), from, at, now) {
+        return MenuHoverEffect::None;
+    }
+    while menu.drill_stack.len() > depth {
+        menu.leave_submenu();
+    }
+    menu.highlight = index;
+    // The switch waited longer than a dwell, so a submenu opens at once.
+    if matches!(menu.items.get(index), Some(ContextMenuItem::Submenu { .. })) {
+        MenuHoverEffect::OpenSubmenu(index)
+    } else {
+        MenuHoverEffect::Redraw
+    }
+}
+
+/// Run the wait of an open submenu, whose panel is `submenu`, that the
+/// pointer has turned from, moving from `from` to `at`. True once the wait is
+/// over and the submenu gives way.
+fn submenu_gives_way(
+    pointer: &mut MenuPointer,
+    submenu: Option<kettle_render::Rect4>,
+    from: Option<(f32, f32)>,
+    at: (f32, f32),
+    now: std::time::Instant,
+) -> bool {
+    let moved = from != Some(at);
     let aiming = moved
         && from
-            .zip(panels.get(depth + 1))
-            .is_some_and(|(from, submenu)| aims_at(from, at, *submenu));
+            .zip(submenu)
+            .is_some_and(|(from, submenu)| aims_at(from, at, submenu));
     let switch = pointer.switch.get_or_insert(PendingSwitch {
         moved: now,
         strayed: None,
@@ -184,19 +253,10 @@ pub(super) fn menu_pointer_moved(
         }
     }
     if now < switch.due() {
-        return MenuHoverEffect::None;
+        return false;
     }
     pointer.switch = None;
-    while menu.drill_stack.len() > depth {
-        menu.leave_submenu();
-    }
-    menu.highlight = index;
-    // The switch waited longer than a dwell, so a submenu opens at once.
-    if matches!(menu.items.get(index), Some(ContextMenuItem::Submenu { .. })) {
-        MenuHoverEffect::OpenSubmenu(index)
-    } else {
-        MenuHoverEffect::Redraw
-    }
+    true
 }
 
 /// Hover row `index` of the deepest level. A row that cannot run (a disabled
@@ -240,26 +300,43 @@ fn hover_row(
 }
 
 /// Whether the pointer, moving from `from` to `to`, stays inside the triangle
-/// between `from` and the near edge of `submenu`: on its way there across
-/// the parent's other rows.
+/// between `from` and the side of `submenu` it faces: the two corners that
+/// bound the submenu as seen from `from`. That is its way to the submenu
+/// across the parent's other rows, whichever side of the parent the submenu
+/// opened on, however much it overlaps the parent, and from below or above
+/// it as well as beside it. A pointer on or in the submenu is not aiming.
 fn aims_at(from: (f32, f32), to: (f32, f32), (x, y, w, h): kettle_render::Rect4) -> bool {
-    let edge = if from.0 <= x {
-        x
-    } else if from.0 >= x + w {
-        x + w
-    } else {
+    if w <= 0.0 || h <= 0.0 || (x..=x + w).contains(&from.0) && (y..=y + h).contains(&from.1) {
+        return false;
+    }
+    let toward = |p: (f32, f32)| (p.0 - from.0, p.1 - from.1);
+    let cross = |a: (f32, f32), b: (f32, f32)| a.0 * b.1 - a.1 * b.0;
+    let corners = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)].map(toward);
+    // Seen from outside, the corners span less than a half turn. Each bound
+    // has every other corner on one side of it; of two in line, the farther.
+    let bound = |side: f32| {
+        corners
+            .into_iter()
+            .filter(|&corner| {
+                corners
+                    .iter()
+                    .all(|&other| side * cross(corner, other) >= 0.0)
+            })
+            .max_by(|a, b| (a.0 * a.0 + a.1 * a.1).total_cmp(&(b.0 * b.0 + b.1 * b.1)))
+    };
+    let (Some(a), Some(b)) = (bound(1.0), bound(-1.0)) else {
         return false;
     };
-    let cross = |o: (f32, f32), a: (f32, f32), b: (f32, f32)| {
-        (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
-    };
-    let corners = [from, (edge, y), (edge, y + h)];
-    let sides = [
-        cross(corners[0], corners[1], to),
-        cross(corners[1], corners[2], to),
-        cross(corners[2], corners[0], to),
-    ];
-    !(sides.iter().any(|side| *side < 0.0) && sides.iter().any(|side| *side > 0.0))
+    let area = cross(a, b);
+    // A triangle with no area would take every point on its line.
+    if area.abs() <= f32::EPSILON {
+        return false;
+    }
+    let side = area.signum();
+    let p = toward(to);
+    side * cross(a, p) >= 0.0
+        && side * cross((b.0 - a.0, b.1 - a.1), (p.0 - a.0, p.1 - a.1)) >= 0.0
+        && side * cross(p, b) >= 0.0
 }
 
 /// The row an arrow key moves the highlight to, `delta` rows on.
@@ -324,6 +401,20 @@ impl MenuAnchor {
     }
 }
 
+/// `ui_geometry`'s account of what a menu was placed around: the point, and
+/// the line's span for one placed beside a text line (`null` for a pointer's
+/// menu). The panel itself is the menu's `rect`.
+pub(super) fn menu_anchor_json(anchor: Option<MenuAnchor>) -> serde_json::Value {
+    match anchor {
+        None => serde_json::Value::Null,
+        Some(MenuAnchor { x, top, bottom }) => serde_json::json!({
+            "x": x,
+            "y": (top + bottom) * 0.5,
+            "line": (top < bottom).then(|| serde_json::json!({"top": top, "bottom": bottom})),
+        }),
+    }
+}
+
 /// Where a menu's panel goes, and how tall it may be.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct MenuPlacement {
@@ -336,12 +427,15 @@ pub(super) struct MenuPlacement {
 /// the anchor when it fits there, else above it, as GTK and macOS menus flip.
 /// When it fits on neither side, a pointer's menu slides onto the window over
 /// the point, and a line's takes the roomier side, held short enough to leave
-/// the line in view; it scrolls.
+/// the line in view; it scrolls. `None` when not one complete row, `row_h`
+/// tall, fits beside the line: no menu rather than one over it, or off the
+/// window.
 pub(super) fn place_context_menu(
     anchor: MenuAnchor,
     panel: (f32, f32),
     surface: (f32, f32),
-) -> MenuPlacement {
+    row_h: f32,
+) -> Option<MenuPlacement> {
     const MARGIN: f32 = 4.0;
     let (x, slid) = clamp_context_menu_anchor((anchor.x, anchor.bottom), panel, surface);
     let below = surface.1 - MARGIN - anchor.bottom;
@@ -353,15 +447,17 @@ pub(super) fn place_context_menu(
         (anchor.top - height, None)
     } else if anchor.top >= anchor.bottom {
         (slid, None)
+    } else if below.max(above) < row_h {
+        return None;
     } else if below >= above {
         (anchor.bottom.max(MARGIN), Some(below))
     } else {
         (MARGIN, Some(above))
     };
-    MenuPlacement {
+    Some(MenuPlacement {
         origin: (x, y),
         max_h,
-    }
+    })
 }
 
 #[cfg(test)]

@@ -619,6 +619,8 @@ impl App {
         }
         self.reclamp_context_menu(ws, (width as f32, height as f32));
         self.resize_all(ws);
+        // The reflow can move the line a keyboard-opened menu sits beside.
+        self.follow_line_menu(ws);
         let show_chip = match self.cfg.resize_overlay {
             kettle_config::ResizeOverlayMode::Never => false,
             kettle_config::ResizeOverlayMode::Always => true,

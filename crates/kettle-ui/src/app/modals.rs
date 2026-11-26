@@ -1267,6 +1267,10 @@ impl App {
             ConfirmAction::CloseTabHolding(_) => {
                 (Text::ConfirmTitleCloseTab, Text::ConfirmButtonCloseTab)
             }
+            ConfirmAction::CloseOtherTabs(_) => (
+                Text::ConfirmTitleCloseOtherTabs,
+                Text::ConfirmButtonCloseOtherTabs,
+            ),
             ConfirmAction::ClosePane(_) => {
                 (Text::ConfirmTitleClosePane, Text::ConfirmButtonClosePane)
             }
@@ -1361,6 +1365,7 @@ impl App {
                     w.request_redraw();
                 }
             }
+            ConfirmAction::CloseOtherTabs(keep) => self.close_other_tabs_now(ws, &keep),
             ConfirmAction::ClosePane(target) => {
                 // Close the pane the PROMPT was about, not whatever happens to
                 // be focused now. While the prompt was up the target's own
@@ -2992,6 +2997,15 @@ pub(super) fn tab_close_scope(ws: &WindowState, idx: usize) -> (usize, usize) {
     (ids.len(), busy)
 }
 
+/// How much closing every tab but `keep` would take: `(panes, busy)` across
+/// the others, as [`tab_close_scope`] counts each.
+pub(super) fn other_tabs_close_scope(ws: &WindowState, keep: usize) -> (usize, usize) {
+    (0..ws.mux.tabs.len())
+        .filter(|&idx| idx != keep)
+        .map(|idx| tab_close_scope(ws, idx))
+        .fold((0, 0), |(panes, busy), (p, b)| (panes + p, busy + b))
+}
+
 /// How much closing this whole window would take: `(panes, busy)` across
 /// every tab. Same idle rule as [`tab_close_scope`].
 pub(super) fn window_close_scope(ws: &WindowState) -> (usize, usize) {
@@ -3223,6 +3237,20 @@ pub(super) fn lone_pane_in_scope(
             [id] => Some(*id),
             _ => None,
         },
+        ConfirmAction::CloseOtherTabs(keep) => {
+            let kept = ws.mux.tab_index_of_any_pane(keep)?;
+            let mut others = ws
+                .mux
+                .tabs
+                .iter()
+                .enumerate()
+                .filter(|&(idx, _)| idx != kept)
+                .flat_map(|(_, tab)| tab.root.leaf_ids());
+            match (others.next(), others.next()) {
+                (Some(id), None) => Some(id),
+                _ => None,
+            }
+        }
         ConfirmAction::CloseWindow { .. } => match ws.mux.panes.keys().collect::<Vec<_>>()[..] {
             [id] => Some(*id),
             _ => None,
@@ -3879,6 +3907,9 @@ pub enum ConfirmAction {
     /// went up. Naming the tab by the panes it held is stable across that; an
     /// empty resolution means the tab is already gone.
     CloseTabHolding(Vec<u64>),
+    /// Close every tab but the one holding any of these panes, as a tab
+    /// menu's Close Other Tabs does. Named by its panes for the same reason.
+    CloseOtherTabs(Vec<u64>),
     /// Close this specific pane.
     ///
     /// Carries the id for the same reason: while the prompt is up, the

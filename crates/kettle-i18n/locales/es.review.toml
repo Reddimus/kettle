@@ -1246,13 +1246,16 @@ quick_portal_managed = "draft"
 quick_portal_position = "draft"
 quick_portal_animation = "draft"
 
-# 2026-11-26: the menu a right-click on a tab opens. Its four new rows and
-# its screen-reader name are drafts.
+# 2026-11-26: the menu a right-click on a tab opens. Its five new rows, its
+# screen-reader name and the Close Other Tabs confirmation are drafts.
 menu_rename_tab = "draft"
 menu_duplicate_tab = "draft"
 menu_move_tab_left = "draft"
 menu_move_tab_right = "draft"
 menu_a11y_tab = "draft"
+menu_close_other_tabs = "draft"
+confirm_title_close_other_tabs = "draft"
+confirm_button_close_other_tabs = "draft"
 
 [second-pass]
 keys = [
@@ -1534,4 +1537,6 @@ keys = [
     "scrollback_a11y_viewing",
     "scrollback_kept",
     "scrollback_kept_lines",
+    "confirm_title_close_other_tabs",
+    "confirm_button_close_other_tabs",
 ]

@@ -859,6 +859,7 @@ impl App {
                 | ContextMenuItem::UrlItem { .. }
                 | ContextMenuItem::Media { .. }
                 | ContextMenuItem::Preview { .. }
+                | ContextMenuItem::CloseOtherTabs { .. }
                 | ContextMenuItem::Info { .. } => row_h,
             })
             .sum();
@@ -884,12 +885,18 @@ impl App {
             return;
         }
         let panel = clamp_context_menu_panel((panel_w, panel_h), (sw, sh));
-        let placement = place_context_menu(MenuAnchor::point(px, py), panel, (sw, sh));
-        let anchor = placement.origin;
-        ws.context_menu_session = ContextMenuSession {
-            root_max_h: placement.max_h,
-            ..ContextMenuSession::default()
+        // A pointer's menu always fits: it slides onto the window.
+        let Some(placement) = place_context_menu(MenuAnchor::point(px, py), panel, (sw, sh), row_h)
+        else {
+            ws.context_menu = None;
+            return;
         };
+        let anchor = placement.origin;
+        // Opened under the pointer, as a right-click opens it.
+        let at_pointer = (px, py) == (ws.cursor.x as f32, ws.cursor.y as f32);
+        ws.context_menu_session =
+            ContextMenuSession::opened(placement.max_h, at_pointer.then_some((px, py)));
+        ws.context_menu_session.anchor = Some(MenuAnchor::point(px, py));
         let anchor_scale = ws
             .window
             .as_ref()
@@ -911,20 +918,61 @@ impl App {
         }
     }
 
-    /// Place the menu just opened for the text line `anchor` again, below the
-    /// line or above it, never over it (`place_context_menu`).
+    /// Place the open menu's own panel for the text line `anchor`, below the
+    /// line or above it, never over it (`place_context_menu`). When not one
+    /// complete row fits beside the line, the menu closes.
     pub(super) fn place_context_menu_at_line(&self, ws: &mut WindowState, anchor: MenuAnchor) {
         ws.context_menu_session.root_max_h = None;
-        let Some((_, panel)) = self.context_menu_geometry(ws) else {
+        let root = ws
+            .context_menu
+            .as_ref()
+            .map(|menu| menu.drill_stack.first().map(ContextMenuLevel::as_state));
+        let geometry = match &root {
+            Some(Some(level)) => self.context_menu_level_geometry(ws, level, true),
+            Some(None) => self.context_menu_geometry(ws),
+            None => None,
+        };
+        let Some((_, panel)) = geometry else {
             return;
         };
-        let placement = place_context_menu(anchor, panel, self.context_menu_surface(ws));
-        ws.context_menu_session.root_max_h = placement.max_h;
-        if let Some(menu) = ws.context_menu.as_mut() {
-            menu.anchor = placement.origin;
+        let (_, cell_h) = self.menu_cell(ws);
+        let row_h = kettle_render::menu::row_height(cell_h);
+        let surface = self.context_menu_surface(ws);
+        let placement = place_context_menu(anchor, panel, surface, row_h);
+        if let Some(placement) = placement {
+            ws.context_menu_session.root_max_h = placement.max_h;
+            ws.context_menu_session.line = true;
+            ws.context_menu_session.anchor = Some(anchor);
+            if let Some(menu) = ws.context_menu.as_mut() {
+                match menu.drill_stack.first_mut() {
+                    Some(level) => level.anchor = placement.origin,
+                    None => menu.anchor = placement.origin,
+                }
+            }
+            self.reclamp_context_menu(ws, surface);
+        } else {
+            ws.context_menu = None;
         }
         if let Some(window) = &ws.window {
             window.request_redraw();
+        }
+    }
+
+    /// The text line a menu opened from the keyboard at `point` stays beside.
+    pub(super) fn text_line_anchor(&self, ws: &WindowState, (x, y): (f32, f32)) -> MenuAnchor {
+        let (_, cell_h) = self.menu_cell(ws);
+        MenuAnchor::line(x, y - cell_h * 0.5, y + cell_h * 0.5)
+    }
+
+    /// After a resize, place a menu opened from the keyboard beside the text
+    /// cursor's line again, wherever the reflow moved it.
+    pub(super) fn follow_line_menu(&self, ws: &mut WindowState) {
+        if ws.context_menu.is_none() || !ws.context_menu_session.line {
+            return;
+        }
+        if let Some(point) = self.keyboard_menu_point(ws) {
+            let line = self.text_line_anchor(ws, point);
+            self.place_context_menu_at_line(ws, line);
         }
     }
 
@@ -1020,7 +1068,8 @@ impl App {
     /// Open the menu of tab `idx` at the pointer `(px, py)`, as a right-click
     /// on the tab does. Its rows act on that tab, whichever tab is active.
     pub(super) fn open_tab_menu(&mut self, ws: &mut WindowState, idx: usize, px: f32, py: f32) {
-        self.close_all_modals(ws);
+        // Find stays open under it, as under the terminal's menu.
+        self.close_modals_for_context_menu(ws);
         let tab = ws.mux.tab_anchor_panes(idx);
         if tab.is_empty() {
             return;
@@ -1036,9 +1085,10 @@ impl App {
         );
     }
 
-    /// Run a tab menu's `action` on the tab holding the panes `tab`, if it is
-    /// still open. Rename and Duplicate bring the tab forward first, since
-    /// they show it; moving or closing it leaves the active tab alone.
+    /// Run a tab menu's row on the tab holding the panes `tab`, if it is
+    /// still open (`step_tab_menu_row`). Rename and Duplicate bring the tab
+    /// forward first, since they show it; moving or closing it leaves the
+    /// active tab alone.
     fn act_on_menu_tab(
         &mut self,
         ws: &mut WindowState,
@@ -1046,11 +1096,17 @@ impl App {
         dispatch: TabMenuDispatch,
         event_loop: &ActiveEventLoop,
     ) {
-        let Some(idx) = ws.mux.tab_index_of_any_pane(tab) else {
-            return;
-        };
-        match dispatch {
-            TabMenuDispatch::Close => {
+        let pre = self.focus_key(ws);
+        match step_tab_menu_row(&mut ws.mux, tab, dispatch) {
+            TabMenuStep::Gone => {
+                // The tab closed while its menu was open. The menu is gone
+                // too, and nothing else would repaint it away.
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+                return;
+            }
+            TabMenuStep::Close(idx) => {
                 // The question the tab's ✕ asks, about this tab.
                 let (panes, busy) = tab_close_scope(ws, idx);
                 if self.confirm_close(
@@ -1061,7 +1117,6 @@ impl App {
                 ) {
                     return;
                 }
-                let pre = self.focus_key(ws);
                 if ws.mux.close_tab_at(idx) {
                     self.fire_tab_close_event(ws, idx);
                     self.save_session(ws);
@@ -1071,23 +1126,52 @@ impl App {
                 self.fire_tab_close_event(ws, idx);
                 self.note_focus_change(ws, pre);
             }
-            TabMenuDispatch::Move(delta) => {
-                if ws.mux.nudge_tab(idx, delta) {
+            TabMenuStep::CloseOthers(idx) => {
+                // One question for them all, about everything that would
+                // close (`confirm_close`'s rule over the other tabs' panes).
+                let (panes, busy) = other_tabs_close_scope(ws, idx);
+                if panes == 0
+                    || self.confirm_close(
+                        ws,
+                        panes,
+                        busy,
+                        ConfirmAction::CloseOtherTabs(ws.mux.tab_anchor_panes(idx)),
+                    )
+                {
+                    return;
+                }
+                let keep = ws.mux.tab_anchor_panes(idx);
+                self.close_other_tabs_now(ws, &keep);
+            }
+            TabMenuStep::Moved(moved) => {
+                if moved {
                     self.save_session(ws);
                 }
             }
-            TabMenuDispatch::Activate(action) => {
-                if idx != ws.mux.active {
-                    let pre = self.focus_key(ws);
-                    ws.mux.active = idx;
-                    ws.mux.touch_active_tab_seen();
-                    ws.reveal_active_tab();
-                    self.note_focus_change(ws, pre);
-                }
+            TabMenuStep::Run(action) => {
+                ws.reveal_active_tab();
+                self.note_focus_change(ws, pre);
                 self.handle_action(ws, action, event_loop);
             }
         }
         self.resize_all(ws);
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Close every tab of the window but the one holding the panes `keep`,
+    /// which becomes the active tab, as Close Other Tabs and its confirmation
+    /// do. Nothing closes when that tab is gone.
+    pub(super) fn close_other_tabs_now(&mut self, ws: &mut WindowState, keep: &[u64]) {
+        let pre = self.focus_key(ws);
+        if let Some(idx) = ws.mux.tab_index_of_any_pane(keep) {
+            for closed in ws.mux.close_tabs_except(idx) {
+                self.fire_tab_close_event(ws, closed);
+            }
+            self.note_focus_change(ws, pre);
+            self.save_session(ws);
+        }
         if let Some(window) = &ws.window {
             window.request_redraw();
         }
@@ -1529,6 +1613,13 @@ impl App {
                 }
                 if let Some(window) = &ws.window {
                     window.request_redraw();
+                }
+            }
+            ContextMenuClick::CloseOtherTabs => {
+                ws.context_menu = None;
+                if let Some(tab) = ws.context_menu_session.tab.take() {
+                    self.act_on_menu_tab(ws, &tab, TabMenuDispatch::CloseOthers, event_loop);
+                    return;
                 }
             }
             ContextMenuClick::MoveTabToWindow { window, panes } => {
@@ -2291,8 +2382,8 @@ pub(super) fn link_menu_rows(
     rows
 }
 
-/// The rows of a tab's menu, for a window of `tabs` tabs. Close Other Tabs
-/// is not offered: no action closes the other tabs yet.
+/// The rows of a tab's menu, for a window of `tabs` tabs. A lone tab has
+/// nowhere to move and no other tabs to close.
 pub(super) fn tab_menu_items(tabs: usize, tr: kettle_i18n::Translator) -> Vec<ContextMenuItem> {
     use kettle_i18n::Text as T;
     let row = |label, action, enabled| ContextMenuItem::Item {
@@ -2300,16 +2391,22 @@ pub(super) fn tab_menu_items(tabs: usize, tr: kettle_i18n::Translator) -> Vec<Co
         action,
         enabled,
     };
-    let moves = tabs > 1;
-    filter_disabled(vec![
+    let others = tabs > 1;
+    let mut items = vec![
         row(T::MenuRenameTab, Action::EditTabTitle, true),
         row(T::MenuDuplicateTab, Action::DuplicateTab, true),
         ContextMenuItem::Separator,
-        row(T::MenuMoveTabLeft, Action::MoveTabLeft, moves),
-        row(T::MenuMoveTabRight, Action::MoveTabRight, moves),
+        row(T::MenuMoveTabLeft, Action::MoveTabLeft, others),
+        row(T::MenuMoveTabRight, Action::MoveTabRight, others),
         ContextMenuItem::Separator,
         row(T::MenuCloseTab, Action::CloseTab, true),
-    ])
+    ];
+    if others {
+        items.push(ContextMenuItem::CloseOtherTabs {
+            label: tr.text(T::MenuCloseOtherTabs),
+        });
+    }
+    filter_disabled(items)
 }
 
 /// The tab whose segment of `bar` holds the point `(x, y)`, for a right-click
@@ -2329,10 +2426,71 @@ pub(super) fn tab_menu_segment(bar: &TabBar, x: f32, y: f32) -> Option<usize> {
 pub(super) enum TabMenuDispatch {
     /// Close it, asking first as its ✕ does.
     Close,
+    /// Close every other tab, asking first as closing them would.
+    CloseOthers,
     /// Move it this many places along the bar.
     Move(i32),
     /// Make it the active tab, then run the action.
     Activate(Action),
+}
+
+/// What a tab menu's row does once it has found its tab, or that it has not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum TabMenuStep {
+    /// The tab is gone: the row does nothing.
+    Gone,
+    /// Close tab `idx`, asking first as its ✕ does.
+    Close(usize),
+    /// Close every tab but `idx`, asking first.
+    CloseOthers(usize),
+    /// The tab was moved, or had nowhere to go.
+    Moved(bool),
+    /// The tab is the active one now: run the action on it.
+    Run(Action),
+}
+
+/// Find the tab holding the panes `tab` in `mux`, wherever it has moved
+/// since the menu opened, and do the row's part on it: move it, or make it
+/// the active tab for an action that shows it. A tab whose panes have all
+/// gone is gone, and the row leaves every other tab alone.
+pub(super) fn step_tab_menu_row(
+    mux: &mut Mux,
+    tab: &[u64],
+    dispatch: TabMenuDispatch,
+) -> TabMenuStep {
+    let Some(idx) = mux.tab_index_of_any_pane(tab) else {
+        return TabMenuStep::Gone;
+    };
+    match dispatch {
+        TabMenuDispatch::Close => TabMenuStep::Close(idx),
+        TabMenuDispatch::CloseOthers => TabMenuStep::CloseOthers(idx),
+        TabMenuDispatch::Move(delta) => TabMenuStep::Moved(mux.nudge_tab(idx, delta)),
+        TabMenuDispatch::Activate(action) => {
+            if idx != mux.active {
+                mux.active = idx;
+                mux.touch_active_tab_seen();
+            }
+            TabMenuStep::Run(action)
+        }
+    }
+}
+
+/// Close a tab's menu once its tab is gone, as when its last shell exits,
+/// so the popup does not stay up with rows that act on nothing. True when it
+/// closed one.
+pub(super) fn dismiss_orphaned_tab_menu(ws: &mut WindowState) -> bool {
+    let orphaned = ws.context_menu.is_some()
+        && ws
+            .context_menu_session
+            .tab
+            .as_deref()
+            .is_some_and(|tab| ws.mux.tab_index_of_any_pane(tab).is_none());
+    if orphaned {
+        ws.context_menu = None;
+        ws.context_menu_session.tab = None;
+        ws.accessibility_pending = true;
+    }
+    orphaned
 }
 
 /// How a tab's menu runs `action` on its tab; `None` for an action that is
@@ -2389,6 +2547,8 @@ pub(super) enum ContextMenuClick {
         window: u64,
         panes: Arc<[u64]>,
     },
+    /// A tab's menu's Close Other Tabs, on the tab the menu was opened on.
+    CloseOtherTabs,
     /// Drill into a `Submenu` row by index. The click handler pushes
     /// the current items onto `drill_stack` + replaces them
     /// with the submenu's items.
@@ -2519,6 +2679,11 @@ pub(super) enum ContextMenuItem {
         label: &'static str,
         target: PreviewMenuTarget,
         action: PreviewMenuAction,
+    },
+    /// A tab's menu's Close Other Tabs, which no action runs: it closes every
+    /// other tab of the window, asking first as closing them would.
+    CloseOtherTabs {
+        label: &'static str,
     },
     /// A static, non-dispatchable information line
     /// (the Shift hint or About panel's version/update rows). Survives
@@ -2656,6 +2821,7 @@ pub(super) fn context_menu_item_columns(item: &ContextMenuItem, hint: &str) -> u
             (label, "", false)
         }
         ContextMenuItem::Info { label, .. } => (label, "", false),
+        ContextMenuItem::CloseOtherTabs { label } => (label, "", false),
         ContextMenuItem::Separator => return 0,
     };
     label.width()
@@ -2696,6 +2862,7 @@ pub(super) fn assign_mnemonics(
             ContextMenuItem::UrlItem { label, .. } => *label,
             ContextMenuItem::Media { label, .. } | ContextMenuItem::Preview { label, .. } => *label,
             // Info rows are non-dispatchable — no mnemonic to claim.
+            ContextMenuItem::CloseOtherTabs { label } => label,
             ContextMenuItem::Info { .. } => "",
             ContextMenuItem::Separator => "",
         })
@@ -2773,7 +2940,10 @@ pub(super) fn typeahead_match(items: &[ContextMenuItem], buf: &str) -> Option<us
         }
         ContextMenuItem::UrlItem { label, .. }
         | ContextMenuItem::Media { label, .. }
-        | ContextMenuItem::Preview { label, .. } => label.to_ascii_lowercase().starts_with(&needle),
+        | ContextMenuItem::Preview { label, .. }
+        | ContextMenuItem::CloseOtherTabs { label } => {
+            label.to_ascii_lowercase().starts_with(&needle)
+        }
         // Info rows aren't dispatchable, so typeahead skips them.
         _ => false,
     })
@@ -3055,6 +3225,7 @@ pub(super) fn item_is_dispatchable(item: &ContextMenuItem) -> bool {
             | ContextMenuItem::UrlItem { .. }
             // A card's or the viewer's media rows.
             | ContextMenuItem::Media { .. }
+            | ContextMenuItem::CloseOtherTabs { .. }
             | ContextMenuItem::Preview { .. } // ContextMenuItem::Info is deliberately absent: a static info line
                                               // (About panel) is not highlightable or clickable.
     )
@@ -3112,6 +3283,7 @@ pub(super) fn item_to_click(item: &ContextMenuItem, idx: usize) -> Option<Contex
             target: *target,
             action: *action,
         }),
+        ContextMenuItem::CloseOtherTabs { .. } => Some(ContextMenuClick::CloseOtherTabs),
         ContextMenuItem::Item { enabled: false, .. }
         | ContextMenuItem::DynamicItem { enabled: false, .. }
         | ContextMenuItem::Info { .. }
@@ -3707,6 +3879,16 @@ pub(super) fn context_menu_row(item: &ContextMenuItem, hint: String) -> ContextM
                 ..Default::default()
             }
         }
+        ContextMenuItem::CloseOtherTabs { label } => ContextMenuRow {
+            toggle: None,
+            swatches: None,
+            matched_chars: None,
+            label: (*label).to_string(),
+            separator: false,
+            enabled: true,
+            hint: String::new(),
+            ..Default::default()
+        },
         ContextMenuItem::Info {
             label, secondary, ..
         } => ContextMenuRow {

@@ -1185,9 +1185,8 @@ impl App {
                     let point = self.keyboard_menu_point(ws);
                     let (px, py) = point.unwrap_or((ws.cursor.x as f32, ws.cursor.y as f32));
                     self.open_context_menu(ws, px, py, false);
-                    if point.is_some() {
-                        let (_, cell_h) = self.menu_cell(ws);
-                        let line = MenuAnchor::line(px, py - cell_h * 0.5, py + cell_h * 0.5);
+                    if let Some(point) = point {
+                        let line = self.text_line_anchor(ws, point);
                         self.place_context_menu_at_line(ws, line);
                     }
                 }
