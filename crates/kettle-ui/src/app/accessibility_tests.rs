@@ -2496,6 +2496,7 @@ fn settings_accessibility_click_dispatches_configure_and_retry() {
             }],
             ..Default::default()
         };
+        let change = super::accessibility_settings_change_id(&settings.rows[0]);
         let projection = super::modal_accessibility_projection(
             &kettle_render::Overlay {
                 settings: Some(settings),
@@ -2513,50 +2514,77 @@ fn settings_accessibility_click_dispatches_configure_and_retry() {
             .find(|(id, _)| *id == target)
             .unwrap()
             .1;
-        // Record both failures independently: the dispatch must work as well as
-        // the advertised default action, including the filtered row identity.
-        let mut adjusted = None;
-        let mut effect = None;
+        let button = &projection
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == change)
+            .expect("the selected row's Change button")
+            .1;
+        assert_eq!(button.label(), Some("Change Global hotkey"));
+        assert!(button.supports_action(Action::Click));
+        // A Click on the row, which an adapter also sends when a screen
+        // reader selects it, only selects it.
         let request = ActionRequest {
             action: Action::Click,
             target_tree: accesskit::TreeId::ROOT,
             target_node: target,
             data: None,
         };
-        let handled = super::accessibility::handle_accessibility_action(
+        assert!(super::accessibility::handle_accessibility_action(
             &mut ws,
             &request,
             &[Some((cat, fld))],
+            Some((change, (cat, fld))),
+            |_, _, _, _| panic!("a Click on the row changed it"),
+        ));
+        assert!(node.supports_action(Action::Click));
+        assert!(node.supports_action(Action::Focus));
+        assert!(!ws.settings_nav.as_ref().unwrap().search_focused);
+        assert!(ws.accessibility_pending);
+        // Record both failures independently: the dispatch must work as well as
+        // the advertised default action of the Change button.
+        let mut adjusted = None;
+        let mut effect = None;
+        let press = ActionRequest {
+            target_node: change,
+            ..request.clone()
+        };
+        let handled = super::accessibility::handle_accessibility_action(
+            &mut ws,
+            &press,
+            &[Some((cat, fld))],
+            Some((change, (cat, fld))),
             |_, cat, fld, dir| {
                 adjusted = Some((cat, fld, dir));
                 assert!(portal::settings_action(&status, false, |action| effect = Some(action)));
             },
         );
-        assert!(handled, "Settings Click did not reach the action handler");
+        assert!(handled, "the Change button did not reach the action handler");
         assert_eq!(adjusted, Some((cat, fld, 0)));
         assert_eq!(effect, Some(status.action(false)));
-        assert!(node.supports_action(Action::Click));
-        assert!(node.supports_action(Action::Focus));
-        assert!(!ws.settings_nav.as_ref().unwrap().search_focused);
-        assert!(ws.accessibility_pending);
         let mut invoked = false;
         assert!(!super::accessibility::handle_accessibility_action(
             &mut ws,
             &request,
             &[None],
+            None,
             |_, _, _, _| invoked = true,
         ));
         assert!(!invoked, "disabled or hidden rows must not activate");
-        let request = ActionRequest {
-            action: Action::Focus,
-            ..request
-        };
-        assert!(super::accessibility::handle_accessibility_action(
-            &mut ws,
-            &request,
-            &[Some((cat, fld))],
-            |_, _, _, _| panic!("Focus activated the row"),
-        ));
+        for focus in [target, change] {
+            let request = ActionRequest {
+                action: Action::Focus,
+                target_node: focus,
+                ..request.clone()
+            };
+            super::accessibility::handle_accessibility_action(
+                &mut ws,
+                &request,
+                &[Some((cat, fld))],
+                Some((change, (cat, fld))),
+                |_, _, _, _| panic!("Focus activated the row"),
+            );
+        }
     }
     let source = include_str!("accessibility.rs");
     assert!(source.contains("self.settings_adjust(ws, &cats, cat, fld, dir)"));
@@ -3703,4 +3731,129 @@ fn accessibility_requests_are_bound_to_their_targets() {
     assert!(!super::accessibility_link_status(id, &shown(link("https://x.test/b", 0.0))));
     assert!(!super::accessibility_link_status(id, &shown(link("https://x.test/a", 200.0))));
     assert!(!super::accessibility_link_status(id, &kettle_render::Overlay::default()));
+}
+
+/// No request an adapter makes when a screen reader selects, deselects,
+/// picks, focuses or presses a Settings row changes it, on screen or
+/// scrolled out of the panel: each only selects the row. Only a press on the
+/// selected row's Change button, which has no selected state for an adapter
+/// to change, changes that row, as Space does, and a Change button queued
+/// for a row that is no longer the selected one changes nothing.
+#[test]
+fn settings_selection_requests_never_change_a_row() {
+    use accesskit::{Action, ActionRequest};
+    let settings = |focused_row| kettle_render::SettingsOverlay {
+        categories: vec!["Appearance".into()],
+        rows: (0..12)
+            .map(|i| kettle_render::SettingsRow {
+                label: format!("Field {i}"),
+                value: "On".into(),
+                group: ["Colors and text", "Window", "Cursor"][i / 4].into(),
+                control: kettle_render::SettingsControl::Toggle(i % 2 == 0),
+                ..Default::default()
+            })
+            .collect(),
+        focused_row,
+        ..Default::default()
+    };
+    let surface = (1280.0, 420.0);
+    let metrics = (8.4, 17.5);
+    let shown = settings(6);
+    let layout = kettle_render::settings_layout(&shown, metrics, surface, metrics.0, 1.0);
+    assert!(layout.rows.len() < shown.rows.len(), "some rows are scrolled out");
+    let change = super::accessibility_settings_change_id(&shown.rows[6]);
+    let overlay = kettle_render::Overlay {
+        settings: Some(shown),
+        ..Default::default()
+    };
+    let projection = super::modal_accessibility_projection(&overlay, surface, metrics, 1.0, &EN_TEXT);
+    let tree = accesskit_consumer::Tree::new(
+        super::mouse_override_hint_tests::finished_tree(projection),
+        true,
+    );
+    let state = tree.state();
+    let rows: Vec<_> = (0..12).map(|i| Some((0, i))).collect();
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.settings_nav = Some(crate::settings::SettingsNav::default());
+    let request = |action, target_node| ActionRequest {
+        action,
+        target_tree: accesskit::TreeId::ROOT,
+        target_node,
+        data: None,
+    };
+    for index in 0..12 {
+        let id = super::accessibility_modal_id(5, index + 2);
+        let node = state.node_by_tree_local_id(id, accesskit::TreeId::ROOT).unwrap();
+        let requests: Vec<_> = adapter_selection_requests(&node)
+            .into_iter()
+            .chain(adapter_press_requests(&node))
+            .collect();
+        assert!(requests.iter().any(|(name, _)| name.starts_with("UIA")), "row {index}");
+        for (name, action) in requests {
+            ws.settings_nav.as_mut().unwrap().field = usize::MAX;
+            assert!(
+                super::accessibility::handle_accessibility_action(
+                    &mut ws,
+                    &request(action, id),
+                    &rows,
+                    Some((change, (0, 6))),
+                    |_, _, _, _| panic!("{name} on row {index} changed it"),
+                ),
+                "{name} on row {index}"
+            );
+            assert_eq!(ws.settings_nav.as_ref().unwrap().field, index, "{name} selects row {index}");
+        }
+    }
+    let button = state.node_by_tree_local_id(change, accesskit::TreeId::ROOT).expect("the Change button");
+    assert_eq!(button.role(), accesskit::Role::Button);
+    assert_eq!(button.label().as_deref(), Some("Change Field 6"));
+    assert_eq!(button.is_selected(), None);
+    assert!(adapter_selection_requests(&button).is_empty(), "no selection request reaches it");
+    let chip = layout.rows.iter().find(|row| row.index == 6).unwrap().chip_rect;
+    assert_eq!(
+        button.data().bounds(),
+        Some(accesskit::Rect::new(
+            chip.0 as f64,
+            chip.1 as f64,
+            (chip.0 + chip.2) as f64,
+            (chip.1 + chip.3) as f64
+        ))
+    );
+    for (name, action) in adapter_press_requests(&button) {
+        let mut changed = None;
+        assert!(super::accessibility::handle_accessibility_action(
+            &mut ws,
+            &request(action, change),
+            &rows,
+            Some((change, (0, 6))),
+            |_, cat, fld, dir| changed = Some((cat, fld, dir)),
+        ));
+        assert_eq!(changed, Some((0, 6, 0)), "{name}");
+    }
+    // Row 7 is selected now: row 6's Change button changes nothing.
+    let now = super::accessibility_settings_change_id(&settings(7).rows[7]);
+    assert_ne!(now, change);
+    let mut invoked = false;
+    assert!(!super::accessibility::handle_accessibility_action(
+        &mut ws,
+        &request(Action::Click, change),
+        &rows,
+        Some((now, (0, 7))),
+        |_, _, _, _| invoked = true,
+    ));
+    assert!(!invoked);
+    // The dispatch hands the free function the Change button the tree shows.
+    let handler = production_source()
+        .split_once("fn handle_accessibility_action(")
+        .unwrap()
+        .1
+        .split_once("let change = projection")
+        .expect("the handler finds the Change button")
+        .1
+        .split("self.update_ime_cursor_area(ws);")
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(handler.contains("accessibility_bound_class(*id, BoundTarget::SettingsChange)"));
+    assert!(handler.contains(".zip(fields.get(focused_row))"));
 }

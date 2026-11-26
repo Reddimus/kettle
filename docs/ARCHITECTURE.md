@@ -2065,7 +2065,11 @@ its Choose button ("Choose Split right"), a `Button` with no selected state
 beside the list, bound to that result and painted nowhere, as a zero-width
 line at the row's end: its Click gives the picker its own Enter
 (`press_picker_enter`), as `picker_pointer` does for a click on the row, so
-the SSH launcher's Save and Remove still open their own steps.
+the SSH launcher's Save and Remove still open their own steps. Settings
+follows the same rule: Focus and Click on a row only select it, and the
+selected row's Change button (bound to the row's category and label, over its
+painted control) changes it through `settings_adjust` as Space does, beside
+the Reset button.
 `accessibility_picker_request` maps a request to the value the picker's
 selection holds (a command for the palette, a row elsewhere). Each
 quick-select label that still matches what has been typed has a press too,

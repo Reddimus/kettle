@@ -48,9 +48,13 @@ value forward, **right-click** to cycle back, **scroll-wheel** over a row to
 adjust it, **left-click Reset** to restore a changed row's default, **click
 a category** to switch pages, and **click outside** the panel to close. A
 right-click or the wheel over Reset acts on the row as anywhere else on it.
-Screen readers get one Reset button for the highlighted row, named for the
-row and the default it restores ("Reset Font size to 14 px") and marked
-unavailable while the row holds that default. Each row is read with its value
+Screen readers get one Change button for the highlighted row ("Change Font
+size"), over its value control, which changes the row as Space does, and one
+Reset button, named for the row and the default it restores ("Reset Font size
+to 14 px") and marked unavailable while the row holds that default. Pressing,
+focusing or selecting a row with a screen reader only highlights it: the
+platforms send the same request for selecting a row as for pressing it, so a
+row's own press never changes its value. Each row is read with its value
 (a choice's current choice, a switch's On or Off); on Linux a switch is also
 reported checked or not checked. The locked macOS and Windows adapters cannot
 carry that state on a list row, so VoiceOver and Narrator hear the On or Off.

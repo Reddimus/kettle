@@ -1393,6 +1393,7 @@ impl App {
                     window.scale_factor() as f32,
                 )
             });
+            let focused_row = settings.focused_row;
             // The window's own overlay: production builds have no default one.
             let mut overlay = self.overlay(ws, true);
             overlay.settings = Some(settings);
@@ -1406,12 +1407,13 @@ impl App {
                 scale,
                 &self.ui_text,
             );
-            let rows: Vec<_> = ws
+            let fields = ws
                 .settings_nav
                 .as_ref()
                 .unwrap()
-                .visible_fields(&cats, &self.ui_text)
-                .into_iter()
+                .visible_fields(&cats, &self.ui_text);
+            let rows: Vec<_> = fields
+                .iter()
                 .enumerate()
                 .map(|(index, identity)| {
                     projection
@@ -1419,10 +1421,17 @@ impl App {
                         .iter()
                         .find(|(id, _)| *id == accessibility_modal_id(5, index + 2))
                         .filter(|(_, node)| !node.is_hidden() && !node.is_disabled())
-                        .map(|_| identity)
+                        .map(|_| *identity)
                 })
                 .collect();
-            if handle_accessibility_action(ws, &request, &rows, |ws, cat, fld, dir| {
+            // The Change button the tree shows now, and the field it changes.
+            let change = projection
+                .nodes
+                .iter()
+                .find(|(id, _)| accessibility_bound_class(*id, BoundTarget::SettingsChange))
+                .zip(fields.get(focused_row))
+                .map(|((id, _), field)| (*id, *field));
+            if handle_accessibility_action(ws, &request, &rows, change, |ws, cat, fld, dir| {
                 self.settings_adjust(ws, &cats, cat, fld, dir);
             }) {
                 self.update_ime_cursor_area(ws);
@@ -2017,6 +2026,7 @@ pub(super) enum BoundTarget {
     Hint = 1,
     Link = 2,
     PickerChoose = 3,
+    SettingsChange = 4,
 }
 
 /// The id of the node of `class` bound to `key`. Different keys share an id
@@ -2060,6 +2070,12 @@ pub(super) fn accessibility_picker_option_ids(
             })
         })
         .collect()
+}
+
+/// The id of the Change button for the Settings `row`: bound to its
+/// category and label, so a press queued for one row never changes another.
+pub(super) fn accessibility_settings_change_id(row: &kettle_render::SettingsRow) -> NodeId {
+    accessibility_bound_id(BoundTarget::SettingsChange, (row.category, &row.label))
 }
 
 /// The id of the Choose button that acts on the option whose id is `option`.
@@ -2479,10 +2495,16 @@ pub(super) fn card_accessibility_node(
 
 /// Dispatch Settings row actions independently of the event loop. The row map
 /// comes from the same filtered projection and geometry as the accessible nodes.
+///
+/// Focus or Click on a row only selects it: the adapters send that Click
+/// when a screen reader selects the row too. Only a Click on the selected
+/// row's Change button (`change`: its id and the row's field) changes it,
+/// through `adjust`, as Space does.
 pub(super) fn handle_accessibility_action(
     ws: &mut WindowState,
     request: &ActionRequest,
     rows: &[Option<(usize, usize)>],
+    change: Option<(NodeId, (usize, usize))>,
     adjust: impl FnOnce(&mut WindowState, usize, usize, i32),
 ) -> bool {
     if request.target_tree != TreeId::ROOT
@@ -2499,6 +2521,20 @@ pub(super) fn handle_accessibility_action(
     {
         return false;
     }
+    if let Some((id, (cat, fld))) = change
+        && id == request.target_node
+    {
+        if request.action != AccessibilityAction::Click {
+            return false;
+        }
+        end_modal_composition(ws);
+        adjust(ws, cat, fld, 0);
+        ws.accessibility_pending = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+        return true;
+    }
     let Some((cat, fld)) = request
         .target_node
         .0
@@ -2514,9 +2550,6 @@ pub(super) fn handle_accessibility_action(
     nav.category = cat;
     nav.field = fld;
     nav.search_focused = false;
-    if request.action == AccessibilityAction::Click {
-        adjust(ws, cat, fld, 0);
-    }
     ws.accessibility_pending = true;
     if let Some(window) = &ws.window {
         window.request_redraw();
@@ -3653,6 +3686,33 @@ pub(super) fn modal_accessibility_projection(
         }
         projection.nodes.push((list_id, list));
         let mut dialog_children = vec![search_id, list_id];
+        // One Change button, for the selected row: the node that changes it,
+        // as Space does. A row has a selected state, and the adapters turn
+        // selecting it into the Click a press sends, so a row's own Click
+        // only selects it. The button has none, is bound to the row and
+        // covers its painted control. The inline editor, when open, is the
+        // row's control instead.
+        let editing = !settings.search_focused
+            && !picker_open
+            && overlay.edit_title.is_none()
+            && overlay.text_field.is_some();
+        if !settings.search_focused
+            && !editing
+            && let Some(row) = settings.rows.get(settings.focused_row)
+            && !row.disabled
+        {
+            let id = accessibility_settings_change_id(row);
+            let mut button = Node::new(Role::Button);
+            button.set_label(tr.settings_a11y_change(&row.label));
+            button.set_keyboard_shortcut("Space");
+            button.add_action(AccessibilityAction::Click);
+            match layout.rows.iter().find(|r| r.index == settings.focused_row) {
+                Some(geometry) => button.set_bounds(bounds(geometry.chip_rect)),
+                None => button.set_hidden(),
+            }
+            projection.nodes.push((id, button));
+            dialog_children.push(id);
+        }
         // One Reset button, for the selected row, named for that row and
         // its default and unavailable while the row holds it. It follows
         // the selection and the row's value on every update, and works

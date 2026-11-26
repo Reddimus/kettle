@@ -3505,6 +3505,13 @@ speech:
   the highlighted result. The button has no selected state, so no selection
   request reaches it, and a Choose button bound to another result acts on
   nothing.
+- `settings_selection_requests_never_change_a_row` runs the same modelled
+  requests against every Settings row, painted or scrolled out. Each only
+  selects its row. Only a press on the selected row's Change button changes
+  it, and a Change button queued for a row that is no longer selected changes
+  nothing. `settings_accessibility_click_dispatches_configure_and_retry` checks
+  that the Change button, not the row, reaches the global hotkey's configure
+  and retry.
 - `quick_select_labels_offer_a_press_that_acts_on_their_target`: matching
   quick-select labels have a Click action that runs `act_hint`. Dimmed labels
   have none.
