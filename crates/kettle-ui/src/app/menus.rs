@@ -1081,9 +1081,10 @@ impl App {
         );
     }
 
-    /// Run a tab menu's `action` on the tab holding the panes `tab`, if it is
-    /// still open. Rename and Duplicate bring the tab forward first, since
-    /// they show it; moving or closing it leaves the active tab alone.
+    /// Run a tab menu's row on the tab holding the panes `tab`, if it is
+    /// still open (`step_tab_menu_row`). Rename and Duplicate bring the tab
+    /// forward first, since they show it; moving or closing it leaves the
+    /// active tab alone.
     fn act_on_menu_tab(
         &mut self,
         ws: &mut WindowState,
@@ -1091,11 +1092,17 @@ impl App {
         dispatch: TabMenuDispatch,
         event_loop: &ActiveEventLoop,
     ) {
-        let Some(idx) = ws.mux.tab_index_of_any_pane(tab) else {
-            return;
-        };
-        match dispatch {
-            TabMenuDispatch::Close => {
+        let pre = self.focus_key(ws);
+        match step_tab_menu_row(&mut ws.mux, tab, dispatch) {
+            TabMenuStep::Gone => {
+                // The tab closed while its menu was open. The menu is gone
+                // too, and nothing else would repaint it away.
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+                return;
+            }
+            TabMenuStep::Close(idx) => {
                 // The question the tab's ✕ asks, about this tab.
                 let (panes, busy) = tab_close_scope(ws, idx);
                 if self.confirm_close(
@@ -1106,7 +1113,6 @@ impl App {
                 ) {
                     return;
                 }
-                let pre = self.focus_key(ws);
                 if ws.mux.close_tab_at(idx) {
                     self.fire_tab_close_event(ws, idx);
                     self.save_session(ws);
@@ -1116,19 +1122,14 @@ impl App {
                 self.fire_tab_close_event(ws, idx);
                 self.note_focus_change(ws, pre);
             }
-            TabMenuDispatch::Move(delta) => {
-                if ws.mux.nudge_tab(idx, delta) {
+            TabMenuStep::Moved(moved) => {
+                if moved {
                     self.save_session(ws);
                 }
             }
-            TabMenuDispatch::Activate(action) => {
-                if idx != ws.mux.active {
-                    let pre = self.focus_key(ws);
-                    ws.mux.active = idx;
-                    ws.mux.touch_active_tab_seen();
-                    ws.reveal_active_tab();
-                    self.note_focus_change(ws, pre);
-                }
+            TabMenuStep::Run(action) => {
+                ws.reveal_active_tab();
+                self.note_focus_change(ws, pre);
                 self.handle_action(ws, action, event_loop);
             }
         }
@@ -2378,6 +2379,62 @@ pub(super) enum TabMenuDispatch {
     Move(i32),
     /// Make it the active tab, then run the action.
     Activate(Action),
+}
+
+/// What a tab menu's row does once it has found its tab, or that it has not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum TabMenuStep {
+    /// The tab is gone: the row does nothing.
+    Gone,
+    /// Close tab `idx`, asking first as its ✕ does.
+    Close(usize),
+    /// The tab was moved, or had nowhere to go.
+    Moved(bool),
+    /// The tab is the active one now: run the action on it.
+    Run(Action),
+}
+
+/// Find the tab holding the panes `tab` in `mux`, wherever it has moved
+/// since the menu opened, and do the row's part on it: move it, or make it
+/// the active tab for an action that shows it. A tab whose panes have all
+/// gone is gone, and the row leaves every other tab alone.
+pub(super) fn step_tab_menu_row(
+    mux: &mut Mux,
+    tab: &[u64],
+    dispatch: TabMenuDispatch,
+) -> TabMenuStep {
+    let Some(idx) = mux.tab_index_of_any_pane(tab) else {
+        return TabMenuStep::Gone;
+    };
+    match dispatch {
+        TabMenuDispatch::Close => TabMenuStep::Close(idx),
+        TabMenuDispatch::Move(delta) => TabMenuStep::Moved(mux.nudge_tab(idx, delta)),
+        TabMenuDispatch::Activate(action) => {
+            if idx != mux.active {
+                mux.active = idx;
+                mux.touch_active_tab_seen();
+            }
+            TabMenuStep::Run(action)
+        }
+    }
+}
+
+/// Close a tab's menu once its tab is gone, as when its last shell exits,
+/// so the popup does not stay up with rows that act on nothing. True when it
+/// closed one.
+pub(super) fn dismiss_orphaned_tab_menu(ws: &mut WindowState) -> bool {
+    let orphaned = ws.context_menu.is_some()
+        && ws
+            .context_menu_session
+            .tab
+            .as_deref()
+            .is_some_and(|tab| ws.mux.tab_index_of_any_pane(tab).is_none());
+    if orphaned {
+        ws.context_menu = None;
+        ws.context_menu_session.tab = None;
+        ws.accessibility_pending = true;
+    }
+    orphaned
 }
 
 /// How a tab's menu runs `action` on its tab; `None` for an action that is

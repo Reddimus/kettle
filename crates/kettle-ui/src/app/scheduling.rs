@@ -293,6 +293,12 @@ impl App {
         // Binding, not an inline call on the right of `||`: see the matching
         // reap in `redraw`.
         let stale_title = clear_stale_title_edit(&ws.mux, &mut ws.editing_title);
+        // A tab's menu goes with its tab.
+        if dismiss_orphaned_tab_menu(ws)
+            && let Some(window) = &ws.window
+        {
+            window.request_redraw();
+        }
         if reaped.layout_changed || stale_title {
             // Another window's turn may already have swept this turn, from
             // before this pane went.

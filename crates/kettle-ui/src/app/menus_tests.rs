@@ -2770,10 +2770,9 @@ fn a_tabs_menu_runs_each_row_on_its_own_tab() {
         .expect("other menus run the action");
     assert!(tab < generic, "the tab target is consulted first");
     let act = finding_body(&src, "act_on_menu_tab");
-    assert!(act.contains("let Some(idx) = ws.mux.tab_index_of_any_pane(tab) else {"));
+    assert!(act.contains("match step_tab_menu_row(&mut ws.mux, tab, dispatch) {"));
     assert!(act.contains("ConfirmAction::CloseTabHolding(ws.mux.tab_anchor_panes(idx))"));
     assert!(act.contains("ws.mux.close_tab_at(idx)"));
-    assert!(act.contains("ws.mux.nudge_tab(idx, delta)"));
     let open = finding_body(&src, "open_tab_menu");
     let shown = open
         .find("self.show_context_menu(ws, items, px, py);")
@@ -2814,3 +2813,120 @@ fn right_clicking_a_tab_opens_its_menu() {
         assert!(tab < terminal);
     }
 }
+
+/// A tab of one pane, `id`, with no terminal behind it.
+fn fake_tab(id: u64) -> crate::mux::Tab {
+    crate::mux::Tab {
+        root: crate::mux::Node::Leaf(id),
+        focus: id,
+        title_override: None,
+        zoomed: false,
+        last_output_at: None,
+        last_seen_at: None,
+        bell: false,
+        lanes: Default::default(),
+        generated_group_name: None,
+        scaled_zoom_owner: false,
+    }
+}
+
+fn fake_tabs(ids: &[u64]) -> Mux {
+    let mut mux = Mux::new();
+    mux.tabs.extend(ids.iter().copied().map(fake_tab));
+    mux
+}
+
+#[test]
+fn a_tab_menu_row_acts_on_its_tab_wherever_it_has_moved() {
+    use super::{TabMenuDispatch as D, TabMenuStep as S, step_tab_menu_row};
+    let order = |mux: &Mux| mux.tabs.iter().map(|tab| tab.focus).collect::<Vec<_>>();
+    // The menu of tab 2 opens while tab 1 is active; then tab 2 is dragged
+    // to the end before a row is picked.
+    let mut mux = fake_tabs(&[1, 2, 3]);
+    let tab = mux.tab_anchor_panes(1);
+    assert!(mux.nudge_tab(1, 1));
+    assert_eq!((order(&mux), mux.active), (vec![1, 3, 2], 0));
+    assert_eq!(step_tab_menu_row(&mut mux, &tab, D::Close), S::Close(2));
+    assert_eq!(step_tab_menu_row(&mut mux, &tab, D::Move(-1)), S::Moved(true));
+    assert_eq!((order(&mux), mux.active), (vec![1, 2, 3], 0), "it moved, tab 1 stayed active");
+    assert_eq!(
+        step_tab_menu_row(&mut mux, &tab, D::Activate(Action::EditTabTitle)),
+        S::Run(Action::EditTabTitle)
+    );
+    assert_eq!(mux.tabs[mux.active].focus, 2, "Rename runs on tab 2, brought forward");
+    // A neighbour closing shifts it down one; the row still finds it.
+    let mut mux = fake_tabs(&[1, 2, 3]);
+    let tab = mux.tab_anchor_panes(2);
+    assert!(!mux.close_tab_at(0));
+    assert_eq!(step_tab_menu_row(&mut mux, &tab, D::Close), S::Close(1));
+}
+
+#[test]
+fn a_tab_menu_row_whose_tab_has_gone_does_nothing() {
+    use super::{TabMenuDispatch as D, TabMenuStep as S, step_tab_menu_row};
+    let mut mux = fake_tabs(&[1, 2, 3]);
+    let tab = mux.tab_anchor_panes(1);
+    // Its last shell exits.
+    assert!(!mux.close_tab_at(1));
+    for dispatch in [
+        D::Close,
+        D::Move(1),
+        D::Activate(Action::DuplicateTab),
+        D::Activate(Action::EditTabTitle),
+    ] {
+        assert_eq!(step_tab_menu_row(&mut mux, &tab, dispatch.clone()), S::Gone, "{dispatch:?}");
+        let tabs = mux.tabs.iter().map(|tab| tab.focus).collect::<Vec<_>>();
+        assert_eq!((tabs, mux.active), (vec![1, 3], 0), "{dispatch:?} left the others alone");
+    }
+}
+
+#[test]
+fn a_tab_menu_closes_once_its_tab_has_gone() {
+    let mut ws = WindowState::new(1, fake_tabs(&[1, 2, 3]));
+    let open = |ws: &mut WindowState, tab: Option<Vec<u64>>| {
+        ws.context_menu = Some(super::ContextMenuState {
+            origin: crate::app::MenuOrigin::Other,
+            anchor: (10.0, 10.0),
+            anchor_scale: 1.0,
+            items: super::tab_menu_items(3, kettle_i18n::Translator::new(kettle_i18n::Language::En)),
+            highlight: 0,
+            drill_stack: Vec::new(),
+            scroll_offset: 0,
+            typeahead_buf: String::new(),
+            typeahead_until: None,
+        });
+        ws.context_menu_session.tab = tab;
+    };
+    let tab = ws.mux.tab_anchor_panes(1);
+    open(&mut ws, Some(tab));
+    assert!(!super::dismiss_orphaned_tab_menu(&mut ws), "its tab is still open");
+    assert!(ws.context_menu.is_some());
+    // Reordering keeps it: the menu follows its tab.
+    assert!(ws.mux.nudge_tab(1, 1));
+    assert!(!super::dismiss_orphaned_tab_menu(&mut ws));
+    // Its tab's last shell exits.
+    let gone = ws.mux.tab_index_of_any_pane(&[2]).unwrap();
+    assert!(!ws.mux.close_tab_at(gone));
+    assert!(super::dismiss_orphaned_tab_menu(&mut ws));
+    assert!(ws.context_menu.is_none() && ws.context_menu_session.tab.is_none());
+    // The terminal menu has no tab to lose.
+    open(&mut ws, None);
+    assert!(!super::dismiss_orphaned_tab_menu(&mut ws));
+    assert!(ws.context_menu.is_some());
+
+    // Each turn checks, and a stale pick repaints the popup away.
+    let src = production_source();
+    let wait = src
+        .split("fn about_to_wait_inner(")
+        .nth(1)
+        .expect("the scheduler");
+    assert!(wait.contains("if dismiss_orphaned_tab_menu(ws)"));
+    let act = finding_body(&src, "act_on_menu_tab");
+    let gone = act
+        .split("TabMenuStep::Gone => {")
+        .nth(1)
+        .and_then(|arm| arm.split("TabMenuStep::Close(idx) => {").next())
+        .expect("the stale row");
+    assert!(gone.contains("window.request_redraw();"));
+}
+

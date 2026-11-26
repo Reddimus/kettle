@@ -5395,7 +5395,9 @@ A right-click on a tab segment, native or through `ctl`, opens that tab's
 menu (`open_tab_menu`): Rename Tab…, Duplicate Tab, Move Tab Left/Right and
 Close Tab, as ordinary action rows. The menu records the tab by the panes it
 holds (`ContextMenuSession::tab`), so a shell exiting meanwhile cannot
-retarget it, and `act_on_menu_tab` runs the row on that tab: Close asks as
+retarget it, and the menu closes once that tab is gone
+(`dismiss_orphaned_tab_menu`, checked each event-loop turn). `step_tab_menu_row`
+finds the tab wherever it has moved and `act_on_menu_tab` runs the row on it: Close asks as
 the tab's ✕ does, Move uses `Mux::nudge_tab` and leaves the active tab active,
 and Rename and Duplicate bring the tab forward first. No action closes the
 other tabs, so the menu has no Close Other Tabs.
