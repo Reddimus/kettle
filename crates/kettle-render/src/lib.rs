@@ -3041,8 +3041,47 @@ impl Renderer {
                 )
             })
             .collect();
+        // The chip that says a pane is in vi mode, where it hides no text:
+        // under the kept-history label, or above the jump button.
+        let vi_mode_chips: Vec<scrollback::ViModeChip> = panes
+            .iter()
+            .filter(|pane| pane.snap.vi_mode)
+            .filter_map(|pane| {
+                let kept = kept_history_label(
+                    pane.terminal,
+                    pane.snap.history_view(),
+                    self.scale,
+                    scrollback_text_cell,
+                    cfg.scrollbar_width,
+                    &pane.tr,
+                )
+                .map(|label| label.rect);
+                let jump = scrollback_pills
+                    .iter()
+                    .find(|(id, _)| *id == pane.id)
+                    .map(|(_, pill)| pill.rect);
+                let origin = pane_grid_origin(pane.terminal, (pad_x, pad_y));
+                scrollback::vi_mode_chip(
+                    pane.terminal,
+                    self.scale,
+                    scrollback_text_cell,
+                    cfg.scrollbar_width,
+                    kept,
+                    jump,
+                    |rect| {
+                        scrollback::rect_covers_text(
+                            pane.snap,
+                            origin,
+                            (self.cell_w, self.cell_h),
+                            rect,
+                        )
+                    },
+                    &pane.tr,
+                )
+            })
+            .collect();
         // One buffer per text, in paint order: each button's count and then
-        // its key, then each label.
+        // its key, then each label, then each vi-mode chip.
         let scrollback_texts: Vec<(&str, f32)> = scrollback_pills
             .iter()
             .flat_map(|(_, pill)| {
@@ -3056,6 +3095,11 @@ impl Renderer {
                 kept_history_labels
                     .iter()
                     .map(|label| (label.label.as_str(), label.rect.3)),
+            )
+            .chain(
+                vi_mode_chips
+                    .iter()
+                    .map(|chip| (chip.label.as_str(), chip.rect.3)),
             )
             .collect();
         while self.scrollback_buffers.len() < scrollback_texts.len() {
@@ -3998,6 +4042,11 @@ impl Renderer {
                 let rest = pill_colors.rest;
                 scrollback::kept_history_label_quads(&mut menu_q, label, rest.fill);
                 text(label.text_origin, label.rect, rest.ink);
+            }
+            for chip in &vi_mode_chips {
+                let rest = pill_colors.rest;
+                scrollback::vi_mode_chip_quads(&mut menu_q, chip, rest.fill);
+                text(chip.text_origin, chip.rect, rest.ink);
             }
         }
         if let Some(bounds) = tab_tooltip {
@@ -5226,8 +5275,9 @@ impl Renderer {
                 if row.separator {
                     continue;
                 }
-                let background = overlays::menu_row_background(
-                    overlays::menu_row_selected(menu, i),
+                let background = overlays::menu_row_fill(
+                    menu,
+                    i,
                     theme,
                     accent,
                     &mut self.chrome_colors,

@@ -189,6 +189,8 @@ fn every_spanish_message_has_a_review_status() {
                     key.as_str(),
                     "hint_legend"
                         | "hint_legend_plain"
+                        // Also the polite status a screen reader hears.
+                        | "hint_none"
                         | "link_open_click"
                         | "link_open_command_click"
                         | "link_open_control_click"

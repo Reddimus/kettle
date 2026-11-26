@@ -1098,6 +1098,7 @@ impl App {
                 self.close_all_modals(ws);
                 ws.layout_picker_entries = crate::session::Session::list_layouts();
                 ws.layout_picker_input = Some((Default::default(), 0));
+                reset_picker_view(ws);
             }
             Action::OpenThemePicker => self.open_theme_picker(ws),
             Action::OpenMediaShelf => self.open_media_shelf(ws),
@@ -1139,17 +1140,21 @@ impl App {
                 let preview = matches!(action, Action::PreviewLink);
                 let targets = self.collect_hints(ws, preview);
                 if targets.is_empty() {
-                    // Nothing in the pane to preview: say so, as the plain
-                    // quick select's empty pane needs no word. A quick select
-                    // already open stays as it was.
+                    // Nothing in the pane to label: say so, a notification
+                    // for previews and a brief pane status for the plain
+                    // quick select. A quick select already open stays as it
+                    // was.
                     if preview {
                         let tr = self.ui_text;
                         fire_notify(
                             tr.text(kettle_i18n::Text::NotifyTitlePreviewNothing),
                             tr.text(kettle_i18n::Text::NotifyBodyPreviewNothing),
                         );
+                    } else {
+                        show_no_hints(ws, std::time::Instant::now());
                     }
                 } else {
+                    ws.no_hints_notice.dismiss();
                     self.close_all_modals(ws);
                     // The purpose goes with the targets it chose.
                     ws.hint_state = Some((targets, String::new()));

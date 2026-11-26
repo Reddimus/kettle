@@ -82,6 +82,11 @@ pub struct ContextMenuRow {
     /// Static information in a context menu, with the contrast of shortcut
     /// labels. The row still uses `enabled` to determine selectability.
     pub informational: bool,
+    /// Lit under the pointer without being selected: a picker row a hover
+    /// may not select, such as the SSH launcher's Save row, which a click
+    /// still runs. Painted fainter than the selection, and only on an
+    /// enabled row that is not the highlighted one.
+    pub prelit: bool,
 }
 
 /// The option a picker's row `row` is, counting only rows that can be
@@ -1943,9 +1948,9 @@ pub(crate) const MENU_SHADOW_LAYERS: [(f32, f32, f32); 4] = [
     (6.0, 4.0, 0.05),
     (10.0, 6.0, 0.035),
 ];
-/// The most rounded surfaces one level paints: its shadow, panel, selection
-/// and a picker's scrollbar thumb.
-pub(crate) const MENU_LEVEL_SURFACES: usize = MENU_SHADOW_LAYERS.len() + 3;
+/// The most rounded surfaces one level paints: its shadow, panel, selection,
+/// a picker row's hover prelight and a picker's scrollbar thumb.
+pub(crate) const MENU_LEVEL_SURFACES: usize = MENU_SHADOW_LAYERS.len() + 4;
 /// Levels whose surfaces fit in one frame. Kettle's own menus nest a few
 /// levels deep at most; a deeper stack paints only its deepest levels' panels.
 pub(crate) const MENU_SURFACE_LEVELS: usize = 16;
@@ -1953,9 +1958,10 @@ pub(crate) const MENU_SURFACES: usize = MENU_LEVEL_SURFACES * MENU_SURFACE_LEVEL
 
 /// The rounded surfaces of one menu or picker level, in draw order: a soft
 /// layered shadow, the bordered panel, then the highlighted row's inset
-/// selection. The selection is filled with the opaque colour the label pass
-/// resolves its text contrast against. Only the radii, the shadow and the
-/// selection's inset follow `scale`; rows, paddings and hit targets do not.
+/// selection and a prelit row's fainter one. Each is filled with the opaque
+/// colour the label pass resolves its text contrast against. Only the radii,
+/// the shadow and the selection's inset follow `scale`; rows, paddings and
+/// hit targets do not.
 pub(crate) fn menu_level_surfaces(
     menu: &ContextMenu,
     theme: &kettle_config::Theme,
@@ -2017,15 +2023,12 @@ pub(crate) fn menu_level_surfaces(
         stroke: rgba(border, 1.0),
         params: [radius, 1.0, 0.0, 0.0],
     });
-    let selected = context_menu_row_rects(menu, (cw, ch))
-        .into_iter()
-        .find(|(i, _)| menu_row_selected(menu, *i));
-    if let Some((_, (rx, ry, rw, rh))) = selected {
+    let rows = context_menu_row_rects(menu, (cw, ch));
+    let mut inset_row = |(rx, ry, rw, rh): Rect4, fill: Rgb| {
         let inset_x = (MENU_SELECTION_INSET.0 * scale).min(MENU_SELECTION_MAX_INSET_X);
         let inset_y = (MENU_SELECTION_INSET.1 * scale).min(rh * 0.15);
         let (sw, sh) = (rw - 2.0 * inset_x, rh - 2.0 * inset_y);
         if sw > 0.0 && sh > 0.0 {
-            let fill = menu_selection_fill(theme, accent, colors, linear);
             out.push(RoundedSurface {
                 pos: [rx + inset_x, ry + inset_y],
                 size: [sw, sh],
@@ -2034,6 +2037,12 @@ pub(crate) fn menu_level_surfaces(
                 params: [(MENU_SELECTION_RADIUS * scale).min(sh * 0.5), 0.0, 0.0, 0.0],
             });
         }
+    };
+    if let Some(&(_, rect)) = rows.iter().find(|(i, _)| menu_row_selected(menu, *i)) {
+        inset_row(rect, menu_selection_fill(theme, accent, colors, linear));
+    }
+    if let Some(&(_, rect)) = rows.iter().find(|(i, _)| menu_row_prelit(menu, *i)) {
+        inset_row(rect, menu_prelight_fill(theme, accent, colors, linear));
     }
     if let Some((tx, ty, tw, th)) = picker_scroll_thumb(menu, (cw, ch), scale) {
         out.push(RoundedSurface {
@@ -2311,6 +2320,16 @@ pub(crate) fn menu_row_selected(menu: &ContextMenu, index: usize) -> bool {
             .is_some_and(|row| row.enabled && !row.separator)
 }
 
+/// Whether row `index` of `menu` paints the hover prelight: a prelit enabled
+/// item that is not also the selected row, which paints the selection.
+pub(crate) fn menu_row_prelit(menu: &ContextMenu, index: usize) -> bool {
+    !menu_row_selected(menu, index)
+        && menu
+            .rows
+            .get(index)
+            .is_some_and(|row| row.prelit && row.enabled && !row.separator)
+}
+
 /// The opaque fill behind the selected row, which its text is resolved against.
 pub(crate) fn menu_selection_fill(
     theme: &kettle_config::Theme,
@@ -2319,6 +2338,18 @@ pub(crate) fn menu_selection_fill(
     linear: bool,
 ) -> Rgb {
     colors.surface(theme.background, accent, 0.18, linear)
+}
+
+/// The opaque fill behind a prelit row: half the selection's accent, the
+/// hover mix the dialog buttons use, so it reads as a hover and not as a
+/// second selection.
+pub(crate) fn menu_prelight_fill(
+    theme: &kettle_config::Theme,
+    accent: Rgb,
+    colors: &mut chrome::Colors,
+    linear: bool,
+) -> Rgb {
+    colors.surface(theme.background, accent, 0.09, linear)
 }
 
 /// The surface a menu row's text sits on.
@@ -2333,6 +2364,29 @@ pub(crate) fn menu_row_background(
         menu_selection_fill(theme, accent, colors, linear)
     } else {
         theme.background
+    }
+}
+
+/// The surface row `index` of `menu` paints its text on: the selection, the
+/// hover prelight, or the panel.
+pub(crate) fn menu_row_fill(
+    menu: &ContextMenu,
+    index: usize,
+    theme: &kettle_config::Theme,
+    accent: Rgb,
+    colors: &mut chrome::Colors,
+    linear: bool,
+) -> Rgb {
+    if menu_row_prelit(menu, index) {
+        menu_prelight_fill(theme, accent, colors, linear)
+    } else {
+        menu_row_background(
+            menu_row_selected(menu, index),
+            theme,
+            accent,
+            colors,
+            linear,
+        )
     }
 }
 

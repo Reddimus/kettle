@@ -1771,6 +1771,7 @@ impl App {
         text: Option<&str>,
         event_loop: &ActiveEventLoop,
     ) {
+        note_picker_keys(ws);
         if self.modal_editor_key(ws, key) {
             return;
         }
@@ -2352,6 +2353,8 @@ impl App {
             return;
         };
         if switch_theme_picker_slot(state, &self.cfg, active, slot, &self.ui_text) {
+            // The list changed: what a hover selected before is gone.
+            note_picker_keys(ws);
             self.sync_theme_preview(ws);
             ws.accessibility_pending = true;
             if let Some(window) = &ws.window {
@@ -2577,6 +2580,7 @@ impl App {
         key: &Key,
         text: Option<&str>,
     ) {
+        note_picker_keys(ws);
         if self.modal_editor_key(ws, key) {
             return;
         }
@@ -2703,6 +2707,7 @@ impl App {
     /// `sync_theme_preview`); Enter keeps it and Esc restores the theme the
     /// picker opened on.
     pub(super) fn theme_picker_key(&mut self, ws: &mut WindowState, key: &Key, text: Option<&str>) {
+        note_picker_keys(ws);
         if self.modal_editor_key(ws, key) {
             return;
         }
@@ -2817,6 +2822,7 @@ impl App {
     }
 
     pub(super) fn ssh_key(&mut self, ws: &mut WindowState, key: &Key, text: Option<&str>) {
+        note_picker_keys(ws);
         if self.modal_editor_key(ws, key) {
             return;
         }

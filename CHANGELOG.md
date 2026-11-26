@@ -1605,6 +1605,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Reduced motion now holds the starfield and animated background images still
   on their current frame.
 
+- Moving the pointer over a row in the command palette or the theme, layout
+  or SSH picker now selects it, as the arrow keys do; a pointer that stays
+  still never takes the selection from the keys, and the theme picker
+  previews a hovered theme only once the pointer rests on it.
+- The mouse wheel over the command palette and the theme, layout and SSH
+  pickers scrolls the list without moving the selection; only a selection
+  that scrolls out of view moves, to the nearest row still shown.
+- Vi mode shows a small "Vi mode" chip in a corner of the pane, placed only
+  over blank cells, so it never covers text.
+- Quick-select hints with nothing on screen to label says "No hints here"
+  for a moment instead of doing nothing.
+
 ## Older releases
 
 - [5.x](docs/changelog/CHANGELOG-5.x.md)

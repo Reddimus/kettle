@@ -552,6 +552,71 @@ impl MouseOverrideHint {
     }
 }
 
+/// How long a pointer that moved a theme picker selection must rest before
+/// the window previews that theme, so a sweep across rows does not flash
+/// every theme it crosses. The keyboard previews at once.
+pub(crate) const THEME_HOVER_PREVIEW_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(150);
+
+/// The open picker's list as the pointer and the wheel see it: the command
+/// palette, theme, layout or SSH picker, whichever is open. Reset when one
+/// opens.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct PickerView {
+    /// The first row the list showed when it was last painted, or where the
+    /// wheel left it. The list moves from there only as far as it must to
+    /// keep the selection in view. `None` until it first paints.
+    pub(crate) scroll: Option<usize>,
+    /// Where the pointer was when the picker last saw it: at a hover, or when
+    /// it opened, took a key or scrolled. Rows move under a pointer that
+    /// stays put, so only a pointer somewhere else selects the row under it,
+    /// and the keyboard's selection holds until the pointer really moves.
+    pub(crate) pointer_seen: Option<PhysicalPosition<f64>>,
+    /// The row under the pointer that a hover lights without selecting: the
+    /// SSH launcher's Save or Remove row, which only a click or a deliberate
+    /// Down selects.
+    pub(crate) prelight: Option<usize>,
+    /// When the theme a hover or the wheel selected becomes the window's
+    /// preview; until then the window keeps the theme it previews now.
+    pub(crate) preview_at: Option<std::time::Instant>,
+}
+
+/// How long "No hints here" stays on its pane.
+pub(crate) const NO_HINTS_NOTICE_LIFETIME: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The pane status that says quick select found nothing to label, so the
+/// key that asked for it does not seem to do nothing.
+#[derive(Debug, Default)]
+pub(crate) struct NoHintsNotice {
+    showing: Option<(u64, std::time::Instant)>,
+}
+
+impl NoHintsNotice {
+    /// Show the notice on `pane` for `NO_HINTS_NOTICE_LIFETIME` from `now`.
+    pub(crate) fn show(&mut self, pane: u64, now: std::time::Instant) {
+        self.showing = Some((pane, now + NO_HINTS_NOTICE_LIFETIME));
+    }
+
+    /// The pane the notice shows on, until it expires or is dismissed.
+    pub(crate) fn pane(&self) -> Option<u64> {
+        self.showing.map(|(pane, _)| pane)
+    }
+
+    pub(crate) fn deadline(&self) -> Option<std::time::Instant> {
+        self.showing.map(|(_, until)| until)
+    }
+
+    /// Take the notice down, saying whether it was up.
+    pub(crate) fn dismiss(&mut self) -> bool {
+        self.showing.take().is_some()
+    }
+
+    /// Take the notice down once its time is up, saying whether it was.
+    pub(crate) fn expire(&mut self, now: std::time::Instant) -> bool {
+        self.deadline().is_some_and(|until| now >= until) && self.dismiss()
+    }
+}
+
 const MEDIA_RECEIPT_EXPANDED: std::time::Duration = std::time::Duration::from_secs(4);
 const MEDIA_RECEIPT_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30);
 const MEDIA_RECEIPT_HARD_LIFETIME: std::time::Duration = std::time::Duration::from_secs(120);
@@ -1590,6 +1655,10 @@ pub(crate) struct WindowState {
     /// The Shift hint over a program that uses the mouse; see
     /// `MouseOverrideHint`.
     pub(crate) mouse_override_hint: MouseOverrideHint,
+    /// "No hints here" after quick select found nothing; see `NoHintsNotice`.
+    pub(crate) no_hints_notice: NoHintsNotice,
+    /// The open picker's scroll, pointer and preview state; see `PickerView`.
+    pub(crate) picker_view: PickerView,
     /// The first `Resized` after window creation is the initial
     /// placement, not a user resize — `resize-overlay = after-first`
     /// (the default) skips it.
@@ -2022,6 +2091,8 @@ impl WindowState {
             resize_overlay: None,
             resize_overlay_label: None,
             mouse_override_hint: MouseOverrideHint::default(),
+            no_hints_notice: NoHintsNotice::default(),
+            picker_view: PickerView::default(),
             seen_first_resize: false,
             spawned_at: std::time::Instant::now(),
             pane_snapshots: Vec::new(),

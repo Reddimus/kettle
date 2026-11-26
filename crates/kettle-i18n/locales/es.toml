@@ -1067,6 +1067,7 @@ hint_action_copy = "copiar texto"
 hint_action_preview = "ver vista previa"
 hint_legend = "Etiqueta: {plain} · Shift+etiqueta: {alternate} · Esc para cancelar"
 hint_legend_plain = "Etiqueta: {plain} · Esc para cancelar"
+hint_none = "No hay etiquetas aquí"
 
 a11y_window_minimize = "Minimizar ventana"
 a11y_window_maximize = "Maximizar ventana"
@@ -1192,6 +1193,7 @@ osc52_blocked_write_by = "Se impidió que un programa copiara al portapapeles mi
 
 scrollback_kept = "Inicio del historial conservado"
 scrollback_a11y_viewing = "Viendo el historial"
+vi_mode_chip = "Modo vi"
 
 settings_group_colors_text = "Colores y texto"
 settings_group_window = "Ventana"

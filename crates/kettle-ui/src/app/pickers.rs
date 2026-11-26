@@ -316,6 +316,7 @@ pub(super) fn open_ssh_launcher(
         Vec::new()
     };
     ws.ssh_input = Some((Default::default(), 0));
+    reset_picker_view(ws);
     ws.ssh_hosts_shown = cfg.ssh_hosts.clone();
     ws.ssh_status = None;
 }
@@ -889,6 +890,7 @@ pub(super) fn begin_theme_picker(ws: &mut WindowState, live: ThemeState) -> Opti
         opened_on: opened.0.clone(),
         slot: None,
     });
+    reset_picker_view(ws);
     ws.theme_preview = Some(opened);
     restore
 }
@@ -915,8 +917,10 @@ pub(super) fn begin_theme_picker_session(
 /// The theme the window must switch to after an event, if any, while
 /// `live_name` is the one it wears. An open picker shows its selection, or its
 /// baseline while nothing matches the query; the baseline stays until the
-/// picker closes. A picker that closed without keeping a theme (a kept one
-/// clears the baseline first) puts the baseline back.
+/// picker closes. A selection the pointer made waits for the pointer to rest
+/// (`PickerView::preview_at`) and changes nothing until then. A picker that
+/// closed without keeping a theme (a kept one clears the baseline first)
+/// puts the baseline back.
 pub(super) fn theme_preview_change(
     ws: &mut WindowState,
     cfg: &Config,
@@ -926,6 +930,9 @@ pub(super) fn theme_preview_change(
     let Some(state) = ws.theme_picker_input.as_ref() else {
         return ws.theme_preview.take();
     };
+    if ws.picker_view.preview_at.is_some() {
+        return None;
+    }
     match theme_picker_selection(state, tr) {
         Some(name) if name == live_name => None,
         Some(name) => Some((name.to_string(), cfg.theme_by_name(name))),
@@ -1233,10 +1240,24 @@ pub(super) fn ssh_picker_hint(status: Option<&str>, tr: &kettle_i18n::Translator
     )
 }
 
-/// Keep the selected picker row inside the visible suffix. Picker rows have no
-/// separators, so this is the context-menu scroll rule reduced to equal-height
-/// rows and can be recomputed from selection on each frame.
+/// The first row a picker list shows when it opens: as far down as keeps the
+/// selected row in view. [`picker_scroll_offset_from`] with nothing shown yet.
+#[cfg(test)]
 pub(super) fn picker_scroll_offset(
+    row_count: usize,
+    selected: usize,
+    panel_height: f32,
+    row_height: f32,
+) -> usize {
+    picker_scroll_offset_from(0, row_count, selected, panel_height, row_height)
+}
+
+/// The first row a picker list of `row_count` equal-height rows shows when
+/// it last showed row `shown` first: still `shown` while the selected row is
+/// in view, else just far enough down or up to bring that row in. The keys
+/// move the list this way; the wheel moves `shown` itself.
+pub(super) fn picker_scroll_offset_from(
+    shown: usize,
     row_count: usize,
     selected: usize,
     panel_height: f32,
@@ -1254,10 +1275,14 @@ pub(super) fn picker_scroll_offset(
         .max(1)
         .min(row_count);
     let selected = selected.min(row_count - 1);
-    selected
-        .saturating_add(1)
-        .saturating_sub(visible)
-        .min(row_count - visible)
+    let shown = shown.min(row_count - visible);
+    if selected < shown {
+        selected
+    } else if selected >= shown + visible {
+        selected + 1 - visible
+    } else {
+        shown
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1483,13 +1508,30 @@ pub(super) fn theme_picker_list_with_footer(
     list
 }
 
-/// The results rectangle shares its x and width with the query header.
+/// The results rectangle shares its x and width with the query header. A
+/// list laid out as it opens, before any frame painted it; the window lays
+/// out its open picker with [`open_picker_menu`].
+#[cfg(test)]
 pub(super) fn picker_context_menu(
+    list: PickerList,
+    surface: (f32, f32),
+    cell: (f32, f32),
+    text_cell: (f32, f32),
+    top_chrome: f32,
+) -> Option<ContextMenu> {
+    picker_context_menu_at(list, surface, cell, text_cell, top_chrome, None)
+}
+
+/// The picker's card and rows for `list`, which showed row `shown` first
+/// when it was last painted (`PickerView::scroll`; `None` before the first
+/// frame). See [`picker_scroll_offset_from`].
+pub(super) fn picker_context_menu_at(
     mut list: PickerList,
     surface: (f32, f32),
     cell: (f32, f32),
     text_cell: (f32, f32),
     top_chrome: f32,
+    shown: Option<usize>,
 ) -> Option<ContextMenu> {
     // At least one row: the query header comes from this layout, and an
     // open picker keeps its field even with nothing listed.
@@ -1569,7 +1611,13 @@ pub(super) fn picker_context_menu(
         fit_context_menu_row(row, max_columns);
     }
     let (_, content_h) = kettle_render::menu::picker_scroll_content(height);
-    let scroll_offset = picker_scroll_offset(list.rows.len(), list.selected, content_h, row_height);
+    let scroll_offset = picker_scroll_offset_from(
+        shown.unwrap_or(0),
+        list.rows.len(),
+        list.selected,
+        content_h,
+        row_height,
+    );
     Some(ContextMenu {
         anchor: (x, y),
         rows: list.rows,
@@ -1582,6 +1630,18 @@ pub(super) fn picker_context_menu(
         picker_header_height: geometry.header.3,
         picker_footer: footer,
     })
+}
+
+/// Remember where the open picker's list was `painted`, so the next key or
+/// wheel step moves it from there (`PickerView::scroll`) instead of from
+/// the top. A context menu is not a picker.
+pub(super) fn remember_picker_scroll(ws: &mut WindowState, painted: Option<&ContextMenu>) {
+    if ws.context_menu.is_some() {
+        return;
+    }
+    if let Some(menu) = painted.filter(|menu| menu.picker_header_height > 0.0) {
+        ws.picker_view.scroll = Some(menu.scroll_offset);
+    }
 }
 
 /// The open picker laid out once: its card, its rows and its header (see
@@ -1601,13 +1661,25 @@ pub(super) fn open_picker_menu(
     text_cell: (f32, f32),
     top_chrome: f32,
 ) -> Option<ContextMenu> {
-    picker_context_menu(
+    let mut menu = picker_context_menu_at(
         open_picker_list(ws, cfg, theme_key, tr, notice)?,
         surface,
         cell,
         text_cell,
         top_chrome,
-    )
+        ws.picker_view.scroll,
+    )?;
+    // Lit only while the physical pointer is in the window: a pointer that
+    // left it, or a control client's move, lights nothing.
+    if let Some(row) = ws
+        .picker_view
+        .prelight
+        .filter(|_| ws.native_pointer.is_some())
+        .and_then(|row| menu.rows.get_mut(row))
+    {
+        row.prelit = true;
+    }
+    Some(menu)
 }
 
 #[derive(Clone, Copy)]
@@ -1719,6 +1791,113 @@ pub(super) fn theme_footer_press(
     }
 }
 
+/// The first row of the open picker that only a click on it, or a deliberate
+/// Down, selects: the SSH launcher's Save or Remove row. A hover lights it
+/// and the wheel stops above it. `usize::MAX` when there is none.
+fn picker_pointer_select_limit(ws: &WindowState, cfg: &Config) -> usize {
+    match &ws.ssh_input {
+        Some((query, _))
+            if ws.palette_input.is_none()
+                && ws.theme_picker_input.is_none()
+                && ws.layout_picker_input.is_none() =>
+        {
+            ssh_wheel_limit(&ssh_rows(query, &cfg.ssh_hosts, &ws.ssh_imported))
+        }
+        _ => None,
+    }
+    .unwrap_or(usize::MAX)
+}
+
+/// A picker just opened: its list starts where it opens, and the pointer,
+/// wherever it is, selects nothing until it moves.
+pub(super) fn reset_picker_view(ws: &mut WindowState) {
+    ws.picker_view = crate::window_state::PickerView {
+        pointer_seen: Some(ws.cursor),
+        ..Default::default()
+    };
+}
+
+/// A key reached the open picker. The keyboard's selection wins until the
+/// pointer really moves again, and a theme it selects previews at once.
+pub(super) fn note_picker_keys(ws: &mut WindowState) {
+    ws.picker_view.pointer_seen = Some(ws.cursor);
+    ws.picker_view.prelight = None;
+    ws.picker_view.preview_at = None;
+}
+
+/// Move the open picker's selection to row `row` of `menu`. Returns whether
+/// it moved.
+fn set_picker_selection(ws: &mut WindowState, menu: &ContextMenu, row: usize) -> bool {
+    // The palette stores the command, not the row: a row below a heading is
+    // the command one fewer heading up.
+    let selected = if ws.palette_input.is_some() {
+        kettle_render::menu_row_option(&menu.rows, row).unwrap_or(row)
+    } else {
+        row
+    };
+    let selection = if let Some((_, selected)) = ws.palette_input.as_mut() {
+        selected
+    } else if let Some(state) = ws.theme_picker_input.as_mut() {
+        &mut state.selected
+    } else if let Some((_, selected)) = ws.layout_picker_input.as_mut() {
+        selected
+    } else if let Some((_, selected)) = ws.ssh_input.as_mut() {
+        selected
+    } else {
+        return false;
+    };
+    if *selection == selected {
+        return false;
+    }
+    *selection = selected;
+    ws.accessibility_pending = true;
+    ws.reuse_pane_snapshots_once = true;
+    if let Some(window) = &ws.window {
+        window.request_redraw();
+    }
+    true
+}
+
+/// The pointer moved over the open picker (VS Code's quick-pick rule). A
+/// pointer somewhere new selects the row under it, which a theme picker
+/// previews once the pointer rests there. A pointer that has not moved since
+/// the picker last saw it selects nothing: the rows scrolled or changed
+/// under it, and the keyboard's selection holds. A row a hover may not
+/// select is only lit.
+fn picker_hover(ws: &mut WindowState, cfg: &Config, menu: &ContextMenu, cell_h: f32, inside: bool) {
+    if ws.picker_view.pointer_seen == Some(ws.cursor) {
+        return;
+    }
+    ws.picker_view.pointer_seen = Some(ws.cursor);
+    let row = inside
+        .then(|| picker_result_row(menu, cell_h, (ws.cursor.x, ws.cursor.y)))
+        .flatten();
+    let limit = picker_pointer_select_limit(ws, cfg);
+    let prelight = row.filter(|&row| row >= limit);
+    if ws.picker_view.prelight != prelight {
+        ws.picker_view.prelight = prelight;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+    if let Some(row) = row.filter(|&row| row < limit)
+        && set_picker_selection(ws, menu, row)
+    {
+        preview_theme_after_rest(ws);
+    }
+}
+
+/// The pointer moved the theme picker's selection: the window previews it
+/// once the pointer has rested `THEME_HOVER_PREVIEW_DELAY`, so sweeping
+/// across rows does not flash each theme. Every move starts the wait again.
+/// Other pickers preview nothing.
+fn preview_theme_after_rest(ws: &mut WindowState) {
+    if ws.theme_picker_input.is_some() {
+        ws.picker_view.preview_at =
+            Some(std::time::Instant::now() + crate::window_state::THEME_HOVER_PREVIEW_DELAY);
+    }
+}
+
 pub(super) fn apply_picker_pointer(
     ws: &mut WindowState,
     cfg: &Config,
@@ -1729,7 +1908,13 @@ pub(super) fn apply_picker_pointer(
     let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
     let (x, y) = menu.anchor;
     let (w, h) = (menu.panel_w_clamped, menu.panel_h_clamped);
-    if px < x || px >= x + w || py < y || py >= y + h {
+    let inside = !(px < x || px >= x + w || py < y || py >= y + h);
+    // A hover never takes the motion from the callers' later checks.
+    if matches!(event, PickerPointer::Hover) {
+        picker_hover(ws, cfg, menu, cell_h, inside);
+        return false;
+    }
+    if !inside {
         return false;
     }
     let row_h = kettle_render::menu::row_height(cell_h);
@@ -1752,74 +1937,114 @@ pub(super) fn apply_picker_pointer(
             .scroll_offset
             .saturating_add_signed(delta)
             .min(max_offset);
-        // The picker viewport follows selection. Crossing the cut edge selects
-        // the newly exposed row and keeps keyboard/preview routing in sync. A
-        // disabled row (a placeholder) is never selected: the nearest enabled
-        // row above it in view is. Nor is the SSH launcher's Save or Remove
-        // row, which takes a deliberate Down or a click on it.
-        let wheel_rows = match &ws.ssh_input {
-            Some((query, _))
-                if ws.palette_input.is_none()
-                    && ws.theme_picker_input.is_none()
-                    && ws.layout_picker_input.is_none() =>
-            {
-                ssh_wheel_limit(&ssh_rows(query, &cfg.ssh_hosts, &ws.ssh_imported))
+        if offset != menu.scroll_offset {
+            ws.picker_view.scroll = Some(offset);
+            if let Some(window) = &ws.window {
+                window.request_redraw();
             }
-            _ => None,
         }
-        .unwrap_or(usize::MAX);
-        if offset == menu.scroll_offset {
+        // The wheel scrolls the list only. The selection stays while it is
+        // in view; one the list scrolls past moves to the nearest row in view
+        // the wheel may select. That is never a disabled row (a placeholder)
+        // or a heading, nor the SSH launcher's Save or Remove row, which
+        // takes a deliberate Down or a click on it.
+        let limit = picker_pointer_select_limit(ws, cfg);
+        let selectable = |index: &usize| {
+            *index < limit
+                && menu
+                    .rows
+                    .get(*index)
+                    .is_some_and(|row| row.enabled && !row.separator)
+        };
+        let shown = offset..offset + visible;
+        if shown.contains(&menu.highlight) {
             menu.highlight
+        } else if menu.highlight < offset {
+            shown.clone().find(selectable).unwrap_or(menu.highlight)
         } else {
-            let exposed = offset + visible - 1;
-            let selectable = |index: usize| {
-                index < wheel_rows
-                    && menu
-                        .rows
-                        .get(index)
-                        .is_some_and(|row| row.enabled && !row.separator)
-            };
-            // Scrolling down, a heading (or another row nothing selects) at
-            // the bottom would leave the last selectable row where it was,
-            // and the viewport, which follows the selection, with it: take
-            // the first selectable row from the exposed one on instead.
-            (delta > 0)
-                .then(|| (exposed..menu.rows.len()).find(|&index| selectable(index)))
-                .flatten()
-                .or_else(|| (offset..=exposed).rev().find(|&index| selectable(index)))
-                .unwrap_or(menu.highlight)
+            shown.rev().find(selectable).unwrap_or(menu.highlight)
         }
     };
-    // The palette stores the command, not the row: a row below a heading is
-    // the command one fewer heading up.
-    let selected = if ws.palette_input.is_some() {
-        kettle_render::menu_row_option(&menu.rows, selected).unwrap_or(selected)
-    } else {
-        selected
-    };
-    let selection = if let Some((_, selected)) = ws.palette_input.as_mut() {
-        selected
-    } else if let Some(state) = ws.theme_picker_input.as_mut() {
-        &mut state.selected
-    } else if let Some((_, selected)) = ws.layout_picker_input.as_mut() {
-        selected
-    } else if let Some((_, selected)) = ws.ssh_input.as_mut() {
-        selected
-    } else {
-        return false;
-    };
-    if *selection != selected {
-        *selection = selected;
-        ws.accessibility_pending = true;
-        ws.reuse_pane_snapshots_once = true;
-        if let Some(window) = &ws.window {
+    let wheel = matches!(event, PickerPointer::Wheel(_));
+    if wheel {
+        // The rows move under a pointer that stays where it is; only its
+        // next real motion selects the row under it.
+        ws.picker_view.pointer_seen = Some(ws.cursor);
+        if ws.picker_view.prelight.take().is_some()
+            && let Some(window) = &ws.window
+        {
             window.request_redraw();
         }
+    }
+    if ws.palette_input.is_none()
+        && ws.theme_picker_input.is_none()
+        && ws.layout_picker_input.is_none()
+        && ws.ssh_input.is_none()
+    {
+        return false;
+    }
+    if set_picker_selection(ws, menu, selected) && wheel {
+        preview_theme_after_rest(ws);
     }
     true
 }
 
+/// Where the theme picker's pointer preview stands at `now`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ThemeHoverPreview {
+    /// Nothing waits.
+    Idle,
+    /// The pointer has not rested long enough: wake after this long.
+    Wait(std::time::Duration),
+    /// It has: preview the selection now.
+    Due,
+}
+
+/// Poll `PickerView::preview_at` at `now`: a wait that ran out, or whose
+/// picker closed, ends here. The scheduler wakes for it, so a still pointer
+/// needs no continuous redraw.
+pub(super) fn poll_theme_hover_preview(
+    ws: &mut WindowState,
+    now: std::time::Instant,
+) -> ThemeHoverPreview {
+    let Some(at) = ws.picker_view.preview_at else {
+        return ThemeHoverPreview::Idle;
+    };
+    if ws.theme_picker_input.is_none() {
+        ws.picker_view.preview_at = None;
+        return ThemeHoverPreview::Idle;
+    }
+    if now < at {
+        return ThemeHoverPreview::Wait(
+            at.saturating_duration_since(now)
+                .max(std::time::Duration::from_millis(1)),
+        );
+    }
+    ws.picker_view.preview_at = None;
+    ThemeHoverPreview::Due
+}
+
 impl App {
+    /// Preview the theme the pointer selected once the pointer has rested
+    /// (see [`poll_theme_hover_preview`]). Returns how long until then.
+    pub(super) fn settle_theme_hover_preview(
+        &mut self,
+        ws: &mut WindowState,
+        now: std::time::Instant,
+    ) -> Option<std::time::Duration> {
+        match poll_theme_hover_preview(ws, now) {
+            ThemeHoverPreview::Idle => None,
+            ThemeHoverPreview::Wait(wait) => Some(wait),
+            ThemeHoverPreview::Due => {
+                self.sync_theme_preview(ws);
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+                None
+            }
+        }
+    }
+
     pub(super) fn picker_top_chrome(&self, ws: &WindowState) -> f32 {
         let tabs = if self.cfg.tab_bar_pos == kettle_config::TabBarPos::Top {
             self.tab_bar_h(ws)
@@ -2105,6 +2330,8 @@ pub(super) fn sync_ssh_hosts(ws: &mut WindowState, hosts: &[(String, String)]) {
     if let Some((_, selected)) = ws.ssh_input.as_mut() {
         *selected = 0;
         ws.accessibility_pending = true;
+        // The rows moved: the lit row is another one now.
+        ws.picker_view.prelight = None;
     }
 }
 
