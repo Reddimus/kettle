@@ -786,25 +786,26 @@ impl SettingsNav {
         (self.category, self.field) = fields[next];
     }
 
-    /// Move `delta` results through the ones that apply, stopping at the
-    /// first and the last.
+    /// Move `delta` results in painted order, as the page in view counts
+    /// them, stopping at the first and the last and landing on a result
+    /// that applies (see [`page_target`]).
     pub fn page_result(&mut self, cats: &[Category], cfg: &Config, tr: &Translator, delta: isize) {
-        let fields: Vec<_> = self
-            .visible_fields(cats, tr)
-            .into_iter()
-            .filter(|&(c, f)| !field_disabled(cfg, cats[c].fields[f].key))
+        let fields = self.visible_fields(cats, tr);
+        let applies: Vec<bool> = fields
+            .iter()
+            .map(|&(c, f)| !field_disabled(cfg, cats[c].fields[f].key))
             .collect();
-        let Some(last) = fields.len().checked_sub(1) else {
-            return;
-        };
-        let current = fields
+        let Some(current) = fields
             .iter()
             .position(|pair| *pair == (self.category, self.field))
-            .unwrap_or(0);
-        let next = (current as isize)
-            .saturating_add(delta)
-            .clamp(0, last as isize) as usize;
-        (self.category, self.field) = fields[next];
+            .or_else(|| applies.iter().position(|&applies| applies))
+        else {
+            return;
+        };
+        let next = page_target(&applies, current, delta);
+        if applies[next] {
+            (self.category, self.field) = fields[next];
+        }
     }
 
     /// Move the focused row within its category.
