@@ -669,6 +669,122 @@ impl SettingsNav {
         let next = (current as isize + delta).rem_euclid(fields.len() as isize) as usize;
         (self.category, self.field) = fields[next];
     }
+
+    /// Move the focused row within its category.
+    pub(crate) fn move_focus(&mut self, cats: &[Category], cfg: &Config, to: RowMove) {
+        let Some(fields) = cats.get(self.category).map(|cat| &cat.fields[..]) else {
+            return;
+        };
+        let count = fields.len();
+        if count == 0 {
+            return;
+        }
+        let field = self.field.min(count - 1);
+        let half = (count / 2).max(1);
+        self.field = match to {
+            RowMove::Next => next_enabled_field(cfg, fields, field, 1),
+            RowMove::Previous => next_enabled_field(cfg, fields, field, -1),
+            RowMove::First => 0,
+            RowMove::Last => count - 1,
+            RowMove::PageDown => (field + half).min(count - 1),
+            RowMove::PageUp => field.saturating_sub(half),
+        };
+    }
+
+    /// Open the next (or previous) category on its first row, leaving any
+    /// search.
+    pub(crate) fn switch_category(&mut self, cats: &[Category], _cfg: &Config, next: bool) {
+        if cats.is_empty() {
+            return;
+        }
+        self.query = Default::default();
+        let count = cats.len();
+        let category = self.category.min(count - 1);
+        self.category = if next {
+            (category + 1) % count
+        } else {
+            (category + count - 1) % count
+        };
+        self.field = 0;
+    }
+}
+
+/// Where a row key moves the focused Settings row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RowMove {
+    Next,
+    Previous,
+    First,
+    Last,
+    PageDown,
+    PageUp,
+}
+
+/// A value key on the focused Settings row: ←/→ (and vim `h`/`l`), or
+/// Space/Enter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ValueKey {
+    Left,
+    Right,
+    Activate,
+}
+
+/// What a key does on Settings' rows once chord capture and search have
+/// passed it on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RowCommand {
+    Close,
+    Move(RowMove),
+    /// `true` for the next category.
+    Category(bool),
+    Value(ValueKey),
+    Reset,
+}
+
+/// The row command for `key`. With `vim` (`vim-menu-nav`), `j`/`k` move,
+/// `h`/`l` change the value, `g`/`G` jump to the ends and Ctrl+D/Ctrl+U
+/// move half a page.
+pub(crate) fn row_command(
+    key: &winit::keyboard::Key,
+    mods: winit::keyboard::ModifiersState,
+    vim: bool,
+) -> Option<RowCommand> {
+    use winit::keyboard::{Key, NamedKey};
+    Some(match key {
+        Key::Named(NamedKey::Escape) => RowCommand::Close,
+        Key::Named(NamedKey::ArrowDown) => RowCommand::Move(RowMove::Next),
+        Key::Named(NamedKey::ArrowUp) => RowCommand::Move(RowMove::Previous),
+        Key::Named(NamedKey::Tab) => RowCommand::Category(!mods.shift_key()),
+        Key::Named(NamedKey::Space | NamedKey::Enter) => RowCommand::Value(ValueKey::Activate),
+        Key::Named(NamedKey::ArrowRight) => RowCommand::Value(ValueKey::Right),
+        Key::Named(NamedKey::ArrowLeft) => RowCommand::Value(ValueKey::Left),
+        Key::Named(NamedKey::Delete | NamedKey::Backspace) => RowCommand::Reset,
+        // Case-fold so CapsLock can't kill the nav layer; g-vs-G derives
+        // from the physical Shift state.
+        Key::Character(text) if vim && !mods.alt_key() && !mods.super_key() => {
+            match (text.to_ascii_lowercase().as_str(), mods.control_key()) {
+                ("j", false) => RowCommand::Move(RowMove::Next),
+                ("k", false) => RowCommand::Move(RowMove::Previous),
+                ("g", false) if mods.shift_key() => RowCommand::Move(RowMove::Last),
+                ("g", false) => RowCommand::Move(RowMove::First),
+                ("h", false) => RowCommand::Value(ValueKey::Left),
+                ("l", false) => RowCommand::Value(ValueKey::Right),
+                ("d", true) => RowCommand::Move(RowMove::PageDown),
+                ("u", true) => RowCommand::Move(RowMove::PageUp),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// The direction `settings_adjust` takes for a value key on `field`.
+pub(crate) fn value_key_dir(_cfg: &Config, _field: &Field, key: ValueKey) -> Option<i32> {
+    Some(match key {
+        ValueKey::Left => -1,
+        ValueKey::Right => 1,
+        ValueKey::Activate => 0,
+    })
 }
 
 /// State for the inline text prompt opened by a [`FieldKind::Text`] row (the

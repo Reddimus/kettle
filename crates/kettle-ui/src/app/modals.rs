@@ -2046,94 +2046,38 @@ impl App {
             return;
         }
 
-        match key {
-            Key::Named(NamedKey::Escape) => {
+        // Chord-capture mode (handled above) already consumed the key, so
+        // capturing a chord like bare `j` (refused anyway) or `Ctrl+d` still
+        // reaches the capture branch. Search may have moved the row.
+        let Some(nav) = ws.settings_nav.as_mut() else {
+            return;
+        };
+        cat = nav.category.min(cats.len() - 1);
+        fld = nav.field.min(cats[cat].fields.len().saturating_sub(1));
+        (nav.category, nav.field) = (cat, fld);
+        use crate::settings::RowCommand;
+        // `dispatch_ui_key` sends Space as a character.
+        let command = if confirmation_space_key(key) {
+            Some(RowCommand::Value(crate::settings::ValueKey::Activate))
+        } else {
+            crate::settings::row_command(key, ws.mods, self.cfg.vim_menu_nav)
+        };
+        match command {
+            Some(RowCommand::Close) => {
                 ws.settings_nav = None;
                 self.reset_blink_phase(ws);
-                return;
             }
-            Key::Named(NamedKey::ArrowDown) => {
-                fld = crate::settings::next_enabled_field(&self.cfg, &cats[cat].fields, fld, 1)
-            }
-            Key::Named(NamedKey::ArrowUp) => {
-                fld = crate::settings::next_enabled_field(&self.cfg, &cats[cat].fields, fld, -1)
-            }
-            Key::Named(NamedKey::Tab) => {
-                if let Some(nav) = ws.settings_nav.as_mut() {
-                    nav.query = Default::default();
-                }
-                let n = cats.len();
-                cat = if ws.mods.shift_key() {
-                    (cat + n - 1) % n
-                } else {
-                    (cat + 1) % n
-                };
-                fld = 0;
-            }
-            key if confirmation_space_key(key)
-                || matches!(
-                    key,
-                    Key::Named(NamedKey::ArrowRight | NamedKey::ArrowLeft | NamedKey::Enter)
-                ) =>
-            {
-                let dir = match key {
-                    Key::Named(NamedKey::ArrowRight) => 1,
-                    Key::Named(NamedKey::ArrowLeft) => -1,
-                    _ => 0, // Space / Enter = activate (cycle forward / toggle)
-                };
-                self.settings_adjust(ws, &cats, cat, fld, dir);
-            }
-            Key::Named(NamedKey::Delete | NamedKey::Backspace) => {
-                self.settings_reset(ws, &cats, cat, fld);
-            }
-            // `vim-menu-nav`: j/k mirror ↓/↑, h/l mirror ←/→, g/G jump to the
-            // first/last field, Ctrl+d / Ctrl+u move half a page. Chord-capture
-            // mode (handled before this match) already consumed the key, so
-            // capturing a chord like bare `j` (refused anyway) or `Ctrl+d`
-            // still reaches the capture branch.
-            Key::Character(s)
-                if self.cfg.vim_menu_nav && !ws.mods.alt_key() && !ws.mods.super_key() =>
-            {
-                let half = (field_count / 2).max(1);
-                // Case-fold so CapsLock can't kill the nav layer; g-vs-G
-                // derives from the physical Shift state.
-                let folded = s.to_ascii_lowercase();
-                match (folded.as_str(), ws.mods.control_key()) {
-                    ("j", false) => {
-                        fld = crate::settings::next_enabled_field(
-                            &self.cfg,
-                            &cats[cat].fields,
-                            fld,
-                            1,
-                        )
-                    }
-                    ("k", false) => {
-                        fld = crate::settings::next_enabled_field(
-                            &self.cfg,
-                            &cats[cat].fields,
-                            fld,
-                            -1,
-                        )
-                    }
-                    ("g", false) => {
-                        fld = if ws.mods.shift_key() {
-                            field_count - 1
-                        } else {
-                            0
-                        };
-                    }
-                    ("h", false) => self.settings_adjust(ws, &cats, cat, fld, -1),
-                    ("l", false) => self.settings_adjust(ws, &cats, cat, fld, 1),
-                    ("d", true) => fld = (fld + half).min(field_count - 1),
-                    ("u", true) => fld = fld.saturating_sub(half),
-                    _ => {}
+            Some(RowCommand::Move(to)) => nav.move_focus(&cats, &self.cfg, to),
+            Some(RowCommand::Category(next)) => nav.switch_category(&cats, &self.cfg, next),
+            Some(RowCommand::Value(value)) => {
+                if let Some(dir) =
+                    crate::settings::value_key_dir(&self.cfg, &cats[cat].fields[fld], value)
+                {
+                    self.settings_adjust(ws, &cats, cat, fld, dir);
                 }
             }
-            _ => {}
-        }
-        if let Some(n) = ws.settings_nav.as_mut() {
-            n.category = cat;
-            n.field = fld;
+            Some(RowCommand::Reset) => self.settings_reset(ws, &cats, cat, fld),
+            None => {}
         }
     }
 
