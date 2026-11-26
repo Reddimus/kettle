@@ -974,7 +974,8 @@ impl App {
                     crate::settings::pending_apply(
                         self.running_graphics.as_ref(),
                         &self.cfg,
-                        ws.surface_caps.lacks_for(&self.cfg),
+                        ws.surface_caps
+                            .lacks_for(&self.cfg, blur != crate::settings::BlurState::Unavailable),
                     ),
                     self.language_change_pending(),
                     match active.fields.get(fld).map(|f| f.key) {

@@ -1095,6 +1095,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- Turning Window blur on where the session cannot blur, such as X11 without
+  a compositor's blur, no longer makes Settings ask for a new window or a
+  restart; the switch reads Unavailable.
+
 - Reset in Settings no longer stops at a font size that only rounds to the
   default, such as 13.4 px from a font = Mono 13.4 line; it sets the real
   default and keeps the font family.

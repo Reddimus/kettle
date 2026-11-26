@@ -278,7 +278,7 @@ fn settings_pending_notes_follow_the_running_and_saved_values() {
     let flat: String = src.split_whitespace().collect();
     assert!(
         flat.contains(
-            "crate::settings::pending_apply(self.running_graphics.as_ref(),&self.cfg,ws.surface_caps.lacks_for(&self.cfg),),"
+            "crate::settings::pending_apply(self.running_graphics.as_ref(),&self.cfg,ws.surface_caps.lacks_for(&self.cfg,blur!=crate::settings::BlurState::Unavailable),),"
         ),
         "the footer derives what is pending"
     );
