@@ -1591,6 +1591,16 @@ impl App {
             }
             return;
         }
+        if accessibility_link_status(request.target_node) {
+            // The link under the pointer, which the node names, opened as a
+            // Ctrl or Cmd click on it opens it.
+            if request.action == AccessibilityAction::Click
+                && let Some(uri) = self.hovered_link_at_cursor(ws).map(|link| link.uri.clone())
+            {
+                self.open_pane_link(ws, links_pane(ws), &uri);
+            }
+            return;
+        }
         if let Some(target) = accessibility_hint_target(request.target_node, ws) {
             // As `hint_key` does once a label is typed whole, without Shift.
             if request.action == AccessibilityAction::Click {
@@ -2416,6 +2426,13 @@ pub(super) fn accessibility_confirm_button_index(id: NodeId) -> Option<usize> {
     (raw < (1 << 16) - 1).then_some(raw as usize)
 }
 
+/// Whether `id` is a hovered link's node (`Role::Link`, over the status that
+/// names its target and how to open it).
+pub(super) fn accessibility_link_status(id: NodeId) -> bool {
+    id.0.checked_sub(accessibility_modal_id(19, 0).0)
+        .is_some_and(|raw| raw < (1 << 16) - 1)
+}
+
 /// The quick-select target a hint label's node names, while quick select is
 /// open and the label still matches what has been typed; a dimmed label, as
 /// a key that does not extend the typed prefix, picks nothing.
@@ -3142,6 +3159,8 @@ pub(super) fn modal_accessibility_projection(
             let link_id = accessibility_modal_id(19, index);
             let mut link = Node::new(Role::Link);
             link.set_label(target.clone());
+            // A press opens it as the click the status names does.
+            link.add_action(AccessibilityAction::Click);
             link.set_tooltip(status.description.clone());
             link.set_described_by(vec![id]);
             link.set_children(vec![id]);

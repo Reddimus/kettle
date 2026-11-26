@@ -3501,6 +3501,9 @@ speech:
 - `quick_select_labels_offer_a_press_that_acts_on_their_target`: matching
   quick-select labels have a Click action that runs `act_hint`. Dimmed labels
   have none.
+- `a_hovered_link_offers_a_press_that_opens_it`: the hovered link's node has
+  a Click action that opens the link under the pointer through
+  `open_pane_link`. Its status text has none.
 - `every_modal_surface_is_a_modal_dialog`: the palette, the theme, layout and
   SSH pickers, Settings and title editing each project one modal dialog.
 - `the_tab_list_holds_only_tabs_beside_a_toolbar_of_the_strips_buttons`: the

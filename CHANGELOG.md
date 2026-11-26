@@ -1098,6 +1098,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Screen readers can choose a command palette, picker or quick-select entry
   by pressing it, as a click does.
 
+- Screen readers can open the link under the pointer by pressing it, as a
+  Ctrl or Cmd click does.
+
 - Screen readers treat the command palette, the pickers, Settings and title
   editing as modal dialogs, as they already treated confirmations.
 

@@ -3333,3 +3333,52 @@ fn the_find_bar_has_one_named_status() {
     assert!(search.contains("search_status_nodes("));
     assert!(!search.contains("Role::Status"), "the find bar builds its status in one place");
 }
+
+/// The hovered link's node offers a press, which opens the link under the
+/// pointer as the Ctrl or Cmd click its status names does; the status beside
+/// it, and a quick-select legend, are text with no press.
+#[test]
+fn a_hovered_link_offers_a_press_that_opens_it() {
+    use accesskit::Action;
+    let link = kettle_render::link_status_layout(
+        (0.0, 0.0, 800.0, 400.0),
+        (8.0, 16.0),
+        "https://x.test/path",
+        "Ctrl+click to open",
+        &[(0.0, 0.0, 100.0, 16.0)],
+    )
+    .unwrap();
+    let overlay = kettle_render::Overlay {
+        pane_statuses: vec![link],
+        ..Default::default()
+    };
+    let projection =
+        super::modal_accessibility_projection(&overlay, (800.0, 400.0), (8.0, 16.0), 1.0, &EN_TEXT);
+    let (id, node) = projection
+        .nodes
+        .iter()
+        .find(|(_, node)| node.role() == accesskit::Role::Link)
+        .unwrap();
+    assert_eq!(node.label(), Some("https://x.test/path"));
+    assert!(node.supports_action(Action::Click));
+    assert!(super::accessibility_link_status(*id));
+    for (other, node) in &projection.nodes {
+        if other != id {
+            assert!(!node.supports_action(Action::Click), "{:?}", node.role());
+            assert!(!super::accessibility_link_status(*other));
+        }
+    }
+    let handler = production_source()
+        .split_once("fn handle_accessibility_action(")
+        .unwrap()
+        .1
+        .split_once("if accessibility_link_status(request.target_node) {")
+        .expect("the handler dispatches a link press")
+        .1
+        .split("return;")
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(handler.contains("self.hovered_link_at_cursor(ws)"));
+    assert!(handler.contains("self.open_pane_link(ws, links_pane(ws), &uri)"));
+}

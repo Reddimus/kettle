@@ -2060,6 +2060,8 @@ the picker's selection holds (a command for the palette, a row elsewhere) and
 `press_picker_option` then gives the picker its own Enter, as `picker_pointer`
 does for a click on the row. A label's press runs `act_hint` without Shift, as
 typing the label does. A dimmed label and a disabled placeholder have none.
+The hovered link's `Link` node has a press too, which opens the link under
+the pointer through `open_pane_link`, as the click its status names does.
 
 The context menu retains its platform convention: left/middle presses outside
 it, including in the terminal, dismiss and consume; an outside right press
