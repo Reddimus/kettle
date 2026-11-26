@@ -1391,6 +1391,7 @@ impl Renderer {
             starfield,
             presentation,
             starfield_started: std::time::Instant::now(),
+            background_held: None,
             bg_image_cache: None,
             bg_image_retry_at: None,
             bg_image_worker: None,

@@ -1091,6 +1091,23 @@ impl App {
         }
     }
 
+    /// Hold an animated background on its frame while motion is reduced.
+    /// Only a background that `background-animation` lets play asks.
+    pub(super) fn sync_background_motion(
+        &self,
+        renderer: &mut kettle_render::Renderer,
+        now: std::time::Instant,
+    ) {
+        use kettle_config::{BackgroundAnimation, BackgroundType};
+        if matches!(
+            self.cfg.background_type,
+            BackgroundType::Starfield | BackgroundType::Image
+        ) && self.cfg.background_animation != BackgroundAnimation::Off
+        {
+            renderer.set_background_motion(self.motion_allowed(), now);
+        }
+    }
+
     /// Show `pane`'s item as its source, or rendered again; only an item
     /// whose source the lane holds has the choice.
     pub(super) fn switch_preview_mode(&mut self, ws: &mut WindowState, pane: u64) {

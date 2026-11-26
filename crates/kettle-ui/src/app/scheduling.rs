@@ -779,6 +779,9 @@ impl App {
         let term_anim_finished = std::mem::replace(&mut ws.term_animation_active, term_anim)
             && !term_anim
             && !render_hidden;
+        if let Some(renderer) = ws.renderer.as_mut() {
+            self.sync_background_motion(renderer, now);
+        }
         // Wake at background frame boundaries, subject to the focus policy.
         // Output-driven repaints may still advance a focus-paused background.
         let bg_anim_interval_raw = ws

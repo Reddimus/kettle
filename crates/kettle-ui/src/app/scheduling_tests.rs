@@ -1087,3 +1087,35 @@ fn the_motion_preference_is_asked_for_from_the_first_turn() {
     assert!(watch.contains("self.cfg.reduce_motion == kettle_config::ReduceMotion::Auto"));
     assert!(watch.contains(".prepare();"));
 }
+
+/// Reduced motion reaches the renderer before it schedules or draws an
+/// animated background: the scheduler and every frame pass
+/// `motion_allowed`, so the starfield and an animated image hold still and
+/// ask for no wakes.
+#[test]
+fn reduced_motion_reaches_the_background_before_it_is_scheduled_or_drawn() {
+    let src = production_source();
+    let wait = src
+        .split("fn about_to_wait_inner(")
+        .nth(1)
+        .expect("about_to_wait_inner");
+    let synced = wait
+        .find("self.sync_background_motion(renderer, now);")
+        .expect("the scheduler passes reduced motion");
+    assert!(synced < wait.find(".bg_anim_interval_ms(").unwrap());
+    assert!(synced < wait.find(".bg_current_frame_index(").unwrap());
+    let redraw = src
+        .split("fn redraw(&mut self, ws: &mut WindowState) {")
+        .nth(1)
+        .expect("redraw");
+    let drawn = redraw
+        .find("self.sync_background_motion(renderer, std::time::Instant::now());")
+        .expect("each frame passes reduced motion");
+    assert!(drawn < redraw.find(".render_frame_with_status_and_pre_present(").unwrap());
+    let sync = src
+        .split("fn sync_background_motion(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("sync_background_motion");
+    assert!(sync.contains("renderer.set_background_motion(self.motion_allowed(), now);"));
+}

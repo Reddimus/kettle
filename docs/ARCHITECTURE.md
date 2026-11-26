@@ -4470,7 +4470,13 @@ at low idle cost. The clock that places the stars stays continuous, so each
 repaint shows the exact position. The animated background (starfield or image)
 plays by default even when unfocused, but the event loop **freezes the wake
 when the window is minimized or occluded** (`window_occluded` +
-`is_minimized`), so a hidden window costs zero idle.
+`is_minimized`), so a hidden window costs zero idle. Reduced motion holds it:
+before it schedules or draws a frame, the app passes `motion_allowed` to
+`Renderer::set_background_motion`, which stops the shared `background_clock`
+at that moment, so a repaint shows the same frame and `background_is_animating`
+asks for no wakes; when motion returns, both clocks shift by the pause and
+playback resumes from the held frame. `background-animation = off` still shows
+frame 0.
 
 The **settings overlay is mouse-driven**: `kettle_render::settings_hit_test`
 recomputes the panel geometry from the SAME `settings_display_lines` + panel math

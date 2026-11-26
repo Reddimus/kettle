@@ -632,7 +632,8 @@ pub enum TextRenderer {
 /// Ghostty's custom GLSL shaders — which pin the GPU to a high frame rate even
 /// when idle — kettle advances on the media's own timestamps (or the starfield's
 /// ~10 fps cap) and freezes when the window is minimized or fully occluded, so a
-/// hidden window costs nothing. A still image ignores this entirely.
+/// hidden window costs nothing. `reduce-motion` holds `Always` and
+/// `WhenFocused` on their current frame. A still image ignores this entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BackgroundAnimation {
     /// Always animate, even when the window is unfocused, because a wallpaper
@@ -1283,9 +1284,9 @@ impl LinkUnderline {
 
 /// Whether Kettle avoids motion it would start on its own (`reduce-motion`):
 /// a video's preview looping while the pointer rests on its lane, the
-/// visual-bell flash, the toasts' fade and the quick terminal's slide. A
-/// preview the user starts plays either way, and the bell mark on the tab
-/// shows either way.
+/// visual-bell flash, the toasts' fade, the quick terminal's slide and an
+/// animated background, which holds its frame. A preview the user starts
+/// plays either way, and the bell mark on the tab shows either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReduceMotion {
     /// Follow macOS Reduce Motion, or the Linux Settings portal and, where
