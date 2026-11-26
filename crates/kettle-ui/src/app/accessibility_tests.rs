@@ -3015,3 +3015,55 @@ fn settings_switches_expose_their_checked_state() {
         .to_string();
     assert!(key.contains("matches!(row.control, kettle_render::SettingsControl::Toggle(true))"));
 }
+
+/// Each Settings row says where it stands among all the rows the list shows,
+/// across its sections while browsing and its categories in a search, as
+/// AT-SPI and UI Automation read it once the tree reaches AccessKit's
+/// consumer: a zero-based position, and the set's size from the list.
+#[test]
+fn settings_rows_report_their_place_among_all_rows() {
+    for query in ["", "o"] {
+        let settings = kettle_render::SettingsOverlay {
+            categories: vec!["Appearance".into(), "Terminal".into()],
+            search_query: query.into(),
+            rows: (0..9)
+                .map(|i| kettle_render::SettingsRow {
+                    label: format!("Field {i}"),
+                    value: "On".into(),
+                    category: i / 5,
+                    group: ["Colors and text", "Window"][i % 2].into(),
+                    disabled: i == 4,
+                    ..Default::default()
+                })
+                .collect(),
+            focused_row: 2,
+            ..Default::default()
+        };
+        let total = settings.rows.len();
+        let overlay = kettle_render::Overlay {
+            settings: Some(settings),
+            ..Default::default()
+        };
+        let projection =
+            super::modal_accessibility_projection(&overlay, (1280.0, 820.0), (8.4, 17.5), 1.0, &EN_TEXT);
+        let tree = accesskit_consumer::Tree::new(
+            super::mouse_override_hint_tests::finished_tree(projection),
+            true,
+        );
+        let state = tree.state();
+        for index in 0..total {
+            let row = state
+                .node_by_tree_local_id(super::accessibility_modal_id(5, index + 2), accesskit::TreeId::ROOT)
+                .unwrap();
+            assert_eq!(row.position_in_set(), Some(index), "{query:?} row {index}");
+            assert_eq!(
+                row.size_of_set_from_container(&accesskit_consumer::common_filter),
+                Some(total),
+                "{query:?} row {index}"
+            );
+            if query.is_empty() {
+                assert_eq!(row.parent().unwrap().role(), accesskit::Role::Group, "in its section");
+            }
+        }
+    }
+}

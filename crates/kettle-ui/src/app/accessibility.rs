@@ -3274,11 +3274,19 @@ pub(super) fn modal_accessibility_projection(
                 node.add_action(AccessibilityAction::Click);
             }
             node.set_selected(index == settings.focused_row);
+            // Its place among every row, sections and categories included.
+            // Zero-based, unlike ARIA: the AT-SPI and UIA adapters add one,
+            // and read the size from the list.
+            node.set_position_in_set(index);
+            node.set_size_of_set(settings.rows.len());
             children.push(id);
             projection.nodes.push((id, node));
         }
         let mut list = Node::new(Role::ListBox);
         list.set_label(tr.text(kettle_i18n::Text::SettingsA11yFields));
+        if !settings.rows.is_empty() {
+            list.set_size_of_set(settings.rows.len());
+        }
         if settings.search_query.is_empty() && settings.rows.iter().all(|row| row.group.is_empty())
         {
             list.set_children(children.clone());

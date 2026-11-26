@@ -3469,7 +3469,10 @@ platform's text keeps unit coverage off its own runner.
 `settings_switches_expose_their_checked_state` gives a switch row its checked
 state wherever the speech choice allows it (every platform but macOS) and no
 other row one, keeps each row's value, and checks that the accessibility key
-follows a switch's state.
+follows a switch's state. `settings_rows_report_their_place_among_all_rows`
+hands the projection to AccessKit's consumer and reads each row's position
+and set size as the AT-SPI and UIA adapters do, while browsing sections and
+in a search.
 
 ## Static text names on every platform
 

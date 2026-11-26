@@ -1104,6 +1104,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - On Linux, screen readers report each Settings switch as checked or not
   checked.
 
+- On Linux and Windows, screen readers hear each Settings row's place in the
+  list, such as 3 of 12.
+
 - `tab-min-width` is measured in logical pixels, as documented. On a display
   with a scale above 100% tabs could shrink to a fraction of the width set
   (half on a Retina display) before the tab bar started to scroll.
