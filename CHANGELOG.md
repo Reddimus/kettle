@@ -1569,7 +1569,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - The resize chip no longer redraws an unchanged window about 30 times a
   second while it shows.
 - Reduced motion now holds the starfield and animated background images still
-  on their current frame.
+  on their current frame; an image loaded meanwhile starts from its first
+  frame when motion returns.
 
 ## Older releases
 

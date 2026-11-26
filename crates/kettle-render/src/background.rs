@@ -165,6 +165,19 @@ pub(crate) fn background_clock(
         .saturating_duration_since(started)
 }
 
+/// The start of an animated background's clock once a hold from `held`
+/// ends at `now`: moved on by the part of the hold the background lived
+/// through, so it plays on from the frame it held. One that started during
+/// the hold (a wallpaper decoded since) starts now, on its first frame.
+pub(crate) fn resumed_clock(
+    started: std::time::Instant,
+    held: std::time::Instant,
+    now: std::time::Instant,
+) -> std::time::Instant {
+    let paused = now.saturating_duration_since(held.max(started));
+    started.checked_add(paused).unwrap_or(now)
+}
+
 fn admit_bg_frames(
     decoded: Vec<bg_image::BgFrame>,
     budget: &kettle_core::GraphicsBudget,
@@ -217,16 +230,16 @@ impl Renderer {
     /// `reduce-motion` for animated backgrounds, which the event loop sets
     /// before it schedules or draws a frame. Held back, the starfield and an
     /// animated image keep the frame they showed at `now` and ask for no
-    /// frames; allowed again, they play on from that frame.
+    /// frames; allowed again, they play on from that frame, and an image
+    /// decoded during the hold starts on its first.
     pub fn set_background_motion(&mut self, allowed: bool, now: std::time::Instant) {
         match (allowed, self.background_held) {
             (false, None) => self.background_held = Some(now),
             (true, Some(held)) => {
                 self.background_held = None;
-                let paused = now.saturating_duration_since(held);
-                self.starfield_started = self.starfield_started.checked_add(paused).unwrap_or(now);
+                self.starfield_started = resumed_clock(self.starfield_started, held, now);
                 if let Some(cache) = self.bg_image_cache.as_mut() {
-                    cache.started = cache.started.checked_add(paused).unwrap_or(now);
+                    cache.started = resumed_clock(cache.started, held, now);
                 }
             }
             _ => {}
