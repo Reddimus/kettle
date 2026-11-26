@@ -2626,3 +2626,201 @@ fn settings_search_group_bounds_follow_first_row_indices_and_sticky_category() {
         }
     }
 }
+
+/// Every enabled picker option offers a press, the default action screen
+/// readers run, and a press picks the option as a click on its row does: the
+/// palette's selection counts commands past its headings, the other pickers'
+/// count rows. The dispatch then hands the picker its own Enter. A disabled
+/// placeholder, a stale id, the footer's controls, another picker's options
+/// and anything under a menu or a confirmation pick nothing.
+#[test]
+fn picker_options_offer_a_press_that_picks_them_as_a_click_does() {
+    use accesskit::Action;
+    let bindings = kettle_config::keybinds::defaults();
+    let list = command_picker_list(
+        "",
+        0,
+        &bindings,
+        &EN_TEXT,
+        None,
+        Some(&[]),
+        false,
+        kettle_config::BroadcastDefault::default(),
+    );
+    let palette = picker_context_menu(list, (1280.0, 820.0), (7.8, 16.25), (7.8, 16.25), 32.0)
+        .unwrap();
+    assert!(palette.rows.iter().any(|row| row.heading), "the empty palette has headings");
+    let mut layouts = picker_context_menu(
+        layout_picker_list("", 0, &["dev".to_string(), "ops".to_string(), "web".to_string()], &EN_TEXT),
+        (1280.0, 820.0),
+        (7.8, 16.25),
+        (7.8, 16.25),
+        32.0,
+    )
+    .unwrap();
+    layouts.rows[1].enabled = false;
+    for (kind, menu) in [
+        (super::MODAL_KIND_PALETTE, palette),
+        (super::MODAL_KIND_LAYOUTS, layouts),
+    ] {
+        let palette = kind == super::MODAL_KIND_PALETTE;
+        let mut ws = WindowState::new(0, Mux::new());
+        let overlay = if palette {
+            ws.palette_input = Some((Default::default(), 0));
+            kettle_render::Overlay {
+                palette_query: Some(String::new()),
+                context_menu: Some(menu),
+                ..Default::default()
+            }
+        } else {
+            ws.layout_picker_input = Some((Default::default(), 0));
+            kettle_render::Overlay {
+                layout_picker_query: Some(String::new()),
+                context_menu: Some(menu),
+                ..Default::default()
+            }
+        };
+        let projection =
+            super::modal_accessibility_projection(&overlay, (1280.0, 820.0), (7.8, 16.25), 1.0, &EN_TEXT);
+        let menu = overlay.context_menu.as_ref().unwrap();
+        let mut pressed = 0;
+        for (index, row) in menu.rows.iter().enumerate() {
+            let Some(option) = kettle_render::menu_row_option(&menu.rows, index) else {
+                continue;
+            };
+            let id = super::accessibility_modal_id(kind, option + 3);
+            let node = &projection.nodes.iter().find(|(at, _)| *at == id).unwrap().1;
+            assert_eq!(node.supports_action(Action::Click), row.enabled, "{kind} row {index}");
+            assert_eq!(
+                super::accessibility_picker_press(&ws, menu, id),
+                row.enabled.then_some(if palette { option } else { index }),
+                "{kind} row {index}"
+            );
+            pressed += usize::from(row.enabled);
+        }
+        assert!(pressed > 1, "{kind}");
+        let first = super::accessibility_modal_id(kind, 3);
+        for stale in [
+            super::accessibility_modal_id(kind, 0),
+            super::accessibility_modal_id(kind, 1),
+            super::accessibility_modal_id(kind, 2),
+            super::accessibility_modal_id(kind, menu.rows.len() + 3),
+            super::accessibility_modal_id(kind, super::PICKER_CONTRAST_A11Y_INDEX),
+            super::accessibility_modal_id(kind, super::PICKER_STATUS_A11Y_INDEX),
+            super::accessibility_modal_id(super::MODAL_KIND_SSH, 3),
+        ] {
+            assert_eq!(super::accessibility_picker_press(&ws, menu, stale), None, "{stale:?}");
+        }
+        assert!(super::accessibility_picker_press(&ws, menu, first).is_some());
+        ws.context_menu = Some(super::ContextMenuState {
+            origin: crate::app::MenuOrigin::Other,
+            anchor: (0.0, 0.0),
+            anchor_scale: 1.0,
+            items: Vec::new(),
+            highlight: 0,
+            drill_stack: Vec::new(),
+            scroll_offset: 0,
+            typeahead_buf: String::new(),
+            typeahead_until: None,
+        });
+        assert_eq!(super::accessibility_picker_press(&ws, menu, first), None);
+        ws.context_menu = None;
+        ws.palette_input = None;
+        ws.layout_picker_input = None;
+        assert_eq!(super::accessibility_picker_press(&ws, menu, first), None);
+    }
+    let handler = production_source()
+        .split_once("fn handle_accessibility_action(")
+        .unwrap()
+        .1
+        .split_once("accessibility_picker_press(ws, &menu, request.target_node)")
+        .expect("the handler dispatches a picker press")
+        .1
+        .split("return;")
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(handler.contains("self.press_picker_option(ws, selected, event_loop)"));
+    let press = production_source()
+        .split_once("fn press_picker_option(")
+        .unwrap()
+        .1
+        .split("\n    }\n")
+        .next()
+        .unwrap()
+        .to_string();
+    for call in [
+        "self.palette_key(ws, &key, None, event_loop)",
+        "self.theme_picker_key(ws, &key, None)",
+        "self.layout_picker_key(ws, &key, None)",
+        "self.ssh_key(ws, &key, None)",
+    ] {
+        assert!(press.contains(call), "{call}");
+    }
+}
+
+/// Each quick-select label still matching what has been typed offers a
+/// press, which acts on its target as typing the label does; a dimmed label
+/// has none and picks nothing, as does any label once quick select closes.
+#[test]
+fn quick_select_labels_offer_a_press_that_acts_on_their_target() {
+    use accesskit::Action;
+    let target = |label: &str| super::HintTarget {
+        row: 0,
+        col: 0,
+        label: label.into(),
+        pane: 1,
+        what: super::HintWhat::Text {
+            kind: kettle_core::hints::Kind::Url,
+            text: format!("https://{label}.test"),
+            bounded: true,
+        },
+    };
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.hint_state = Some((vec![target("aa"), target("ab"), target("ba")], "a".into()));
+    let overlay = kettle_render::Overlay {
+        hint_labels: ["aa", "ab", "ba"]
+            .into_iter()
+            .enumerate()
+            .map(|(col, label)| kettle_render::HintLabel {
+                row: 0,
+                col: col * 4,
+                label: label.into(),
+                dim: !label.starts_with('a'),
+            })
+            .collect(),
+        hint_bounds: (0..3).map(|col| (col as f32 * 32.0, 0.0, 16.0, 16.0)).collect(),
+        ..Default::default()
+    };
+    let projection =
+        super::modal_accessibility_projection(&overlay, (800.0, 400.0), (8.0, 16.0), 1.0, &EN_TEXT);
+    for (index, (label, live)) in [("aa", true), ("ab", true), ("ba", false)].into_iter().enumerate() {
+        let id = super::accessibility_modal_id(3, index + 1);
+        let node = &projection.nodes.iter().find(|(at, _)| *at == id).unwrap().1;
+        assert_eq!(node.supports_action(Action::Click), live, "{label}");
+        assert_eq!(
+            super::accessibility_hint_target(id, &ws).map(|target| target.label),
+            live.then(|| label.to_string()),
+            "{label}"
+        );
+    }
+    for stale in [super::accessibility_modal_id(3, 0), super::accessibility_modal_id(3, 4)] {
+        assert!(super::accessibility_hint_target(stale, &ws).is_none());
+    }
+    let first = super::accessibility_modal_id(3, 1);
+    ws.hint_state = None;
+    assert!(super::accessibility_hint_target(first, &ws).is_none());
+    let handler = production_source()
+        .split_once("fn handle_accessibility_action(")
+        .unwrap()
+        .1
+        .split_once("accessibility_hint_target(request.target_node, ws)")
+        .expect("the handler dispatches a hint press")
+        .1
+        .split("return;")
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(handler.contains("ws.hint_state = None;"));
+    assert!(handler.contains("self.act_hint(ws, &target, false)"));
+}

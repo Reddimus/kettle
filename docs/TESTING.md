@@ -3475,6 +3475,22 @@ label. They check the theme picker's footer text (with the lowest colour's
 number and the below-3:1 warning) and Settings' no-match line in English and
 Spanish. They do not run Orca or Narrator.
 
+## Accessibility tree semantics
+
+These `kettle-ui` tests check the generated tree and the action routing, not
+speech:
+
+- `picker_options_offer_a_press_that_picks_them_as_a_click_does`: every
+  enabled palette and layout picker option has a Click action, and a press
+  selects the command (palette) or row (other pickers) a click would. The
+  handler then sends the picker its own Enter. Disabled rows, stale ids, footer
+  controls and options under a menu select nothing.
+- `quick_select_labels_offer_a_press_that_acts_on_their_target`: matching
+  quick-select labels have a Click action that runs `act_hint`. Dimmed labels
+  have none.
+
+VoiceOver and Orca have not yet been run against these changes.
+
 ## Configured-session and desktop acceptance, 2026-11-01
 
 On native macOS, the configured AstroNvim/LazyVCS copy completed a five-minute,

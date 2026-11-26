@@ -1325,6 +1325,46 @@ impl App {
         }
     }
 
+    /// A screen reader's press on a picker option: the option becomes the
+    /// selection (`accessibility_picker_press`), then the picker's own Enter
+    /// acts on it, as `picker_pointer` does for a click on its row.
+    fn press_picker_option(
+        &mut self,
+        ws: &mut WindowState,
+        selected: usize,
+        event_loop: &ActiveEventLoop,
+    ) {
+        let selection = if let Some((_, selection)) = ws.palette_input.as_mut() {
+            selection
+        } else if let Some(state) = ws.theme_picker_input.as_mut() {
+            &mut state.selected
+        } else if let Some((_, selection)) = ws.layout_picker_input.as_mut() {
+            selection
+        } else if let Some((_, selection)) = ws.ssh_input.as_mut() {
+            selection
+        } else {
+            return;
+        };
+        *selection = selected;
+        end_modal_composition(ws);
+        let mods = std::mem::replace(&mut ws.mods, ModifiersState::empty());
+        let key = Key::Named(NamedKey::Enter);
+        if ws.palette_input.is_some() {
+            self.palette_key(ws, &key, None, event_loop);
+        } else if ws.theme_picker_input.is_some() {
+            self.theme_picker_key(ws, &key, None);
+        } else if ws.layout_picker_input.is_some() {
+            self.layout_picker_key(ws, &key, None);
+        } else if ws.ssh_input.is_some() {
+            self.ssh_key(ws, &key, None);
+        }
+        ws.mods = mods;
+        ws.accessibility_pending = true;
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
     pub(super) fn handle_accessibility_action(
         &mut self,
         ws: &mut WindowState,
@@ -1554,6 +1594,18 @@ impl App {
             }
             return;
         }
+        if let Some(target) = accessibility_hint_target(request.target_node, ws) {
+            // As `hint_key` does once a label is typed whole, without Shift.
+            if request.action == AccessibilityAction::Click {
+                ws.hint_state = None;
+                self.act_hint(ws, &target, false);
+                ws.accessibility_pending = true;
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+            }
+            return;
+        }
         if request.target_node == ACCESSIBILITY_MEDIA_RECEIPT_DISMISS_ID {
             if request.action == AccessibilityAction::Click {
                 ws.media_paste_receipt = None;
@@ -1740,6 +1792,14 @@ impl App {
         if ws.theme_picker_input.is_some() && accessibility_theme_contrast(request.target_node) {
             if request.action == AccessibilityAction::Click {
                 self.step_picker_contrast(ws);
+            }
+            return;
+        }
+        if let Some(menu) = accessibility_picker_kind(ws).and_then(|_| self.picker_menu(ws))
+            && let Some(selected) = accessibility_picker_press(ws, &menu, request.target_node)
+        {
+            if request.action == AccessibilityAction::Click {
+                self.press_picker_option(ws, selected, event_loop);
             }
             return;
         }
@@ -2313,6 +2373,24 @@ pub(super) fn accessibility_confirm_button_index(id: NodeId) -> Option<usize> {
     (raw < (1 << 16) - 1).then_some(raw as usize)
 }
 
+/// The quick-select target a hint label's node names, while quick select is
+/// open and the label still matches what has been typed; a dimmed label, as
+/// a key that does not extend the typed prefix, picks nothing.
+pub(super) fn accessibility_hint_target(id: NodeId, ws: &WindowState) -> Option<HintTarget> {
+    if ws.confirm_dialog.is_some() {
+        return None;
+    }
+    let (targets, typed) = ws.hint_state.as_ref()?;
+    let raw = id.0.checked_sub(accessibility_modal_id(3, 1).0)?;
+    if raw >= (1 << 16) - 1 {
+        return None;
+    }
+    targets
+        .get(raw as usize)
+        .filter(|target| target.label.starts_with(typed.as_str()))
+        .cloned()
+}
+
 pub(super) fn accessibility_context_menu_item_index(id: NodeId, ws: &WindowState) -> Option<usize> {
     if ws.confirm_dialog.is_some()
         || ws.palette_input.is_some()
@@ -2544,6 +2622,48 @@ pub(super) const PICKER_CONTRAST_A11Y_INDEX: usize = PICKER_FOOTER_A11Y_INDEX - 
 /// reach them.
 pub(super) const PICKER_STATUS_A11Y_INDEX: usize = PICKER_FOOTER_A11Y_INDEX - 5;
 
+/// The kind of the picker that has the keyboard, as `picker_pointer` finds
+/// it, while no menu or confirmation covers it.
+pub(super) fn accessibility_picker_kind(ws: &WindowState) -> Option<u64> {
+    if ws.confirm_dialog.is_some() || ws.context_menu.is_some() {
+        None
+    } else if ws.palette_input.is_some() {
+        Some(MODAL_KIND_PALETTE)
+    } else if ws.theme_picker_input.is_some() {
+        Some(MODAL_KIND_THEMES)
+    } else if ws.layout_picker_input.is_some() {
+        Some(MODAL_KIND_LAYOUTS)
+    } else {
+        ws.ssh_input.is_some().then_some(MODAL_KIND_SSH)
+    }
+}
+
+/// What a screen reader's press on `node` selects in the open picker: the
+/// value its selection then holds (the palette's counts commands, every
+/// other picker's rows), or `None` for a node that is not one of its enabled
+/// options in `menu`, as laid out for this frame.
+pub(super) fn accessibility_picker_press(
+    ws: &WindowState,
+    menu: &ContextMenu,
+    node: NodeId,
+) -> Option<usize> {
+    let kind = accessibility_picker_kind(ws)?;
+    let raw = node.0.checked_sub(accessibility_modal_id(kind, 3).0)?;
+    // The footer, its sides and the status line sit above every option.
+    if raw >= (PICKER_STATUS_A11Y_INDEX - 3) as u64 {
+        return None;
+    }
+    let option = raw as usize;
+    let row = kettle_render::menu_option_row(&menu.rows, option)?;
+    menu.rows[row]
+        .enabled
+        .then_some(if kind == MODAL_KIND_PALETTE {
+            option
+        } else {
+            row
+        })
+}
+
 /// Whether `node` is the theme picker's Contrast button.
 pub(super) fn accessibility_theme_contrast(node: NodeId) -> bool {
     node == accessibility_modal_id(MODAL_KIND_THEMES, PICKER_CONTRAST_A11Y_INDEX)
@@ -2640,6 +2760,8 @@ fn push_picker_accessibility(
                 // Zero-based, unlike ARIA: the AT-SPI adapter adds one.
                 option.set_position_in_set(position);
                 option.set_size_of_set(results);
+                // A press picks the option as a click on its row does.
+                option.add_action(AccessibilityAction::Click);
                 position += 1;
             } else {
                 option.set_disabled();
@@ -3011,6 +3133,9 @@ pub(super) fn modal_accessibility_projection(
             }
             if hint.dim {
                 node.set_disabled();
+            } else {
+                // A press acts on the target as typing its label does.
+                node.add_action(AccessibilityAction::Click);
             }
             children.push(id);
             projection.nodes.push((id, node));

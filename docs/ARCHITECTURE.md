@@ -2046,6 +2046,14 @@ cancels only that capture on a press outside its focused row. Confirmation dialo
 keep their question and consume outside presses. The search lane and vi mode keep
 their existing pointer behavior because they are not transient popups.
 
+Every enabled picker option, and each quick-select label that still matches
+what has been typed, has a press: AccessKit's `Click`, the default action a
+screen reader runs. `accessibility_picker_press` maps the option to the value
+the picker's selection holds (a command for the palette, a row elsewhere) and
+`press_picker_option` then gives the picker its own Enter, as `picker_pointer`
+does for a click on the row. A label's press runs `act_hint` without Shift, as
+typing the label does. A dimmed label and a disabled placeholder have none.
+
 The context menu retains its platform convention: left/middle presses outside
 it, including in the terminal, dismiss and consume; an outside right press
 dismisses and follows the ordinary right-click route to relocate/reopen the menu.
