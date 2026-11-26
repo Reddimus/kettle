@@ -6592,12 +6592,19 @@ portal has none does `motion::SystemMotion` start a second watch, on GNOME's
 `org.gnome.desktop.interface enable-animations` through the same portal
 (`Preference::resolve`). Where the portal has neither key, or there is no
 portal, a GNOME-like session (`XDG_CURRENT_DESKTOP`) reads GNOME's own switch
-with the first executable `gsettings` on an absolute `PATH` entry
-(`motion/gnome_local.rs`, `Preference::linux`). That read runs on its own
-thread, gives up after two seconds or 64 bytes of output, is killed and
-reaped then or when its watch is dropped, and is repeated every 30 seconds so
-a change applies; the watch's drop joins the thread. A failed read keeps the
-last answer. A watch distinguishes a pending first answer, which holds motion
+with the first `gsettings` on an absolute `PATH` entry that the process may
+run, as `faccessat` decides it for the effective user, so an unusable one
+earlier in `PATH` cannot hide it (`motion/gnome_local.rs`,
+`Preference::linux`). Finding `gsettings` and the read run on the watch's
+own thread. The first answer is due two seconds after the watch starts,
+lookup included, and is no longer pending then even if the thread is still
+held in the filesystem; each later read has two seconds and 64 bytes of
+output. A read's child is killed and reaped when it overruns or the watch is
+dropped, and no child starts past a read's deadline or after the stop. The
+read is repeated every 30 seconds so a change applies, and a failed one keeps
+the last answer. Dropping the watch never waits on the filesystem: it stops
+the thread and joins it within half a second, and otherwise leaves a thread
+held in a lookup or spawn to end on its own. A watch distinguishes a pending first answer, which holds motion
 back until the desktop answers or a bounded call fails, from an unavailable
 one. Under `auto` the portal watch starts on the first event-loop turn, the
 portal's GNOME watch as soon as the portal says it has no `reduced-motion`,
