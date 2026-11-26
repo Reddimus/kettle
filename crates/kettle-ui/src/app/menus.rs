@@ -886,10 +886,10 @@ impl App {
         let panel = clamp_context_menu_panel((panel_w, panel_h), (sw, sh));
         let placement = place_context_menu(MenuAnchor::point(px, py), panel, (sw, sh));
         let anchor = placement.origin;
-        ws.context_menu_session = ContextMenuSession {
-            root_max_h: placement.max_h,
-            ..ContextMenuSession::default()
-        };
+        // Opened under the pointer, as a right-click opens it.
+        let at_pointer = (px, py) == (ws.cursor.x as f32, ws.cursor.y as f32);
+        ws.context_menu_session =
+            ContextMenuSession::opened(placement.max_h, at_pointer.then_some((px, py)));
         let anchor_scale = ws
             .window
             .as_ref()

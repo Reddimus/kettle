@@ -784,3 +784,60 @@ fn moving_along_the_submenus_edge_line_away_from_it_is_not_aiming() {
         "300 ms after it turned away, the row below takes over"
     );
 }
+
+#[test]
+fn a_first_motion_off_a_menu_opened_under_the_pointer_clears_its_highlight() {
+    // Right-click at (300, 200): the menu's corner is the pointer, and the
+    // first motion, one pixel left, is already off it.
+    let mut menu = state(vec![
+        leaf("Copy", Action::Copy),
+        leaf("Paste", Action::Paste),
+    ]);
+    let mut session = ContextMenuSession::opened(None, Some((300.0, 200.0)));
+    let panels = [(300.0, 200.0, 160.0, 48.0)];
+    assert_eq!(
+        menu_pointer_moved(
+            &mut menu,
+            &mut session.pointer,
+            MenuHit::Outside,
+            &panels,
+            (299.0, 200.0),
+            Instant::now()
+        ),
+        MenuHoverEffect::Redraw
+    );
+    assert!(menu_shown_highlight(&menu, &session.pointer) >= menu.items.len());
+    assert!(menu_activate_click(&menu, &session.pointer).is_none());
+    // Opened elsewhere, as from the keyboard, the same motion changes nothing.
+    let mut session = ContextMenuSession::opened(None, None);
+    assert_eq!(
+        menu_pointer_moved(
+            &mut menu,
+            &mut session.pointer,
+            MenuHit::Outside,
+            &panels,
+            (299.0, 200.0),
+            Instant::now()
+        ),
+        MenuHoverEffect::None
+    );
+    assert_eq!(menu_shown_highlight(&menu, &session.pointer), 0);
+}
+
+#[test]
+fn a_menu_opened_at_the_pointer_starts_as_entered() {
+    let src = super::super::production_source();
+    let show = src
+        .split("fn show_context_menu(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("the shared menu transition");
+    assert!(
+        show.contains("let at_pointer = (px, py) == (ws.cursor.x as f32, ws.cursor.y as f32);")
+    );
+    assert!(
+        show.contains(
+            "ContextMenuSession::opened(placement.max_h, at_pointer.then_some((px, py)));"
+        )
+    );
+}

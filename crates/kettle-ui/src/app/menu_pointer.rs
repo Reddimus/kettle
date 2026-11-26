@@ -118,6 +118,26 @@ pub(crate) struct ContextMenuSession {
     pub(super) tab: Option<Vec<u64>>,
 }
 
+impl ContextMenuSession {
+    /// The state a menu starts with: its height limit, and `pointer`, the
+    /// pointer's position when the menu opened right there, as a right-click
+    /// does. Such a menu counts as entered at that point, so a first motion
+    /// away from it leaves the menu and clears its highlight; a menu opened
+    /// elsewhere, as from the keyboard, waits for the pointer to come over it.
+    pub(super) fn opened(root_max_h: Option<f32>, pointer: Option<(f32, f32)>) -> Self {
+        let mut session = Self {
+            root_max_h,
+            ..Self::default()
+        };
+        if let Some(at) = pointer {
+            session.pointer.last = Some(at);
+            session.pointer.inside = true;
+            session.pointer.entered = true;
+        }
+        session
+    }
+}
+
 /// Move the hover to `hit`. `panels` are the levels' rectangles, the menu
 /// itself first, and `at` is the pointer, both in surface pixels, at `now`.
 /// The scheduler calls it again at [`MenuPointer::deadline`] with the pointer

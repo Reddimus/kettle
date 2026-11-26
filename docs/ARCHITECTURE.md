@@ -5378,8 +5378,10 @@ the highlight where it was, so the lit row is always one Enter can run.
 A pointer that leaves the menu's panels, or the window, with no submenu open
 clears the highlight, as macOS and GTK menus do: the overlay and `ctl`
 report no row (`usize::MAX`, `null`), Enter runs nothing, and the next arrow
-starts from the first or last row. A pointer that was never over the menu,
-as with one opened from the keyboard, leaves the highlight alone.
+starts from the first or last row. A menu opened under the pointer, as a
+right-click opens it, counts as entered there, so a first motion off it
+clears the highlight too. A pointer that was never over the menu, as with one
+opened from the keyboard, leaves the highlight alone.
 `place_context_menu` opens a menu below its anchor and flips it above when it
 does not fit there, as GTK and macOS do. A right-click's anchor is the pointer,
 and a menu too tall for either side slides onto the window. A menu opened
