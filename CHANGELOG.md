@@ -1564,6 +1564,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   (a click or Right opens one at once), and an open submenu stays while the
   pointer moves toward it across other rows, so a diagonal move no longer
   lands on a different submenu.
+- Hovering a menu row that cannot run, such as Copy with nothing selected or
+  the Shift hint's line, keeps the previous row lit instead of lighting
+  nothing, so Enter still runs the row you see.
 
 ## Older releases
 

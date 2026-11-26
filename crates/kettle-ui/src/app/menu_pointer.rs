@@ -130,11 +130,11 @@ pub(super) fn menu_pointer_moved(
         }
     };
     pointer.open = None;
-    if menu
-        .drill_stack
-        .get(depth)
-        .is_none_or(|level| level.highlight == index)
-    {
+    // Back on the open row, or on a row there that cannot run: the open
+    // submenu stays.
+    if menu.drill_stack.get(depth).is_none_or(|level| {
+        level.highlight == index || !level.items.get(index).is_some_and(item_is_dispatchable)
+    }) {
         pointer.switch = None;
         return MenuHoverEffect::None;
     }
@@ -171,13 +171,19 @@ pub(super) fn menu_pointer_moved(
     }
 }
 
-/// Hover row `index` of the deepest level.
+/// Hover row `index` of the deepest level. A row that cannot run (a disabled
+/// Copy, an information line) is never lit: the highlight stays where it
+/// was, so Enter cannot land on it.
 fn hover_row(
     menu: &mut ContextMenuState,
     pointer: &mut MenuPointer,
     index: usize,
     now: std::time::Instant,
 ) -> MenuHoverEffect {
+    if !menu.items.get(index).is_some_and(item_is_dispatchable) {
+        pointer.open = None;
+        return MenuHoverEffect::None;
+    }
     let changed = menu.highlight != index;
     menu.highlight = index;
     let lit = if changed {

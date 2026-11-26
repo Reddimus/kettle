@@ -363,3 +363,83 @@ fn coming_back_to_the_open_row_keeps_its_submenu() {
     );
     assert!(cascade.split_still_open());
 }
+
+#[test]
+fn hovering_a_row_that_cannot_run_keeps_the_last_highlight() {
+    let mut menu = state(vec![
+        ContextMenuItem::Info {
+            label: "Hold Shift to reach the menu".into(),
+            secondary: true,
+            continued: false,
+        },
+        ContextMenuItem::Separator,
+        ContextMenuItem::Item {
+            label: "Copy",
+            action: Action::Copy,
+            enabled: false,
+        },
+        leaf("Paste", Action::Paste),
+    ]);
+    menu.highlight = 3;
+    let mut pointer = MenuPointer::default();
+    let panels = [(10.0, 10.0, 160.0, 80.0)];
+    let t0 = Instant::now();
+    // The audit's repro: no selection, so Copy is disabled; then the Shift
+    // hint's information line.
+    for (step, (row, y)) in [(2, 50.0), (0, 20.0)].into_iter().enumerate() {
+        assert_eq!(
+            menu_pointer_moved(
+                &mut menu,
+                &mut pointer,
+                MenuHit::Row(row),
+                &panels,
+                (90.0, y),
+                t0 + ms(16 * step as u64)
+            ),
+            MenuHoverEffect::None,
+            "row {row}"
+        );
+        assert_eq!(menu.highlight, 3, "row {row}");
+        assert_eq!(menu_shown_highlight(&menu, &pointer), 3, "row {row}");
+        assert!(
+            matches!(
+                menu_activate_click(&menu, &pointer),
+                Some(ContextMenuClick::Action(Action::Paste))
+            ),
+            "Enter runs the row still lit, row {row}"
+        );
+    }
+}
+
+#[test]
+fn a_parent_row_that_cannot_run_never_takes_over_the_open_submenu() {
+    let mut menu = state(vec![
+        ContextMenuItem::Item {
+            label: "Copy",
+            action: Action::Copy,
+            enabled: false,
+        },
+        submenu("Split", Action::SplitRight),
+    ]);
+    menu.highlight = 1;
+    assert!(menu.enter_submenu(1));
+    let mut pointer = MenuPointer::default();
+    let panels = [(10.0, 10.0, 160.0, 48.0), (170.0, 34.0, 160.0, 48.0)];
+    let t0 = Instant::now();
+    let copy = MenuHit::ParentRow { depth: 0, index: 0 };
+    for (after, y) in [(0, 22.0), (16, 21.0), (1000, 21.0)] {
+        assert_eq!(
+            menu_pointer_moved(
+                &mut menu,
+                &mut pointer,
+                copy,
+                &panels,
+                (90.0, y),
+                t0 + ms(after)
+            ),
+            MenuHoverEffect::None
+        );
+    }
+    assert_eq!(menu.drill_stack.len(), 1, "Split stays open");
+    assert_eq!(menu.drill_stack[0].highlight, 1);
+}
