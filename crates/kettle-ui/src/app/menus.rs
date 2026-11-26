@@ -884,7 +884,12 @@ impl App {
             return;
         }
         let panel = clamp_context_menu_panel((panel_w, panel_h), (sw, sh));
-        let placement = place_context_menu(MenuAnchor::point(px, py), panel, (sw, sh));
+        // A pointer's menu always fits: it slides onto the window.
+        let Some(placement) = place_context_menu(MenuAnchor::point(px, py), panel, (sw, sh), row_h)
+        else {
+            ws.context_menu = None;
+            return;
+        };
         let anchor = placement.origin;
         // Opened under the pointer, as a right-click opens it.
         let at_pointer = (px, py) == (ws.cursor.x as f32, ws.cursor.y as f32);
@@ -911,20 +916,60 @@ impl App {
         }
     }
 
-    /// Place the menu just opened for the text line `anchor` again, below the
-    /// line or above it, never over it (`place_context_menu`).
+    /// Place the open menu's own panel for the text line `anchor`, below the
+    /// line or above it, never over it (`place_context_menu`). When not one
+    /// complete row fits beside the line, the menu closes.
     pub(super) fn place_context_menu_at_line(&self, ws: &mut WindowState, anchor: MenuAnchor) {
         ws.context_menu_session.root_max_h = None;
-        let Some((_, panel)) = self.context_menu_geometry(ws) else {
+        let root = ws
+            .context_menu
+            .as_ref()
+            .map(|menu| menu.drill_stack.first().map(ContextMenuLevel::as_state));
+        let geometry = match &root {
+            Some(Some(level)) => self.context_menu_level_geometry(ws, level, true),
+            Some(None) => self.context_menu_geometry(ws),
+            None => None,
+        };
+        let Some((_, panel)) = geometry else {
             return;
         };
-        let placement = place_context_menu(anchor, panel, self.context_menu_surface(ws));
-        ws.context_menu_session.root_max_h = placement.max_h;
-        if let Some(menu) = ws.context_menu.as_mut() {
-            menu.anchor = placement.origin;
+        let (_, cell_h) = self.menu_cell(ws);
+        let row_h = kettle_render::menu::row_height(cell_h);
+        let surface = self.context_menu_surface(ws);
+        let placement = place_context_menu(anchor, panel, surface, row_h);
+        if let Some(placement) = placement {
+            ws.context_menu_session.root_max_h = placement.max_h;
+            ws.context_menu_session.line = true;
+            if let Some(menu) = ws.context_menu.as_mut() {
+                match menu.drill_stack.first_mut() {
+                    Some(level) => level.anchor = placement.origin,
+                    None => menu.anchor = placement.origin,
+                }
+            }
+            self.reclamp_context_menu(ws, surface);
+        } else {
+            ws.context_menu = None;
         }
         if let Some(window) = &ws.window {
             window.request_redraw();
+        }
+    }
+
+    /// The text line a menu opened from the keyboard at `point` stays beside.
+    pub(super) fn text_line_anchor(&self, ws: &WindowState, (x, y): (f32, f32)) -> MenuAnchor {
+        let (_, cell_h) = self.menu_cell(ws);
+        MenuAnchor::line(x, y - cell_h * 0.5, y + cell_h * 0.5)
+    }
+
+    /// After a resize, place a menu opened from the keyboard beside the text
+    /// cursor's line again, wherever the reflow moved it.
+    pub(super) fn follow_line_menu(&self, ws: &mut WindowState) {
+        if ws.context_menu.is_none() || !ws.context_menu_session.line {
+            return;
+        }
+        if let Some(point) = self.keyboard_menu_point(ws) {
+            let line = self.text_line_anchor(ws, point);
+            self.place_context_menu_at_line(ws, line);
         }
     }
 

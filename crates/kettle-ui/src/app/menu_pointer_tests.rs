@@ -30,6 +30,11 @@ fn state(items: Vec<ContextMenuItem>) -> ContextMenuState {
     }
 }
 
+/// Where a menu with 28 px rows goes; every case here has room for a row.
+fn place(anchor: MenuAnchor, panel: (f32, f32), surface: (f32, f32)) -> MenuPlacement {
+    place_context_menu(anchor, panel, surface, 28.0).expect("a row fits")
+}
+
 fn ms(millis: u64) -> Duration {
     Duration::from_millis(millis)
 }
@@ -102,7 +107,7 @@ fn arrows_skip_separators_and_wrap() {
 
 #[test]
 fn a_menu_with_room_below_its_pointer_opens_there() {
-    let placement = place_context_menu(
+    let placement = place(
         MenuAnchor::point(100.0, 120.0),
         (200.0, 300.0),
         (800.0, 600.0),
@@ -110,7 +115,7 @@ fn a_menu_with_room_below_its_pointer_opens_there() {
     assert_eq!(placement.origin, (100.0, 120.0));
     assert_eq!(placement.max_h, None);
     // A pointer near the right edge moves the menu left to fit.
-    let placement = place_context_menu(
+    let placement = place(
         MenuAnchor::point(700.0, 120.0),
         (200.0, 300.0),
         (800.0, 600.0),
@@ -549,7 +554,7 @@ fn a_menu_for_the_last_line_flips_above_it() {
         top: 700.0,
         bottom: 736.0,
     };
-    let placement = place_context_menu(line, (300.0, 404.0), (1280.0, 820.0));
+    let placement = place(line, (300.0, 404.0), (1280.0, 820.0));
     assert_eq!(placement.origin, (100.0, 296.0));
     assert_eq!(placement.max_h, None);
     // A line with room below opens under it, not over its lower half.
@@ -558,7 +563,7 @@ fn a_menu_for_the_last_line_flips_above_it() {
         top: 100.0,
         bottom: 136.0,
     };
-    let placement = place_context_menu(line, (300.0, 404.0), (1280.0, 820.0));
+    let placement = place(line, (300.0, 404.0), (1280.0, 820.0));
     assert_eq!(placement.origin, (100.0, 136.0));
 }
 
@@ -570,7 +575,7 @@ fn a_menu_too_tall_for_either_side_of_its_line_keeps_the_line_in_view() {
             top,
             bottom,
         };
-        let placement = place_context_menu(line, (300.0, 500.0), (800.0, 600.0));
+        let placement = place(line, (300.0, 500.0), (800.0, 600.0));
         let (_, y) = placement.origin;
         let height = placement.max_h.expect("the menu is held short and scrolls");
         assert!(
@@ -586,14 +591,14 @@ fn a_menu_too_tall_for_either_side_of_its_line_keeps_the_line_in_view() {
 
 #[test]
 fn a_pointer_menu_flips_above_the_pointer_near_the_bottom() {
-    let placement = place_context_menu(
+    let placement = place(
         MenuAnchor::point(100.0, 500.0),
         (200.0, 300.0),
         (800.0, 600.0),
     );
     assert_eq!(placement.origin, (100.0, 200.0));
     // Too tall for either side: it slides onto the window, as before.
-    let placement = place_context_menu(
+    let placement = place(
         MenuAnchor::point(100.0, 300.0),
         (200.0, 590.0),
         (800.0, 600.0),
@@ -601,7 +606,7 @@ fn a_pointer_menu_flips_above_the_pointer_near_the_bottom() {
     assert_eq!(placement.origin, (100.0, 6.0));
     assert_eq!(placement.max_h, None);
     // Asked for above the window's top margin, it stays on the margin.
-    let placement = place_context_menu(MenuAnchor::point(0.0, 0.0), (200.0, 300.0), (800.0, 600.0));
+    let placement = place(MenuAnchor::point(0.0, 0.0), (200.0, 300.0), (800.0, 600.0));
     assert_eq!(placement.origin, (4.0, 4.0));
 }
 
@@ -620,7 +625,13 @@ fn a_menu_opened_from_the_keyboard_is_placed_for_the_cursor_line() {
         .find("self.place_context_menu_at_line(ws, line);")
         .expect("then sits beside the cursor's line");
     assert!(open < placed);
-    assert!(arm.contains("MenuAnchor::line(px, py - cell_h * 0.5, py + cell_h * 0.5)"));
+    assert!(arm.contains("let line = self.text_line_anchor(ws, point);"));
+    let line = src
+        .split("fn text_line_anchor(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("the cursor's line");
+    assert!(line.contains("MenuAnchor::line(x, y - cell_h * 0.5, y + cell_h * 0.5)"));
 }
 
 #[test]
@@ -840,4 +851,57 @@ fn a_menu_opened_at_the_pointer_starts_as_entered() {
             "ContextMenuSession::opened(placement.max_h, at_pointer.then_some((px, py)));"
         )
     );
+}
+
+#[test]
+fn a_line_menu_with_no_room_for_a_row_beside_its_line_is_not_placed() {
+    // 16 px cells, so 28 px rows; a 60 px window; the cursor's line at
+    // 18..34. 22 px below and 14 above: the menu would run off the window
+    // at y 62, or cover the line.
+    let line = MenuAnchor {
+        x: 100.0,
+        top: 18.0,
+        bottom: 34.0,
+    };
+    assert_eq!(
+        place_context_menu(line, (300.0, 28.0), (800.0, 60.0), 28.0),
+        None
+    );
+    // One row's room below is enough: the menu fits there and scrolls.
+    let placement =
+        place_context_menu(line, (300.0, 200.0), (800.0, 70.0), 28.0).expect("a row fits below");
+    assert_eq!(placement.origin.1, 34.0);
+    assert_eq!(placement.max_h, Some(32.0));
+    // A pointer's menu always has a place: it slides onto the window.
+    assert!(
+        place_context_menu(
+            MenuAnchor::point(100.0, 30.0),
+            (300.0, 200.0),
+            (800.0, 60.0),
+            28.0
+        )
+        .is_some()
+    );
+}
+
+#[test]
+fn a_keyboard_menu_follows_its_line_through_a_resize_or_closes() {
+    let src = super::super::production_source();
+    let resize = src
+        .split("fn apply_window_resize(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("the resize");
+    let reflow = resize.find("self.resize_all(ws);").expect("the reflow");
+    let follow = resize
+        .find("self.follow_line_menu(ws);")
+        .expect("a keyboard menu follows its line");
+    assert!(reflow < follow, "after the reflow moved the line");
+    let place = src
+        .split("fn place_context_menu_at_line(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("the line placement");
+    assert!(place.contains("ws.context_menu_session.line = true;"));
+    assert!(place.contains("} else {\n            ws.context_menu = None;\n        }"));
 }

@@ -112,6 +112,9 @@ pub(crate) struct ContextMenuSession {
     /// The tallest the menu's own panel may be, in surface pixels. `None`
     /// leaves it as tall as the surface allows.
     pub(super) root_max_h: Option<f32>,
+    /// The menu was placed beside the text cursor's line, as one opened from
+    /// the keyboard is, and follows that line when the window resizes.
+    pub(super) line: bool,
     /// For a tab's menu, that tab, by the panes it holds
     /// (`Mux::tab_anchor_panes`), so a tab closing meanwhile cannot
     /// retarget it.
@@ -407,12 +410,15 @@ pub(super) struct MenuPlacement {
 /// the anchor when it fits there, else above it, as GTK and macOS menus flip.
 /// When it fits on neither side, a pointer's menu slides onto the window over
 /// the point, and a line's takes the roomier side, held short enough to leave
-/// the line in view; it scrolls.
+/// the line in view; it scrolls. `None` when not one complete row, `row_h`
+/// tall, fits beside the line: no menu rather than one over it, or off the
+/// window.
 pub(super) fn place_context_menu(
     anchor: MenuAnchor,
     panel: (f32, f32),
     surface: (f32, f32),
-) -> MenuPlacement {
+    row_h: f32,
+) -> Option<MenuPlacement> {
     const MARGIN: f32 = 4.0;
     let (x, slid) = clamp_context_menu_anchor((anchor.x, anchor.bottom), panel, surface);
     let below = surface.1 - MARGIN - anchor.bottom;
@@ -424,15 +430,17 @@ pub(super) fn place_context_menu(
         (anchor.top - height, None)
     } else if anchor.top >= anchor.bottom {
         (slid, None)
+    } else if below.max(above) < row_h {
+        return None;
     } else if below >= above {
         (anchor.bottom.max(MARGIN), Some(below))
     } else {
         (MARGIN, Some(above))
     };
-    MenuPlacement {
+    Some(MenuPlacement {
         origin: (x, y),
         max_h,
-    }
+    })
 }
 
 #[cfg(test)]

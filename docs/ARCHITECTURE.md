@@ -5387,7 +5387,10 @@ does not fit there, as GTK and macOS do. A right-click's anchor is the pointer,
 and a menu too tall for either side slides onto the window. A menu opened
 from the keyboard is anchored on the text cursor's line: too tall for either
 side, it takes the roomier one and is held short enough to leave the line in
-view (`ContextMenuSession::root_max_h`), and scrolls.
+view (`ContextMenuSession::root_max_h`), and scrolls; with not one complete row
+of room beside the line it does not open, rather than cover the line or run
+off the window. A resize places it again beside the cursor's line once the
+terminals have reflowed (`follow_line_menu`), closing it if no row fits.
 A right-click on a tab segment, native or through `ctl`, opens that tab's
 menu (`open_tab_menu`): Rename Tab…, Duplicate Tab, Move Tab Left/Right and
 Close Tab, as ordinary action rows. The menu records the tab by the panes it
