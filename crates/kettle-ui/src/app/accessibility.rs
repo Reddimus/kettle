@@ -3270,10 +3270,20 @@ pub(super) fn modal_accessibility_projection(
             dialog_children.push(id);
         }
         let mut dialog = Node::new(Role::Dialog);
-        dialog.set_label(match settings.categories.get(settings.active_category) {
-            Some(category) => tr.settings_a11y_dialog(category),
-            None => tr.text(kettle_i18n::Text::SettingsA11yTitle).to_string(),
-        });
+        // Named as its title reads: while a search lists rows from every
+        // category, no category is open.
+        dialog.set_label(
+            match settings
+                .highlighted_category()
+                .and_then(|index| settings.categories.get(index))
+            {
+                Some(category) => tr.settings_a11y_dialog(category),
+                None if !settings.search_query.is_empty() => {
+                    tr.settings_a11y_dialog(tr.text(kettle_i18n::Text::SettingsSearchResults))
+                }
+                None => tr.text(kettle_i18n::Text::SettingsA11yTitle).to_string(),
+            },
+        );
         dialog.set_children(dialog_children);
         dialog.set_bounds(bounds(layout.rect));
         projection.roots.push(container_id);

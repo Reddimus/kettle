@@ -86,6 +86,38 @@ fn settings_accessibility_names_follow_the_ui_language() {
     );
 }
 
+/// While a search lists results from every category, screen readers name
+/// the dialog as its title reads, "Search results", not by the category the
+/// stored row belongs to; with no query they name the open category again.
+#[test]
+fn the_settings_dialog_is_named_search_results_while_searching() {
+    let dialog = |query: &str, tr: &Translator| {
+        let overlay = kettle_render::Overlay {
+            settings: Some(kettle_render::SettingsOverlay {
+                categories: vec![
+                    tr.text(kettle_i18n::Text::SettingsCategoryAppearance)
+                        .into(),
+                ],
+                search_query: query.into(),
+                ..Default::default()
+            }),
+            ..kettle_render::Overlay::default()
+        };
+        modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, tr)
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role() == accesskit::Role::Dialog)
+            .and_then(|(_, node)| node.label().map(str::to_string))
+            .unwrap()
+    };
+    assert_eq!(dialog("qqzzxx", &EN), "Settings, Search results");
+    assert_eq!(
+        dialog("qqzzxx", &ES),
+        "Configuración, Resultados de la búsqueda"
+    );
+    assert_eq!(dialog("", &EN), "Settings, Appearance");
+}
+
 #[test]
 fn gpu_kinds_translate_and_unknown_kinds_pass_through() {
     assert_eq!(gpu_kind_text(&EN, "Integrated"), "Integrated");
