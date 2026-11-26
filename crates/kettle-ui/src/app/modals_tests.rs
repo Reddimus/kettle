@@ -1471,3 +1471,26 @@ fn a_refused_capture_key_is_reported_in_the_settings_row() {
         );
     }
 }
+
+/// Reset takes the row's keys out of the config file and reloads, instead
+/// of writing the default the running build has (`theme-mode = auto`,
+/// `font-size = 13`), which pinned the row and added a line each time. It
+/// writes the default only when that still does not show, because the key
+/// is set somewhere Kettle does not edit.
+#[test]
+fn settings_reset_removes_the_rows_keys_before_writing_a_default() {
+    let src = production_source();
+    let reset = src
+        .split("fn settings_reset(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("settings_reset");
+    let flat: String = reset.split_whitespace().collect();
+    assert!(
+        flat.contains(
+            "ifself.unset_prefs(&crate::settings::reset_keys(field))==Ok(true){self.reload_config(ws);ifcrate::settings::holds_default(&self.cfg,field){return;}}self.settings_store(ws,field.key,value);"
+        ),
+        "{flat}"
+    );
+    assert_eq!(flat.matches("settings_store(").count(), 1);
+}

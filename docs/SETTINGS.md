@@ -12,7 +12,9 @@ choices have arrows, and quantities
 show their units. A control keeps one width while its value changes. The
 highlighted option has a bar at its left edge as well as a tint. An option
 you have changed shows a **Reset** button beside its value; the highlighted
-option shows it dimmed when it already holds its default. Where a row is
+option shows it dimmed when it already holds its default. Reset removes the
+option's line from your config file, so the option follows Kettle's default
+from then on, including one that differs by platform, such as the font size. Where a row is
 too narrow for the word, Reset shows as an anticlockwise-arrow icon, and on
 the narrowest rows it is left out (Delete still resets). Below a panel width
 of 640 pixels, categories become a

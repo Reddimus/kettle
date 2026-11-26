@@ -1894,6 +1894,15 @@ pub fn default_value(field: &Field) -> Option<String> {
     }
 }
 
+/// The config keys a Reset of `field` removes: the uniform Window padding
+/// row writes both axes.
+pub(crate) fn reset_keys(field: &Field) -> Vec<&'static str> {
+    match field.key {
+        "window-padding-x" => vec!["window-padding-x", "window-padding-y"],
+        key => vec![key],
+    }
+}
+
 /// Whether `field` already holds its [`default_value`] in `cfg`.
 pub fn holds_default(cfg: &Config, field: &Field) -> bool {
     match &field.kind {
@@ -2495,6 +2504,48 @@ mod tests {
             .find(|f| f.key == "theme")
             .unwrap();
         assert_eq!(default_value(&theme), None);
+    }
+
+    /// Reset takes a row's lines out of the config, both padding axes for
+    /// the uniform Window padding row, rather than writing the default the
+    /// running build has, so a reset row follows the platform's and later
+    /// releases' defaults (13 px fonts on macOS, 14 px on Linux).
+    #[test]
+    fn reset_removes_each_rows_keys() {
+        let cats = categories(&[]);
+        let field = |key: &str| {
+            cats.iter()
+                .flat_map(|cat| &cat.fields)
+                .find(|field| field.key == key)
+                .unwrap()
+        };
+        assert_eq!(
+            reset_keys(field("window-padding-x")),
+            ["window-padding-x", "window-padding-y"]
+        );
+        for key in [
+            "font-size",
+            "theme-mode",
+            "tab-bar-position",
+            "cursor-blink",
+        ] {
+            assert_eq!(reset_keys(field(key)), [key]);
+        }
+        let dir = kettle_test_support::private_tempdir("kettle-settings-reset-");
+        let path = dir.join("config");
+        std::fs::write(
+            &path,
+            "font-size = 20\nwindow-padding-x = 8\nwindow-padding-y = 8\n",
+        )
+        .unwrap();
+        for key in ["font-size", "window-padding-x"] {
+            kettle_config::remove_config_keys(&path, &reset_keys(field(key))).unwrap();
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, "");
+        let cfg = Config::parse_text(&text);
+        assert!(holds_default(&cfg, field("font-size")));
+        assert!(holds_default(&cfg, field("window-padding-x")));
     }
 
     #[test]

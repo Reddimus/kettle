@@ -2265,7 +2265,10 @@ impl App {
     }
 
     /// Reset the focused Settings row to the value a config that does not set
-    /// it would give, through the same write and reload as a change.
+    /// it would give: its lines leave the config file, so the row follows the
+    /// default from then on, as it changes between releases and platforms.
+    /// Where the default still does not show (the key is also set where
+    /// Kettle does not edit), the default is written as a change would be.
     pub(super) fn settings_reset(
         &mut self,
         ws: &mut WindowState,
@@ -2282,9 +2285,16 @@ impl App {
         {
             return;
         }
-        if let Some(value) = crate::settings::default_value(field) {
-            self.settings_store(ws, field.key, value);
+        let Some(value) = crate::settings::default_value(field) else {
+            return;
+        };
+        if self.unset_prefs(&crate::settings::reset_keys(field)) == Ok(true) {
+            self.reload_config(ws);
+            if crate::settings::holds_default(&self.cfg, field) {
+                return;
+            }
         }
+        self.settings_store(ws, field.key, value);
     }
 
     /// Reset the selected Settings row, as Delete does: what the Reset
