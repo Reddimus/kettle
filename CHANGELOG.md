@@ -1571,6 +1571,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   the pointer, and their tooltips say what a press does.
 - A tab whose title is too long to show whole now shows the full title in a
   tooltip when the pointer rests on it.
+- The media viewer's and preview lane's header buttons light up under the
+  pointer and take a press anywhere in a 24 by 24 point target, up from 25
+  by 17.5 pixels; the header row is a little taller to make room.
 
 ## Older releases
 

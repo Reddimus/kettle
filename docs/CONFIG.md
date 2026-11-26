@@ -1069,7 +1069,11 @@ only once it is ready (the place shows the one asked for meanwhile), starts
 fitted and its source from the top, and stays put if it cannot be drawn.
 `↻` reads a Markdown file's gallery again at the diagram shown. Where the header is too narrow, these give way,
 open outside first, then zoom out, zoom in and fit, copy, browsing, the
-background and the source, and reload last. A press or the wheel over a lane never
+background and the source, and reload last. Each of these buttons takes a
+press anywhere in a target at least 24 by 24 points, so the header row, and a
+gallery's detail line, are that tall even where a line of text is shorter;
+the button under the pointer lights, unless it would do nothing (browsing
+past either end). A press or the wheel over a lane never
 reaches the terminal, and menus and dialogs open over it without closing it.
 The command palette lists it as "Open media shelf". On macOS its default
 chord is `Ctrl+Shift+Cmd+I`; elsewhere it has no default binding.

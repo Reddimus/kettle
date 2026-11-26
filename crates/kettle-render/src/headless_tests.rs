@@ -2782,7 +2782,10 @@ fn a_lane_draws_its_open_outside_button_only_when_offered() {
     )
     .expect("the lane fits");
     let open = geometry.open_outside.expect("offered");
+    // The chip behind a button's glyph, a line high in its taller target.
+    let line = renderer.metrics.line_height;
     let corner = |frame: &image::RgbaImage, rect: (f32, f32, f32, f32)| {
+        let rect = crate::media_lane::control_chip(rect, line);
         let p = frame.get_pixel(rect.0.ceil() as u32 + 1, rect.1.ceil() as u32 + 1);
         (p[0], p[1], p[2])
     };
@@ -2869,7 +2872,10 @@ fn a_lane_draws_a_gallerys_page_controls() {
         geometry.page_counter.unwrap(),
         geometry.page_next.unwrap(),
     );
+    // The chip behind a button's glyph, a line high in its taller target.
+    let line = cells.1.1;
     let corner = |frame: &image::RgbaImage, rect: (f32, f32, f32, f32)| {
+        let rect = crate::media_lane::control_chip(rect, line);
         let p = frame.get_pixel(rect.0.ceil() as u32 + 1, rect.1.ceil() as u32 + 1);
         (p[0], p[1], p[2])
     };

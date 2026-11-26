@@ -2085,3 +2085,26 @@ fn a_cut_tab_title_shows_whole_in_a_tooltip() {
         "a lone title stands for the window"
     );
 }
+
+/// D11 of the 6.0 UI review: a media lane button under the pointer showed
+/// nothing but the hand. The window now repaints as the real pointer moves
+/// onto or off a button that would act, so the renderer lights its chip,
+/// and leaving the window puts it out.
+#[test]
+fn moving_onto_a_lane_button_repaints_to_light_it() {
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(source.contains("self.sync_tooltip(ws, &bar); self.sync_lane_control_hover(ws);"));
+    assert!(source.contains(
+        "let hovered = self.hovered_lane_control(ws); if hovered != ws.lane_control_hover { ws.lane_control_hover = hovered; if let Some(window) = &ws.window { window.request_redraw(); } }"
+    ));
+    assert!(source.contains(
+        "(!matches!(hit, Hit::Inside | Hit::Resize) && lane_control_enabled(&lane, hit)) .then_some((pane, hit))"
+    ));
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    ws.lane_control_hover = Some((1, kettle_render::MediaLaneHit::ZoomIn));
+    ws.leave_tab_bar();
+    assert_eq!(ws.lane_control_hover, None);
+}

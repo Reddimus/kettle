@@ -717,18 +717,12 @@ pub(super) fn lane_interactive_controls(
         .collect()
 }
 
+/// The same test the renderer lights a hovered button by.
 pub(super) fn lane_control_enabled(
     lane: &kettle_render::MediaLanePanel,
     hit: kettle_render::MediaLaneHit,
 ) -> bool {
-    use kettle_render::MediaLaneHit as Hit;
-    match hit {
-        Hit::Previous => lane.position.0 > 1,
-        Hit::Next => lane.position.0 < lane.position.1,
-        Hit::PreviousPage => lane.page.is_some_and(|(page, _)| page > 1),
-        Hit::NextPage => lane.page.is_some_and(|(page, count)| page < count),
-        _ => true,
-    }
+    kettle_render::media_lane_control_enabled(lane, hit)
 }
 
 /// A lane control's name in ctl `ui_geometry`.

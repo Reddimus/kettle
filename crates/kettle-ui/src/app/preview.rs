@@ -3074,6 +3074,38 @@ impl App {
         !self.non_search_modal_open(ws) && ws.preview_overlay.is_none_or(|open| open.pane == pane)
     }
 
+    /// The lane button under the real pointer that a press would act on, by
+    /// pane: what the renderer lights from the same pointer. Nothing under a
+    /// dialog or menu.
+    pub(super) fn hovered_lane_control(
+        &self,
+        ws: &WindowState,
+    ) -> Option<(u64, kettle_render::MediaLaneHit)> {
+        use kettle_render::MediaLaneHit as Hit;
+        if self.non_search_modal_open(ws) {
+            return None;
+        }
+        let pointer = ws.native_pointer?;
+        let (x, y) = (pointer.x as f32, pointer.y as f32);
+        let (pane, rect, collapsed) = self.preview_lane_at(ws, x, y)?;
+        let lane = self.preview_lane_panel(ws, pane, rect, collapsed)?;
+        let hit = self.preview_lane_geometry(ws, &lane)?.hit_test(x, y)?;
+        (!matches!(hit, Hit::Inside | Hit::Resize) && lane_control_enabled(&lane, hit))
+            .then_some((pane, hit))
+    }
+
+    /// Repaint as the pointer moves onto or off a lane button, so its chip
+    /// lights and goes out with it.
+    pub(super) fn sync_lane_control_hover(&self, ws: &mut WindowState) {
+        let hovered = self.hovered_lane_control(ws);
+        if hovered != ws.lane_control_hover {
+            ws.lane_control_hover = hovered;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+    }
+
     /// The lane under `(x, y)` in the active tab, with its pane and whether
     /// it shows as a strip: the whole lane, whether or not its panel has room
     /// to draw.

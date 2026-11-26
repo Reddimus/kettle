@@ -165,6 +165,10 @@ the arrows' hover, hand cursor, translated tooltips and anchor.
 `a_tab_label_is_cut_only_when_the_strip_shortens_it` (`kettle-render`) cover
 the full-title tooltip, and `narrow_tab_titles_keep_the_start_that_tells_them_apart`
 the end ellipsis below 16 columns.
+`every_lane_button_is_a_24_pixel_target`, `a_hovered_lane_button_lights_its_chip`
+and `browsing_past_an_end_is_not_a_live_button` (`kettle-render`) and
+`moving_onto_a_lane_button_repaints_to_light_it` (`kettle-ui`) cover the media
+lane buttons' WCAG 2.5.8 targets and hover fill.
 Full render/UI suites and clippy remain required; native focus changes,
 hover/press feedback, tooltip placement and Spanish acceptance need a desktop.
 

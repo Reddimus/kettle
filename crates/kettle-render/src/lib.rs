@@ -405,7 +405,8 @@ const _: () = assert!(TEXT_FIELD_PLACEHOLDER_SEGMENT < SEARCH_SEGMENTS);
 pub use media_lane::{
     MediaCanvas, MediaLaneEdge, MediaLaneFrame, MediaLaneGeometry, MediaLaneHit, MediaLaneMode,
     MediaLanePanel, MediaLanePlay, MediaLaneScrubber, MediaLaneSender, MediaLaneSound,
-    MediaLaneSource, MediaLaneTile, media_lane_geometry, media_lane_geometry_scaled,
+    MediaLaneSource, MediaLaneTile, media_lane_control_enabled, media_lane_geometry,
+    media_lane_geometry_scaled,
 };
 
 pub use media_viewport::{MAX_MEDIA_ZOOM, MEDIA_ZOOM_STEP, MIN_MEDIA_ZOOM, MediaViewport};
@@ -4283,43 +4284,29 @@ impl Renderer {
             if let Some(paint) = transport_paint {
                 transport_surfaces.extend(paint.shapes);
             }
-            for button in [
-                geometry.play,
-                geometry.sound,
-                geometry.theater,
-                geometry.fullscreen,
-                geometry.previous,
-                geometry.next,
-                geometry.open_outside,
-                geometry.mode,
-                geometry.canvas,
-                geometry.copy,
-                geometry.reload,
-                geometry.zoom_out,
-                geometry.zoom_in,
-                geometry.zoom_fit,
-                geometry.page_previous,
-                geometry.page_next,
-                Some(geometry.toggle),
-                Some(geometry.close),
-            ]
-            .into_iter()
-            .flatten()
-            {
+            // Each button's chip, lit while the pointer is over a button
+            // that would act, as the player's buttons are.
+            let hovered = overlay
+                .media_pointer
+                .and_then(|(px, py)| geometry.hit_test(px, py))
+                .filter(|hit| media_lane::media_lane_control_enabled(lane, *hit));
+            for (button, hit) in geometry.chip_controls() {
+                let Some(button) = button else {
+                    continue;
+                };
                 if geometry
                     .transport
                     .is_some_and(|transport| button.1 >= transport.1)
                 {
                     continue;
                 }
-                lane_q.push(rect(
-                    button.0,
-                    button.1,
-                    button.2,
-                    button.3,
-                    palette.divider,
-                    1.0,
-                ));
+                let fill = if hovered == Some(hit) {
+                    media_transport::hover_fill(palette.divider, palette.label)
+                } else {
+                    palette.divider
+                };
+                let (x, y, w, h) = media_lane::control_chip(button, self.metrics.line_height);
+                lane_q.push(rect(x, y, w, h, fill, 1.0));
             }
             if let Some((fx, fy, fw, fh)) = lane.focused_control {
                 let line = (2.0 * self.scale).max(1.0).min(fw / 2.0).min(fh / 2.0);
