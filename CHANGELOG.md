@@ -1125,7 +1125,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   writing today's default into it, so the option follows the platform's
   default (and later ones) and the file no longer gains a line with each
   reset. It saves in one step: a reset that cannot be saved leaves the file
-  and the option as they were.
+  and the option as they were, and one saved but not confirmed on disk
+  applies with a warning.
 
 - In Settings search, Tab leaves a search with no matches, and clearing a
   search you didn't move into puts the highlight back on the option it was

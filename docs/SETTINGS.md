@@ -22,7 +22,11 @@ Kettle's default from then on, including one that differs by platform, such as t
 Where another line still decides the value, such as a `theme` line for
 Appearance or a `font` line for Font size, Reset adds the default after it and
 keeps that line. Reset saves in one step: if the file cannot be saved, the
-file and the option stay as they were.
+file and the option stay as they were. If it is saved but the system cannot
+confirm it reached the disk, the reset applies and a notification warns that
+it could be lost if the computer stops suddenly. Reset keeps lines of spaces
+or tabs; it takes only the one empty line Kettle added before a setting it
+appended.
 Where a row is too narrow for the word, Reset shows as an anticlockwise-arrow icon, and on
 the narrowest rows it is left out (Delete still resets). Below a panel width
 of 640 pixels, categories become a
