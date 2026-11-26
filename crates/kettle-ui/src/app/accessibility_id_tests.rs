@@ -130,6 +130,47 @@ fn accessibility_ids_do_not_collide() {
     ] {
         add(what.into(), id);
     }
+    // Bound ids, for a picker's results, a quick-select label and a link.
+    let rows: Vec<ContextMenuRow> = ["dev", "ops", "dev"]
+        .into_iter()
+        .map(|label| ContextMenuRow {
+            label: label.into(),
+            ..Default::default()
+        })
+        .collect();
+    for kind in [MODAL_KIND_PALETTE, MODAL_KIND_LAYOUTS] {
+        for (index, id) in accessibility_picker_option_ids(kind, &rows)
+            .into_iter()
+            .enumerate()
+        {
+            add(format!("picker {kind} option {index}"), id.unwrap());
+        }
+    }
+    add(
+        "hint".into(),
+        accessibility_hint_id(&HintTarget {
+            row: 0,
+            col: 0,
+            label: "a".into(),
+            pane: 1,
+            what: HintWhat::Text {
+                kind: kettle_core::hints::Kind::Url,
+                text: "https://x.test".into(),
+                bounded: true,
+            },
+        }),
+    );
+    add(
+        "link".into(),
+        accessibility_link_id(&kettle_render::PaneStatus {
+            rect: (0.0, 0.0, 100.0, 16.0),
+            text: String::new(),
+            description: String::new(),
+            target: Some("https://x.test".into()),
+            link_bounds: None,
+            selection_hint: false,
+        }),
+    );
     let mut seen: std::collections::HashMap<u64, &str> = std::collections::HashMap::new();
     for (what, id) in &ids {
         if let Some(other) = seen.insert(id.0, what) {

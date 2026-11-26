@@ -1308,13 +1308,12 @@ fn picker_accessibility_bounds_follow_header_rows_and_scroll() {
         .unwrap();
     assert_eq!(input.1.bounds(), Some(bounds(header)));
     let menu = overlay.context_menu.as_ref().unwrap();
+    let ids = super::accessibility_picker_option_ids(super::MODAL_KIND_LAYOUTS, &menu.rows);
     for (index, _) in menu.rows.iter().enumerate() {
         let node = &projection
             .nodes
             .iter()
-            .find(|(id, _)| {
-                *id == super::accessibility_modal_id(super::MODAL_KIND_LAYOUTS, index + 3)
-            })
+            .find(|(id, _)| Some(*id) == ids[index])
             .unwrap()
             .1;
         assert_eq!(
@@ -2684,12 +2683,13 @@ fn picker_options_offer_a_press_that_picks_them_as_a_click_does() {
         let projection =
             super::modal_accessibility_projection(&overlay, (1280.0, 820.0), (7.8, 16.25), 1.0, &EN_TEXT);
         let menu = overlay.context_menu.as_ref().unwrap();
+        let ids = super::accessibility_picker_option_ids(kind, &menu.rows);
         let mut pressed = 0;
         for (index, row) in menu.rows.iter().enumerate() {
             let Some(option) = kettle_render::menu_row_option(&menu.rows, index) else {
                 continue;
             };
-            let id = super::accessibility_modal_id(kind, option + 3);
+            let id = ids[index].unwrap();
             let node = &projection.nodes.iter().find(|(at, _)| *at == id).unwrap().1;
             assert_eq!(node.supports_action(Action::Click), row.enabled, "{kind} row {index}");
             assert_eq!(
@@ -2700,8 +2700,11 @@ fn picker_options_offer_a_press_that_picks_them_as_a_click_does() {
             pressed += usize::from(row.enabled);
         }
         assert!(pressed > 1, "{kind}");
-        let first = super::accessibility_modal_id(kind, 3);
+        let first = ids.iter().flatten().copied().next().unwrap();
+        let elsewhere = super::accessibility_picker_option_ids(super::MODAL_KIND_SSH, &menu.rows);
         for stale in [
+            super::accessibility_modal_id(kind, 3),
+            elsewhere.iter().flatten().copied().next().unwrap(),
             super::accessibility_modal_id(kind, 0),
             super::accessibility_modal_id(kind, 1),
             super::accessibility_modal_id(kind, 2),
@@ -2793,10 +2796,17 @@ fn quick_select_labels_offer_a_press_that_acts_on_their_target() {
         hint_bounds: (0..3).map(|col| (col as f32 * 32.0, 0.0, 16.0, 16.0)).collect(),
         ..Default::default()
     };
-    let projection =
-        super::modal_accessibility_projection(&overlay, (800.0, 400.0), (8.0, 16.0), 1.0, &EN_TEXT);
+    let projection = super::modal_accessibility_projection_for_window(
+        &overlay,
+        &ws,
+        (800.0, 400.0),
+        (8.0, 16.0),
+        1.0,
+        &EN_TEXT,
+    );
+    let targets = ws.hint_state.as_ref().unwrap().0.clone();
     for (index, (label, live)) in [("aa", true), ("ab", true), ("ba", false)].into_iter().enumerate() {
-        let id = super::accessibility_modal_id(3, index + 1);
+        let id = super::accessibility_hint_id(&targets[index]);
         let node = &projection.nodes.iter().find(|(at, _)| *at == id).unwrap().1;
         assert_eq!(node.supports_action(Action::Click), live, "{label}");
         assert_eq!(
@@ -2805,10 +2815,14 @@ fn quick_select_labels_offer_a_press_that_acts_on_their_target() {
             "{label}"
         );
     }
-    for stale in [super::accessibility_modal_id(3, 0), super::accessibility_modal_id(3, 4)] {
+    for stale in [
+        super::accessibility_modal_id(3, 0),
+        super::accessibility_modal_id(3, 1),
+        super::accessibility_modal_id(3, 4),
+    ] {
         assert!(super::accessibility_hint_target(stale, &ws).is_none());
     }
-    let first = super::accessibility_modal_id(3, 1);
+    let first = super::accessibility_hint_id(&targets[0]);
     ws.hint_state = None;
     assert!(super::accessibility_hint_target(first, &ws).is_none());
     let handler = production_source()
@@ -3361,24 +3375,146 @@ fn a_hovered_link_offers_a_press_that_opens_it() {
         .unwrap();
     assert_eq!(node.label(), Some("https://x.test/path"));
     assert!(node.supports_action(Action::Click));
-    assert!(super::accessibility_link_status(*id));
+    assert!(super::accessibility_link_status(*id, &overlay));
     for (other, node) in &projection.nodes {
         if other != id {
             assert!(!node.supports_action(Action::Click), "{:?}", node.role());
-            assert!(!super::accessibility_link_status(*other));
+            assert!(!super::accessibility_link_status(*other, &overlay));
         }
     }
     let handler = production_source()
         .split_once("fn handle_accessibility_action(")
         .unwrap()
         .1
-        .split_once("if accessibility_link_status(request.target_node) {")
+        .split_once("if accessibility_bound_class(request.target_node, BoundTarget::Link) {")
         .expect("the handler dispatches a link press")
         .1
         .split("return;")
         .next()
         .unwrap()
         .to_string();
+    assert!(handler.contains("accessibility_link_status(request.target_node, &self.overlay(ws, true))"));
     assert!(handler.contains("self.hovered_link_at_cursor(ws)"));
     assert!(handler.contains("self.open_pane_link(ws, links_pane(ws), &uri)"));
+}
+
+/// A node a screen reader can act on is bound to its target, not to its
+/// place: a request the adapter queued against an earlier tree names nothing
+/// once the view has changed, so it can never act on whatever took that
+/// place. Filtering the layout picker from dev and ops to ops leaves the
+/// queued id for dev naming nothing, while ops keeps its id; a quick-select
+/// label of an earlier session, or one over other text, names nothing; and a
+/// hovered link's node names nothing once another link, or the same target
+/// painted elsewhere, is under the pointer.
+#[test]
+fn accessibility_requests_are_bound_to_their_targets() {
+    let names = ["dev".to_string(), "ops".to_string()];
+    let menu = |query: &str| {
+        picker_context_menu(
+            layout_picker_list(query, 0, &names, &EN_TEXT),
+            (1280.0, 820.0),
+            (7.8, 16.25),
+            (7.8, 16.25),
+            32.0,
+        )
+        .unwrap()
+    };
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.layout_picker_input = Some((Default::default(), 0));
+    let both = menu("");
+    let before = super::accessibility_picker_option_ids(super::MODAL_KIND_LAYOUTS, &both.rows);
+    assert_eq!(both.rows[0].label, "dev");
+    let (dev, ops) = (before[0].unwrap(), before[1].unwrap());
+    let filtered = menu("op");
+    assert_eq!(filtered.rows.len(), 1);
+    assert_eq!(filtered.rows[0].label, "ops");
+    let after = super::accessibility_picker_option_ids(super::MODAL_KIND_LAYOUTS, &filtered.rows);
+    assert_ne!(after[0], Some(dev), "the first place is not dev's any more");
+    assert_eq!(after[0], Some(ops), "ops keeps its id");
+    assert_eq!(super::accessibility_picker_press(&ws, &filtered, dev), None);
+    assert_eq!(super::accessibility_picker_press(&ws, &filtered, ops), Some(0));
+    assert_eq!(super::accessibility_picker_press(&ws, &both, dev), Some(0));
+
+    let target = |label: &str, col: usize, text: &str| super::HintTarget {
+        row: 2,
+        col,
+        label: label.into(),
+        pane: 1,
+        what: super::HintWhat::Text {
+            kind: kettle_core::hints::Kind::Url,
+            text: text.into(),
+            bounded: true,
+        },
+    };
+    let first = target("a", 4, "https://one.test");
+    ws.layout_picker_input = None;
+    ws.hint_state = Some((vec![first.clone()], String::new()));
+    let overlay = kettle_render::Overlay {
+        hint_labels: vec![kettle_render::HintLabel { row: 2, col: 4, label: "a".into(), dim: false }],
+        hint_bounds: vec![(32.0, 32.0, 8.0, 16.0)],
+        ..Default::default()
+    };
+    let projection = super::modal_accessibility_projection_for_window(
+        &overlay,
+        &ws,
+        (800.0, 400.0),
+        (8.0, 16.0),
+        1.0,
+        &EN_TEXT,
+    );
+    let id = super::accessibility_hint_id(&first);
+    let node = &projection.nodes.iter().find(|(at, _)| *at == id).expect("the bound label").1;
+    assert!(node.supports_action(accesskit::Action::Click));
+    let list = &projection
+        .nodes
+        .iter()
+        .find(|(at, _)| *at == super::accessibility_modal_id(3, 0))
+        .unwrap()
+        .1;
+    assert_eq!(list.children(), [id]);
+    assert_eq!(super::accessibility_hint_target(id, &ws).map(|t| t.label), Some("a".into()));
+    for later in [target("a", 4, "https://two.test"), target("a", 9, "https://one.test")] {
+        ws.hint_state = Some((vec![later], String::new()));
+        assert!(super::accessibility_hint_target(id, &ws).is_none());
+    }
+    // A label the window's targets do not hold keeps its place and no press.
+    ws.hint_state = Some((vec![target("b", 4, "https://one.test")], String::new()));
+    let projection = super::modal_accessibility_projection_for_window(
+        &overlay,
+        &ws,
+        (800.0, 400.0),
+        (8.0, 16.0),
+        1.0,
+        &EN_TEXT,
+    );
+    let node = &projection
+        .nodes
+        .iter()
+        .find(|(at, _)| *at == super::accessibility_modal_id(3, 1))
+        .unwrap()
+        .1;
+    assert!(!node.supports_action(accesskit::Action::Click));
+
+    let link = |uri: &str, x: f32| {
+        kettle_render::link_status_layout(
+            (0.0, 0.0, 800.0, 400.0),
+            (8.0, 16.0),
+            uri,
+            "Ctrl+click to open",
+            &[(x, 0.0, 100.0, 16.0)],
+        )
+        .unwrap()
+    };
+    let shown = |status| kettle_render::Overlay {
+        pane_statuses: vec![status],
+        ..Default::default()
+    };
+    let a = shown(link("https://x.test/a", 0.0));
+    let id = super::accessibility_link_id(&a.pane_statuses[0]);
+    let projection = super::modal_accessibility_projection(&a, (800.0, 400.0), (8.0, 16.0), 1.0, &EN_TEXT);
+    assert!(projection.nodes.iter().any(|(at, node)| *at == id && node.role() == accesskit::Role::Link));
+    assert!(super::accessibility_link_status(id, &a));
+    assert!(!super::accessibility_link_status(id, &shown(link("https://x.test/b", 0.0))));
+    assert!(!super::accessibility_link_status(id, &shown(link("https://x.test/a", 200.0))));
+    assert!(!super::accessibility_link_status(id, &kettle_render::Overlay::default()));
 }

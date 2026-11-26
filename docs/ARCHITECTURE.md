@@ -2063,6 +2063,18 @@ typing the label does. A dimmed label and a disabled placeholder have none.
 The hovered link's `Link` node has a press too, which opens the link under
 the pointer through `open_pane_link`, as the click its status names does.
 
+A node a screen reader can act on is bound to its target, not to its place:
+its AccessKit id is a hash of the target (`accessibility_bound_id`), above
+every modal kind's ids. A picker option's id comes from its label and how many
+options above it share that label (`accessibility_picker_option_ids`), a
+quick-select label's from its label, pane, cell and text (a card's cell, never
+its nonce; `bind_hint_accessibility` gives the window's labels these ids), and
+the hovered link's from its status target and painted bounds. Adapters queue
+requests against the tree they last received, so a request that arrives after
+the view changed names a node the current view does not hold and is dropped,
+where a place-based id would act on whatever took that place. Opening still
+goes through `open_pane_link` and the picker's own Enter, with their checks.
+
 The context menu retains its platform convention: left/middle presses outside
 it, including in the terminal, dismiss and consume; an outside right press
 dismisses and follows the ordinary right-click route to relocate/reopen the menu.

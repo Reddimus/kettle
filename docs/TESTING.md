@@ -3504,6 +3504,11 @@ speech:
 - `a_hovered_link_offers_a_press_that_opens_it`: the hovered link's node has
   a Click action that opens the link under the pointer through
   `open_pane_link`. Its status text has none.
+- `accessibility_requests_are_bound_to_their_targets`: after the layout
+  picker is filtered from dev and ops to ops, the id published for dev names
+  nothing while ops keeps its id. A quick-select label from an earlier session,
+  or one over other text, names nothing, and neither does a link node once
+  another link, or the same target painted elsewhere, is shown.
 - `every_modal_surface_is_a_modal_dialog`: the palette, the theme, layout and
   SSH pickers, Settings and title editing each project one modal dialog.
 - `the_tab_list_holds_only_tabs_beside_a_toolbar_of_the_strips_buttons`: the
