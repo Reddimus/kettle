@@ -2767,7 +2767,7 @@ impl App {
             handled = true;
         }
         if bcode == 0 {
-            ws.scrollbar_drag_offset = None;
+            end_scrollbar_drag(ws);
             ws.tab_drag_active = false;
             ws.tab_drag_press = None;
             ws.tab_pressed_idx = None;

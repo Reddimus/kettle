@@ -1277,7 +1277,12 @@ impl App {
                 }
                 if bcode == 0 {
                     ws.search.dragging_editor = false;
-                    ws.scrollbar_drag_offset = None;
+                    // A drag held the arrow wherever it went; released over
+                    // text the pointer gets the I-beam back now, not on its
+                    // next move.
+                    if end_scrollbar_drag(ws) {
+                        self.sync_cursor_icon(ws);
+                    }
                     // End the drag-to-reorder gesture on
                     // left-button release. Any swaps that happened
                     // during the drag are already committed; this just

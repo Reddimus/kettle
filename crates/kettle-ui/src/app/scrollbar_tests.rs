@@ -172,3 +172,20 @@ fn the_scrollbar_shows_the_arrow_where_a_press_grabs_it() {
         assert!(source.contains(needle), "missing: {needle}");
     }
 }
+
+/// A drag holds the arrow wherever the pointer takes it, so releasing it over
+/// text must give the pointer its I-beam back at once, and narrow the bar it
+/// held wide, rather than leave both for the next event in an idle window.
+/// The native release works the cursor out again as the drag ends, and both
+/// releases end the drag through the helper that asks for the frame.
+#[test]
+fn releasing_a_scrollbar_drag_restores_the_cursor_at_once() {
+    let source: String = production_source().split_whitespace().collect();
+    for needle in [
+        "ifend_scrollbar_drag(ws){self.sync_cursor_icon(ws);}",
+        "ifbcode==0{end_scrollbar_drag(ws);ws.tab_drag_active=false;",
+        "fnend_scrollbar_drag(ws:&mutWindowState)->bool{ifws.scrollbar_drag_offset.take().is_none(){returnfalse;}ifletSome(window)=&ws.window{window.request_redraw();}true}",
+    ] {
+        assert!(source.contains(needle), "missing: {needle}");
+    }
+}

@@ -1184,6 +1184,36 @@ pub(super) fn scrollbar_hit_contains((x, y, w, h): Rect, px: f32, py: f32) -> bo
     px >= x && px <= x + w && py >= y && py <= y + h
 }
 
+/// End a scrollbar drag, if one is live. Says whether one was: the bar it
+/// held wide narrows back on the frame this asks for, and the cursor it held
+/// as the arrow must be worked out again where the pointer is now.
+pub(super) fn end_scrollbar_drag(ws: &mut WindowState) -> bool {
+    if ws.scrollbar_drag_offset.take().is_none() {
+        return false;
+    }
+    if let Some(window) = &ws.window {
+        window.request_redraw();
+    }
+    true
+}
+
+#[cfg(test)]
+mod scrollbar_release_tests {
+    use super::end_scrollbar_drag;
+
+    /// A release ends a live drag once and says so, so its caller works the
+    /// cursor out again; with no drag live it changes nothing.
+    #[test]
+    fn a_release_ends_a_scrollbar_drag_once_and_says_so() {
+        let mut ws = crate::window_state::WindowState::new(1, crate::mux::Mux::new());
+        assert!(!end_scrollbar_drag(&mut ws), "no drag to end");
+        ws.scrollbar_drag_offset = Some(4.0);
+        assert!(end_scrollbar_drag(&mut ws), "the drag ended");
+        assert_eq!(ws.scrollbar_drag_offset, None);
+        assert!(!end_scrollbar_drag(&mut ws), "it ends once");
+    }
+}
+
 /// Whether a primary press on a pane's scrollbar strip grabs the bar: the
 /// pane has `history` to scroll, so the bar is drawn, and its program does
 /// not take the press first. A program reporting the mouse (`track`) gets it,
