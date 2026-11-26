@@ -1838,6 +1838,8 @@ fn strip_tooltips_wait_for_a_rest_and_a_press_hides_them() {
         modal_open: false,
         bindings: &bindings,
         tr: &tr,
+        tab_format: "{title}",
+        tab_cell_width: 8.0,
     };
     let bar = kettle_render::TabBar::hidden();
     let shown = |ws: &crate::window_state::WindowState, at| {
@@ -1967,6 +1969,8 @@ fn overflow_arrows_light_point_and_name_what_a_press_does() {
             modal_open: false,
             bindings: &bindings,
             tr: &tr,
+            tab_format: "{title}",
+            tab_cell_width: 8.0,
         };
         bar.in_titlebar = titlebar;
         ws.hovered_scroll_arrow = Some(forward);
@@ -1996,4 +2000,88 @@ fn overflow_arrows_light_point_and_name_what_a_press_does() {
         "let new_tab_hover_icon = (new_tab_hover.is_some() || ws.hovered_scroll_arrow.is_some()) .then_some(CursorIcon::Pointer);"
     ));
     assert!(source.contains("hovered_scroll_right: ws.hovered_scroll_arrow == Some(true),"));
+}
+
+/// Must 4 and D8 of the 6.0 UI review: a tab whose title the strip cut had
+/// no way to read it whole. Resting the pointer on such a tab, off its close
+/// button, now shows the full title (the whole working directory for a tab
+/// named by its folder) in a tooltip hung from the tab; a tab shown whole,
+/// its close button and a lone title-bar title have none.
+#[test]
+fn a_cut_tab_title_shows_whole_in_a_tooltip() {
+    use super::chrome::{StripTooltipContext, shown_strip_tooltip, strip_tooltip_target};
+    use std::time::{Duration, Instant};
+    let long = "Tab 2: Build and deploy the production cluster migration script";
+    let path = "~/Repos/kettle/crates/kettle-ui";
+    let seg = |idx: usize, x: f32, title: &str, path: Option<&str>| {
+        let rect = (x, 0.0, 100.0, 28.0);
+        let close = (x + 72.0, 0.0, 28.0, 28.0);
+        kettle_render::TabSeg {
+            idx,
+            rect,
+            title_rect: (x + 8.0, 0.0, 64.0, 28.0),
+            hint: None,
+            close,
+            title: title.into(),
+            path: path.map(Into::into),
+            active: idx == 0,
+            activity: kettle_render::TabActivity::Normal,
+        }
+    };
+    let mut bar = kettle_render::TabBar::hidden();
+    bar.height = 28.0;
+    bar.band = (0.0, 0.0, 400.0, 28.0);
+    bar.segments = vec![
+        seg(0, 0.0, "vim", None),
+        seg(1, 100.0, long, None),
+        seg(2, 200.0, "kettle-ui", Some(path)),
+    ];
+    let bindings = kettle_config::keybinds::defaults();
+    let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+    let context = StripTooltipContext {
+        modal_open: false,
+        bindings: &bindings,
+        tr: &tr,
+        tab_format: "{title}",
+        tab_cell_width: 8.0,
+    };
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    ws.window_focused = true;
+    let at_on = |ws: &mut crate::window_state::WindowState, bar: &kettle_render::TabBar, x: f64| {
+        ws.native_pointer = Some(winit::dpi::PhysicalPosition::new(x, 14.0));
+        strip_tooltip_target(ws, bar, &context)
+    };
+    let at = |ws: &mut crate::window_state::WindowState, x: f64| at_on(ws, &bar, x);
+    assert_eq!(at(&mut ws, 20.0), None, "a title shown whole");
+    let tip = at(&mut ws, 120.0).expect("a cut title");
+    assert_eq!(
+        tip.target,
+        crate::tooltip::TooltipTarget::TabTitle(1)
+    );
+    assert_eq!(tip.text, long);
+    assert_eq!(tip.anchor, Some(bar.segments[1].rect));
+    assert_eq!(at(&mut ws, 185.0), None, "the close button names nothing");
+    let folder = at(&mut ws, 220.0).expect("a folder shown by its leaf");
+    assert_eq!(folder.text, path);
+    // It waits for a rest, as every chrome tooltip does.
+    let t0 = Instant::now();
+    ws.tooltip.hover(Some(tip.target), t0);
+    ws.native_pointer = Some(winit::dpi::PhysicalPosition::new(120.0, 14.0));
+    assert_eq!(shown_strip_tooltip(&ws, &bar, &context, t0), None);
+    assert_eq!(
+        shown_strip_tooltip(&ws, &bar, &context, t0 + Duration::from_millis(500))
+            .map(|tip| tip.text)
+            .as_deref(),
+        Some(long)
+    );
+    let mut lone = kettle_render::TabBar::hidden();
+    lone.height = 28.0;
+    lone.segments = vec![seg(0, 0.0, long, None)];
+    assert!(at_on(&mut ws, &lone, 20.0).is_some());
+    lone.lone_title = true;
+    assert_eq!(
+        at_on(&mut ws, &lone, 20.0),
+        None,
+        "a lone title stands for the window"
+    );
 }

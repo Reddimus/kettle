@@ -161,6 +161,10 @@ tooltip until the pointer leaves, and a single scheduler wake per deadline;
 `overflow_arrows_light_point_and_name_what_a_press_does` (`kettle-ui`) and
 `overflow_arrows_prelight_like_the_other_flat_buttons` (`kettle-render`) cover
 the arrows' hover, hand cursor, translated tooltips and anchor.
+`a_cut_tab_title_shows_whole_in_a_tooltip` (`kettle-ui`) and
+`a_tab_label_is_cut_only_when_the_strip_shortens_it` (`kettle-render`) cover
+the full-title tooltip, and `narrow_tab_titles_keep_the_start_that_tells_them_apart`
+the end ellipsis below 16 columns.
 Full render/UI suites and clippy remain required; native focus changes,
 hover/press feedback, tooltip placement and Spanish acceptance need a desktop.
 

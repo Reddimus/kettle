@@ -1569,6 +1569,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   leaves the button.
 - The tab strip's overflow arrows light up and show the pointing hand under
   the pointer, and their tooltips say what a press does.
+- A tab whose title is too long to show whole now shows the full title in a
+  tooltip when the pointer rests on it.
 
 ## Older releases
 

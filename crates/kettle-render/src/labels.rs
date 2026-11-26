@@ -333,6 +333,23 @@ pub fn fit_pane_titlebar_title(
     format!("  {title_prefix}{fitted_title}{bell_part}")
 }
 
+/// Whether the strip shows `seg` shortened: [`tab_segment_label`] paints
+/// less than the whole label, so its full title belongs in a tooltip.
+pub fn tab_segment_label_cut(seg: &crate::TabSeg, format: &str, cw: f32, notice: &str) -> bool {
+    let notice = if seg.active { notice } else { "" };
+    let title = seg.path.as_deref().unwrap_or(&seg.title);
+    let body = kettle_config::template::fill(
+        format,
+        &[("n", &(seg.idx + 1).to_string()), ("title", title)],
+    );
+    let whole = if notice.is_empty() {
+        body
+    } else {
+        format!("{notice} {body}")
+    };
+    tab_segment_label(seg, format, cw, notice) != whole
+}
+
 /// Fit and format a tab label, including the native caption's recording notice.
 pub fn tab_segment_label(seg: &crate::TabSeg, format: &str, cw: f32, notice: &str) -> String {
     let avail = (seg.title_rect.2.max(0.0) / cw.max(1.0)) as usize;

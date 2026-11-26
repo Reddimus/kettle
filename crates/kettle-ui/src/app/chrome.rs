@@ -103,23 +103,31 @@ impl App {
     }
 
     /// What a strip tooltip needs besides the window's own state.
-    fn strip_tooltip_context(&self, ws: &WindowState) -> StripTooltipContext<'_> {
+    fn strip_tooltip_context(&self, ws: &WindowState, bar: &TabBar) -> StripTooltipContext<'_> {
+        // The cell the strip fits tab titles by, as the renderer has it.
+        let cell = self.overlay_text_cell_width(ws);
         StripTooltipContext {
             modal_open: self.pointer_modal_open(ws),
             bindings: &self.cfg.keybinds,
             tr: &self.ui_text,
+            tab_format: &self.cfg.tab_format,
+            tab_cell_width: if bar.in_titlebar {
+                cell * kettle_render::tab_text_scale(bar.height, self.overlay_text_line_height(ws))
+            } else {
+                cell
+            },
         }
     }
 
     /// Give `bar` the strip's tooltip in this frame: the hovered control's,
     /// once [`crate::tooltip::TooltipClock`] says it shows.
     fn attach_strip_tooltip(&self, ws: &WindowState, bar: &mut TabBar) {
-        if let Some(tip) = shown_strip_tooltip(
-            ws,
-            bar,
-            &self.strip_tooltip_context(ws),
-            std::time::Instant::now(),
-        ) {
+        let now = std::time::Instant::now();
+        // Most layouts have no tooltip showing: skip working one out.
+        if ws.tooltip.shown(now).is_none() {
+            return;
+        }
+        if let Some(tip) = shown_strip_tooltip(ws, bar, &self.strip_tooltip_context(ws, bar), now) {
             bar.tooltip = Some(tip.text);
             bar.tooltip_anchor = tip.anchor;
         }
@@ -129,8 +137,8 @@ impl App {
     /// pointer, after a pointer move set the strip's hover, and repaint when
     /// the tooltip shown changes.
     pub(super) fn sync_tooltip(&self, ws: &mut WindowState, bar: &TabBar) {
-        let target =
-            strip_tooltip_target(ws, bar, &self.strip_tooltip_context(ws)).map(|tip| tip.target);
+        let target = strip_tooltip_target(ws, bar, &self.strip_tooltip_context(ws, bar))
+            .map(|tip| tip.target);
         if ws.tooltip.hover(target, std::time::Instant::now())
             && let Some(window) = &ws.window
         {
@@ -1180,6 +1188,9 @@ pub(super) struct StripTooltipContext<'a> {
     pub(super) modal_open: bool,
     pub(super) bindings: &'a kettle_config::keybinds::Bindings,
     pub(super) tr: &'a kettle_i18n::Translator,
+    /// What tab labels are made of, and the cell the strip fits them by.
+    pub(super) tab_format: &'a str,
+    pub(super) tab_cell_width: f32,
 }
 
 /// The strip control under the pointer on `bar` that has a tooltip, and
@@ -1238,15 +1249,48 @@ pub(super) fn strip_tooltip_target(
     } else {
         ws.hovered_new_tab.then_some(NewTabHoverTarget::Plus)
     };
-    let shortcut = target.and_then(|target| chrome_button_shortcut(bindings, target));
-    let text = new_tab_tooltip(target, tr, shortcut.as_deref())?;
-    let target = match target? {
+    let Some(target) = target else {
+        return cut_tab_title_tooltip(ws, bar, context);
+    };
+    let shortcut = chrome_button_shortcut(bindings, target);
+    let text = new_tab_tooltip(Some(target), tr, shortcut.as_deref())?;
+    let target = match target {
         NewTabHoverTarget::Menu => TooltipTarget::NewTabMenu,
         NewTabHoverTarget::Plus => TooltipTarget::NewTab,
         NewTabHoverTarget::Settings => TooltipTarget::Settings,
         NewTabHoverTarget::Search => TooltipTarget::Search,
     };
     strip(target, text)
+}
+
+/// The tab under the pointer, off its close button, when the strip shows
+/// its title shortened: the tooltip names the whole title. A lone title-bar
+/// title stands for the window and has none.
+fn cut_tab_title_tooltip(
+    ws: &WindowState,
+    bar: &TabBar,
+    context: &StripTooltipContext<'_>,
+) -> Option<ChromeTooltip> {
+    let pointer = ws.native_pointer?;
+    let (x, y) = (pointer.x as f32, pointer.y as f32);
+    if bar.lone_title || bar.height <= 0.0 {
+        return None;
+    }
+    let seg = bar.segments.iter().find(|s| rect_contains(s.rect, x, y))?;
+    if seg.close.2 > 0.0 && rect_contains(seg.close, x, y) {
+        return None;
+    }
+    kettle_render::tab_segment_label_cut(
+        seg,
+        context.tab_format,
+        context.tab_cell_width,
+        &bar.recording_notice,
+    )
+    .then(|| ChromeTooltip {
+        target: crate::tooltip::TooltipTarget::TabTitle(seg.idx),
+        text: seg.path.as_deref().unwrap_or(&seg.title).to_owned(),
+        anchor: Some(seg.rect),
+    })
 }
 
 /// The overflow arrow under the pointer, named for what a press on it does:

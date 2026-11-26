@@ -136,6 +136,7 @@ pub(crate) const TAB_CLOSE_GLYPH_SCALE: f32 = 1.5;
 
 pub use labels::{
     display_width, fit_pane_titlebar_title, fit_tab_segment_title, tab_segment_label,
+    tab_segment_label_cut,
 };
 #[cfg(test)]
 use labels::{fit_tab_path, fit_tab_title};

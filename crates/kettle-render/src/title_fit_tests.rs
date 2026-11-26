@@ -574,3 +574,41 @@ fn review_recording_notice_survives_custom_formats_and_title_fitting() {
         }
     }
 }
+
+/// A tab's tooltip names its full title only when the strip cut it: a
+/// shortened title, a path shown by its last folder, or a recording notice
+/// that leaves no room; never a title shown whole.
+#[test]
+fn a_tab_label_is_cut_only_when_the_strip_shortens_it() {
+    let seg = |title: &str, path: Option<&str>, width: f32| super::TabSeg {
+        idx: 2,
+        rect: (0.0, 0.0, width + 16.0, 28.0),
+        title_rect: (8.0, 0.0, width, 28.0),
+        close: (0.0, 0.0, 0.0, 0.0),
+        hint: None,
+        title: title.into(),
+        path: path.map(Into::into),
+        active: true,
+        activity: super::TabActivity::Normal,
+    };
+    let cut = |seg: &super::TabSeg, format: &str, notice: &str| {
+        super::tab_segment_label_cut(seg, format, 8.0, notice)
+    };
+    assert!(!cut(&seg("shell", None, 80.0), "{title}", ""));
+    assert!(cut(
+        &seg("Tab 3: Build and deploy", None, 80.0),
+        "{title}",
+        ""
+    ));
+    // Exactly as wide as the label: whole.
+    assert!(!cut(&seg("abcdefghij", None, 80.0), "{title}", ""));
+    assert!(cut(&seg("abcdefghij", None, 80.0), "{n}: {title}", ""));
+    let path = "~/Repos/kettle/crates/kettle-ui";
+    assert!(cut(&seg("kettle-ui", Some(path), 80.0), "{title}", ""));
+    assert!(!cut(&seg("kettle-ui", Some(path), 400.0), "{title}", ""));
+    assert!(cut(
+        &seg("shell", None, 80.0),
+        "{title}",
+        "REC recording input"
+    ));
+}

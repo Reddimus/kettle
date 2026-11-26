@@ -1312,7 +1312,9 @@ A tab title too long for its tab is shortened with an ellipsis. A title
 derived from the working directory keeps its last folder, and a title that
 looks like a path keeps its end. Any other title keeps both ends when at least
 16 columns of it show, and only its start in a narrower tab, so tabs whose
-titles differ near the start still read apart.
+titles differ near the start still read apart. Resting the pointer on a
+shortened tab shows its whole title, or its whole working directory, in a
+tooltip.
 
 When a window loses focus on macOS or Linux, tab text and controls dim toward
 their backgrounds while retaining at least 3:1 contrast, and the active accent

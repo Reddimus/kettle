@@ -34,6 +34,8 @@ pub(crate) enum TooltipTarget {
     ScrollBack,
     /// The tab strip's forward overflow arrow.
     ScrollForward,
+    /// A tab whose title the strip shortened, by index.
+    TabTitle(usize),
 }
 
 /// The pointer's tooltip state in one window.
