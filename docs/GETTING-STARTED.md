@@ -147,12 +147,18 @@ macOS leaves `Option+Arrow` to the terminal, so split focus lives on
 the same thing and stays bound. `Ctrl+Shift+N` / `Ctrl+Shift+P` cycles panes on
 every platform.
 
+Right-click a tab for Rename Tab…, Duplicate Tab, Move Tab Left and Right,
+and Close Tab; each acts on that tab, even when another tab is active.
 Right-click a terminal to reach Copy, Paste and Select All first. A link adds
 Open Link and Copy Link before those actions. Split, Pane, Tab, Window, Title,
 Group and Appearance commands live in submenus. Click a category or press Right
-to enter it; Left or Escape returns to its parent. Hovering a category also
-opens it. Menus and the command palette show native shortcut symbols on macOS
-(for example, ⌘V and ⇧⌘D); other platforms keep Ctrl+Shift+V notation.
+to enter it; Left or Escape returns to its parent. Resting the pointer on a
+category for a fifth of a second also opens it, and an open submenu stays put
+while the pointer heads for it across the other categories. Moving the
+pointer off the menu, or out of the window, clears its highlight unless a
+submenu is open; the next Down or Up starts again from the top or the bottom.
+Menus and the command palette show native shortcut symbols on macOS (for
+example, ⌘V and ⇧⌘D); other platforms keep Ctrl+Shift+V notation.
 
 Pasting text that contains a newline or a control character other than tab
 asks for confirmation when the receiving program has not enabled bracketed

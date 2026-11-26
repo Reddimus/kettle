@@ -992,6 +992,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   instead of appending to it.
 - A tab with a single pane no longer draws a frame around it; pane borders
   appear once a tab is split, and while broadcast input is on.
+- Right-clicking a tab opens a menu for that tab, with Rename Tab…,
+  Duplicate Tab, Move Tab Left, Move Tab Right and Close Tab, instead of the
+  terminal's menu. Each acts on the tab you clicked, not the active one.
 
 ### Security
 
@@ -1616,6 +1619,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   over blank cells, so it never covers text.
 - Quick-select hints with nothing on screen to label says "No hints here"
   for a moment instead of doing nothing.
+
+- Context-menu submenus open once the pointer rests on their row for 200 ms
+  (a click or Right opens one at once), and an open submenu stays while the
+  pointer moves toward it across other rows, so a diagonal move no longer
+  lands on a different submenu.
+- Hovering a menu row that cannot run, such as Copy with nothing selected or
+  the Shift hint's line, keeps the previous row lit instead of lighting
+  nothing, so Enter still runs the row you see.
+- Moving the pointer off a context menu, or out of the window, clears its
+  highlight unless a submenu is open, as macOS and GTK menus do; the next
+  Down or Up starts again from the top or the bottom.
+- A context menu that does not fit below the pointer, or below the text
+  cursor's line when opened from the keyboard, opens above it instead of
+  sliding up over it, so the menu no longer covers the prompt it was opened
+  for.
 
 ## Older releases
 

@@ -5422,6 +5422,34 @@ and atomic config write-back via `persist_config_toggle`; its
 opt-in keys, and an opt-in pre-commit hook (`.githooks/pre-commit`) catches
 clippy / fmt / test / shellcheck / rustdoc regressions at commit time.
 A submenu restores its parent's selected row and scroll position when it closes.
+Hover goes through the pure `app/menu_pointer.rs`: a submenu row opens after a
+200 ms dwell (a click or Right opens it at once), and an open submenu holds
+while the pointer crosses its parent's other rows inside the triangle from the
+pointer's last position to the submenu's near edge, giving way 300 ms after the
+pointer leaves that triangle or comes to rest. A pointer at rest sends no
+events, so `about_to_wait` wakes once at the pending deadline
+(`context_menu_pointer_tick`); nothing redraws until the hover changes.
+Hovering a row that cannot run (a disabled Copy, an information line) leaves
+the highlight where it was, so the lit row is always one Enter can run.
+A pointer that leaves the menu's panels, or the window, with no submenu open
+clears the highlight, as macOS and GTK menus do: the overlay and `ctl`
+report no row (`usize::MAX`, `null`), Enter runs nothing, and the next arrow
+starts from the first or last row. A pointer that was never over the menu,
+as with one opened from the keyboard, leaves the highlight alone.
+`place_context_menu` opens a menu below its anchor and flips it above when it
+does not fit there, as GTK and macOS do. A right-click's anchor is the pointer,
+and a menu too tall for either side slides onto the window. A menu opened
+from the keyboard is anchored on the text cursor's line: too tall for either
+side, it takes the roomier one and is held short enough to leave the line in
+view (`ContextMenuSession::root_max_h`), and scrolls.
+A right-click on a tab segment, native or through `ctl`, opens that tab's
+menu (`open_tab_menu`): Rename Tab…, Duplicate Tab, Move Tab Left/Right and
+Close Tab, as ordinary action rows. The menu records the tab by the panes it
+holds (`ContextMenuSession::tab`), so a shell exiting meanwhile cannot
+retarget it, and `act_on_menu_tab` runs the row on that tab: Close asks as
+the tab's ✕ does, Move uses `Mux::nudge_tab` and leaves the active tab active,
+and Rename and Duplicate bring the tab forward first. No action closes the
+other tabs, so the menu has no Close Other Tabs.
 
 Other additions:
 

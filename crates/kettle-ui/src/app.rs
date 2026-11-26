@@ -74,6 +74,7 @@ pub(crate) fn app_source() -> String {
         include_str!("app/layout.rs"),
         include_str!("app/links.rs"),
         include_str!("app/media.rs"),
+        include_str!("app/menu_pointer.rs"),
         include_str!("app/menus.rs"),
         include_str!("app/modals.rs"),
         include_str!("app/notifications.rs"),
@@ -179,6 +180,7 @@ pub(crate) use keyboard::*;
 pub(crate) use layout::*;
 pub(crate) use links::*;
 use media::*;
+pub(crate) use menu_pointer::*;
 pub(crate) use menus::*;
 pub(crate) use modals::*;
 use notification_toast::*;
@@ -213,6 +215,7 @@ mod linux_titlebar_tests;
 mod selection_hint;
 use linux_titlebar::*;
 mod media;
+mod menu_pointer;
 mod menus;
 mod modals;
 mod notices;

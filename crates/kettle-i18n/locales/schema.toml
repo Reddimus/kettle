@@ -194,6 +194,9 @@ context = "crates/kettle-ui/src/app/accessibility.rs mark_context_submenu_row: s
 [messages.menu_a11y_terminal]
 context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the right-click menu."
 
+[messages.menu_a11y_tab]
+context = "crates/kettle-ui/src/app/menus.rs open_tab_menu: screen-reader name of the menu a right-click on a tab in the tab bar opens, which acts on that tab."
+
 [messages.menu_about]
 context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row. Row of the new-tab dropdown. kettle is the product name."
 
@@ -201,7 +204,19 @@ context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click men
 context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
 
 [messages.menu_close_tab]
-context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row. Also a row of the menu a right-click on a tab opens (tab_menu_items), where it closes that tab."
+
+[messages.menu_rename_tab]
+context = "crates/kettle-ui/src/app/menus.rs tab_menu_items: row of the menu a right-click on a tab in the tab bar opens. Opens the inline editor for that tab's title; the ellipsis says an editor opens."
+
+[messages.menu_duplicate_tab]
+context = "crates/kettle-ui/src/app/menus.rs tab_menu_items: row of the menu a right-click on a tab opens. Opens a new tab like that one (same directory and program)."
+
+[messages.menu_move_tab_left]
+context = "crates/kettle-ui/src/app/menus.rs tab_menu_items: row of the menu a right-click on a tab opens. Moves that tab one place left in the tab bar, wrapping from the first to the last."
+
+[messages.menu_move_tab_right]
+context = "crates/kettle-ui/src/app/menus.rs tab_menu_items: row of the menu a right-click on a tab opens. Moves that tab one place right in the tab bar, wrapping from the last to the first."
 
 [messages.menu_close_window]
 context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."

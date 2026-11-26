@@ -1176,11 +1176,16 @@ impl App {
                     self.open_preview_menu(ws, focus.pane, None);
                 } else {
                     // Not a click: the menu opens at the text cursor, where
-                    // the keyboard is.
-                    let (px, py) = self
-                        .keyboard_menu_point(ws)
-                        .unwrap_or((ws.cursor.x as f32, ws.cursor.y as f32));
+                    // the keyboard is, below or above its line but never over
+                    // it.
+                    let point = self.keyboard_menu_point(ws);
+                    let (px, py) = point.unwrap_or((ws.cursor.x as f32, ws.cursor.y as f32));
                     self.open_context_menu(ws, px, py, false);
+                    if point.is_some() {
+                        let (_, cell_h) = self.menu_cell(ws);
+                        let line = MenuAnchor::line(px, py - cell_h * 0.5, py + cell_h * 0.5);
+                        self.place_context_menu_at_line(ws, line);
+                    }
                 }
             }
             Action::UndoCloseTab => {

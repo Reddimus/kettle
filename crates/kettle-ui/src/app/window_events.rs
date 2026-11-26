@@ -269,6 +269,7 @@ impl App {
             }
             WindowEvent::CursorLeft { .. } => {
                 dismiss_link_hover(ws);
+                self.context_menu_pointer_left(ws);
                 // A compositor's move grab takes the pointer away as well.
                 ws.titlebar_click = None;
                 if let Some(dialog) = ws.confirm_dialog.as_mut() {
@@ -794,6 +795,13 @@ impl App {
                 if self.press_linux_chrome(ws, &bar, px, py, bcode)
                     || bcode == 0 && self.press_titlebar_space(ws, &bar, px, py)
                 {
+                    return;
+                }
+                // A right-click on a tab opens that tab's menu.
+                if bcode == 2
+                    && let Some(idx) = tab_menu_segment(&bar, px, py)
+                {
+                    self.open_tab_menu(ws, idx, px, py);
                     return;
                 }
                 if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {

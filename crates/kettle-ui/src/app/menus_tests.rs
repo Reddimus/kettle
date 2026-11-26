@@ -1277,11 +1277,17 @@ fn context_menu_label_ellipsis_is_bounded_and_utf8_safe() {
 
 #[test]
 fn finding_short_menu_keeps_one_complete_row() {
-    let body = finding_body(include_str!("menus.rs"), "context_menu_level_geometry");
+    let limit = include_str!("menus.rs")
+        .split("fn context_menu_height_limit(")
+        .nth(1)
+        .and_then(|body| body.split("\n}\n").next())
+        .expect("the height limit");
     assert!(
-        body.contains(".max(row_h)"),
+        limit.contains(".max(row_h)"),
         "menu breathing room must yield to one complete row"
     );
+    let body = finding_body(include_str!("menus.rs"), "context_menu_level_geometry");
+    assert!(body.contains("context_menu_height_limit(surface_h, row_h)"));
 }
 
 #[test]
@@ -2670,4 +2676,141 @@ fn a_menu_opened_from_the_keyboard_opens_at_the_text_cursor() {
     let point = finding_body(&src, "keyboard_menu_point");
     assert!(point.contains("(point.line.0, point.column.0)"), "the signed line");
     assert!(point.contains("map.visual(column)"), "the painted column");
+}
+
+#[test]
+fn a_tabs_menu_offers_what_can_be_done_to_that_tab() {
+    use kettle_i18n::{Language, Translator};
+    let shape = |tabs, language| {
+        super::tab_menu_items(tabs, Translator::new(language))
+            .into_iter()
+            .map(|item| match item {
+                ContextMenuItem::Item {
+                    label,
+                    action,
+                    enabled: true,
+                } => Some((label, action)),
+                ContextMenuItem::Separator => None,
+                _ => panic!("a tab menu row is a plain row"),
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        shape(3, Language::En),
+        [
+            Some(("Rename Tab…", Action::EditTabTitle)),
+            Some(("Duplicate Tab", Action::DuplicateTab)),
+            None,
+            Some(("Move Tab Left", Action::MoveTabLeft)),
+            Some(("Move Tab Right", Action::MoveTabRight)),
+            None,
+            Some(("Close Tab", Action::CloseTab)),
+        ]
+    );
+    assert_eq!(
+        shape(2, Language::Es),
+        [
+            Some(("Cambiar el nombre de la pestaña…", Action::EditTabTitle)),
+            Some(("Duplicar pestaña", Action::DuplicateTab)),
+            None,
+            Some(("Mover la pestaña a la izquierda", Action::MoveTabLeft)),
+            Some(("Mover la pestaña a la derecha", Action::MoveTabRight)),
+            None,
+            Some(("Cerrar pestaña", Action::CloseTab)),
+        ]
+    );
+    // A lone tab has nowhere to move, and no separator is left doubled.
+    assert_eq!(
+        shape(1, Language::En),
+        [
+            Some(("Rename Tab…", Action::EditTabTitle)),
+            Some(("Duplicate Tab", Action::DuplicateTab)),
+            None,
+            Some(("Close Tab", Action::CloseTab)),
+        ]
+    );
+    // Its width is measured from the same translated labels it paints.
+    let spanish = super::tab_menu_items(2, Translator::new(Language::Es));
+    let widest = spanish
+        .iter()
+        .map(|item| context_menu_item_columns(item, ""))
+        .max()
+        .unwrap();
+    assert_eq!(
+        widest,
+        unicode_width::UnicodeWidthStr::width("Cambiar el nombre de la pestaña…")
+    );
+}
+
+#[test]
+fn a_tabs_menu_runs_each_row_on_its_own_tab() {
+    use super::{TabMenuDispatch as D, tab_menu_dispatch};
+    assert_eq!(tab_menu_dispatch(&Action::CloseTab), Some(D::Close));
+    assert_eq!(tab_menu_dispatch(&Action::MoveTabLeft), Some(D::Move(-1)));
+    assert_eq!(tab_menu_dispatch(&Action::MoveTabRight), Some(D::Move(1)));
+    for action in [Action::EditTabTitle, Action::DuplicateTab] {
+        assert_eq!(
+            tab_menu_dispatch(&action),
+            Some(D::Activate(action.clone()))
+        );
+    }
+    assert_eq!(tab_menu_dispatch(&Action::Paste), None);
+
+    let src = production_source();
+    let dispatch = finding_body(&src, "dispatch_context_menu_click");
+    let action_arm = dispatch
+        .split("ContextMenuClick::Action(action) => {")
+        .nth(1)
+        .expect("the action arm");
+    let tab = action_arm
+        .find("if let Some(tab) = ws.context_menu_session.tab.take()")
+        .expect("a tab's menu keeps its tab");
+    let generic = action_arm
+        .find("(action, _) => self.handle_action(ws, action, event_loop),")
+        .expect("other menus run the action");
+    assert!(tab < generic, "the tab target is consulted first");
+    let act = finding_body(&src, "act_on_menu_tab");
+    assert!(act.contains("let Some(idx) = ws.mux.tab_index_of_any_pane(tab) else {"));
+    assert!(act.contains("ConfirmAction::CloseTabHolding(ws.mux.tab_anchor_panes(idx))"));
+    assert!(act.contains("ws.mux.close_tab_at(idx)"));
+    assert!(act.contains("ws.mux.nudge_tab(idx, delta)"));
+    let open = finding_body(&src, "open_tab_menu");
+    let shown = open
+        .find("self.show_context_menu(ws, items, px, py);")
+        .unwrap();
+    assert!(shown < open.find("ws.context_menu_session.tab = Some(tab);").unwrap());
+    assert!(open.contains("Text::MenuA11yTab"));
+}
+
+#[test]
+fn right_clicking_a_tab_opens_its_menu() {
+    let src = production_source();
+    let segment = src
+        .split("fn tab_menu_segment(")
+        .nth(1)
+        .and_then(|body| body.split("\n}\n").next())
+        .expect("the tab under a right-click");
+    assert!(segment.contains("if !tab_bar_pointer_region_contains(bar, x, y) {"));
+    assert!(segment.contains(".find(|segment| rect_contains(segment.rect, x, y))"));
+    // Native presses, then control presses: the tab segment's right-click
+    // reaches the tab menu before the terminal menu's route.
+    for press in [
+        src.split("WindowEvent::MouseInput {")
+            .nth(1)
+            .expect("the native press"),
+        src.split("fn ctl_mouse_press(")
+            .nth(1)
+            .expect("the control press"),
+    ] {
+        let press = press.split_whitespace().collect::<Vec<_>>().join(" ");
+        let tab = press
+            .find(
+                "if bcode == 2 && let Some(idx) = tab_menu_segment(&bar, px, py) { self.open_tab_menu(ws, idx, px, py);",
+            )
+            .expect("a right-click on a tab opens its menu");
+        let terminal = press
+            .find("self.open_context_menu(ws, px, py, offer_copied)")
+            .expect("the terminal menu");
+        assert!(tab < terminal);
+    }
 }
