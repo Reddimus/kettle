@@ -204,14 +204,16 @@ impl App {
     /// Overlay-scrollbar hover-brighten: point `scrollbar_hover` at the pane
     /// whose bar is under the pointer, repainting only on the enter/leave
     /// edge so it costs nothing while the pointer is elsewhere. A drag holds
-    /// the hover it started with until its release.
+    /// the hover it started with until its release. The hover is the physical
+    /// pointer's (`scrollbar_hover_pointer`), so with the pointer outside the
+    /// window no bar is hovered.
     pub(super) fn update_scrollbar_hover(&self, ws: &mut WindowState) {
         if ws.scrollbar_drag_offset.is_some() {
             return;
         }
         let area = self.area(ws);
-        let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
-        let hover = self.scrollbar_pane_at(ws, area, px, py);
+        let hover = scrollbar_hover_pointer(ws)
+            .and_then(|(px, py)| self.scrollbar_pane_at(ws, area, px, py));
         if hover != ws.scrollbar_hover {
             ws.scrollbar_hover = hover;
             if let Some(w) = &ws.window {
@@ -1201,6 +1203,42 @@ pub(super) fn pane_scrollbar(
 /// Whether the pointer is on a scrollbar's hit strip, edges included.
 pub(super) fn scrollbar_hit_contains((x, y, w, h): Rect, px: f32, py: f32) -> bool {
     px >= x && px <= x + w && py >= y && py <= y + h
+}
+
+/// Where the scrollbar hover looks: the physical pointer, never a control
+/// client's cursor, and nowhere once the pointer has left the window. A drag
+/// captured past the window's edge can end with a release before any move
+/// reports where the pointer is; the last position seen inside, which
+/// `ws.cursor` still holds, must not light the bar under it.
+pub(super) fn scrollbar_hover_pointer(ws: &WindowState) -> Option<(f32, f32)> {
+    ws.native_pointer.map(|p| (p.x as f32, p.y as f32))
+}
+
+#[cfg(test)]
+mod scrollbar_hover_pointer_tests {
+    use super::scrollbar_hover_pointer;
+    use winit::dpi::PhysicalPosition;
+
+    /// The hover follows the physical pointer, not a control client's
+    /// cursor, and finds nothing after the pointer left the window, though
+    /// the last cursor position it had is kept.
+    #[test]
+    fn the_scrollbar_hover_reads_only_the_physical_pointer() {
+        let mut ws = crate::window_state::WindowState::new(1, crate::mux::Mux::new());
+        ws.cursor = PhysicalPosition::new(795.0, 300.0);
+        ws.native_pointer = Some(PhysicalPosition::new(795.0, 300.0));
+        assert_eq!(scrollbar_hover_pointer(&ws), Some((795.0, 300.0)));
+        ws.cursor = PhysicalPosition::new(20.0, 40.0);
+        assert_eq!(
+            scrollbar_hover_pointer(&ws),
+            Some((795.0, 300.0)),
+            "ctl moves"
+        );
+        // `CursorLeft`: the pointer is gone, the stale cursor stays.
+        ws.cursor = PhysicalPosition::new(795.0, 300.0);
+        ws.native_pointer = None;
+        assert_eq!(scrollbar_hover_pointer(&ws), None);
+    }
 }
 
 /// End a scrollbar drag, if one is live. Says whether one was: the bar it

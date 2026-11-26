@@ -219,7 +219,7 @@ fn a_program_taking_motion_leaves_no_scrollbar_lit() {
         "one hover update"
     );
     assert!(source.contains(
-        "fnupdate_scrollbar_hover(&self,ws:&mutWindowState){ifws.scrollbar_drag_offset.is_some(){return;}letarea=self.area(ws);let(px,py)=(ws.cursor.xasf32,ws.cursor.yasf32);lethover=self.scrollbar_pane_at(ws,area,px,py);ifhover!=ws.scrollbar_hover{ws.scrollbar_hover=hover;"
+        "fnupdate_scrollbar_hover(&self,ws:&mutWindowState){ifws.scrollbar_drag_offset.is_some(){return;}letarea=self.area(ws);lethover=scrollbar_hover_pointer(ws).and_then(|(px,py)|self.scrollbar_pane_at(ws,area,px,py));ifhover!=ws.scrollbar_hover{ws.scrollbar_hover=hover;"
     ));
 }
 
@@ -249,4 +249,30 @@ fn a_drag_released_off_the_bar_leaves_it_narrow() {
         released.track_rect.2 < hovered.track_rect.2,
         "released off the bar it is drawn at its resting width"
     );
+}
+
+/// A drag captured past the window's edge can end with a release before any
+/// move: `CursorLeft` has cleared the hover and the physical pointer, while
+/// the last position seen inside, still in `ws.cursor`, may be on the bar.
+/// The hover the release works out again reads the physical pointer, so it
+/// finds nothing and the bar stays narrow with the pointer outside.
+#[test]
+fn a_release_after_the_pointer_left_lights_no_bar() {
+    let source: String = production_source().split_whitespace().collect();
+    let update = source
+        .split("fnupdate_scrollbar_hover(&self,ws:&mutWindowState){")
+        .nth(1)
+        .and_then(|rest| rest.split("ifhover!=ws.scrollbar_hover{").next())
+        .expect("update_scrollbar_hover");
+    assert!(
+        update.contains("lethover=scrollbar_hover_pointer(ws).and_then(|(px,py)|self.scrollbar_pane_at(ws,area,px,py));"),
+        "the hover reads the physical pointer: {update}"
+    );
+    assert!(
+        !update.contains("ws.cursor"),
+        "not the cursor a release keeps"
+    );
+    assert!(source.contains(
+        "fnscrollbar_hover_pointer(ws:&WindowState)->Option<(f32,f32)>{ws.native_pointer.map(|p|(p.xasf32,p.yasf32))}"
+    ));
 }
