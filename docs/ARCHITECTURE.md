@@ -2048,9 +2048,12 @@ the picker last saw, set when it opens, on each of its keys
 under a still pointer are never selected and the keyboard's selection holds
 until the pointer really moves. A row a hover may not select is lit instead.
 The keyboard previews the theme it selects at once; a theme the pointer
-selects previews once the pointer has rested 150 ms (`PickerView::preview_at`,
-which `theme_preview_change` waits for and `about_to_wait_inner` wakes for),
-so a sweep across the list does not flash themes. A click runs the row as
+selects previews once the pointer has rested on its row 150 ms
+(`PickerView::pointer_preview`, which `theme_preview_change` waits for and
+`about_to_wait_inner` wakes for), so a sweep across the list does not flash
+themes. Each motion within the row starts the wait again, and leaving the
+row or the window (`picker_pointer_left`) drops it until the pointer rests on
+a row or a key previews. A click runs the row as
 Enter does. Any pointer press cancels a keyboard-only hint. Settings closes
 on a press outside its panel; an active path editor or keybinding capture instead
 cancels only that capture on a press outside its focused row. Confirmation dialogs

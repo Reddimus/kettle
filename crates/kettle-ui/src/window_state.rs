@@ -576,9 +576,25 @@ pub(crate) struct PickerView {
     /// SSH launcher's Save or Remove row, which only a click or a deliberate
     /// Down selects.
     pub(crate) prelight: Option<usize>,
-    /// When the theme a hover or the wheel selected becomes the window's
-    /// preview; until then the window keeps the theme it previews now.
-    pub(crate) preview_at: Option<std::time::Instant>,
+    /// Where a theme the pointer selected stands on its way to the window's
+    /// preview; see `PointerPreview`.
+    pub(crate) pointer_preview: PointerPreview,
+}
+
+/// A theme picker selection the pointer made, which the window previews only
+/// once the pointer rests on its row. The keyboard previews at once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum PointerPreview {
+    /// Nothing waits: the window wears the selection.
+    #[default]
+    None,
+    /// The pointer is on the selected row: preview it at this instant if the
+    /// pointer has not moved again by then. Each motion within the row, or a
+    /// wheel step that moves the selection, sets a later one.
+    At(std::time::Instant),
+    /// The pointer left the row, or the window, before it rested. The window
+    /// keeps the theme it wears until a key, or a rest on a row.
+    Held,
 }
 
 /// How long "No hints here" stays on its pane.

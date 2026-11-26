@@ -918,7 +918,8 @@ pub(super) fn begin_theme_picker_session(
 /// `live_name` is the one it wears. An open picker shows its selection, or its
 /// baseline while nothing matches the query; the baseline stays until the
 /// picker closes. A selection the pointer made waits for the pointer to rest
-/// (`PickerView::preview_at`) and changes nothing until then. A picker that
+/// on its row (`PickerView::pointer_preview`) and changes nothing until then,
+/// nor after the pointer left the row first. A picker that
 /// closed without keeping a theme (a kept one clears the baseline first)
 /// puts the baseline back.
 pub(super) fn theme_preview_change(
@@ -930,7 +931,7 @@ pub(super) fn theme_preview_change(
     let Some(state) = ws.theme_picker_input.as_ref() else {
         return ws.theme_preview.take();
     };
-    if ws.picker_view.preview_at.is_some() {
+    if ws.picker_view.pointer_preview != crate::window_state::PointerPreview::None {
         return None;
     }
     match theme_picker_selection(state, tr) {
@@ -1822,7 +1823,7 @@ pub(super) fn reset_picker_view(ws: &mut WindowState) {
 pub(super) fn note_picker_keys(ws: &mut WindowState) {
     ws.picker_view.pointer_seen = Some(ws.cursor);
     ws.picker_view.prelight = None;
-    ws.picker_view.preview_at = None;
+    ws.picker_view.pointer_preview = crate::window_state::PointerPreview::None;
 }
 
 /// Move the open picker's selection to row `row` of `menu`. Returns whether
@@ -1880,21 +1881,52 @@ fn picker_hover(ws: &mut WindowState, cfg: &Config, menu: &ContextMenu, cell_h: 
             window.request_redraw();
         }
     }
-    if let Some(row) = row.filter(|&row| row < limit)
-        && set_picker_selection(ws, menu, row)
-    {
-        preview_theme_after_rest(ws);
+    let row = row.filter(|&row| row < limit);
+    let moved = row.is_some_and(|row| set_picker_selection(ws, menu, row));
+    // A row the hover did not move the selection to is the selected one.
+    hover_theme_preview(ws, moved, row.is_some());
+}
+
+/// The pointer moved in the theme picker: onto another row, which it
+/// selected (`moved`), within the selected row (`on_row`), or off it. On the
+/// row it is not resting yet, so a preview it made waits
+/// `THEME_HOVER_PREVIEW_DELAY` from now again; a preview already shown, or
+/// one the keys made, stays as it is. Off the row, a preview still waiting is
+/// dropped: the window keeps its theme until a key or a rest on a row.
+fn hover_theme_preview(ws: &mut WindowState, moved: bool, on_row: bool) {
+    use crate::window_state::PointerPreview;
+    if ws.theme_picker_input.is_none() {
+        return;
+    }
+    let preview = &mut ws.picker_view.pointer_preview;
+    *preview = match *preview {
+        _ if moved => PointerPreview::At(
+            std::time::Instant::now() + crate::window_state::THEME_HOVER_PREVIEW_DELAY,
+        ),
+        PointerPreview::At(_) | PointerPreview::Held if on_row => PointerPreview::At(
+            std::time::Instant::now() + crate::window_state::THEME_HOVER_PREVIEW_DELAY,
+        ),
+        PointerPreview::At(_) | PointerPreview::Held => PointerPreview::Held,
+        PointerPreview::None => PointerPreview::None,
+    };
+}
+
+/// The pointer left the window: a theme preview still waiting for it to
+/// rest is dropped, as when it leaves the row.
+pub(super) fn picker_pointer_left(ws: &mut WindowState) {
+    if let crate::window_state::PointerPreview::At(_) = ws.picker_view.pointer_preview {
+        ws.picker_view.pointer_preview = crate::window_state::PointerPreview::Held;
     }
 }
 
-/// The pointer moved the theme picker's selection: the window previews it
-/// once the pointer has rested `THEME_HOVER_PREVIEW_DELAY`, so sweeping
-/// across rows does not flash each theme. Every move starts the wait again.
-/// Other pickers preview nothing.
+/// The wheel moved the theme picker's selection: the window previews it
+/// once the pointer has rested `THEME_HOVER_PREVIEW_DELAY`, so wheeling
+/// through rows does not flash each theme. Other pickers preview nothing.
 fn preview_theme_after_rest(ws: &mut WindowState) {
     if ws.theme_picker_input.is_some() {
-        ws.picker_view.preview_at =
-            Some(std::time::Instant::now() + crate::window_state::THEME_HOVER_PREVIEW_DELAY);
+        ws.picker_view.pointer_preview = crate::window_state::PointerPreview::At(
+            std::time::Instant::now() + crate::window_state::THEME_HOVER_PREVIEW_DELAY,
+        );
     }
 }
 
@@ -2004,28 +2036,34 @@ pub(super) enum ThemeHoverPreview {
     Due,
 }
 
-/// Poll `PickerView::preview_at` at `now`: a wait that ran out, or whose
-/// picker closed, ends here. The scheduler wakes for it, so a still pointer
-/// needs no continuous redraw.
+/// Poll `PickerView::pointer_preview` at `now`: a wait that ran out, or
+/// whose picker closed, ends here. The scheduler wakes for it, so a still
+/// pointer needs no continuous redraw. A preview held back by a pointer that
+/// left its row waits for nothing.
 pub(super) fn poll_theme_hover_preview(
     ws: &mut WindowState,
     now: std::time::Instant,
 ) -> ThemeHoverPreview {
-    let Some(at) = ws.picker_view.preview_at else {
-        return ThemeHoverPreview::Idle;
-    };
-    if ws.theme_picker_input.is_none() {
-        ws.picker_view.preview_at = None;
+    use crate::window_state::PointerPreview;
+    let preview = ws.picker_view.pointer_preview;
+    if preview == PointerPreview::None {
         return ThemeHoverPreview::Idle;
     }
-    if now < at {
-        return ThemeHoverPreview::Wait(
+    if ws.theme_picker_input.is_none() {
+        ws.picker_view.pointer_preview = PointerPreview::None;
+        return ThemeHoverPreview::Idle;
+    }
+    match preview {
+        PointerPreview::At(at) if now < at => ThemeHoverPreview::Wait(
             at.saturating_duration_since(now)
                 .max(std::time::Duration::from_millis(1)),
-        );
+        ),
+        PointerPreview::At(_) => {
+            ws.picker_view.pointer_preview = PointerPreview::None;
+            ThemeHoverPreview::Due
+        }
+        PointerPreview::None | PointerPreview::Held => ThemeHoverPreview::Idle,
     }
-    ws.picker_view.preview_at = None;
-    ThemeHoverPreview::Due
 }
 
 impl App {
