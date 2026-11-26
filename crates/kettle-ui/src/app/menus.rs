@@ -1223,6 +1223,62 @@ impl App {
         self.apply_menu_hover(ws, effect);
     }
 
+    /// The pointer left the window, so it is over no row of the menu.
+    pub(super) fn context_menu_pointer_left(&self, ws: &mut WindowState) {
+        let at = (ws.cursor.x as f32, ws.cursor.y as f32);
+        let Some(menu) = ws.context_menu.as_mut() else {
+            return;
+        };
+        let effect = menu_pointer_moved(
+            menu,
+            &mut ws.context_menu_session.pointer,
+            MenuHit::Outside,
+            &[],
+            at,
+            std::time::Instant::now(),
+        );
+        self.apply_menu_hover(ws, effect);
+    }
+
+    /// Look at the hover again when a waiting submenu is due to open or give
+    /// way, and return how long until the next such moment. A pointer at
+    /// rest sends no events, so only this wake can open its submenu.
+    pub(super) fn context_menu_pointer_tick(
+        &self,
+        ws: &mut WindowState,
+        now: std::time::Instant,
+    ) -> Option<std::time::Duration> {
+        if ws.context_menu.is_none() {
+            ws.context_menu_session.pointer.cancel_pending();
+            return None;
+        }
+        if ws
+            .context_menu_session
+            .pointer
+            .deadline()
+            .is_some_and(|due| due <= now)
+        {
+            let panels = self.context_menu_panels(ws);
+            let hit = self.context_menu_pointer_hit(ws, &panels);
+            let at = (ws.cursor.x as f32, ws.cursor.y as f32);
+            if let Some(menu) = ws.context_menu.as_mut() {
+                let effect = menu_pointer_moved(
+                    menu,
+                    &mut ws.context_menu_session.pointer,
+                    hit,
+                    &panels,
+                    at,
+                    now,
+                );
+                self.apply_menu_hover(ws, effect);
+            }
+        }
+        ws.context_menu_session.pointer.deadline().map(|due| {
+            due.saturating_duration_since(now)
+                .max(std::time::Duration::from_millis(1))
+        })
+    }
+
     /// Carry out what a hover asked for.
     fn apply_menu_hover(&self, ws: &mut WindowState, effect: MenuHoverEffect) {
         match effect {
@@ -1688,6 +1744,7 @@ impl App {
         if !menu.enter_submenu(index) {
             return;
         }
+        ws.context_menu_session.pointer.cancel_pending();
         let surface = ws
             .renderer
             .as_ref()
@@ -1738,6 +1795,7 @@ impl App {
     /// Esc / `h` semantics: pop a drilled-in submenu back to its parent, or
     /// close the menu when at the top level.
     pub(super) fn context_menu_back(&mut self, ws: &mut WindowState) {
+        ws.context_menu_session.pointer.cancel_pending();
         if ws
             .context_menu
             .as_mut()
@@ -1880,6 +1938,9 @@ impl App {
         // highlighted action, and bare letters dispatch mnemonics /
         // typeahead. Any other key is swallowed so a stray keypress doesn't
         // leak into the focused pane while the menu is expecting nav input.
+        // Keys act at once: a submenu waiting on the pointer's dwell or aim
+        // no longer does.
+        ws.context_menu_session.pointer.cancel_pending();
         if self.cfg.vim_menu_nav && self.context_menu_vim_key(ws, key, event_loop) {
             return;
         }

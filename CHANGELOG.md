@@ -1560,6 +1560,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   leave a truncated file when they fail, GPU setup keeps trying other
   backends when one device fails to open, and macOS audio decoding moved off
   the sound-control thread.
+- Context-menu submenus open once the pointer rests on their row for 200 ms
+  (a click or Right opens one at once), and an open submenu stays while the
+  pointer moves toward it across other rows, so a diagonal move no longer
+  lands on a different submenu.
 
 ## Older releases
 

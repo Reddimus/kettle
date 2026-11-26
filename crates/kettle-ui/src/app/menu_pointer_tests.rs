@@ -140,3 +140,226 @@ fn a_submenu_row_hover_reaches_its_submenu() {
     });
     assert!(opened);
 }
+
+/// Three submenu rows 24 px tall in a panel at (10, 10), Split's open
+/// beside it, and the pointer resting on Split.
+struct Cascade {
+    menu: ContextMenuState,
+    pointer: MenuPointer,
+    panels: [kettle_render::Rect4; 2],
+    t0: Instant,
+}
+
+impl Cascade {
+    /// `left` puts the submenu on the parent's left, as it flips at the
+    /// window's right edge.
+    fn new(left: bool) -> Self {
+        let (root, child) = if left {
+            ((200.0, 10.0, 160.0, 72.0), (40.0, 10.0, 160.0, 96.0))
+        } else {
+            ((10.0, 10.0, 160.0, 72.0), (170.0, 10.0, 160.0, 96.0))
+        };
+        let mut menu = state(vec![
+            submenu("Split", Action::SplitRight),
+            submenu("Pane", Action::ClosePane),
+            submenu("Tab", Action::CloseTab),
+        ]);
+        assert!(menu.enter_submenu(0));
+        let mut cascade = Self {
+            menu,
+            pointer: MenuPointer::default(),
+            panels: [root, child],
+            t0: Instant::now(),
+        };
+        let on_split = cascade.at(left, 90.0, 22.0);
+        assert_eq!(
+            cascade.hover(MenuHit::ParentRow { depth: 0, index: 0 }, on_split, 0),
+            MenuHoverEffect::None,
+            "the pointer rests on the open row"
+        );
+        cascade
+    }
+
+    /// `(x, y)` measured from the root's left edge, mirrored for a
+    /// submenu on the left.
+    fn at(&self, left: bool, x: f32, y: f32) -> (f32, f32) {
+        if left { (370.0 - x, y) } else { (x, y) }
+    }
+
+    fn hover(&mut self, hit: MenuHit, at: (f32, f32), after: u64) -> MenuHoverEffect {
+        menu_pointer_moved(
+            &mut self.menu,
+            &mut self.pointer,
+            hit,
+            &self.panels,
+            at,
+            self.t0 + ms(after),
+        )
+    }
+
+    fn split_still_open(&self) -> bool {
+        self.menu.drill_stack.len() == 1 && self.menu.drill_stack[0].highlight == 0
+    }
+}
+
+#[test]
+fn a_submenu_opens_only_after_the_pointer_rests_on_its_row() {
+    let t0 = Instant::now();
+    let mut menu = state(vec![
+        leaf("Paste", Action::Paste),
+        submenu("Split", Action::SplitRight),
+    ]);
+    let mut pointer = MenuPointer::default();
+    let panels = [(10.0, 10.0, 160.0, 48.0)];
+    let mut hover = |menu: &mut ContextMenuState, hit, at, after| {
+        menu_pointer_moved(menu, &mut pointer, hit, &panels, at, t0 + ms(after))
+    };
+    // Passing over Split on the way down lights it, opens nothing.
+    assert_eq!(
+        hover(&mut menu, MenuHit::Row(1), (90.0, 40.0), 0),
+        MenuHoverEffect::Redraw,
+        "the row lights at once, but its submenu waits"
+    );
+    assert_eq!(menu.highlight, 1);
+    assert_eq!(
+        hover(&mut menu, MenuHit::Row(1), (91.0, 41.0), 150),
+        MenuHoverEffect::None
+    );
+    assert!(menu.drill_stack.is_empty());
+    // At rest for the dwell, the scheduler's look opens it.
+    assert_eq!(
+        hover(&mut menu, MenuHit::Row(1), (91.0, 41.0), 200),
+        MenuHoverEffect::OpenSubmenu(1)
+    );
+    // Leaving the row before the dwell ends opens nothing.
+    let mut menu = state(vec![
+        leaf("Paste", Action::Paste),
+        submenu("Split", Action::SplitRight),
+    ]);
+    assert_ne!(
+        hover(&mut menu, MenuHit::Row(1), (90.0, 40.0), 1000),
+        MenuHoverEffect::OpenSubmenu(1)
+    );
+    assert_eq!(
+        hover(&mut menu, MenuHit::Row(0), (90.0, 20.0), 1100),
+        MenuHoverEffect::Redraw
+    );
+    assert_eq!(
+        hover(&mut menu, MenuHit::Row(0), (90.0, 20.0), 1400),
+        MenuHoverEffect::None
+    );
+    assert_eq!(menu.highlight, 0);
+}
+
+#[test]
+fn crossing_parent_rows_toward_the_open_submenu_keeps_it() {
+    for left in [false, true] {
+        let mut cascade = Cascade::new(left);
+        // Diagonally down toward the submenu's lower part, over Pane and
+        // Tab: the path the audit's probe took to land on Tab.
+        for (step, (x, y, index)) in [(120.0, 36.0, 1), (145.0, 52.0, 1), (160.0, 70.0, 2)]
+            .into_iter()
+            .enumerate()
+        {
+            let at = cascade.at(left, x, y);
+            let after = 16 * (step as u64 + 1);
+            assert_eq!(
+                cascade.hover(MenuHit::ParentRow { depth: 0, index }, at, after),
+                MenuHoverEffect::None,
+                "left {left}, step {step}"
+            );
+            assert!(cascade.split_still_open(), "left {left}, step {step}");
+        }
+        // Into the submenu: its rows take the hover, Split stays.
+        let inside = cascade.at(left, 180.0, 76.0);
+        cascade.hover(MenuHit::Row(1), inside, 64);
+        assert!(cascade.split_still_open(), "left {left}");
+        assert_eq!(cascade.menu.highlight, 1, "left {left}");
+    }
+}
+
+#[test]
+fn leaving_the_aim_switches_after_the_delay() {
+    let mut cascade = Cascade::new(false);
+    // Straight down onto Pane: away from the submenu.
+    let pane = MenuHit::ParentRow { depth: 0, index: 1 };
+    assert_eq!(cascade.hover(pane, (90.0, 44.0), 10), MenuHoverEffect::None);
+    assert!(cascade.split_still_open());
+    assert_eq!(
+        cascade.hover(pane, (90.0, 46.0), 200),
+        MenuHoverEffect::None
+    );
+    assert!(
+        cascade.split_still_open(),
+        "motion off the aim does not reset the wait"
+    );
+    // 300 ms after it turned away, Pane takes over and, having waited
+    // longer than a dwell, opens its own submenu at once.
+    assert_eq!(
+        cascade.hover(pane, (90.0, 47.0), 310),
+        MenuHoverEffect::OpenSubmenu(1)
+    );
+    assert!(cascade.menu.drill_stack.is_empty());
+    assert_eq!(cascade.menu.highlight, 1);
+}
+
+#[test]
+fn resting_on_another_parent_row_switches_to_it() {
+    let mut cascade = Cascade::new(false);
+    let pane = MenuHit::ParentRow { depth: 0, index: 1 };
+    // Heading for the submenu, then stopping on Pane.
+    assert_eq!(
+        cascade.hover(pane, (120.0, 36.0), 16),
+        MenuHoverEffect::None
+    );
+    assert_eq!(
+        cascade.hover(pane, (120.0, 36.0), 16 + 299),
+        MenuHoverEffect::None
+    );
+    assert!(cascade.split_still_open());
+    assert_eq!(
+        cascade.hover(pane, (120.0, 36.0), 16 + 300),
+        MenuHoverEffect::OpenSubmenu(1)
+    );
+    assert!(cascade.menu.drill_stack.is_empty());
+}
+
+#[test]
+fn a_waiting_submenu_wakes_the_scheduler_and_keys_skip_the_wait() {
+    let src = super::super::production_source();
+    let wait = src
+        .split("fn about_to_wait_inner(")
+        .nth(1)
+        .expect("the scheduler");
+    assert!(wait.contains("let menu_pointer_wait = self.context_menu_pointer_tick(ws, now);"));
+    assert!(wait.contains("if let Some(next) = menu_pointer_wait {"));
+    let left = src
+        .split("WindowEvent::CursorLeft { .. } => {")
+        .nth(1)
+        .and_then(|arm| arm.split("WindowEvent::CursorEntered").next())
+        .expect("the CursorLeft arm");
+    assert!(left.contains("self.context_menu_pointer_left(ws);"));
+    let keys = src
+        .split("fn context_menu_key(")
+        .nth(1)
+        .and_then(|body| body.split("match key {").next())
+        .expect("the menu's key handler");
+    assert!(keys.contains("ws.context_menu_session.pointer.cancel_pending();"));
+}
+
+#[test]
+fn coming_back_to_the_open_row_keeps_its_submenu() {
+    let mut cascade = Cascade::new(false);
+    let pane = MenuHit::ParentRow { depth: 0, index: 1 };
+    let split = MenuHit::ParentRow { depth: 0, index: 0 };
+    assert_eq!(cascade.hover(pane, (90.0, 44.0), 10), MenuHoverEffect::None);
+    assert_eq!(
+        cascade.hover(split, (90.0, 30.0), 100),
+        MenuHoverEffect::None
+    );
+    assert_eq!(
+        cascade.hover(split, (90.0, 30.0), 1000),
+        MenuHoverEffect::None
+    );
+    assert!(cascade.split_still_open());
+}

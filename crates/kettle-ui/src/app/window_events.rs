@@ -269,6 +269,7 @@ impl App {
             }
             WindowEvent::CursorLeft { .. } => {
                 dismiss_link_hover(ws);
+                self.context_menu_pointer_left(ws);
                 // A compositor's move grab takes the pointer away as well.
                 ws.titlebar_click = None;
                 if let Some(dialog) = ws.confirm_dialog.as_mut() {

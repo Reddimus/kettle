@@ -26,10 +26,67 @@ pub(super) enum MenuHoverEffect {
     OpenSubmenu(usize),
 }
 
+/// How long the pointer rests on a submenu's row before the submenu opens. A
+/// click or Right opens it at once.
+pub(super) const SUBMENU_OPEN_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How long an open submenu holds while the pointer crosses other rows of its
+/// parent: from the pointer's last motion while it heads for the submenu, and
+/// from the moment it turned away otherwise.
+pub(super) const SUBMENU_SWITCH_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// Pointer state an open menu keeps between hover events. It lives beside
 /// the menu in [`ContextMenuSession`] and starts afresh with every menu.
 #[derive(Debug, Default)]
-pub(crate) struct MenuPointer {}
+pub(crate) struct MenuPointer {
+    /// Where the pointer was at the last hover event.
+    last: Option<(f32, f32)>,
+    /// A submenu row waiting out its dwell.
+    open: Option<PendingOpen>,
+    /// An open submenu the pointer has left for another row of a parent.
+    switch: Option<PendingSwitch>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingOpen {
+    depth: usize,
+    index: usize,
+    at: std::time::Instant,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingSwitch {
+    /// When the pointer last moved.
+    moved: std::time::Instant,
+    /// When it turned away from the submenu; `None` while it heads for it.
+    strayed: Option<std::time::Instant>,
+}
+
+impl PendingSwitch {
+    fn due(self) -> std::time::Instant {
+        let rest = self.moved + SUBMENU_SWITCH_DELAY;
+        self.strayed
+            .map_or(rest, |since| rest.min(since + SUBMENU_SWITCH_DELAY))
+    }
+}
+
+impl MenuPointer {
+    /// When a waiting submenu opens or gives way, if one is waiting. The
+    /// scheduler wakes then and looks at the hover again.
+    pub(super) fn deadline(&self) -> Option<std::time::Instant> {
+        self.open
+            .map(|open| open.at)
+            .into_iter()
+            .chain(self.switch.map(PendingSwitch::due))
+            .min()
+    }
+
+    /// Drop a waiting open or switch: keys and clicks act at once.
+    pub(super) fn cancel_pending(&mut self) {
+        self.open = None;
+        self.switch = None;
+    }
+}
 
 /// Per-menu state kept beside `WindowState::context_menu`, reset each time a
 /// menu opens.
@@ -43,48 +100,137 @@ pub(crate) struct ContextMenuSession {
 
 /// Move the hover to `hit`. `panels` are the levels' rectangles, the menu
 /// itself first, and `at` is the pointer, both in surface pixels, at `now`.
+/// The scheduler calls it again at [`MenuPointer::deadline`] with the pointer
+/// where it was.
+///
+/// A submenu opens once the pointer has rested on its row for
+/// [`SUBMENU_OPEN_DELAY`]. An open submenu stays while the pointer crosses
+/// other rows of its parent inside the triangle from its last position to the
+/// submenu's near edge, as macOS and GTK menus do, and gives way after
+/// [`SUBMENU_SWITCH_DELAY`] outside that triangle or at rest.
 pub(super) fn menu_pointer_moved(
     menu: &mut ContextMenuState,
-    _pointer: &mut MenuPointer,
+    pointer: &mut MenuPointer,
     hit: MenuHit,
-    _panels: &[kettle_render::Rect4],
-    _at: (f32, f32),
-    _now: std::time::Instant,
+    panels: &[kettle_render::Rect4],
+    at: (f32, f32),
+    now: std::time::Instant,
 ) -> MenuHoverEffect {
-    let index = match hit {
-        MenuHit::Row(index) => index,
-        MenuHit::ParentRow { depth, index } => {
-            if menu
-                .drill_stack
-                .get(depth)
-                .is_none_or(|level| level.highlight == index)
-            {
-                return MenuHoverEffect::None;
-            }
-            while menu.drill_stack.len() > depth {
-                menu.leave_submenu();
-            }
-            index
+    let from = pointer.last.replace(at);
+    let moved = from != Some(at);
+    let (depth, index) = match hit {
+        MenuHit::Row(index) => {
+            pointer.switch = None;
+            return hover_row(menu, pointer, index, now);
         }
-        MenuHit::Panel | MenuHit::Outside => return MenuHoverEffect::None,
+        MenuHit::ParentRow { depth, index } => (depth, index),
+        MenuHit::Panel | MenuHit::Outside => {
+            pointer.cancel_pending();
+            return MenuHoverEffect::None;
+        }
     };
-    let changed = menu.highlight != index;
+    pointer.open = None;
+    if menu
+        .drill_stack
+        .get(depth)
+        .is_none_or(|level| level.highlight == index)
+    {
+        pointer.switch = None;
+        return MenuHoverEffect::None;
+    }
+    // Level `depth + 1` is the submenu the parent row opened.
+    let aiming = moved
+        && from
+            .zip(panels.get(depth + 1))
+            .is_some_and(|(from, submenu)| aims_at(from, at, *submenu));
+    let switch = pointer.switch.get_or_insert(PendingSwitch {
+        moved: now,
+        strayed: None,
+    });
+    if moved {
+        switch.moved = now;
+        if aiming {
+            switch.strayed = None;
+        } else {
+            switch.strayed.get_or_insert(now);
+        }
+    }
+    if now < switch.due() {
+        return MenuHoverEffect::None;
+    }
+    pointer.switch = None;
+    while menu.drill_stack.len() > depth {
+        menu.leave_submenu();
+    }
     menu.highlight = index;
+    // The switch waited longer than a dwell, so a submenu opens at once.
     if matches!(menu.items.get(index), Some(ContextMenuItem::Submenu { .. })) {
         MenuHoverEffect::OpenSubmenu(index)
-    } else if changed {
-        MenuHoverEffect::Redraw
     } else {
-        MenuHoverEffect::None
+        MenuHoverEffect::Redraw
     }
 }
 
+/// Hover row `index` of the deepest level.
+fn hover_row(
+    menu: &mut ContextMenuState,
+    pointer: &mut MenuPointer,
+    index: usize,
+    now: std::time::Instant,
+) -> MenuHoverEffect {
+    let changed = menu.highlight != index;
+    menu.highlight = index;
+    let lit = if changed {
+        MenuHoverEffect::Redraw
+    } else {
+        MenuHoverEffect::None
+    };
+    if !matches!(menu.items.get(index), Some(ContextMenuItem::Submenu { .. })) {
+        pointer.open = None;
+        return lit;
+    }
+    let depth = menu.drill_stack.len();
+    let open = match pointer.open {
+        Some(open) if (open.depth, open.index) == (depth, index) => open,
+        _ => *pointer.open.insert(PendingOpen {
+            depth,
+            index,
+            at: now + SUBMENU_OPEN_DELAY,
+        }),
+    };
+    if now < open.at {
+        return lit;
+    }
+    pointer.open = None;
+    MenuHoverEffect::OpenSubmenu(index)
+}
+
+/// Whether the pointer, moving from `from` to `to`, stays inside the triangle
+/// between `from` and the near edge of `submenu`: on its way there across
+/// the parent's other rows.
+fn aims_at(from: (f32, f32), to: (f32, f32), (x, y, w, h): kettle_render::Rect4) -> bool {
+    let edge = if from.0 <= x {
+        x
+    } else if from.0 >= x + w {
+        x + w
+    } else {
+        return false;
+    };
+    let cross = |o: (f32, f32), a: (f32, f32), b: (f32, f32)| {
+        (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
+    };
+    let corners = [from, (edge, y), (edge, y + h)];
+    let sides = [
+        cross(corners[0], corners[1], to),
+        cross(corners[1], corners[2], to),
+        cross(corners[2], corners[0], to),
+    ];
+    !(sides.iter().any(|side| *side < 0.0) && sides.iter().any(|side| *side > 0.0))
+}
+
 /// The row an arrow key moves the highlight to, `delta` rows on.
-pub(super) fn menu_step(
-    menu: &ContextMenuState,
-    _pointer: &mut MenuPointer,
-    delta: isize,
-) -> usize {
+pub(super) fn menu_step(menu: &ContextMenuState, pointer: &mut MenuPointer, delta: isize) -> usize {
+    pointer.cancel_pending();
     next_context_menu_highlight(&menu.items, menu.highlight, delta)
 }
 

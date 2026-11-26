@@ -630,6 +630,8 @@ impl App {
                 .saturating_duration_since(now)
                 .max(std::time::Duration::from_millis(1))
         });
+        // A submenu waiting on the pointer's dwell or aim opens or gives way.
+        let menu_pointer_wait = self.context_menu_pointer_tick(ws, now);
         let receipt_enabled = ws
             .media_paste_receipt
             .as_ref()
@@ -985,6 +987,9 @@ impl App {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = mouse_hint_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = menu_pointer_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = card_settle_wait {
