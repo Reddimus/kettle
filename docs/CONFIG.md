@@ -1208,7 +1208,11 @@ copy/navigation mode (default `Ctrl+Shift+Space`): `h`/`j`/`k`/`l` move,
 `0`/`$`/`g`/`G`/`H`/`M`/`L` jump, `v` starts a visual selection, `V` a
 line selection and `Ctrl+v` a block selection (pressing another of the three
 switches the selection to that kind, the same one again ends it), `y` yanks it
-to the clipboard, `Esc` exits. See `man kettle` for the full keymap.
+to the clipboard, `Esc` exits. See `man kettle` for the full keymap. While it
+is on, a small **Vi mode** chip sits at the pane's top right (under the
+"Start of kept history" label when that shows), or at its bottom right above
+the jump-to-bottom button when text or the cursor is at the top; it only ever
+sits over blank, unselected cells, so with text in both places it stays hidden.
 
 **Misc**: `reset` (RIS — full terminal reset including engine state;
 like `clear_history`, it acts on Kettle's terminal, not the program in it,

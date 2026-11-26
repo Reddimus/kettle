@@ -1191,6 +1191,7 @@ osc52_blocked_write_by = "Se impidió que un programa copiara al portapapeles mi
 
 scrollback_kept = "Inicio del historial conservado"
 scrollback_a11y_viewing = "Viendo el historial"
+vi_mode_chip = "Modo vi"
 
 settings_group_colors_text = "Colores y texto"
 settings_group_window = "Ventana"

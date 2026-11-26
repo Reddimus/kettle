@@ -5326,7 +5326,11 @@ selection, and renders the captured native state. The UI's `ViState` stores
 only the owning pane and whether visual selection is active; the visual kind
 (`v`, `V`, Ctrl-v) is the engine selection's own `SelectionType`. This single-owner
 model keeps viewport following, reflow, scrollback rotation, and selection
-invalidation consistent with the grid.
+invalidation consistent with the grid. The renderer marks the mode from the
+captured `PaneSnapshot::vi_mode` with a chip (`scrollback::vi_mode_chip`) in the
+kept-history label's lane and style: top right, else bottom right above the
+jump button, placed only where `rect_covers_text` finds no text, cursor or
+selection under it, and left out when both places are covered.
 
 ## Key design choices
 

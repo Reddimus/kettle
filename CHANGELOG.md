@@ -1567,6 +1567,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - The mouse wheel over the command palette and the theme, layout and SSH
   pickers scrolls the list without moving the selection; only a selection
   that scrolls out of view moves, to the nearest row still shown.
+- Vi mode shows a small "Vi mode" chip in a corner of the pane, placed only
+  over blank cells, so it never covers text.
 
 ## Older releases
 

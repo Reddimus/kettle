@@ -1190,6 +1190,7 @@ osc52_blocked_write_by = "A program was blocked from copying to the clipboard wh
 
 scrollback_kept = "Start of kept history"
 scrollback_a11y_viewing = "Viewing history"
+vi_mode_chip = "Vi mode"
 
 settings_group_colors_text = "Colors and text"
 settings_group_window = "Window"

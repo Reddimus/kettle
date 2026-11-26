@@ -894,3 +894,113 @@ fn the_shaped_chord_ends_inside_the_button_in_either_spelling() {
         }
     }
 }
+
+/// Review D20: vi mode shows a chip in the pane's top right, sized and kept
+/// clear of the scrollbar as the kept-history label is, and below that label
+/// when it shows. Where text or the cursor is under that place, the chip
+/// takes the bottom right, above the jump button when it shows; with both
+/// covered there is none, so it never hides what the terminal shows.
+#[test]
+fn the_vi_mode_chip_takes_a_corner_that_hides_no_text() {
+    use crate::scrollback::vi_mode_chip;
+    let tr = Translator::new(Language::En);
+    for scale in SCALES {
+        let pane = terminal(800.0, scale);
+        let chip = |kept, jump, covers: &dyn Fn(Rect4) -> bool| {
+            vi_mode_chip(pane, scale, cell(scale), 6.0, kept, jump, covers, &tr)
+        };
+        let free = chip(None, None, &|_| false).expect("a chip");
+        assert_eq!(free.label, "Vi mode");
+        let view = HistoryView {
+            offset: HISTORY,
+            size: HISTORY,
+            origin: 1,
+        };
+        let kept = kept_history_label(pane, view, scale, cell(scale), 6.0, &tr).unwrap();
+        assert_eq!(
+            free.rect.0 + free.rect.2,
+            kept.rect.0 + kept.rect.2,
+            "{scale}"
+        );
+        assert_eq!(
+            (free.rect.1, free.rect.3),
+            (kept.rect.1, kept.rect.3),
+            "{scale}"
+        );
+        let below = chip(Some(kept.rect), None, &|_| false).unwrap();
+        assert!(
+            below.rect.1 >= kept.rect.1 + kept.rect.3,
+            "{scale}: under the label"
+        );
+        let top_half = |rect: Rect4| rect.1 < pane.1 + pane.3 / 2.0;
+        let bottom = chip(None, None, &top_half).unwrap();
+        assert_eq!(
+            bottom.rect.1 + bottom.rect.3,
+            pane.1 + pane.3 - 6.0 * scale,
+            "{scale}: bottom right"
+        );
+        let jump =
+            scrollback_pill(pane, SCROLLED_BACK, scale, cell(scale), 6.0, None, &tr).unwrap();
+        let above = chip(None, Some(jump.rect), &top_half).unwrap();
+        assert!(
+            above.rect.1 + above.rect.3 <= jump.rect.1,
+            "{scale}: above the button"
+        );
+        assert!(
+            chip(None, None, &|_| true).is_none(),
+            "{scale}: text in both places"
+        );
+        let es = Translator::new(Language::Es);
+        let spanish = vi_mode_chip(pane, scale, cell(scale), 6.0, None, None, |_| false, &es);
+        assert_eq!(spanish.unwrap().label, "Modo vi");
+    }
+}
+
+/// What the chip may not cover: a letter, the right half of a wide
+/// character, the cursor and the selection. Spaces and rows never written
+/// are not text.
+#[test]
+fn the_vi_mode_chip_sees_text_and_the_cursor_under_it() {
+    use crate::scrollback::rect_covers_text;
+    let snap = crate::headless_tests::snapshot_of(20, 4, "ab\r\n   \u{4e2d}".as_bytes());
+    let (origin, cell) = ((5.0, 7.0), (10.0, 20.0));
+    let at = |row: f32, col: f32, cols: f32| {
+        (
+            origin.0 + col * cell.0 + 1.0,
+            origin.1 + row * cell.1 + 1.0,
+            cols * cell.0 - 2.0,
+            cell.1 - 2.0,
+        )
+    };
+    assert!(
+        rect_covers_text(&snap, origin, cell, at(0.0, 1.0, 1.0)),
+        "a letter"
+    );
+    assert!(
+        !rect_covers_text(&snap, origin, cell, at(0.0, 10.0, 4.0)),
+        "spaces"
+    );
+    assert!(
+        rect_covers_text(&snap, origin, cell, at(1.0, 4.0, 1.0)),
+        "the right half of a wide character"
+    );
+    assert!(
+        rect_covers_text(&snap, origin, cell, at(1.0, 5.0, 1.0)),
+        "the cursor"
+    );
+    assert!(
+        !rect_covers_text(&snap, origin, cell, at(3.0, 0.0, 20.0)),
+        "a blank row"
+    );
+    use alacritty_terminal::index::{Column, Line, Point};
+    let mut selected = snap;
+    selected.selection = Some(alacritty_terminal::selection::SelectionRange::new(
+        Point::new(Line(3), Column(0)),
+        Point::new(Line(3), Column(19)),
+        false,
+    ));
+    assert!(
+        rect_covers_text(&selected, origin, cell, at(3.0, 10.0, 4.0)),
+        "selected blanks"
+    );
+}
