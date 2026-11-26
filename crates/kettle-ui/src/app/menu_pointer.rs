@@ -115,6 +115,9 @@ pub(crate) struct ContextMenuSession {
     /// The menu was placed beside the text cursor's line, as one opened from
     /// the keyboard is, and follows that line when the window resizes.
     pub(super) line: bool,
+    /// What the menu's panel was placed around: the pointer, or the text
+    /// cursor's line. `ui_geometry` reports it beside the panel's own rect.
+    pub(super) anchor: Option<MenuAnchor>,
     /// For a tab's menu, that tab, by the panes it holds
     /// (`Mux::tab_anchor_panes`), so a tab closing meanwhile cannot
     /// retarget it.
@@ -395,6 +398,20 @@ impl MenuAnchor {
     /// A text line from `top` to `bottom`, which the menu leaves in view.
     pub(super) fn line(x: f32, top: f32, bottom: f32) -> Self {
         Self { x, top, bottom }
+    }
+}
+
+/// `ui_geometry`'s account of what a menu was placed around: the point, and
+/// the line's span for one placed beside a text line (`null` for a pointer's
+/// menu). The panel itself is the menu's `rect`.
+pub(super) fn menu_anchor_json(anchor: Option<MenuAnchor>) -> serde_json::Value {
+    match anchor {
+        None => serde_json::Value::Null,
+        Some(MenuAnchor { x, top, bottom }) => serde_json::json!({
+            "x": x,
+            "y": (top + bottom) * 0.5,
+            "line": (top < bottom).then(|| serde_json::json!({"top": top, "bottom": bottom})),
+        }),
     }
 }
 

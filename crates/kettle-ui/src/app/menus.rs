@@ -895,6 +895,7 @@ impl App {
         let at_pointer = (px, py) == (ws.cursor.x as f32, ws.cursor.y as f32);
         ws.context_menu_session =
             ContextMenuSession::opened(placement.max_h, at_pointer.then_some((px, py)));
+        ws.context_menu_session.anchor = Some(MenuAnchor::point(px, py));
         let anchor_scale = ws
             .window
             .as_ref()
@@ -940,6 +941,7 @@ impl App {
         if let Some(placement) = placement {
             ws.context_menu_session.root_max_h = placement.max_h;
             ws.context_menu_session.line = true;
+            ws.context_menu_session.anchor = Some(anchor);
             if let Some(menu) = ws.context_menu.as_mut() {
                 match menu.drill_stack.first_mut() {
                     Some(level) => level.anchor = placement.origin,

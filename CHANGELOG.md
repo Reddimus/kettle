@@ -995,6 +995,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Right-clicking a tab opens a menu for that tab, with Rename Tab…,
   Duplicate Tab, Move Tab Left, Move Tab Right and Close Tab, instead of the
   terminal's menu. Each acts on the tab you clicked, not the active one.
+- `kettle ctl ui_geometry` reports a context menu's `anchor` as what the
+  menu was placed around (the pointer, or for a menu opened from the
+  keyboard the text cursor's line) instead of the panel's corner, which
+  `rect` already gives.
 
 ### Security
 

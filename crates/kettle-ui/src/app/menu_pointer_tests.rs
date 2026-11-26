@@ -905,3 +905,39 @@ fn a_keyboard_menu_follows_its_line_through_a_resize_or_closes() {
     assert!(place.contains("ws.context_menu_session.line = true;"));
     assert!(place.contains("} else {\n            ws.context_menu = None;\n        }"));
 }
+
+#[test]
+fn ui_geometry_reports_what_a_menu_was_placed_around() {
+    // A right-click's point, which the panel may have flipped above.
+    assert_eq!(
+        menu_anchor_json(Some(MenuAnchor::point(300.0, 200.0))),
+        serde_json::json!({"x": 300.0, "y": 200.0, "line": null})
+    );
+    // A keyboard menu's text line, with the point at its middle.
+    assert_eq!(
+        menu_anchor_json(Some(MenuAnchor::line(100.0, 782.0, 799.5))),
+        serde_json::json!({"x": 100.0, "y": 790.75, "line": {"top": 782.0, "bottom": 799.5}})
+    );
+    assert_eq!(menu_anchor_json(None), serde_json::Value::Null);
+
+    let src = super::super::production_source();
+    let menu = src
+        .split("let context_menu = target.context_menu.as_ref().and_then(|menu| {")
+        .nth(1)
+        .and_then(|body| body.split("\n        });").next())
+        .expect("ui_geometry's menu");
+    assert!(menu.contains("\"anchor\": menu_anchor_json(target.context_menu_session.anchor),"));
+    assert!(menu.contains("\"rect\": rect_json((ax, ay, panel_w, panel_h)),"));
+    let show = src
+        .split("fn show_context_menu(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("the shared menu transition");
+    assert!(show.contains("ws.context_menu_session.anchor = Some(MenuAnchor::point(px, py));"));
+    let line = src
+        .split("fn place_context_menu_at_line(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("the line placement");
+    assert!(line.contains("ws.context_menu_session.anchor = Some(anchor);"));
+}
