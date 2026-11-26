@@ -282,7 +282,8 @@ launch.
 ### Keybinds
 
 Rebind common actions interactively. Each row shows the chord
-currently bound to that action; press **Enter** on a row, then press the new
+currently bound to that action, the one the menus and the command palette
+show (on macOS the Cmd chord where the action has one); press **Enter** on a row, then press the new
 chord you want (any modifier combination). It binds immediately (replacing the
 action's previous chord) and is saved to your config as a `keybind = …` line. Press **Esc** to cancel a capture.
 A key pressed without a modifier is refused (a Keybinds row takes a bare F-key

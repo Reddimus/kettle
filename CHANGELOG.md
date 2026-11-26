@@ -1095,6 +1095,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- On macOS, the Settings Keybinds page shows each action's Cmd shortcut, as
+  the menus do; Previous tab read Ctrl+PageUp beside Next tab's Shift+Cmd+].
+
 - When Settings refuses a shortcut key pressed without a modifier, the row
   now says "Add a modifier, Esc to cancel" instead of only sending a desktop
   notification.

@@ -1626,7 +1626,8 @@ pub fn read(cfg: &Config, field: &Field, tr: &Translator) -> String {
             // keymap's order changes between launches, so a first match would
             // not be stable for an action with several chords.
             match kettle_config::Action::from_name(action) {
-                Some(a) => kettle_config::keybinds::hint_label(&cfg.keybinds, &a)
+                Some(a) => keybind_row_trigger(&cfg.keybinds, &a, cfg!(target_os = "macos"))
+                    .map(|trigger| trigger.label())
                     .unwrap_or_else(|| tr.text(T::SettingsValueUnbound).to_string()),
                 None => "—".to_string(),
             }
@@ -1640,6 +1641,17 @@ pub fn read(cfg: &Config, field: &Field, tr: &Translator) -> String {
             }
         }
     }
+}
+
+/// The chord a Keybinds row shows for `action`: the one the palette and the
+/// menus show, so on macOS a Cmd chord comes first, and every row of the
+/// page shows the macOS form beside Cmd chords.
+pub(crate) fn keybind_row_trigger(
+    bindings: &kettle_config::keybinds::Bindings,
+    action: &kettle_config::Action,
+    macos: bool,
+) -> Option<kettle_config::keybinds::Trigger> {
+    kettle_config::keybinds::hint_trigger(bindings, action, macos)
 }
 
 /// A number and its unit symbol. Symbols are not translated, and both
@@ -3123,18 +3135,41 @@ mod tests {
             }
             let label = read(&cfg, &row, &EN);
             assert_eq!(
-                Some(&label),
-                kettle_config::keybinds::hint_label(&cfg.keybinds, &close).as_ref()
+                Some(label.clone()),
+                kettle_config::keybinds::hint_trigger(
+                    &cfg.keybinds,
+                    &close,
+                    cfg!(target_os = "macos")
+                )
+                .map(|trigger| trigger.label())
             );
             shown.insert(label);
         }
-        // The shortest label wins: macOS spells Super as Cmd.
+        // On macOS the Cmd chord wins, as in the menus; elsewhere the
+        // shortest label. macOS spells Super as Cmd.
         let stable = if cfg!(target_os = "macos") {
             "Shift+Cmd+D"
         } else {
             "Ctrl+Shift+W"
         };
         assert_eq!(shown.into_iter().collect::<Vec<_>>(), [stable]);
+    }
+
+    /// On macOS the Keybinds page shows the Cmd chord the menus show for an
+    /// action that also has a Ctrl chord: Previous tab read `Ctrl+PageUp`
+    /// beside Next tab's `Shift+Cmd+]`. Elsewhere the shortest label wins.
+    #[test]
+    fn a_keybind_row_prefers_the_command_chord_on_macos() {
+        use kettle_config::keybinds::{Bindings, Mods, parse_trigger};
+        let previous = kettle_config::Action::from_name("prev_tab").unwrap();
+        let mut bindings = Bindings::new();
+        for chord in ["ctrl+pageup", "super+shift+["] {
+            bindings.insert(parse_trigger(chord).unwrap(), previous.clone());
+        }
+        let macos = keybind_row_trigger(&bindings, &previous, true).unwrap();
+        assert!(macos.mods.contains(Mods::SUPER), "{macos:?}");
+        let other = keybind_row_trigger(&bindings, &previous, false).unwrap();
+        assert_eq!(other, parse_trigger("ctrl+pageup").unwrap());
     }
 
     #[test]
