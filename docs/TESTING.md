@@ -159,6 +159,8 @@ tooltip timing: the 500 ms rest, the one-second warm spell, a press hiding the
 tooltip until the pointer leaves the control's place (a moment with no control
 to name, while the press is held or a dropdown is open, is no leave), and a
 single scheduler wake per deadline;
+`a_clicked_tab_title_rearms_after_the_pointer_crosses_its_close_button` checks
+that the place a press is held against is where its control is named;
 `the_tooltip_clock_follows_moves_presses_leaves` guards the wiring.
 `overflow_arrows_light_point_and_name_what_a_press_does` (`kettle-ui`) and
 `overflow_arrows_prelight_like_the_other_flat_buttons` (`kettle-render`) cover

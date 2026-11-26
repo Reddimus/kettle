@@ -1200,9 +1200,21 @@ pub(super) struct ChromeTooltip {
     pub(super) target: crate::tooltip::TooltipTarget,
     pub(super) text: String,
     pub(super) anchor: Option<kettle_render::Rect4>,
-    /// Where the control is: a press hides its tooltip until the pointer
-    /// leaves this.
+    /// Where the pointer names this control: a press hides its tooltip
+    /// until the pointer leaves this. Everywhere in it, and nowhere outside
+    /// it, the pointer names this target.
     pub(super) rect: kettle_render::Rect4,
+}
+
+/// Where a tab names its own title: the whole tab but its close button,
+/// which sits at its trailing end and names nothing.
+pub(super) fn tab_title_region(seg: &kettle_render::TabSeg) -> kettle_render::Rect4 {
+    let (x, y, w, h) = seg.rect;
+    if seg.close.2 > 0.0 && seg.close.3 > 0.0 {
+        (x, y, (seg.close.0 - x).clamp(0.0, w), h)
+    } else {
+        seg.rect
+    }
 }
 
 /// What a strip tooltip needs besides the window's own state.
@@ -1316,7 +1328,7 @@ fn cut_tab_title_tooltip(
         target: crate::tooltip::TooltipTarget::TabTitle(seg.idx),
         text: seg.path.as_deref().unwrap_or(&seg.title).to_owned(),
         anchor: Some(seg.rect),
-        rect: seg.rect,
+        rect: tab_title_region(seg),
     })
 }
 

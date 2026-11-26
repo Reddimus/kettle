@@ -2289,3 +2289,76 @@ fn a_tab_drag_at_the_end_rests_on_nothing() {
         (None, Some((true, later)))
     );
 }
+
+/// Defect 3 of the second 6.0 review: a clicked tab title kept its tooltip
+/// hidden after the pointer went onto the tab's close button and back,
+/// because the press was held against the whole tab, ✕ included, where the
+/// title is not named. The pressed region is now where the title is named,
+/// the tab without its ✕, so passing over the ✕ is a leave.
+#[test]
+fn a_clicked_tab_title_rearms_after_the_pointer_crosses_its_close_button() {
+    use super::chrome::{StripTooltipContext, shown_strip_tooltip, strip_tooltip_target};
+    use std::time::{Duration, Instant};
+    let long = "Tab 2: Build and deploy the production cluster migration script";
+    let mut bar = kettle_render::TabBar::hidden();
+    bar.height = 28.0;
+    bar.band = (0.0, 0.0, 400.0, 28.0);
+    bar.segments = vec![kettle_render::TabSeg {
+        idx: 0,
+        rect: (100.0, 0.0, 100.0, 28.0),
+        title_rect: (108.0, 0.0, 64.0, 28.0),
+        hint: None,
+        close: (172.0, 0.0, 28.0, 28.0),
+        title: long.into(),
+        path: None,
+        active: true,
+        activity: kettle_render::TabActivity::Normal,
+    }];
+    let bindings = kettle_config::keybinds::defaults();
+    let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+    let context = StripTooltipContext {
+        modal_open: false,
+        bindings: &bindings,
+        tr: &tr,
+        tab_format: "{title}",
+        tab_cell_width: 8.0,
+    };
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    ws.window_focused = true;
+    let ms = Duration::from_millis;
+    let t0 = Instant::now();
+    let move_to = |ws: &mut crate::window_state::WindowState, x: f64, at| {
+        ws.native_pointer = Some(winit::dpi::PhysicalPosition::new(x, 14.0));
+        let tip = strip_tooltip_target(ws, &bar, &context);
+        if let Some(tip) = &tip {
+            let (rx, ry, rw, rh) = tip.rect;
+            assert!(
+                (rx..rx + rw).contains(&(x as f32)) && (ry..ry + rh).contains(&14.0),
+                "the pressed region holds the pointer"
+            );
+        }
+        ws.tooltip.hover(
+            tip.map(|tip| (tip.target, tip.rect)),
+            Some((x as f32, 14.0)),
+            at,
+        );
+    };
+    move_to(&mut ws, 120.0, t0);
+    let shown = |ws: &crate::window_state::WindowState, at| {
+        shown_strip_tooltip(ws, &bar, &context, at).map(|tip| tip.text)
+    };
+    assert_eq!(shown(&ws, t0 + ms(500)).as_deref(), Some(long));
+    // Click the tab: hidden, and it stays hidden on the title.
+    ws.tooltip.press(t0 + ms(600));
+    move_to(&mut ws, 130.0, t0 + ms(700));
+    assert_eq!(shown(&ws, t0 + ms(3000)), None);
+    // Over its ✕, which names nothing, and back: a leave.
+    move_to(&mut ws, 185.0, t0 + ms(3100));
+    move_to(&mut ws, 120.0, t0 + ms(3200));
+    assert_eq!(shown(&ws, t0 + ms(3200)), None, "a rest first");
+    assert_eq!(shown(&ws, t0 + ms(3700)).as_deref(), Some(long));
+    assert_eq!(
+        super::chrome::tab_title_region(&bar.segments[0]),
+        (100.0, 0.0, 72.0, 28.0)
+    );
+}
