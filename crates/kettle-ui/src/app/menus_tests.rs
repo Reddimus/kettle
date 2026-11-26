@@ -1277,11 +1277,17 @@ fn context_menu_label_ellipsis_is_bounded_and_utf8_safe() {
 
 #[test]
 fn finding_short_menu_keeps_one_complete_row() {
-    let body = finding_body(include_str!("menus.rs"), "context_menu_level_geometry");
+    let limit = include_str!("menus.rs")
+        .split("fn context_menu_height_limit(")
+        .nth(1)
+        .and_then(|body| body.split("\n}\n").next())
+        .expect("the height limit");
     assert!(
-        body.contains(".max(row_h)"),
+        limit.contains(".max(row_h)"),
         "menu breathing room must yield to one complete row"
     );
+    let body = finding_body(include_str!("menus.rs"), "context_menu_level_geometry");
+    assert!(body.contains("context_menu_height_limit(surface_h, row_h)"));
 }
 
 #[test]

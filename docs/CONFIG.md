@@ -1195,7 +1195,8 @@ not look the path up itself, so printed text cannot make it reach a network
 mount. On Windows path hints are always copied),
 `new_ssh` (`ssh`), `context_menu`
 (`open_context_menu`: the right-click menu, opened at the text cursor
-rather than under the mouse pointer; `Menu` on Linux and Windows, and
+rather than under the mouse pointer, below the cursor's line or, when it does
+not fit there, above it, never over it; `Menu` on Linux and Windows, and
 bindable to any key on macOS). Up and Down move the highlight, which
 starts on the first row it can act on, Enter picks it and Escape closes the
 menu; while it is open no key reaches the program in the pane. Shift+F10,

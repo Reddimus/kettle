@@ -843,7 +843,7 @@ impl App {
         let (cw, ch) = self.menu_cell(ws);
         let row_h = kettle_render::menu::row_height(ch);
         let sep_h = kettle_render::menu::SEP_H;
-        let panel_h: f32 = items
+        let natural_h: f32 = items
             .iter()
             .map(|it| match it {
                 ContextMenuItem::Separator => sep_h,
@@ -862,6 +862,9 @@ impl App {
                 | ContextMenuItem::Info { .. } => row_h,
             })
             .sum();
+        // As tall as it will be drawn, so placement flips on the real size.
+        let (sw, sh) = self.context_menu_surface(ws);
+        let panel_h = natural_h.min(context_menu_height_limit(sh, row_h));
         // Dropdown parity: the width budget includes each row's
         // right-aligned shortcut hint (+2 spacer columns) — the same formula
         // the renderer's `menu_row_chars` uses, kept in lockstep.
@@ -873,7 +876,6 @@ impl App {
             .max()
             .unwrap_or(0) as f32;
         let panel_w = kettle_render::menu::panel_width(max_columns, cw);
-        let (sw, sh) = self.context_menu_surface(ws);
         if !context_menu_surface_can_fit_row((sw, sh), (cw, ch)) {
             ws.context_menu = None;
             if let Some(window) = &ws.window {
@@ -906,6 +908,23 @@ impl App {
         });
         if let Some(w) = &ws.window {
             w.request_redraw();
+        }
+    }
+
+    /// Place the menu just opened for the text line `anchor` again, below the
+    /// line or above it, never over it (`place_context_menu`).
+    pub(super) fn place_context_menu_at_line(&self, ws: &mut WindowState, anchor: MenuAnchor) {
+        ws.context_menu_session.root_max_h = None;
+        let Some((_, panel)) = self.context_menu_geometry(ws) else {
+            return;
+        };
+        let placement = place_context_menu(anchor, panel, self.context_menu_surface(ws));
+        ws.context_menu_session.root_max_h = placement.max_h;
+        if let Some(menu) = ws.context_menu.as_mut() {
+            menu.anchor = placement.origin;
+        }
+        if let Some(window) = &ws.window {
+            window.request_redraw();
         }
     }
 
@@ -1567,9 +1586,7 @@ impl App {
         if !context_menu_surface_can_fit_row((surface_w, surface_h), (cw, ch)) {
             return None;
         }
-        let max_h = (surface_h - kettle_render::menu::PANEL_BREATHING)
-            .max(row_h)
-            .min((surface_h - 8.0).max(1.0));
+        let max_h = context_menu_height_limit(surface_h, row_h);
         let max_h = match ws.context_menu_session.root_max_h {
             Some(cap) if root => max_h.min(cap.max(row_h)),
             _ => max_h,
@@ -3003,6 +3020,14 @@ pub(super) fn clamp_context_menu_anchor(
     let x = req_x.clamp(margin, max_x);
     let y = req_y.clamp(margin, max_y);
     (x, y)
+}
+
+/// The tallest a menu's panel is drawn on a surface `surface_h` tall: room to
+/// breathe above and below, but never less than one complete row.
+pub(super) fn context_menu_height_limit(surface_h: f32, row_h: f32) -> f32 {
+    (surface_h - kettle_render::menu::PANEL_BREATHING)
+        .max(row_h)
+        .min((surface_h - 8.0).max(1.0))
 }
 
 pub(super) fn clamp_context_menu_panel(

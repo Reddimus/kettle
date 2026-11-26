@@ -539,3 +539,86 @@ fn a_pointer_that_never_entered_the_menu_leaves_the_keys_highlight_alone() {
     assert_eq!(menu_shown_highlight(&menu, &pointer), 1);
     assert!(menu_activate_click(&menu, &pointer).is_some());
 }
+
+#[test]
+fn a_menu_for_the_last_line_flips_above_it() {
+    // The audit's capture: the prompt on the last row of an 820 px window,
+    // and a 404 px menu, which slid up over the prompt (y 412..816).
+    let line = MenuAnchor {
+        x: 100.0,
+        top: 700.0,
+        bottom: 736.0,
+    };
+    let placement = place_context_menu(line, (300.0, 404.0), (1280.0, 820.0));
+    assert_eq!(placement.origin, (100.0, 296.0));
+    assert_eq!(placement.max_h, None);
+    // A line with room below opens under it, not over its lower half.
+    let line = MenuAnchor {
+        x: 100.0,
+        top: 100.0,
+        bottom: 136.0,
+    };
+    let placement = place_context_menu(line, (300.0, 404.0), (1280.0, 820.0));
+    assert_eq!(placement.origin, (100.0, 136.0));
+}
+
+#[test]
+fn a_menu_too_tall_for_either_side_of_its_line_keeps_the_line_in_view() {
+    for (top, bottom) in [(280.0, 316.0), (320.0, 356.0)] {
+        let line = MenuAnchor {
+            x: 100.0,
+            top,
+            bottom,
+        };
+        let placement = place_context_menu(line, (300.0, 500.0), (800.0, 600.0));
+        let (_, y) = placement.origin;
+        let height = placement.max_h.expect("the menu is held short and scrolls");
+        assert!(
+            y >= bottom || y + height <= top,
+            "{top}..{bottom}: the menu {y}..{} covers the line",
+            y + height
+        );
+        assert!(y >= 4.0 && y + height <= 596.0, "{top}..{bottom}");
+        // The roomier side.
+        assert_eq!(y >= bottom, 600.0 - bottom >= top, "{top}..{bottom}");
+    }
+}
+
+#[test]
+fn a_pointer_menu_flips_above_the_pointer_near_the_bottom() {
+    let placement = place_context_menu(
+        MenuAnchor::point(100.0, 500.0),
+        (200.0, 300.0),
+        (800.0, 600.0),
+    );
+    assert_eq!(placement.origin, (100.0, 200.0));
+    // Too tall for either side: it slides onto the window, as before.
+    let placement = place_context_menu(
+        MenuAnchor::point(100.0, 300.0),
+        (200.0, 590.0),
+        (800.0, 600.0),
+    );
+    assert_eq!(placement.origin, (100.0, 6.0));
+    assert_eq!(placement.max_h, None);
+    // Asked for above the window's top margin, it stays on the margin.
+    let placement = place_context_menu(MenuAnchor::point(0.0, 0.0), (200.0, 300.0), (800.0, 600.0));
+    assert_eq!(placement.origin, (4.0, 4.0));
+}
+
+#[test]
+fn a_menu_opened_from_the_keyboard_is_placed_for_the_cursor_line() {
+    let src = super::super::production_source();
+    let arm = src
+        .split("Action::OpenContextMenu => {")
+        .nth(1)
+        .and_then(|rest| rest.split("Action::UndoCloseTab => {").next())
+        .expect("the action's arm");
+    let open = arm
+        .find("self.open_context_menu(ws, px, py, false);")
+        .expect("the menu opens");
+    let placed = arm
+        .find("self.place_context_menu_at_line(ws, line);")
+        .expect("then sits beside the cursor's line");
+    assert!(open < placed);
+    assert!(arm.contains("MenuAnchor::line(px, py - cell_h * 0.5, py + cell_h * 0.5)"));
+}

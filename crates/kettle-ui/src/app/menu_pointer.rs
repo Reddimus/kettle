@@ -313,6 +313,11 @@ impl MenuAnchor {
             bottom: y,
         }
     }
+
+    /// A text line from `top` to `bottom`, which the menu leaves in view.
+    pub(super) fn line(x: f32, top: f32, bottom: f32) -> Self {
+        Self { x, top, bottom }
+    }
 }
 
 /// Where a menu's panel goes, and how tall it may be.
@@ -323,16 +328,35 @@ pub(super) struct MenuPlacement {
     pub(super) max_h: Option<f32>,
 }
 
-/// Place a `panel`-sized menu for `anchor` on a `surface`-sized window.
+/// Place a `panel`-sized menu for `anchor` on a `surface`-sized window: below
+/// the anchor when it fits there, else above it, as GTK and macOS menus flip.
+/// When it fits on neither side, a pointer's menu slides onto the window over
+/// the point, and a line's takes the roomier side, held short enough to leave
+/// the line in view; it scrolls.
 pub(super) fn place_context_menu(
     anchor: MenuAnchor,
     panel: (f32, f32),
     surface: (f32, f32),
 ) -> MenuPlacement {
-    let y = (anchor.top + anchor.bottom) * 0.5;
+    const MARGIN: f32 = 4.0;
+    let (x, slid) = clamp_context_menu_anchor((anchor.x, anchor.bottom), panel, surface);
+    let below = surface.1 - MARGIN - anchor.bottom;
+    let above = anchor.top - MARGIN;
+    let height = panel.1;
+    let (y, max_h) = if height <= below {
+        (anchor.bottom.max(MARGIN), None)
+    } else if height <= above {
+        (anchor.top - height, None)
+    } else if anchor.top >= anchor.bottom {
+        (slid, None)
+    } else if below >= above {
+        (anchor.bottom.max(MARGIN), Some(below))
+    } else {
+        (MARGIN, Some(above))
+    };
     MenuPlacement {
-        origin: clamp_context_menu_anchor((anchor.x, y), panel, surface),
-        max_h: None,
+        origin: (x, y),
+        max_h,
     }
 }
 

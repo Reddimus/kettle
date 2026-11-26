@@ -5375,6 +5375,12 @@ clears the highlight, as macOS and GTK menus do: the overlay and `ctl`
 report no row (`usize::MAX`, `null`), Enter runs nothing, and the next arrow
 starts from the first or last row. A pointer that was never over the menu,
 as with one opened from the keyboard, leaves the highlight alone.
+`place_context_menu` opens a menu below its anchor and flips it above when it
+does not fit there, as GTK and macOS do. A right-click's anchor is the pointer,
+and a menu too tall for either side slides onto the window. A menu opened
+from the keyboard is anchored on the text cursor's line: too tall for either
+side, it takes the roomier one and is held short enough to leave the line in
+view (`ContextMenuSession::root_max_h`), and scrolls.
 
 Other additions:
 
