@@ -1180,6 +1180,15 @@ pub(super) fn link_open_gesture(
     })
 }
 
+/// Whether a primary click opens the link under it: any click with
+/// `link-single-click` on, else one with Ctrl or Cmd held. The press, and
+/// the hand cursor that promises it, both ask this; on plain hover the
+/// underline and the status hint name the link while the I-beam stays, since
+/// a plain click there selects.
+pub(super) fn link_click_opens(single_click: bool, mods: winit::keyboard::ModifiersState) -> bool {
+    single_click || mods.control_key() || mods.super_key()
+}
+
 pub(super) fn dismiss_link_hover(ws: &mut WindowState) {
     if ws.link_hover_key.take().is_some()
         && let Some(window) = &ws.window
@@ -1285,4 +1294,28 @@ pub(super) fn painted_row_bidi(
     row: usize,
 ) -> Option<&kettle_core::bidi::RowBidi> {
     ws.renderer.as_ref()?.painted_row_bidi(terminal, row)
+}
+
+#[cfg(test)]
+mod link_click_tests {
+    use super::link_click_opens;
+    use winit::keyboard::ModifiersState as M;
+
+    /// Ctrl or Cmd opens a link, alone or with other keys held; Shift or
+    /// Alt alone does not. `link-single-click` opens on any click.
+    #[test]
+    fn a_click_opens_a_link_with_the_open_modifier_or_single_click() {
+        for mods in [
+            M::CONTROL,
+            M::SUPER,
+            M::CONTROL | M::SHIFT,
+            M::SUPER | M::ALT,
+        ] {
+            assert!(link_click_opens(false, mods), "{mods:?}");
+        }
+        for mods in [M::empty(), M::SHIFT, M::ALT, M::SHIFT | M::ALT] {
+            assert!(!link_click_opens(false, mods), "{mods:?}");
+            assert!(link_click_opens(true, mods), "{mods:?}");
+        }
+    }
 }

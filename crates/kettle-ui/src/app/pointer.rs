@@ -1847,8 +1847,9 @@ impl App {
         // Browser / iTerm2 / Ghostty convention: the OS cursor turns into
         // a "pointing hand" while the user holds the same modifier that
         // would open a URL on click (Ctrl on Linux/Windows, Cmd on
-        // macOS — winit's `super_key` maps Cmd) and the pointer sits on
-        // a clickable link. Otherwise show the standard text-I-beam, the
+        // macOS — winit's `super_key` maps Cmd; with `link-single-click`
+        // none is needed) and the pointer sits on a clickable link
+        // (`link_click_opens`). Otherwise show the standard text-I-beam, the
         // affordance every modern terminal uses for "this surface accepts
         // mouse selection."
         //
@@ -1965,7 +1966,10 @@ impl App {
             .or_else(|| self.lane_cursor_icon(ws))
             .or_else(|| self.split_seam_hover_icon(ws))
             .unwrap_or_else(|| {
-                let want_pointer = self.hovered_link_at_cursor(ws).is_some();
+                // The hand promises a click opens the link: only with the
+                // open modifier held, or `link-single-click` on.
+                let want_pointer = self.hovered_link_at_cursor(ws).is_some()
+                    && link_click_opens(self.cfg.link_single_click, ws.mods);
                 if want_pointer {
                     CursorIcon::Pointer
                 } else {

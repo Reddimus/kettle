@@ -965,8 +965,7 @@ impl App {
                 // modifier) is enough to open URLs. Default keeps
                 // kettle's Ctrl-click guard so accidental drags don't
                 // navigate.
-                let url_modifier =
-                    self.cfg.link_single_click || ws.mods.control_key() || ws.mods.super_key();
+                let url_modifier = link_click_opens(self.cfg.link_single_click, ws.mods);
                 if bcode == 0
                     && url_modifier
                     && let Some(uri) = self.link_at_cursor(ws).map(|l| l.uri.clone())

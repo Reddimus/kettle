@@ -471,3 +471,36 @@ fn a_selected_hovered_link_loses_its_underline_until_the_selection_clears() {
         "every link keeps its rect"
     );
 }
+
+/// The hand cursor over a link promises that a click opens it, so it shows
+/// only when one would: with Ctrl or Cmd held, or `link-single-click` on. On
+/// plain hover the link keeps its underline and status hint over the I-beam.
+/// The click and the cursor ask the same question, and a modifier press
+/// re-syncs the cursor without the pointer moving.
+#[test]
+fn the_link_hand_shows_only_when_a_click_would_open_the_link() {
+    let src = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        src.contains(
+            "let want_pointer = self.hovered_link_at_cursor(ws).is_some() \
+             && link_click_opens(self.cfg.link_single_click, ws.mods);"
+        ),
+        "the hand needs the open gesture"
+    );
+    assert!(
+        src.contains("let url_modifier = link_click_opens(self.cfg.link_single_click, ws.mods);"),
+        "the click asks the same question"
+    );
+    assert!(src.contains(
+        "fn link_click_opens(single_click: bool, mods: winit::keyboard::ModifiersState) -> bool { single_click || mods.control_key() || mods.super_key() }"
+    ));
+    let modifiers = src
+        .split("WindowEvent::ModifiersChanged(")
+        .nth(1)
+        .and_then(|rest| rest.split("WindowEvent::").next())
+        .expect("ModifiersChanged arm");
+    assert!(modifiers.contains("self.sync_cursor_icon(ws);"));
+}

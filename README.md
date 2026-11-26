@@ -417,7 +417,9 @@ See [configuration](docs/CONFIG.md) and [getting started](docs/GETTING-STARTED.m
 ## Links and quick-select hints
 
 Hover a link to highlight it and see its destination and opening gesture.
-The hovered link uses a solid accent underline and a hand cursor. At rest,
+The hovered link uses a solid accent underline. The pointer turns into a hand
+only while a click would open the link: with Cmd (macOS) or Ctrl held, or
+always with `link-single-click`; otherwise it stays the text cursor. At rest,
 detected URLs and paths have no underline, so a screen full of them stays
 quiet; `link-underline = always` gives them a thin, dim one. Explicit OSC 8
 links always rest with a dotted underline. Inside a selection or search match

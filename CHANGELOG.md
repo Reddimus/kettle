@@ -1095,6 +1095,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- The pointer turns into a hand over a link only while a click would open it (Cmd or Ctrl held, or `link-single-click` on); a plain hover keeps the text cursor.
+
 - Tabs, their close buttons and the title-bar buttons no longer light up or show the hand cursor under the command palette, Settings, a picker or a dialog, where a click would not reach them.
 
 - A program that tracks the mouse no longer hears the pointer moving over the tab bar, the status bar or another split as motion at its edge.
