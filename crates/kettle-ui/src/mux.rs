@@ -2288,6 +2288,15 @@ pub struct DetachedTab {
     pub panes: Vec<(u64, Pane)>,
 }
 
+/// What [`Mux::close_tabs_except`] closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BulkClosed {
+    /// The tab at this index, as it was when it closed.
+    Tab(usize),
+    /// This pane alone, from a tab that keeps panes opened since.
+    Pane(u64),
+}
+
 pub struct Mux {
     restore_content: std::collections::VecDeque<crate::session_content::PaneContent>,
     restore_divider: String,
@@ -4526,21 +4535,35 @@ impl Mux {
         self.tabs.is_empty()
     }
 
-    /// Close every tab but `keep`, which becomes the active tab, and return
-    /// the closed tabs' indices, each as it was when that tab closed: the
-    /// last first, so each index still names the tab it was read for.
-    pub fn close_tabs_except(&mut self, keep: usize) -> Vec<usize> {
-        if keep >= self.tabs.len() {
+    /// Close the panes `captured` that are still open outside tab `keep`,
+    /// which becomes the active tab, and say what closed, in order. A tab
+    /// whose every pane is captured closes whole, the last first, so each
+    /// index names the tab it was read for; a tab that has gained panes since
+    /// they were captured loses only the captured ones, and a tab of none
+    /// stays.
+    pub fn close_tabs_except(&mut self, keep: usize, captured: &[u64]) -> Vec<BulkClosed> {
+        let kept = self.tab_anchor_panes(keep);
+        if kept.is_empty() {
             return Vec::new();
         }
-        let closed: Vec<usize> = (0..self.tabs.len())
-            .rev()
-            .filter(|&idx| idx != keep)
-            .collect();
-        for &idx in &closed {
-            self.close_tab_at(idx);
+        let mut closed = Vec::new();
+        for idx in (0..self.tabs.len()).rev() {
+            let panes = self.tabs[idx].root.leaf_ids();
+            if idx != keep && !panes.is_empty() && panes.iter().all(|id| captured.contains(id)) {
+                self.close_tab_at(idx);
+                closed.push(BulkClosed::Tab(idx));
+            }
         }
-        self.active = 0;
+        for &pane in captured {
+            let Some(idx) = self.tab_index_of_any_pane(&[pane]) else {
+                continue;
+            };
+            if Some(idx) != self.tab_index_of_any_pane(&kept) && self.focus_pane(pane) {
+                self.close_focused();
+                closed.push(BulkClosed::Pane(pane));
+            }
+        }
+        self.active = self.tab_index_of_any_pane(&kept).unwrap_or(0);
         self.touch_active_tab_seen();
         closed
     }

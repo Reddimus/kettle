@@ -5404,9 +5404,11 @@ runs the row on it: Close asks as the tab's ✕ does, Move uses
 and Rename and Duplicate bring the tab forward first. Close Other Tabs, a row
 no action runs (`ContextMenuItem::CloseOtherTabs`), asks once with
 `confirm_close` over all the other tabs' panes and busy count
-(`other_tabs_close_scope`, `ConfirmAction::CloseOtherTabs`), then
-`Mux::close_tabs_except` closes them, last first, and leaves the kept tab
-active.
+(`other_tabs_close_scope`). The question records those panes
+(`ConfirmAction::CloseOtherTabs { keep, panes }`), and on acceptance
+`Mux::close_tabs_except` closes only them: a tab all of whose panes were asked
+about closes whole, last first, a tab split since loses only its old panes, and
+a tab opened since stays. The kept tab ends active.
 
 Other additions:
 

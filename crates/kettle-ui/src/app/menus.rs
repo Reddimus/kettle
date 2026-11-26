@@ -1129,19 +1129,24 @@ impl App {
             TabMenuStep::CloseOthers(idx) => {
                 // One question for them all, about everything that would
                 // close (`confirm_close`'s rule over the other tabs' panes).
+                // The question, and the close, are about these panes only.
+                let keep = ws.mux.tab_anchor_panes(idx);
+                let others = other_tabs_panes(ws, idx);
                 let (panes, busy) = other_tabs_close_scope(ws, idx);
                 if panes == 0
                     || self.confirm_close(
                         ws,
                         panes,
                         busy,
-                        ConfirmAction::CloseOtherTabs(ws.mux.tab_anchor_panes(idx)),
+                        ConfirmAction::CloseOtherTabs {
+                            keep: keep.clone(),
+                            panes: others.clone(),
+                        },
                     )
                 {
                     return;
                 }
-                let keep = ws.mux.tab_anchor_panes(idx);
-                self.close_other_tabs_now(ws, &keep);
+                self.close_other_tabs_now(ws, &keep, &others);
             }
             TabMenuStep::Moved(moved) => {
                 if moved {
@@ -1160,14 +1165,23 @@ impl App {
         }
     }
 
-    /// Close every tab of the window but the one holding the panes `keep`,
+    /// Close the panes `others` outside the tab holding the panes `keep`,
     /// which becomes the active tab, as Close Other Tabs and its confirmation
-    /// do. Nothing closes when that tab is gone.
-    pub(super) fn close_other_tabs_now(&mut self, ws: &mut WindowState, keep: &[u64]) {
+    /// do: those it asked about, and none that opened since. Nothing closes
+    /// when that tab is gone.
+    pub(super) fn close_other_tabs_now(
+        &mut self,
+        ws: &mut WindowState,
+        keep: &[u64],
+        others: &[u64],
+    ) {
         let pre = self.focus_key(ws);
         if let Some(idx) = ws.mux.tab_index_of_any_pane(keep) {
-            for closed in ws.mux.close_tabs_except(idx) {
-                self.fire_tab_close_event(ws, closed);
+            for closed in ws.mux.close_tabs_except(idx, others) {
+                match closed {
+                    crate::mux::BulkClosed::Tab(closed) => self.fire_tab_close_event(ws, closed),
+                    crate::mux::BulkClosed::Pane(pane) => self.fire_pane_close_event(ws, pane),
+                }
             }
             self.note_focus_change(ws, pre);
             self.save_session(ws);
