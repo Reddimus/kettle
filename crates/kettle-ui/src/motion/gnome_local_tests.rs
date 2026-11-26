@@ -7,6 +7,45 @@ fn sh(script: &str) -> Command {
     command
 }
 
+/// `command`, reporting each start: the child writes a byte to the returned
+/// pipe before it runs anything, and `spawn` returns only after that, so a
+/// start is seen even if the child is killed at once.
+fn counted(mut command: Command) -> (Command, std::io::PipeReader) {
+    use std::os::fd::{AsRawFd as _, OwnedFd};
+    use std::os::unix::process::CommandExt as _;
+    let (reader, writer) = std::io::pipe().expect("a pipe");
+    let writer = OwnedFd::from(writer);
+    // SAFETY: the hook runs in the forked child before exec and only calls
+    // write(2), which is async-signal-safe, on a descriptor the closure
+    // keeps open.
+    unsafe {
+        command.pre_exec(move || {
+            libc::write(writer.as_raw_fd(), b"s".as_ptr().cast(), 1);
+            Ok(())
+        });
+    }
+    (command, reader)
+}
+
+/// Whether a command from `counted` was started (since the last start this
+/// saw). The pipe also turns ready at end of file, once the command is
+/// dropped, so a start is a byte read from it.
+fn started(starts: &std::io::PipeReader) -> bool {
+    use std::io::Read as _;
+    use std::os::fd::AsRawFd as _;
+    let mut poll = libc::pollfd {
+        fd: starts.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: poll is writable storage for one pollfd on a live descriptor.
+    if unsafe { libc::poll(&mut poll, 1, 0) } <= 0 {
+        return false;
+    }
+    let mut reader = starts;
+    matches!(reader.read(&mut [0; 1]), Ok(1))
+}
+
 fn wait_for(message: &str, mut ready: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(6);
     while !ready() {
@@ -192,18 +231,19 @@ fn a_read_takes_true_or_false_from_a_successful_run_and_nothing_else() {
     assert_eq!(read("head -c 4096 /dev/zero"), None, "output is bounded");
     let mut missing = Command::new("/nonexistent/gsettings");
     assert_eq!(super::read(&mut missing, soon(), &stop), None);
-    // Past its deadline a read starts nothing.
-    let sleeper = Sleeper::new();
-    assert_eq!(
-        super::read(&mut sleeper.command(), Instant::now(), &stop),
-        None
-    );
-    std::thread::sleep(Duration::from_millis(100));
-    assert_eq!(
-        sleeper.pid(),
-        None,
+    // Past its deadline, or once stopped, a read starts nothing.
+    let (mut late, starts) = counted(sh("exit 0"));
+    assert_eq!(super::read(&mut late, Instant::now(), &stop), None);
+    assert!(
+        !started(&starts),
         "a read past its deadline started a child"
     );
+    let (closed, gone) = mpsc::channel::<()>();
+    drop(closed);
+    assert_eq!(super::read(&mut late, soon(), &gone), None);
+    assert!(!started(&starts), "a stopped read started a child");
+    assert_eq!(super::read(&mut late, soon(), &stop), None);
+    assert!(started(&starts), "the counter sees a start");
 }
 
 /// A read that overruns its time is killed and reaped, and the caller is
@@ -212,7 +252,7 @@ fn a_read_takes_true_or_false_from_a_successful_run_and_nothing_else() {
 fn an_overrunning_read_is_killed_and_reaped() {
     let sleeper = Sleeper::new();
     let (_open, stop) = mpsc::channel();
-    let started = Instant::now();
+    let since = Instant::now();
     assert_eq!(
         read(
             &mut sleeper.command(),
@@ -221,7 +261,7 @@ fn an_overrunning_read_is_killed_and_reaped() {
         ),
         None
     );
-    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(since.elapsed() < Duration::from_secs(3));
     assert!(sleeper.reaped(), "the overrunning child was left behind");
 }
 
@@ -236,7 +276,7 @@ fn a_stopped_read_is_killed_and_reaped_at_once() {
         wait_for("the child started", || pid_file.exists());
         drop(stop);
     });
-    let started = Instant::now();
+    let since = Instant::now();
     assert_eq!(
         read(
             &mut sleeper.command(),
@@ -246,7 +286,7 @@ fn a_stopped_read_is_killed_and_reaped_at_once() {
         None
     );
     stopper.join().unwrap();
-    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(since.elapsed() < Duration::from_secs(5));
     assert!(sleeper.reaped(), "the stopped child was left behind");
 }
 
@@ -302,9 +342,9 @@ fn dropping_the_watch_mid_read_leaves_no_child_or_thread() {
     let watch = LocalWatch::start(move || Some(command), Arc::new(|| {}));
     wait_for("the child started", || sleeper.pid().is_some());
     assert_eq!(watch.reading(), Reading::Pending);
-    let started = Instant::now();
+    let since = Instant::now();
     drop(watch);
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(since.elapsed() < Duration::from_secs(2));
     assert!(sleeper.reaped(), "the watch's child outlived it");
 }
 
@@ -345,7 +385,7 @@ fn a_gnome_switch_only_gnome_itself_reports_holds_motion_back() {
 #[test]
 fn dropping_the_watch_during_a_held_lookup_returns_at_once() {
     let sleeper = Sleeper::new();
-    let command = sleeper.command();
+    let (command, starts) = counted(sleeper.command());
     let (release, held) = mpsc::channel::<()>();
     let (entered, looking) = mpsc::channel::<()>();
     let wake: kettle_core::Waker = Arc::new(|| {});
@@ -365,9 +405,9 @@ fn dropping_the_watch_during_a_held_lookup_returns_at_once() {
         std::thread::sleep(Duration::from_secs(3));
         let _ = release.send(());
     });
-    let started = Instant::now();
+    let since = Instant::now();
     drop(watch);
-    let waited = started.elapsed();
+    let waited = since.elapsed();
     releaser.join().unwrap();
     assert!(
         waited < Duration::from_secs(2),
@@ -376,7 +416,7 @@ fn dropping_the_watch_during_a_held_lookup_returns_at_once() {
     wait_for("the thread ended after its lookup", || {
         worker.upgrade().is_none()
     });
-    assert_eq!(sleeper.pid(), None, "a child was started after the stop");
+    assert!(!started(&starts), "a child was started after the stop");
 }
 
 /// The first answer's time starts before the lookup: a lookup held past it
@@ -385,7 +425,7 @@ fn dropping_the_watch_during_a_held_lookup_returns_at_once() {
 #[test]
 fn a_held_lookup_counts_against_the_first_answers_time() {
     let sleeper = Sleeper::new();
-    let command = sleeper.command();
+    let (command, starts) = counted(sleeper.command());
     let (release, held) = mpsc::channel::<()>();
     let watch = LocalWatch::start_with(
         move || {
@@ -404,7 +444,9 @@ fn a_held_lookup_counts_against_the_first_answers_time() {
         "the wait for a first answer outlasted its time"
     );
     release.send(()).unwrap();
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(sleeper.pid(), None, "a read started after its time ran out");
+    wait_for("the read after the lookup gave up", || {
+        watch.state.load(Ordering::Acquire) == UNAVAILABLE
+    });
+    assert!(!started(&starts), "a read started after its time ran out");
     assert_eq!(watch.reading(), Reading::Unavailable);
 }
