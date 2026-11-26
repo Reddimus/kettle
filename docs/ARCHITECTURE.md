@@ -2124,7 +2124,13 @@ its nonce) and whether its quick select is for previews
 the hovered link's from its status target and painted bounds. Adapters queue
 requests against the tree they last received, so a request that arrives after
 the view changed names a node the current view does not hold and is dropped,
-where a place-based id would act on whatever took that place. Opening still
+where a place-based id would act on whatever took that place. The
+accessibility key hashes what each bound id is made from (a picker row's
+`a11y_key` and `a11y_name` through `hash_accessible_menu_rows`, each
+quick-select label's bound id, the link status's target and bounds, a Settings
+row's category and label), so a change that only rebinds a node, such as a
+reload that moves an SSH host to another target, still republishes the tree.
+Opening still
 goes through `open_pane_link` and the picker's own Enter, with their checks.
 
 The context menu retains its platform convention: left/middle presses outside

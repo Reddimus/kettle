@@ -3567,6 +3567,10 @@ speech:
   narrow for the Reset chip, AccessKit's consumer hit test on the value control
   finds the Change button. Reset stays in the tree as a zero-width line at the
   control's left edge.
+- `the_accessibility_key_follows_what_picker_rows_are_bound_to`: changing only
+  an SSH host's target paints the same launcher row but changes its option ids
+  and the accessibility key, so the tree is published again. A row's whole
+  name counts too, and the key's source covers the other bound nodes.
 - `quick_select_labels_are_bound_to_their_quick_selects_purpose`: a label of
   a plain quick select names nothing in a quick select for previews over the
   same text, and the other way round.

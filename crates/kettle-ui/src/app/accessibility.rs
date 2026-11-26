@@ -871,8 +871,15 @@ impl App {
                 // value does not show.
                 matches!(row.control, kettle_render::SettingsControl::Toggle(true))
                     .hash(&mut hasher);
+                // The key the selected row's Change button names.
+                settings_change_key(row.control).hash(&mut hasher);
             }
         }
+        // Capture makes the Change button unavailable.
+        ws.settings_nav
+            .as_ref()
+            .map(|nav| nav.capturing)
+            .hash(&mut hasher);
         if let Some(menu) = &ws.context_menu {
             for parent in &menu.drill_stack {
                 parent.highlight.hash(&mut hasher);
@@ -912,15 +919,7 @@ impl App {
             ] {
                 component.to_bits().hash(&mut hasher);
             }
-            for row in &menu.rows {
-                row.label.hash(&mut hasher);
-                row.hint.hash(&mut hasher);
-                row.a11y_description.hash(&mut hasher);
-                row.heading.hash(&mut hasher);
-                row.separator.hash(&mut hasher);
-                row.enabled.hash(&mut hasher);
-                row.toggle.hash(&mut hasher);
-            }
+            hash_accessible_menu_rows(&menu.rows, &mut hasher);
         }
         overlay.palette_query.hash(&mut hasher);
         if let Some(status) = palette_profile_accessibility_status(overlay, ws, &self.ui_text) {
@@ -1982,6 +1981,29 @@ pub(super) fn accessibility_picker_option_ids(
             })
         })
         .collect()
+}
+
+/// What the open menu's or picker's `rows` add to the accessibility key:
+/// what their nodes show, and what a picker option and its Choose button are
+/// bound to and named for (`a11y_key`, `a11y_name`). A reload that changes
+/// only an SSH host's target leaves the painted row as it was but gives its
+/// option and Choose button new ids, and must still republish the tree.
+pub(super) fn hash_accessible_menu_rows(
+    rows: &[ContextMenuRow],
+    hasher: &mut impl std::hash::Hasher,
+) {
+    use std::hash::Hash as _;
+    for row in rows {
+        row.label.hash(hasher);
+        row.hint.hash(hasher);
+        row.a11y_description.hash(hasher);
+        row.heading.hash(hasher);
+        row.separator.hash(hasher);
+        row.enabled.hash(hasher);
+        row.toggle.hash(hasher);
+        row.a11y_name.hash(hasher);
+        row.a11y_key.hash(hasher);
+    }
 }
 
 /// What an SSH launcher row acts on (`ContextMenuRow::a11y_key`): the host
