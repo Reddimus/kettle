@@ -8,7 +8,6 @@ use alacritty_terminal::Term;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::{Cell, Flags};
-use regex::Regex;
 use regex_automata::Input;
 use regex_automata::meta::Regex as MetaRegex;
 use regex_automata::nfa::thompson::WhichCaptures;
@@ -1269,34 +1268,6 @@ pub enum CaseSensitivity {
     Smart,
     Always,
     Never,
-}
-
-/// Compile a search pattern with **smart-case** semantics: case-insensitive
-/// unless the pattern contains an uppercase letter (ripgrep/vim behavior).
-/// The pattern is a real regex; if it doesn't compile it falls back to a
-/// literal (escaped) search so a stray `(` or `*` never breaks search.
-///
-/// Preserved as the smart-case shorthand; new callers that want to
-/// honor a user-configured override should call `build_regex_with`.
-pub fn build_regex(pattern: &str) -> Option<Regex> {
-    build_regex_with(pattern, CaseSensitivity::Smart)
-}
-
-/// Same as `build_regex` but with an explicit override.
-/// Pure — no terminal state involved.
-pub fn build_regex_with(pattern: &str, mode: CaseSensitivity) -> Option<Regex> {
-    if pattern.is_empty() {
-        return None;
-    }
-    let ci = match mode {
-        CaseSensitivity::Smart => !pattern.chars().any(|c| c.is_uppercase()),
-        CaseSensitivity::Always => false,
-        CaseSensitivity::Never => true,
-    };
-    let flag = if ci { "(?i)" } else { "" };
-    Regex::new(&format!("{flag}{pattern}"))
-        .or_else(|_| Regex::new(&format!("{flag}{}", regex::escape(pattern))))
-        .ok()
 }
 
 /// [`search_with`] with smart case.
@@ -2610,28 +2581,33 @@ mod tests {
         assert!(!token.is_current(&term, 4, 9));
     }
 
+    /// `search` is smart case: insensitive until the pattern has an uppercase
+    /// letter. Patterns are regexes, and one that does not parse is matched as
+    /// the literal text typed.
     #[test]
-    fn smart_case_is_insensitive_until_an_uppercase() {
-        // All-lowercase pattern → case-insensitive.
-        let re = build_regex("error").unwrap();
-        assert!(re.is_match("ERROR"));
-        assert!(re.is_match("Error"));
-        assert!(re.is_match("error"));
-        // Any uppercase → case-sensitive.
-        let re = build_regex("Error").unwrap();
-        assert!(re.is_match("Error"));
-        assert!(!re.is_match("error"));
-        assert!(!re.is_match("ERROR"));
-    }
-
-    #[test]
-    fn pattern_is_a_real_regex() {
-        let re = build_regex(r"warn|fail").unwrap();
-        assert!(re.is_match("a fail here"));
-        assert!(re.is_match("WARN: x"), "alternation + smart-case");
-        let re = build_regex(r"\bfoo\b").unwrap();
-        assert!(re.is_match("a foo b"));
-        assert!(!re.is_match("foobar"));
+    fn search_is_smart_case_regex_with_a_literal_fallback() {
+        let mut term = empty_term(24, 1);
+        write_ascii(&mut term, 0, 0, "ERROR Error a(b foobar");
+        let starts = |pattern: &str| -> Vec<usize> {
+            search(&term, pattern)
+                .iter()
+                .map(|found| found.start.column)
+                .collect()
+        };
+        assert_eq!(starts("error"), [0, 6]);
+        assert_eq!(starts("Error"), [6]);
+        assert_eq!(starts("rror|b"), [1, 7, 14, 19]);
+        assert_eq!(starts(r"foo"), Vec::<usize>::new());
+        assert_eq!(starts("a(b"), [12]);
+        assert_eq!(starts(""), Vec::<usize>::new());
+        for (mode, found) in [
+            (CaseSensitivity::Smart, 2),
+            (CaseSensitivity::Always, 0),
+            (CaseSensitivity::Never, 2),
+        ] {
+            assert_eq!(search_with(&term, "error", mode).len(), found, "{mode:?}");
+        }
+        assert_eq!(search_with(&term, "Error", CaseSensitivity::Never).len(), 2);
     }
 
     #[test]
@@ -2649,45 +2625,6 @@ mod tests {
         // Clamped to [0, hist]; never panics on extremes.
         assert!(reveal_offset(-9999, 0, 100, 40) <= 100);
         assert_eq!(reveal_offset(9999, 0, 100, 40), 0);
-    }
-
-    #[test]
-    fn invalid_regex_falls_back_to_literal() {
-        // Unbalanced paren is not a valid regex → literal search instead.
-        let re = build_regex("a(b").unwrap();
-        assert!(re.is_match("xx a(b yy"));
-        assert!(!re.is_match("ab"));
-        // Empty pattern yields nothing.
-        assert!(build_regex("").is_none());
-    }
-
-    /// Drift guard. The three CaseSensitivity modes drive
-    /// the (?i) flag override on `build_regex_with`:
-    ///   - Smart: case-insensitive unless any uppercase in pattern
-    ///   - Always: case-sensitive even for all-lowercase pattern
-    ///   - Never: case-insensitive even for mixed-case pattern
-    #[test]
-    fn build_regex_with_honors_explicit_case_sensitivity() {
-        use super::{CaseSensitivity, build_regex_with};
-        // Smart: lowercase → insensitive (matches ERROR).
-        let re = build_regex_with("error", CaseSensitivity::Smart).unwrap();
-        assert!(re.is_match("ERROR"));
-        // Always: even lowercase pattern is sensitive (no match on ERROR).
-        let re = build_regex_with("error", CaseSensitivity::Always).unwrap();
-        assert!(!re.is_match("ERROR"));
-        assert!(re.is_match("error"));
-        // Never: even mixed-case pattern is insensitive (matches ERROR).
-        let re = build_regex_with("Error", CaseSensitivity::Never).unwrap();
-        assert!(re.is_match("ERROR"));
-        assert!(re.is_match("error"));
-        // Empty pattern still None across all modes.
-        for mode in [
-            CaseSensitivity::Smart,
-            CaseSensitivity::Always,
-            CaseSensitivity::Never,
-        ] {
-            assert!(build_regex_with("", mode).is_none());
-        }
     }
 
     /// The cap is applied to the pattern the user typed, but escaping can
