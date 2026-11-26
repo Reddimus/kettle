@@ -4515,9 +4515,10 @@ when the window is minimized or occluded** (`window_occluded` +
 before it schedules or draws a frame, the app passes `motion_allowed` to
 `Renderer::set_background_motion`, which stops the shared `background_clock`
 at that moment, so a repaint shows the same frame and `background_is_animating`
-asks for no wakes; when motion returns, both clocks shift by the pause and
-playback resumes from the held frame. `background-animation = off` still shows
-frame 0.
+asks for no wakes. When motion returns, each clock moves on by the part of the
+pause it lived through (`resumed_clock`): playback resumes from the held
+frame, and an image decoded during the hold starts on its first frame.
+`background-animation = off` still shows frame 0.
 
 The **settings overlay is mouse-driven**: `kettle_render::settings_hit_test`
 recomputes the panel geometry from the SAME `settings_display_lines` + panel math
@@ -6526,12 +6527,20 @@ owner changes invalidate state, and retries and shutdown stay off the UI thread.
 Reduced motion reads `org.freedesktop.appearance reduced-motion`; only where the
 portal has none does `motion::SystemMotion` start a second watch, on GNOME's
 `org.gnome.desktop.interface enable-animations` through the same portal
-(`Preference::resolve`). A watch distinguishes a pending first answer, which
-holds motion back until the desktop answers or a bounded call fails, from an
-unavailable one. Under `auto` the portal watch starts on the first event-loop
-turn and GNOME's as soon as the portal says it has none
-(`SystemMotion::prepare`), so that wait ends before the first motion. A
-desktop with neither setting allows motion.
+(`Preference::resolve`). Where the portal has neither key, or there is no
+portal, a GNOME-like session (`XDG_CURRENT_DESKTOP`) reads GNOME's own switch
+with the first executable `gsettings` on an absolute `PATH` entry
+(`motion/gnome_local.rs`, `Preference::linux`). That read runs on its own
+thread, gives up after two seconds or 64 bytes of output, is killed and
+reaped then or when its watch is dropped, and is repeated every 30 seconds so
+a change applies; the watch's drop joins the thread. A failed read keeps the
+last answer. A watch distinguishes a pending first answer, which holds motion
+back until the desktop answers or a bounded call fails, from an unavailable
+one. Under `auto` the portal watch starts on the first event-loop turn, the
+portal's GNOME watch as soon as the portal says it has no `reduced-motion`,
+and the local read once neither has an answer (`SystemMotion::prepare`), so
+that wait ends before the first motion. A desktop that says nothing allows
+motion.
 That worker and every other session-bus connection Kettle opens itself (global
 shortcuts, notifications, the image viewer and file-manager hand-offs) connect
 through `kettle-ui/src/dbus_bound.rs`, which reads each message's 16-byte

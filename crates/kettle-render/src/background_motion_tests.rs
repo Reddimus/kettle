@@ -110,3 +110,53 @@ fn reduced_motion_holds_an_animated_image_on_its_frame() {
     let cache = renderer.bg_image_cache.as_ref().expect("still cached");
     assert_eq!(cache.started, started + Duration::from_millis(28_950));
 }
+
+/// A wallpaper decoded while motion is held (its clock starts when the
+/// decode lands) starts on its first frame when motion returns. Shifting
+/// its clock by the whole hold put its start in the future, so the first
+/// frame stayed up for the part of the hold before the decode, with
+/// repeated wakes for a frame that never changed.
+#[test]
+fn a_wallpaper_decoded_during_the_hold_starts_on_its_first_frame() {
+    let cfg = Config {
+        background_type: BackgroundType::Image,
+        background_image: "late.gif".into(),
+        background_blur: false,
+        background_animation: BackgroundAnimation::Always,
+        background_opacity: 1.0,
+        ..gpu_test_config()
+    };
+    let mut renderer = cpu_renderer(&cfg);
+    let held = twenty_seconds_ago();
+    renderer.set_background_motion(false, held);
+    let decoded = held + Duration::from_secs(5);
+    let frames: Vec<_> = [[255, 0, 0, 255], [0, 255, 0, 255]]
+        .into_iter()
+        .map(|rgba| kettle_core::ImageData::new(1, 1, rgba.to_vec()).expect("a 1x1 frame"))
+        .collect();
+    renderer.bg_image_cache = Some(BgImageAnim {
+        path: "late.gif".into(),
+        blur: 0,
+        frames,
+        opaque_frames: vec![true; 2],
+        gaps: vec![100; 2],
+        started: decoded,
+    });
+    let resumed = held + Duration::from_secs(10);
+    renderer.set_background_motion(true, resumed);
+    let cache = renderer.bg_image_cache.as_ref().expect("still cached");
+    assert_eq!(
+        cache.started, resumed,
+        "plays from its first frame at resume"
+    );
+    assert!(
+        cache.started <= Instant::now(),
+        "its clock is not in the future"
+    );
+    // A clock that started before the hold moves on by the whole hold.
+    let early = held - Duration::from_secs(3);
+    assert_eq!(
+        crate::background::resumed_clock(early, held, resumed),
+        early + Duration::from_secs(10)
+    );
+}
