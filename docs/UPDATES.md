@@ -163,7 +163,9 @@ Update notices appear briefly at the top center of the active window. Each
 release's available, installed and failed state is announced once across windows
 and restarts. Notices wait while Kettle is in the background; they do not also
 send a desktop notification. The seven-second timer pauses on hover or when an
-accessibility user focuses a toast button. Reduced motion disables fading.
+accessibility user focuses a toast button; a paused toast shows at full
+strength, even mid-fade, and afterwards stays at least three more seconds.
+Reduced motion disables fading.
 
 **Details** opens About; the close button dismisses the toast. About and the
 command palette retain update status and release notes after it disappears.

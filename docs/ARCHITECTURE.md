@@ -4909,8 +4909,12 @@ non-regression claim.
   (one visible, three waiting; repeats and overflow are counted on toasts,
   never by evicting the visible one), is painted through the update toast's
   painter as one of the overlay's notices, and keeps its time in the update
-  toast's `ToastClock`. A desktop delivery is remembered in
-  `PendingDesktop` (64 entries, 60 s) under the id the worker reports
+  toast's `ToastClock`. A paused clock (hover or assistive focus) reports full
+  opacity, and resuming leaves at least three seconds, so a toast caught
+  mid-fade shows whole and later fades from the start; each tick compares
+  the opacity drawn before it with the one after and repaints once when a
+  pause changed it (`ToastClock::needs_frame`). A desktop delivery is
+  remembered in `PendingDesktop` (64 entries, 60 s) under the id the worker reports
   failures with, so a refused or failed one is queued as a toast in its own
   window. No path logs or stores the text.
 - **One process-wide desktop-notification worker** — every OSC 9/777, Lua,

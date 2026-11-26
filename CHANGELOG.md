@@ -1560,6 +1560,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   leave a truncated file when they fail, GPU setup keeps trying other
   backends when one device fails to open, and macOS audio decoding moved off
   the sound-control thread.
+- A toast you hover, or focus with a screen reader, while it fades now shows
+  at full strength, and afterwards stays at least three seconds more.
 
 ## Older releases
 

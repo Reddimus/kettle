@@ -3138,7 +3138,8 @@ window fullscreen. Check the accessible names and toggle states for both size
 controls, including Spanish. Preserve the original pane focus and verify that
 player keys do not reach its terminal.
 
-Update-toast tests use injected clocks for foreground expiry and hover pauses,
+Update-toast tests use injected clocks for foreground expiry and hover pauses
+(a toast paused mid-fade is drawn whole and resumes with time to read it),
 and private cache fixtures for concurrent claims, restart persistence, abandoned
 claims, contention recovery and failed writes. An unreadable record must remain
 byte-identical. Native checks must retain terminal grid, cursor and
