@@ -2897,3 +2897,38 @@ fn every_modal_surface_is_a_modal_dialog() {
         assert!(dialogs[0].1.is_modal(), "{name} is not modal");
     }
 }
+
+/// The three ways a Settings row's value reaches a screen reader, checked on
+/// any host: macOS reads it in the name, AT-SPI after the name in the
+/// description, UI Automation as the value. A choice's current choice is the
+/// value in all three, and the host builds its rows the way its reader needs.
+#[test]
+fn settings_row_text_follows_each_platforms_reader() {
+    use super::accessibility::{SETTINGS_ROW_SPEECH, SettingsRowSpeech, settings_row_node};
+    let row = kettle_render::SettingsRow {
+        label: "Cursor shape".into(),
+        value: "Block".into(),
+        description: "Choose the terminal cursor shape.".into(),
+        control: kettle_render::SettingsControl::Choice,
+        ..Default::default()
+    };
+    let mac = SettingsRowSpeech { value_in_name: true, value_in_description: false };
+    let atspi = SettingsRowSpeech { value_in_name: false, value_in_description: true };
+    let uia = SettingsRowSpeech { value_in_name: false, value_in_description: false };
+    for (speech, name, description) in [
+        (mac, "Cursor shape, Block", "Choose the terminal cursor shape."),
+        (atspi, "Cursor shape", "Block. Choose the terminal cursor shape."),
+        (uia, "Cursor shape", "Choose the terminal cursor shape."),
+    ] {
+        let node = settings_row_node(&row, speech);
+        assert_eq!(node.role(), accesskit::Role::ListBoxOption);
+        assert_eq!(node.label(), Some(name), "{speech:?}");
+        assert_eq!(node.value(), Some("Block"), "{speech:?}");
+        assert_eq!(node.description(), Some(description), "{speech:?}");
+    }
+    assert_eq!(SETTINGS_ROW_SPEECH.value_in_name, cfg!(target_os = "macos"));
+    assert_eq!(
+        SETTINGS_ROW_SPEECH.value_in_description,
+        cfg!(all(unix, not(target_os = "macos")))
+    );
+}

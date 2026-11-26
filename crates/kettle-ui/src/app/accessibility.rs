@@ -3257,33 +3257,7 @@ pub(super) fn modal_accessibility_projection(
                 continue;
             }
             let id = accessibility_modal_id(5, index + 2);
-            let mut node = Node::new(Role::ListBoxOption);
-            // macOS maps list options to static text and uses the label as
-            // AXValue, hiding a separate string value from the reader.
-            #[cfg(target_os = "macos")]
-            let label = if row.value.is_empty() {
-                row.label.clone()
-            } else {
-                format!("{}, {}", row.label, row.value)
-            };
-            #[cfg(not(target_os = "macos"))]
-            let label = row.label.clone();
-            node.set_label(label);
-            node.set_value(row.value.clone());
-            // AT-SPI exposes a string value only through text ranges, so Orca
-            // would read the row's name alone; there the value is also the
-            // description, which Orca speaks after the name. Windows reads
-            // the value itself.
-            #[cfg(all(unix, not(target_os = "macos")))]
-            node.set_description(if row.description.is_empty() {
-                row.value.clone()
-            } else {
-                format!("{}. {}", row.value, row.description)
-            });
-            #[cfg(not(all(unix, not(target_os = "macos"))))]
-            if !row.description.is_empty() {
-                node.set_description(row.description.clone());
-            }
+            let mut node = settings_row_node(row, SETTINGS_ROW_SPEECH);
             if let Some(geometry) = layout.rows.iter().find(|r| r.index == index) {
                 node.set_bounds(bounds(geometry.rect));
             } else {
@@ -3465,6 +3439,52 @@ pub(super) fn modal_accessibility_projection(
     }
 
     projection
+}
+
+/// How a Settings row's value reaches each platform's screen reader, for
+/// `settings_row_node`.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct SettingsRowSpeech {
+    /// macOS maps list options to static text and uses the label as AXValue,
+    /// hiding a separate string value from the reader, so the name carries
+    /// the value.
+    pub(super) value_in_name: bool,
+    /// AT-SPI exposes a string value only through text ranges, so Orca would
+    /// read the row's name alone; there the value also leads the description,
+    /// which Orca speaks after the name. Windows reads the value itself.
+    pub(super) value_in_description: bool,
+}
+
+/// This platform's [`SettingsRowSpeech`].
+pub(super) const SETTINGS_ROW_SPEECH: SettingsRowSpeech = SettingsRowSpeech {
+    value_in_name: cfg!(target_os = "macos"),
+    value_in_description: cfg!(all(unix, not(target_os = "macos"))),
+};
+
+/// A Settings row as a list option before its bounds, actions and selection:
+/// named for its label, with its value (a choice's current choice, a
+/// switch's On or Off) and description as `speech` says.
+pub(super) fn settings_row_node(
+    row: &kettle_render::SettingsRow,
+    speech: SettingsRowSpeech,
+) -> Node {
+    let mut node = Node::new(Role::ListBoxOption);
+    node.set_label(if speech.value_in_name && !row.value.is_empty() {
+        format!("{}, {}", row.label, row.value)
+    } else {
+        row.label.clone()
+    });
+    node.set_value(row.value.clone());
+    if speech.value_in_description {
+        node.set_description(if row.description.is_empty() {
+            row.value.clone()
+        } else {
+            format!("{}. {}", row.value, row.description)
+        });
+    } else if !row.description.is_empty() {
+        node.set_description(row.description.clone());
+    }
+    node
 }
 
 #[derive(Clone)]
