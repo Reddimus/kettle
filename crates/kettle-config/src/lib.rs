@@ -2836,15 +2836,15 @@ fn append_config_line(out: &mut String, key: &str, value: &str, line_ending: &st
 
 /// `text` without the lines that set one of `keys` in the sections Kettle
 /// reads, or `None` when no line does. Every other line keeps its bytes,
-/// line ending included, except blank lines left between the rest of the
-/// file and a removed last line: the gap [`persist_config_toggle`] leaves
-/// before a key it appends goes with that key. Blank lines the file ends
-/// with after other content stay.
+/// line ending included, but one: the empty line [`persist_config_toggle`]
+/// leaves before a key it appends goes with that key, when the key ends the
+/// file. A line of spaces or tabs is the user's, as are further empty lines
+/// and those the file ends with after other content.
 fn without_config_keys(text: &str, keys: &[&str]) -> Option<String> {
     #[derive(PartialEq)]
     enum Line {
         Kept,
-        Blank,
+        Empty,
         Removed,
     }
     let needles: Vec<String> = keys.iter().map(|key| normalize_key(key)).collect();
@@ -2860,8 +2860,8 @@ fn without_config_keys(text: &str, keys: &[&str]) -> Option<String> {
                 && parse_line_key(line).is_some_and(|key| needles.contains(&normalize_key(key)))
             {
                 Line::Removed
-            } else if line.trim().is_empty() {
-                Line::Blank
+            } else if line.is_empty() {
+                Line::Empty
             } else {
                 Line::Kept
             };
@@ -2871,12 +2871,16 @@ fn without_config_keys(text: &str, keys: &[&str]) -> Option<String> {
     if !lines.iter().any(|(_, kind)| *kind == Line::Removed) {
         return None;
     }
-    let mut removed_after = false;
+    // From the end: a removed key takes the one empty line just before it.
+    let mut after_removed = false;
     for (_, kind) in lines.iter_mut().rev() {
         match kind {
-            Line::Removed => removed_after = true,
-            Line::Blank if removed_after => *kind = Line::Removed,
-            Line::Blank => {}
+            Line::Removed => after_removed = true,
+            Line::Empty if after_removed => {
+                *kind = Line::Removed;
+                after_removed = false;
+            }
+            Line::Empty => {}
             Line::Kept => break,
         }
     }
@@ -13360,6 +13364,11 @@ split_horiz = <Control><Shift>j
             ("font-size = 18\na = 1", "a = 1"),
             ("a = 1\n\nfont-size = 18\n", "a = 1\n"),
             ("a = 1\n\nfont-size = 18\n\n", "a = 1\n\n"),
+            // A line of spaces and tabs is the user's; so is a second
+            // empty line, which the writer never adds.
+            ("# owned\r\n \t\r\nfont-size = 18\r\n", "# owned\r\n \t\r\n"),
+            ("a = 1\n\n\nfont-size = 18\n", "a = 1\n\n"),
+            ("a = 1\n\nb = 2\n\nfont-size = 18\n", "a = 1\n\nb = 2\n"),
         ] {
             write_private_fixture(&path, original);
             remove(&path, &["font-size"]).unwrap();
