@@ -274,26 +274,43 @@ fn hover_row(
 }
 
 /// Whether the pointer, moving from `from` to `to`, stays inside the triangle
-/// between `from` and the near edge of `submenu`: on its way there across
-/// the parent's other rows.
+/// between `from` and the side of `submenu` it faces: the two corners that
+/// bound the submenu as seen from `from`. That is its way to the submenu
+/// across the parent's other rows, whichever side of the parent the submenu
+/// opened on, however much it overlaps the parent, and from below or above
+/// it as well as beside it. A pointer on or in the submenu is not aiming.
 fn aims_at(from: (f32, f32), to: (f32, f32), (x, y, w, h): kettle_render::Rect4) -> bool {
-    let edge = if from.0 <= x {
-        x
-    } else if from.0 >= x + w {
-        x + w
-    } else {
+    if w <= 0.0 || h <= 0.0 || (x..=x + w).contains(&from.0) && (y..=y + h).contains(&from.1) {
+        return false;
+    }
+    let toward = |p: (f32, f32)| (p.0 - from.0, p.1 - from.1);
+    let cross = |a: (f32, f32), b: (f32, f32)| a.0 * b.1 - a.1 * b.0;
+    let corners = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)].map(toward);
+    // Seen from outside, the corners span less than a half turn. Each bound
+    // has every other corner on one side of it; of two in line, the farther.
+    let bound = |side: f32| {
+        corners
+            .into_iter()
+            .filter(|&corner| {
+                corners
+                    .iter()
+                    .all(|&other| side * cross(corner, other) >= 0.0)
+            })
+            .max_by(|a, b| (a.0 * a.0 + a.1 * a.1).total_cmp(&(b.0 * b.0 + b.1 * b.1)))
+    };
+    let (Some(a), Some(b)) = (bound(1.0), bound(-1.0)) else {
         return false;
     };
-    let cross = |o: (f32, f32), a: (f32, f32), b: (f32, f32)| {
-        (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
-    };
-    let corners = [from, (edge, y), (edge, y + h)];
-    let sides = [
-        cross(corners[0], corners[1], to),
-        cross(corners[1], corners[2], to),
-        cross(corners[2], corners[0], to),
-    ];
-    !(sides.iter().any(|side| *side < 0.0) && sides.iter().any(|side| *side > 0.0))
+    let area = cross(a, b);
+    // A triangle with no area would take every point on its line.
+    if area.abs() <= f32::EPSILON {
+        return false;
+    }
+    let side = area.signum();
+    let p = toward(to);
+    side * cross(a, p) >= 0.0
+        && side * cross((b.0 - a.0, b.1 - a.1), (p.0 - a.0, p.1 - a.1)) >= 0.0
+        && side * cross(p, b) >= 0.0
 }
 
 /// The row an arrow key moves the highlight to, `delta` rows on.

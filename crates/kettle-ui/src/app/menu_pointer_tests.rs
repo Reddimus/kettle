@@ -700,3 +700,87 @@ fn a_submenu_opened_from_the_keyboard_ignores_a_pointer_that_never_came_near() {
     }
     assert_eq!(menu.drill_stack.len(), 1);
 }
+
+/// The audit's overlapping left cascade: on a 340 px window a 200 px parent
+/// at x 60 opens its 200 px child at x 4, over the parent, held up to y
+/// 100..180 by the window's bottom, so the pointer on the parent's row below
+/// reaches the child from beneath it.
+fn overlapping_cascade() -> (ContextMenuState, MenuPointer, [kettle_render::Rect4; 2]) {
+    let mut menu = state(
+        (0..8)
+            .map(|row| submenu(&format!("Row {row}"), Action::Paste))
+            .collect(),
+    );
+    menu.highlight = 7;
+    assert!(menu.enter_submenu(7));
+    (
+        menu,
+        MenuPointer::default(),
+        [(60.0, 40.0, 200.0, 192.0), (4.0, 100.0, 200.0, 80.0)],
+    )
+}
+
+#[test]
+fn heading_for_an_overlapping_submenu_from_below_keeps_it() {
+    let (mut menu, mut pointer, panels) = overlapping_cascade();
+    let t0 = Instant::now();
+    let mut hover = |menu: &mut ContextMenuState, hit, at, after| {
+        menu_pointer_moved(menu, &mut pointer, hit, &panels, at, t0 + ms(after))
+    };
+    // On the open row (y 208..232), under the child.
+    let open_row = MenuHit::ParentRow { depth: 0, index: 7 };
+    assert_eq!(
+        hover(&mut menu, open_row, (170.0, 215.0), 0),
+        MenuHoverEffect::None
+    );
+    // Up the row above it toward (204, 147) on the child's right edge, over
+    // 350 ms.
+    let row_above = MenuHit::ParentRow { depth: 0, index: 6 };
+    for (after, at) in [
+        (16, (175.0, 205.0)),
+        (200, (180.0, 195.0)),
+        (350, (185.0, 185.0)),
+    ] {
+        assert_eq!(
+            hover(&mut menu, row_above, at, after),
+            MenuHoverEffect::None,
+            "{at:?} after {after} ms"
+        );
+        assert_eq!(menu.drill_stack.len(), 1, "{at:?} after {after} ms");
+    }
+    // In through its bottom edge.
+    hover(&mut menu, MenuHit::Row(1), (187.0, 170.0), 400);
+    assert_eq!(
+        (menu.drill_stack.len(), menu.drill_stack[0].highlight),
+        (1, 7)
+    );
+}
+
+#[test]
+fn moving_along_the_submenus_edge_line_away_from_it_is_not_aiming() {
+    let (mut menu, mut pointer, panels) = overlapping_cascade();
+    let t0 = Instant::now();
+    let mut hover = |menu: &mut ContextMenuState, hit, at, after| {
+        menu_pointer_moved(menu, &mut pointer, hit, &panels, at, t0 + ms(after))
+    };
+    // Exactly on the line of the child's right edge, x 204, below it, and
+    // down that line: the triangle to that edge would have no area.
+    let open_row = MenuHit::ParentRow { depth: 0, index: 6 };
+    menu.drill_stack[0].highlight = 6;
+    assert_eq!(
+        hover(&mut menu, open_row, (204.0, 205.0), 0),
+        MenuHoverEffect::None
+    );
+    let row_below = MenuHit::ParentRow { depth: 0, index: 7 };
+    for (after, y) in [(16, 212.0), (200, 220.0)] {
+        assert_eq!(
+            hover(&mut menu, row_below, (204.0, y), after),
+            MenuHoverEffect::None
+        );
+    }
+    assert_eq!(
+        hover(&mut menu, row_below, (204.0, 228.0), 350),
+        MenuHoverEffect::OpenSubmenu(7),
+        "300 ms after it turned away, the row below takes over"
+    );
+}
