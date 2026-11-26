@@ -31,6 +31,43 @@ fn url_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r#"(https?://|ftp://|file://|www\.)[^\s\x00-\x1f<>"]+"#).unwrap())
 }
 
+/// Whether a detected URL, trimmed of trailing punctuation, still names
+/// something to open: a host after `scheme://` or `www.`, or a path after
+/// `file://`. `see https://...` trims to a bare `https://`, and
+/// `see www...` to `www`.
+pub(crate) fn names_a_target(url: &str) -> bool {
+    if let Some(rest) = url
+        .get(..4)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("www."))
+        .map(|_| &url[4..])
+    {
+        return rest.starts_with(char::is_alphanumeric);
+    }
+    match url.split_once(':') {
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("file") => rest.len() > "//".len(),
+        Some((_, rest)) => names_a_host(rest),
+        None => false,
+    }
+}
+
+/// Whether the text after a URL's `scheme:` is `//` and an authority with
+/// a host, past any user info and port: not `//`, `///x`, `//?q`, `//#f`
+/// or `//:8080/x`.
+fn names_a_host(rest: &str) -> bool {
+    let Some(rest) = rest.strip_prefix("//") else {
+        return false;
+    };
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = match host.strip_prefix('[') {
+        Some(literal) => literal.split_once(']').map_or("", |(address, _)| address),
+        None => host.split_once(':').map_or(host, |(name, _)| name),
+    };
+    !host.is_empty()
+}
+
 /// Normalize a detected URL for opening, leaving its displayed text alone.
 pub fn normalize_url(text: &str) -> String {
     if text.starts_with("www.") {
@@ -249,9 +286,27 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
                 }
                 group += 1;
             };
+        // Take a refused match's cells, so no piece of it links either.
+        let cover = |start: usize, len: usize, covered: &mut Vec<crate::hints::Taken>| {
+            let segments = row_segments(&pos_of_byte, start, len);
+            if segments
+                .iter()
+                .all(|&(row, s, e)| !covered[row].overlaps(s, e + 1))
+            {
+                for (row, s, e) in segments {
+                    covered[row].insert(s, e + 1);
+                }
+            }
+        };
         for m in url_re().find_iter(&text) {
             let matched = crate::url_trim::trim_trailing(m.as_str());
-            if matched.is_empty() || fragment(m.start(), m.end()) {
+            if fragment(m.start(), m.end()) {
+                continue;
+            }
+            // A scheme with nothing after it is no link, and its query is
+            // not a local path (`https://?q=/etc/hosts`).
+            if !names_a_target(matched) {
+                cover(m.start(), m.len(), &mut covered);
                 continue;
             }
             let uri = normalize_url(matched);
@@ -267,17 +322,7 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
                 Some(uri) => push(start, close - start, uri, &mut covered),
                 // Refused (a climb, no directory to resolve against): no
                 // piece of it may link either.
-                None => {
-                    let segments = row_segments(&pos_of_byte, start, close - start);
-                    if segments
-                        .iter()
-                        .all(|&(row, s, e)| !covered[row].overlaps(s, e + 1))
-                    {
-                        for (row, s, e) in segments {
-                            covered[row].insert(s, e + 1);
-                        }
-                    }
-                }
+                None => cover(start, close - start, &mut covered),
             }
         }
         for (start, end, matched) in path_candidates(&text) {
@@ -526,7 +571,8 @@ pub fn is_safe_url(uri: &str) -> bool {
         return false; // no scheme → not opened
     };
     match scheme.to_ascii_lowercase().as_str() {
-        "http" | "https" | "ftp" | "ftps" | "mailto" => !rest.is_empty(),
+        "http" | "https" | "ftp" | "ftps" => names_a_host(rest),
+        "mailto" => !rest.is_empty(),
         // Allow LOCAL files only — never a remote authority.
         "file" => is_local_file_url(uri),
         _ => false,
@@ -1545,6 +1591,70 @@ mod tests {
             path_match_to_file_uri("/tmp/my café.pdf", None).as_deref(),
             Some("file:///tmp/my%20caf%C3%A9.pdf")
         );
+    }
+
+    /// A web or FTP URL names a host: a scheme with nothing after it, or
+    /// with only a path, query, fragment or port, opens nothing.
+    #[test]
+    fn web_urls_without_a_host_are_refused() {
+        for uri in [
+            "https://",
+            "https:///",
+            "https:///etc/passwd",
+            "https://?q=1",
+            "https://#frag",
+            "https://:8080/x",
+            "https://user@/x",
+            "https://[]/x",
+            "https:example.com",
+            "http:/example.com",
+            "ftp://",
+        ] {
+            assert!(!is_safe_url(uri), "{uri}");
+        }
+        for uri in [
+            "https://a",
+            "https://me@x.test:8080/a",
+            "http://[::1]:8080/x",
+            "ftp://host/file",
+            "https://www./",
+        ] {
+            assert!(is_safe_url(uri), "{uri}");
+        }
+    }
+
+    /// Trailing prose can leave a bare scheme or `www` once trimmed: no
+    /// link, and no piece of it links as a path.
+    #[test]
+    fn a_bare_scheme_is_no_link() {
+        for line in [
+            "see www...",
+            "see www.,",
+            "see www./",
+            "see https://...",
+            "see https:///",
+            "see https://?q=1",
+            "see https://#frag",
+            "see https://:8080/x",
+            "see ftp://...",
+            "see file://...",
+            "see https://?q=/etc/hosts",
+            "see https:///etc/hosts",
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert!(found.is_empty(), "{line}: {found:?}");
+        }
+        for (line, uri) in [
+            ("see https://a", "https://a"),
+            ("see www.example.com...", "https://www.example.com"),
+            ("see file:///etc/hosts.", "file:///etc/hosts"),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert_eq!(found.len(), 1, "{line}: {found:?}");
+            assert_eq!(found[0].uri, uri, "{line}");
+        }
     }
 
     /// Drift guard: `file://` must be local-only — a remote

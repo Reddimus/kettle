@@ -1649,6 +1649,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Local file links whose names hold two dots in a row, such as `a..b.pdf` or a folder named `...`, open; only a `..` that names the parent folder is refused.
 - A path on screen whose name holds a literal `%2e`, such as `/tmp/100%2e.pdf`, is a link.
 - A link holding an invisible character, such as a no-break or zero-width space or a control that reverses text, is refused, and quick select copies such a path rather than opening it.
+- Text that trails off after a bare scheme, such as `see https://...` or `see www...`, is no longer offered as a link or a quick-select URL, and a web link with no host is refused.
 - Sessions: session files are checked for trust before restoring commands,
   sessions that restore would reject are not autosaved, and repeated restore
   failures no longer turn off saving.

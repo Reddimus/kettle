@@ -510,6 +510,14 @@ fn detect_line(
             };
             let before = line[..m.start()].chars().next_back();
             let fragment = (cut.0 && m.start() == 0) || (cut.1 && m.end() == line.len());
+            // A scheme with nothing after it (`see https://...`) is no URL,
+            // and no piece of it is a path either.
+            if *kind == Kind::Url && !fragment && !crate::links::names_a_target(trimmed) {
+                if !taken.overlaps(m.start(), m.end()) {
+                    taken.insert(m.start(), m.end());
+                }
+                continue;
+            }
             if trimmed.is_empty()
                 || fragment
                 || (*kind == Kind::Path
@@ -1415,6 +1423,34 @@ mod tests {
         assert_eq!(h[0].text, "https://rust-lang.org", "no trailing ).");
         // The URL's path-looking substring is not also a separate hint.
         assert!(h.iter().all(|s| s.kind == Kind::Url));
+    }
+
+    /// A URL trimmed down to a bare scheme or `www` names nothing: no hint
+    /// opens it, and no piece of it becomes a path hint.
+    #[test]
+    fn a_bare_scheme_is_no_url_hint() {
+        for line in [
+            "see www...",
+            "see www.,",
+            "see www./",
+            "see https://...",
+            "see https:///",
+            "see https://?q=1",
+            "see https://#frag",
+            "see https://:8080/x",
+            "see ftp://***",
+            "see file://...",
+            "see https://?q=/etc/hosts",
+        ] {
+            let spans = detect(&[line]);
+            assert!(spans.is_empty(), "{line}: {spans:?}");
+        }
+        let spans = detect(&["see https://a"]);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(
+            (spans[0].kind, spans[0].text.as_str()),
+            (Kind::Url, "https://a")
+        );
     }
 
     /// A URL in Markdown code or emphasis is detected without the marks.
