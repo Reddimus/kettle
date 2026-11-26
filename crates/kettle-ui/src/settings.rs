@@ -1897,24 +1897,23 @@ pub fn default_value(field: &Field) -> Option<String> {
 /// The config keys a Reset of `field` removes: the uniform Window padding
 /// row writes both axes.
 pub(crate) fn reset_keys(field: &Field) -> Vec<&'static str> {
-    match field.key {
+    let mut keys = match field.key {
         "window-padding-x" => vec!["window-padding-x", "window-padding-y"],
         key => vec![key],
-    }
+    };
+    // An older name or a Terminator key that sets the same value goes too.
+    keys.extend(kettle_config::compatibility_keys(field.key));
+    keys
 }
 
 /// The lines a Reset of `field` adds where removing [`reset_keys`] alone
 /// does not give its default `value`: both padding axes for Window padding.
 pub(crate) fn reset_fallback(field: &Field, value: &str) -> Vec<(&'static str, String)> {
-    reset_keys(field)
-        .into_iter()
-        .take(if field.key == "window-padding-x" {
-            2
-        } else {
-            1
-        })
-        .map(|key| (key, value.to_string()))
-        .collect()
+    let keys: &[&'static str] = match field.key {
+        "window-padding-x" => &["window-padding-x", "window-padding-y"],
+        _ => std::slice::from_ref(&field.key),
+    };
+    keys.iter().map(|key| (*key, value.to_string())).collect()
 }
 
 /// Whether `field` already holds its [`default_value`] in `cfg`.
@@ -2545,6 +2544,20 @@ mod tests {
         ] {
             assert_eq!(reset_keys(field(key)), [key]);
         }
+        // Their older names and Terminator keys go with them.
+        assert_eq!(reset_keys(field("osc52")), ["osc52", "clipboard"]);
+        assert_eq!(
+            reset_keys(field("update-policy")),
+            ["update-policy", "update-check", "check-for-updates"]
+        );
+        assert_eq!(
+            reset_keys(field("bell")),
+            ["bell", "visible-bell", "urgent-bell", "force-no-bell"]
+        );
+        assert_eq!(
+            reset_keys(field("scrollback")),
+            ["scrollback", "scrollback-infinite"]
+        );
         let dir = kettle_test_support::private_tempdir("kettle-settings-reset-");
         let path = dir.join("config");
         std::fs::write(

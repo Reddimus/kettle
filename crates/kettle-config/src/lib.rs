@@ -2798,6 +2798,23 @@ pub fn reset_config_setting(
     edit.commit(&out).map(Some)
 }
 
+/// The keys besides `key` whose lines also decide its value: an older
+/// name for it, or a Terminator key folded into it. Spellings in the alias
+/// table (`KEY_ALIASES`) and `-`/`_` or case variants already match `key`
+/// itself. A Reset of `key` removes these too. Keys that also carry other
+/// settings are not listed, `font` (the family as well as the size) and
+/// `theme` (the theme as well as a fixed mode): a Reset keeps them and adds
+/// the default after them instead.
+pub fn compatibility_keys(key: &str) -> &'static [&'static str] {
+    match normalize_key(key).as_str() {
+        "bell" => &["visible-bell", "urgent-bell", "force-no-bell"],
+        "osc52" => &["clipboard"],
+        "update_policy" => &["update-check", "check-for-updates"],
+        "scrollback" => &["scrollback-infinite"],
+        _ => &[],
+    }
+}
+
 /// Add `key = value` where Kettle reads it, as [`persist_config_toggle`]
 /// adds a key it does not find: after a blank line at the end of the file,
 /// or at its top when the file ends in a section Kettle does not read.
@@ -13418,6 +13435,74 @@ split_horiz = <Control><Shift>j
         // A default that cannot be reached is refused, the file untouched.
         assert!(super::reset_config_setting(&path, &["theme-mode"], &[], |_| false).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    /// An older name or a Terminator key that still sets a value goes with
+    /// it on Reset, so removal alone restores the default and nothing is
+    /// pinned: `update-check` for `update-policy`, `clipboard` for `osc52`,
+    /// Terminator's bell pair and `force_no_bell` for `bell`, and
+    /// `scrollback_infinite` for the line count. A Reset of Clipboard
+    /// access then fits a file at the size cap.
+    #[test]
+    fn reset_clears_a_settings_compatibility_keys() {
+        let dir = tempdir_for("reset-compat");
+        let path = dir.join("config");
+        let defaults = Config::default();
+        type Same = fn(&Config, &Config) -> bool;
+        let cases: [(&str, &str, Same); 5] = [
+            (
+                "update-policy",
+                "update-check = false\nupdate-policy = notify\ncheck-for-updates = no\n",
+                |a, b| a.update_policy == b.update_policy,
+            ),
+            ("osc52", "clipboard = both\nosc52 = paste\n", |a, b| {
+                a.osc52 == b.osc52
+            }),
+            (
+                "bell",
+                "[global_config]\nvisible_bell = True\nurgent_bell = False\n",
+                |a, b| a.bell == b.bell,
+            ),
+            ("bell", "bell = both\nforce_no_bell = True\n", |a, b| {
+                a.bell == b.bell && a.force_no_bell == b.force_no_bell
+            }),
+            (
+                "scrollback",
+                "scrollback_infinite = True\nscrollback_lines = 100\n",
+                |a, b| a.scrollback == b.scrollback,
+            ),
+        ];
+        for (key, original, same) in cases {
+            write_private_fixture(&path, original);
+            assert!(
+                !same(&Config::parse_text(original), &defaults),
+                "{original:?}"
+            );
+            let mut keys = vec![key];
+            keys.extend(super::compatibility_keys(key));
+            super::reset_config_setting(&path, &keys, &[], |cfg| same(cfg, &defaults))
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                same(&Config::parse_text(&text), &defaults),
+                "{key}: {text:?}"
+            );
+        }
+        assert!(super::compatibility_keys("font-size").is_empty());
+        assert!(super::compatibility_keys("theme-mode").is_empty());
+        let tail = "clipboard = both\nosc52=off\n";
+        let original = format!(
+            "#{}\n{tail}",
+            "x".repeat(super::MAX_CONFIG_BYTES as usize - 1 - tail.len() - 2)
+        );
+        write_private_fixture(&path, &original);
+        let mut keys = vec!["osc52"];
+        keys.extend(super::compatibility_keys("osc52"));
+        super::reset_config_setting(&path, &keys, &[("osc52", "copy")], |cfg| {
+            cfg.osc52 == Osc52::Copy
+        })
+        .unwrap();
+        assert_eq!(Config::load_from(&path).osc52, Osc52::Copy);
     }
 
     /// Writing a new key into an empty config appends it.

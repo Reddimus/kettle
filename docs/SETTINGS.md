@@ -14,8 +14,11 @@ highlighted option has a bar at its left edge as well as a tint, which stands
 out from the panel (at least 1.3:1) in light and dark themes alike. An option
 you have changed shows a **Reset** button beside its value; the highlighted
 option shows it dimmed when it already holds its default. Reset removes the
-option's line from your config file, so the option follows Kettle's default
-from then on, including one that differs by platform, such as the font size.
+option's lines from your config file, older spellings and the Terminator keys
+it reads in their place included (`clipboard` for Clipboard access,
+`update-check` for Updates, `visible_bell`, `urgent_bell` and `force_no_bell`
+for Bell, `scrollback_infinite` for Scrollback lines), so the option follows
+Kettle's default from then on, including one that differs by platform, such as the font size.
 Where another line still decides the value, such as a `theme` line for
 Appearance or a `font` line for Font size, Reset adds the default after it and
 keeps that line. Reset saves in one step: if the file cannot be saved, the
