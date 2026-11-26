@@ -1231,6 +1231,10 @@ pub(crate) struct WindowState {
     /// The lane whose picture the real pointer rests on: what starts a
     /// hover preview.
     pub(crate) lane_hover: Option<LaneHover>,
+    /// The lane button under the real pointer, by pane, whose chip is lit.
+    pub(crate) lane_control_hover: Option<(u64, kettle_render::MediaLaneHit)>,
+    /// The toast or notice button under the real pointer, which is lit.
+    pub(crate) toast_control_hover: Option<kettle_render::Rect4>,
     pub(crate) selecting: bool,
     pub(crate) selection_hint_plain: bool,
     /// Pane that owns the active pointer selection gesture. Focus can
@@ -1437,6 +1441,9 @@ pub(crate) struct WindowState {
     /// Drag-to-reorder tab state. `true` while a left-mouse-button press in
     /// the tab bar is being held; cleared on release.
     pub(crate) tab_drag_active: bool,
+    /// The overflow arrow a live tab drag rests on (`true` forward), and
+    /// since when, or since the strip last scrolled for it.
+    pub(crate) tab_drag_arrow: Option<(bool, std::time::Instant)>,
     /// Surface position where the in-window tab reorder gesture was armed.
     /// A click stays visually a click until movement crosses the drag-distance
     /// threshold; this prevents the drag ghost from flashing under a normal
@@ -1490,6 +1497,11 @@ pub(crate) struct WindowState {
     /// press opens or closes Find; the press only shows until its release.
     pub(crate) hovered_search: bool,
     pub(crate) pressed_search: bool,
+    /// The tab strip's overflow arrow under the pointer: `Some(true)` for
+    /// forward, `Some(false)` for back.
+    pub(crate) hovered_scroll_arrow: Option<bool>,
+    /// When the tooltip of the control under the pointer shows.
+    pub(crate) tooltip: crate::tooltip::TooltipClock,
     /// The pointer is over the tab bar's update chip.
     /// What a screen reader calls the open context menu, when it is not the
     /// terminal's. Each new menu resets it.
@@ -1755,14 +1767,19 @@ impl WindowState {
     }
 
     /// When the pointer leaves the window, nothing in the tab bar is under
-    /// it or pressed any more.
+    /// it or pressed any more, no tooltip shows and no lane or toast button
+    /// is lit.
     pub(crate) fn leave_tab_bar(&mut self) {
         self.release_tab_hold();
+        self.tooltip.hover(None, std::time::Instant::now());
+        self.lane_control_hover = None;
+        self.toast_control_hover = None;
         self.release_titlebar_buttons();
         self.hovered_close_idx = None;
         self.hovered_tab_idx = None;
         self.hovered_new_tab = false;
         self.hovered_new_tab_menu = false;
+        self.hovered_scroll_arrow = None;
     }
 
     /// Scroll the title-bar strip to the active tab at its next layout,
@@ -1974,6 +1991,8 @@ impl WindowState {
             lane_previews: std::collections::HashMap::new(),
             lane_playbacks: std::collections::HashMap::new(),
             lane_hover: None,
+            lane_control_hover: None,
+            toast_control_hover: None,
             selecting: false,
             selection_hint_plain: false,
             selecting_pane: None,
@@ -2033,6 +2052,7 @@ impl WindowState {
             mouse_hidden: false,
             last_cursor_icon: None,
             tab_drag_active: false,
+            tab_drag_arrow: None,
             tab_drag_press: None,
             tab_pressed_idx: None,
             detach_drag: crate::detach::DragState::default(),
@@ -2049,6 +2069,8 @@ impl WindowState {
             pressed_settings: false,
             hovered_search: false,
             pressed_search: false,
+            hovered_scroll_arrow: None,
+            tooltip: crate::tooltip::TooltipClock::default(),
             context_menu_a11y_label: None,
             context_menu_output_row: None,
             context_menu_session: Default::default(),

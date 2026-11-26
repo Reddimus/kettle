@@ -1635,6 +1635,27 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   sliding up over it, so the menu no longer covers the prompt it was opened
   for.
 
+- In a narrow window, tabs whose titles share a start and an end no longer
+  all read alike (`Tab …t-1`): a title with fewer than 16 columns to show
+  keeps its start and ends with an ellipsis.
+- Tooltips no longer pop up the moment the pointer crosses a button. The
+  first one shows after the pointer rests for half a second, the next one at
+  once while you move along the row, and a click hides it until the pointer
+  leaves the button.
+- The tab strip's overflow arrows light up and show the pointing hand under
+  the pointer, and their tooltips say what a press does.
+- A tab whose title is too long to show whole now shows the full title in a
+  tooltip when the pointer rests on it.
+- The media viewer's and preview lane's header buttons light up under the
+  pointer and take a press anywhere in a 24 by 24 point target, up from 25
+  by 17.5 pixels; the header row is a little taller to make room.
+- Those buttons have tooltips naming what they do and the key that does the
+  same.
+- A toast's Show and × buttons, and the bad-config notice's Open Config and
+  Dismiss, light up under the pointer.
+- A tab dragged onto a tab-strip overflow arrow and held there scrolls the
+  strip, so it can be moved past the tabs shown.
+
 ## Older releases
 
 - [5.x](docs/changelog/CHANGELOG-5.x.md)

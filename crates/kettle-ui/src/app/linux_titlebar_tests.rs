@@ -418,14 +418,14 @@ fn linux_header_tooltips_follow_actual_control_and_press_state() {
         let tr = kettle_i18n::Translator::new(language);
         let mut buttons =
             linux_window_control_layout((0.0, 0.0, 800.0, 46.0), true, None, None, &tr);
-        assert!(window_control_tooltip_label(&buttons).is_none());
+        assert!(hovered_window_control_button(&buttons).is_none());
         buttons[1].hovered = true;
         assert_eq!(
-            window_control_tooltip_label(&buttons),
+            hovered_window_control_button(&buttons).map(|b| b.label.as_str()),
             Some(tr.text(kettle_i18n::Text::A11yWindowRestore))
         );
         buttons[1].pressed = true;
-        assert!(window_control_tooltip_label(&buttons).is_none());
+        assert!(hovered_window_control_button(&buttons).is_none());
     }
 }
 

@@ -1944,3 +1944,385 @@ fn compact_header_rtl_and_wide_literal_titles_fit_the_lone_tab() {
         }
     }
 }
+
+/// Should 6 of the 6.0 UI review: the strip's tooltips showed the moment the
+/// pointer arrived. A tooltip now waits for the pointer to rest on its
+/// button, shows at once on the next button while tooltips are warm, and a
+/// press hides it until the pointer leaves the button and comes back; the
+/// release alone never brings it back.
+#[test]
+fn strip_tooltips_wait_for_a_rest_and_a_press_hides_them() {
+    use super::chrome::{StripTooltipContext, shown_strip_tooltip, strip_tooltip_target};
+    use std::time::{Duration, Instant};
+    let bindings = kettle_config::keybinds::defaults();
+    let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+    let context = StripTooltipContext {
+        modal_open: false,
+        bindings: &bindings,
+        tr: &tr,
+        tab_format: "{title}",
+        tab_cell_width: 8.0,
+    };
+    let bar = kettle_render::TabBar::hidden();
+    let shown = |ws: &crate::window_state::WindowState, at| {
+        shown_strip_tooltip(ws, &bar, &context, at).map(|tip| tip.text)
+    };
+    let hover = |ws: &mut crate::window_state::WindowState, at| {
+        let target = strip_tooltip_target(ws, &bar, &context).map(|tip| tip.target);
+        ws.tooltip.hover(target, at);
+    };
+    let ms = Duration::from_millis;
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    ws.window_focused = true;
+    let t0 = Instant::now();
+    ws.hovered_new_tab = true;
+    hover(&mut ws, t0);
+    assert_eq!(shown(&ws, t0), None, "nothing the moment the pointer lands");
+    assert_eq!(shown(&ws, t0 + ms(499)), None);
+    let plus = shown(&ws, t0 + ms(500)).expect("shown after a rest");
+    assert!(plus.starts_with("New Tab"), "{plus}");
+    // Straight on to the dropdown beside it: warm, so at once.
+    ws.hovered_new_tab = false;
+    ws.hovered_new_tab_menu = true;
+    hover(&mut ws, t0 + ms(600));
+    assert_eq!(
+        shown(&ws, t0 + ms(600)).as_deref(),
+        Some("New Tab Options")
+    );
+    // A press hides it, and the release leaves it hidden.
+    ws.tooltip.press(t0 + ms(700));
+    ws.pressed_new_tab_menu = true;
+    assert_eq!(shown(&ws, t0 + ms(700)), None);
+    ws.pressed_new_tab_menu = false;
+    hover(&mut ws, t0 + ms(800));
+    assert_eq!(shown(&ws, t0 + ms(5000)), None, "no reshow after release");
+    // Off the button and back: it shows again after a rest.
+    ws.hovered_new_tab_menu = false;
+    hover(&mut ws, t0 + ms(5000));
+    ws.hovered_new_tab_menu = true;
+    hover(&mut ws, t0 + ms(7000));
+    assert_eq!(shown(&ws, t0 + ms(7000)), None);
+    assert_eq!(
+        shown(&ws, t0 + ms(7500)).as_deref(),
+        Some("New Tab Options")
+    );
+}
+
+/// The tooltip clock follows the physical pointer: every native move tells
+/// it what is under the pointer, a native press hides the tooltip, leaving
+/// the window clears it, and the scheduler wakes once at its deadline
+/// instead of redrawing while it waits.
+#[test]
+fn the_tooltip_clock_follows_moves_presses_leaves_and_one_scheduled_wake() {
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(source.contains(
+        "let (new_tab_hover, hover_changed) = hover_tab_bar(ws, &bar); self.sync_lane_control_hover(ws); self.sync_toast_control_hover(ws); self.sync_tooltip(ws, &bar);"
+    ));
+    assert!(source.contains(
+        "ws.resume_native_pointer(); // A press hides the tooltip until the pointer leaves its // control. if ws.tooltip.press(std::time::Instant::now())"
+    ));
+    let window_state = include_str!("../window_state.rs")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(window_state.contains(
+        "pub(crate) fn leave_tab_bar(&mut self) { self.release_tab_hold(); self.tooltip.hover(None, std::time::Instant::now());"
+    ));
+    assert!(source.contains("ws.leave_tab_bar();"));
+    assert!(source.contains("let (tooltip_due, tooltip_wake) = ws.tooltip.poll(now);"));
+    assert!(source.contains(
+        "if let Some(next) = tooltip_wait { wait = Some(wait.map_or(next, |current| current.min(next))); }"
+    ));
+}
+
+/// Should 11 and Must 4 of the 6.0 UI review: the overflow arrows had no
+/// hover, a plain arrow cursor and no tooltip. The pointer over one now
+/// lights it, from the same rect a press uses, turns the cursor into the
+/// pointing hand, and after a rest names what a press does: the previous or
+/// next tab with its shortcut, or, in a macOS title bar that scrolls without
+/// selecting, which way the strip scrolls. The tooltip hangs from the arrow.
+#[test]
+fn overflow_arrows_light_point_and_name_what_a_press_does() {
+    use super::chrome::{
+        StripTooltipContext, hover_tab_bar, scroll_arrow_at, shown_strip_tooltip,
+        strip_tooltip_target,
+    };
+    use std::time::{Duration, Instant};
+    let bindings = kettle_config::keybinds::defaults();
+    let mut bar = kettle_render::TabBar::hidden();
+    bar.height = 28.0;
+    bar.band = (0.0, 0.0, 640.0, 28.0);
+    bar.scroll_left = (0.0, 0.0, 20.0, 28.0);
+    bar.scroll_right = (580.0, 0.0, 20.0, 28.0);
+    assert_eq!(scroll_arrow_at(&bar, 10.0, 14.0), Some(false));
+    assert_eq!(scroll_arrow_at(&bar, 590.0, 14.0), Some(true));
+    assert_eq!(scroll_arrow_at(&bar, 300.0, 14.0), None);
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    ws.window_focused = true;
+    ws.cursor = winit::dpi::PhysicalPosition::new(590.0, 14.0);
+    assert_eq!(hover_tab_bar(&mut ws, &bar), (None, true), "entering repaints");
+    assert_eq!(ws.hovered_scroll_arrow, Some(true));
+    ws.cursor = winit::dpi::PhysicalPosition::new(300.0, 14.0);
+    assert_eq!(hover_tab_bar(&mut ws, &bar), (None, true), "leaving repaints");
+    assert_eq!(ws.hovered_scroll_arrow, None);
+    ws.leave_tab_bar();
+    let start = Instant::now();
+    for (round, (language, titlebar, forward, label)) in [
+        (kettle_i18n::Language::En, false, false, "Previous Tab"),
+        (kettle_i18n::Language::En, false, true, "Next Tab"),
+        (kettle_i18n::Language::En, true, false, "Scroll Tabs Left"),
+        (kettle_i18n::Language::En, true, true, "Scroll Tabs Right"),
+        (kettle_i18n::Language::Es, false, true, "Pestaña siguiente"),
+        (
+            kettle_i18n::Language::Es,
+            true,
+            false,
+            "Desplazar pestañas a la izquierda",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let tr = kettle_i18n::Translator::new(language);
+        let context = StripTooltipContext {
+            modal_open: false,
+            bindings: &bindings,
+            tr: &tr,
+            tab_format: "{title}",
+            tab_cell_width: 8.0,
+        };
+        bar.in_titlebar = titlebar;
+        ws.hovered_scroll_arrow = Some(forward);
+        // Each round starts long after the last tooltip went away.
+        let t0 = start + Duration::from_secs(20 * round as u64);
+        let target = strip_tooltip_target(&ws, &bar, &context).map(|tip| tip.target);
+        ws.tooltip.hover(target, t0);
+        assert_eq!(shown_strip_tooltip(&ws, &bar, &context, t0), None);
+        let tip = shown_strip_tooltip(&ws, &bar, &context, t0 + Duration::from_millis(500))
+            .expect("named after a rest");
+        let arrow = if forward { bar.scroll_right } else { bar.scroll_left };
+        assert_eq!(tip.anchor, Some(arrow));
+        let action = if forward { Action::NextTab } else { Action::PrevTab };
+        let expected = match (titlebar, kettle_config::keybinds::ui_hint_label(&bindings, &action)) {
+            (false, Some(key)) => format!("{label}  {key}"),
+            _ => label.to_owned(),
+        };
+        assert_eq!(tip.text, expected);
+        ws.tooltip.hover(None, t0 + Duration::from_secs(10));
+    }
+    // The hand, as the strip's other buttons show.
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(source.contains(
+        "let new_tab_hover_icon = (new_tab_hover.is_some() || ws.hovered_scroll_arrow.is_some()) .then_some(CursorIcon::Pointer);"
+    ));
+    assert!(source.contains("hovered_scroll_right: ws.hovered_scroll_arrow == Some(true),"));
+}
+
+/// Must 4 and D8 of the 6.0 UI review: a tab whose title the strip cut had
+/// no way to read it whole. Resting the pointer on such a tab, off its close
+/// button, now shows the full title (the whole working directory for a tab
+/// named by its folder) in a tooltip hung from the tab; a tab shown whole,
+/// its close button and a lone title-bar title have none.
+#[test]
+fn a_cut_tab_title_shows_whole_in_a_tooltip() {
+    use super::chrome::{StripTooltipContext, shown_strip_tooltip, strip_tooltip_target};
+    use std::time::{Duration, Instant};
+    let long = "Tab 2: Build and deploy the production cluster migration script";
+    let path = "~/Repos/kettle/crates/kettle-ui";
+    let seg = |idx: usize, x: f32, title: &str, path: Option<&str>| {
+        let rect = (x, 0.0, 100.0, 28.0);
+        let close = (x + 72.0, 0.0, 28.0, 28.0);
+        kettle_render::TabSeg {
+            idx,
+            rect,
+            title_rect: (x + 8.0, 0.0, 64.0, 28.0),
+            hint: None,
+            close,
+            title: title.into(),
+            path: path.map(Into::into),
+            active: idx == 0,
+            activity: kettle_render::TabActivity::Normal,
+        }
+    };
+    let mut bar = kettle_render::TabBar::hidden();
+    bar.height = 28.0;
+    bar.band = (0.0, 0.0, 400.0, 28.0);
+    bar.segments = vec![
+        seg(0, 0.0, "vim", None),
+        seg(1, 100.0, long, None),
+        seg(2, 200.0, "kettle-ui", Some(path)),
+    ];
+    let bindings = kettle_config::keybinds::defaults();
+    let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+    let context = StripTooltipContext {
+        modal_open: false,
+        bindings: &bindings,
+        tr: &tr,
+        tab_format: "{title}",
+        tab_cell_width: 8.0,
+    };
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    ws.window_focused = true;
+    let at_on = |ws: &mut crate::window_state::WindowState, bar: &kettle_render::TabBar, x: f64| {
+        ws.native_pointer = Some(winit::dpi::PhysicalPosition::new(x, 14.0));
+        strip_tooltip_target(ws, bar, &context)
+    };
+    let at = |ws: &mut crate::window_state::WindowState, x: f64| at_on(ws, &bar, x);
+    assert_eq!(at(&mut ws, 20.0), None, "a title shown whole");
+    let tip = at(&mut ws, 120.0).expect("a cut title");
+    assert_eq!(
+        tip.target,
+        crate::tooltip::TooltipTarget::TabTitle(1)
+    );
+    assert_eq!(tip.text, long);
+    assert_eq!(tip.anchor, Some(bar.segments[1].rect));
+    assert_eq!(at(&mut ws, 185.0), None, "the close button names nothing");
+    let folder = at(&mut ws, 220.0).expect("a folder shown by its leaf");
+    assert_eq!(folder.text, path);
+    // It waits for a rest, as every chrome tooltip does.
+    let t0 = Instant::now();
+    ws.tooltip.hover(Some(tip.target), t0);
+    ws.native_pointer = Some(winit::dpi::PhysicalPosition::new(120.0, 14.0));
+    assert_eq!(shown_strip_tooltip(&ws, &bar, &context, t0), None);
+    assert_eq!(
+        shown_strip_tooltip(&ws, &bar, &context, t0 + Duration::from_millis(500))
+            .map(|tip| tip.text)
+            .as_deref(),
+        Some(long)
+    );
+    let mut lone = kettle_render::TabBar::hidden();
+    lone.height = 28.0;
+    lone.segments = vec![seg(0, 0.0, long, None)];
+    assert!(at_on(&mut ws, &lone, 20.0).is_some());
+    lone.lone_title = true;
+    assert_eq!(
+        at_on(&mut ws, &lone, 20.0),
+        None,
+        "a lone title stands for the window"
+    );
+}
+
+/// D11 of the 6.0 UI review: a media lane button under the pointer showed
+/// nothing but the hand. The window now repaints as the real pointer moves
+/// onto or off a button that would act, so the renderer lights its chip,
+/// and leaving the window puts it out.
+#[test]
+fn moving_onto_a_lane_button_repaints_to_light_it() {
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(source.contains("self.sync_lane_control_hover(ws); self.sync_toast_control_hover(ws);"));
+    assert!(source.contains(
+        "let hovered = self.hovered_lane_control(ws); if hovered != ws.lane_control_hover { ws.lane_control_hover = hovered; if let Some(window) = &ws.window { window.request_redraw(); } }"
+    ));
+    assert!(source.contains(
+        "(!matches!(hit, Hit::Inside | Hit::Resize) && lane_control_enabled(&lane, hit)) .then_some((lane, button, hit))"
+    ));
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    ws.lane_control_hover = Some((1, kettle_render::MediaLaneHit::ZoomIn));
+    ws.leave_tab_bar();
+    assert_eq!(ws.lane_control_hover, None);
+}
+
+/// Should 12 of the 6.0 UI review: a toast's Show and Dismiss, and the
+/// bad-config notice's Open config and Dismiss, gave no hover. Every toast
+/// and notice projection now says which of its buttons the real pointer is
+/// on, from the same hit test a press uses, and the window repaints as that
+/// changes.
+#[test]
+fn toast_and_notice_buttons_light_under_the_pointer() {
+    use super::notices::toast_button_at;
+    let geometry = kettle_render::persistent_notice_geometry(
+        (0.0, 0.0, 800.0, 600.0),
+        (8.0, 16.0),
+        2,
+        12,
+        7,
+    )
+    .unwrap();
+    let centre = |rect: kettle_render::Rect4| (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0);
+    let (x, y) = centre(geometry.details);
+    assert_eq!(toast_button_at(&geometry, x, y), Some(1));
+    let (x, y) = centre(geometry.close);
+    assert_eq!(toast_button_at(&geometry, x, y), Some(2));
+    let (x, y) = centre(geometry.message);
+    assert_eq!(toast_button_at(&geometry, x, y), None, "the body is no button");
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(
+        source
+            .matches("hovered: self.toast_control_hover(ws, &geometry),")
+            .count(),
+        4,
+        "both notices, the notification toast and the update toast"
+    );
+    assert!(source.contains(
+        "if hovered != ws.toast_control_hover { ws.toast_control_hover = hovered; if let Some(window) = &ws.window { window.request_redraw(); } }"
+    ));
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    ws.toast_control_hover = Some(geometry.close);
+    ws.leave_tab_bar();
+    assert_eq!(ws.toast_control_hover, None);
+}
+
+/// Should 11 of the 6.0 UI review: a tab dragged onto an overflow arrow
+/// could go no further than the last tab shown. Resting there 400 ms now
+/// scrolls the strip a tab toward the arrow, by moving the dragged tab one
+/// place on, and again every 400 ms while it stays; leaving the arrow, or
+/// moving to the other one, starts the wait over.
+#[test]
+fn a_tab_drag_resting_on_an_overflow_arrow_scrolls_the_strip() {
+    use super::windowing::{TAB_DRAG_SCROLL_DWELL, tab_drag_arrow_step};
+    use std::time::{Duration, Instant};
+    let ms = Duration::from_millis;
+    let t0 = Instant::now();
+    assert_eq!(tab_drag_arrow_step(None, None, t0), (None, None));
+    let (step, rest) = tab_drag_arrow_step(None, Some(true), t0);
+    assert_eq!((step, rest), (None, Some((true, t0))));
+    assert_eq!(
+        tab_drag_arrow_step(rest, Some(true), t0 + ms(399)),
+        (None, Some((true, t0)))
+    );
+    let at = t0 + TAB_DRAG_SCROLL_DWELL;
+    let (step, rest) = tab_drag_arrow_step(rest, Some(true), at);
+    assert_eq!((step, rest), (Some(true), Some((true, at))), "a step");
+    assert_eq!(
+        tab_drag_arrow_step(rest, Some(true), at + ms(100)).0,
+        None,
+        "the next waits again"
+    );
+    assert_eq!(
+        tab_drag_arrow_step(rest, Some(true), at + TAB_DRAG_SCROLL_DWELL).0,
+        Some(true)
+    );
+    // The other arrow starts over, and leaving forgets the rest.
+    let back = t0 + ms(2000);
+    assert_eq!(
+        tab_drag_arrow_step(rest, Some(false), back),
+        (None, Some((false, back)))
+    );
+    assert_eq!(tab_drag_arrow_step(rest, None, back), (None, None));
+
+    // The scheduler steps a live drag by moving the dragged tab one place
+    // on, which the strip keeps in view, and wakes for the next step.
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(source.contains(
+        "let dragging = ws.tab_drag_active && ws.tab_drag_press.is_none(); let over = ws.hovered_scroll_arrow.filter(|_| dragging); let (step, rest) = tab_drag_arrow_step(ws.tab_drag_arrow, over, now); ws.tab_drag_arrow = rest; if let Some(forward) = step && ws.mux.move_active_tab(if forward { 1 } else { -1 })"
+    ));
+    assert!(source.contains("let tab_drag_scroll_wait = self.scroll_tab_drag_at_arrow(ws, now)"));
+    assert!(source.contains(
+        "if let Some(next) = tab_drag_scroll_wait { wait = Some(wait.map_or(next, |current| current.min(next))); }"
+    ));
+}

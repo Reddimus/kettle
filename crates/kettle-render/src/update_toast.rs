@@ -3,9 +3,35 @@ use crate::{Rgb, UpdateToastOverlay, chrome, rounded_surface::RoundedSurface, th
 pub(crate) struct Palette {
     background: Rgb,
     control: Rgb,
+    /// A button under the pointer, and its label on it.
+    hover: Rgb,
+    pub hover_text: Rgb,
     border: Rgb,
     focus: Rgb,
     pub text: [Rgb; 3],
+}
+
+/// A hovered toast button's fill: its own moved 9% toward black or white,
+/// as a confirmation dialog's buttons are.
+fn hover_fill(control: Rgb) -> Rgb {
+    let target = if crate::color::relative_luminance(control) > 0.4 {
+        Rgb::new(0, 0, 0)
+    } else {
+        Rgb::new(255, 255, 255)
+    };
+    crate::color::over(control, target, 0.09, false)
+}
+
+impl Palette {
+    /// The label colour of toast part `part` (0 the message, 1 details, 2
+    /// close) while `hovered` is the button under the pointer.
+    pub(crate) fn text_for(&self, part: usize, hovered: Option<usize>) -> Rgb {
+        if part > 0 && hovered == Some(part) {
+            self.hover_text
+        } else {
+            self.text[part.min(2)]
+        }
+    }
 }
 
 pub(crate) fn palette(
@@ -17,9 +43,12 @@ pub(crate) fn palette(
     let control = solid_blend(accent, background, 12);
     let text = colors.text(theme.foreground, background);
     let control_text = colors.text(theme.foreground, control);
+    let hover = hover_fill(control);
     Palette {
         background,
         control,
+        hover,
+        hover_text: colors.text(theme.foreground, hover),
         border: solid_blend(theme.foreground, theme.background, 30),
         focus: colors.icon(accent, control),
         text: [text, control_text, control_text],
@@ -29,6 +58,13 @@ pub(crate) fn palette(
 pub(crate) fn surfaces(toast: &UpdateToastOverlay, palette: &Palette) -> Vec<RoundedSurface> {
     let geometry = toast.control_geometry();
     let focused = toast.focused;
+    let fill = |part| {
+        if toast.hovered == Some(part) {
+            palette.hover
+        } else {
+            palette.control
+        }
+    };
     let alpha = toast.opacity.clamp(0.0, 1.0);
     let rgba = |color: Rgb, alpha| {
         [
@@ -55,7 +91,7 @@ pub(crate) fn surfaces(toast: &UpdateToastOverlay, palette: &Palette) -> Vec<Rou
         ),
         shape(
             geometry.details,
-            palette.control,
+            fill(1),
             palette.focus,
             (16.0 * geometry.unit).min(geometry.details.3 * 0.5),
             if focused == Some(1) {
@@ -66,7 +102,7 @@ pub(crate) fn surfaces(toast: &UpdateToastOverlay, palette: &Palette) -> Vec<Rou
         ),
         shape(
             geometry.close,
-            palette.control,
+            fill(2),
             palette.focus,
             geometry.close.2 * 0.5,
             if focused == Some(2) {
@@ -109,11 +145,62 @@ mod tests {
             close: "Dismiss".into(),
             opacity: 1.0,
             focused: Some(1),
+            hovered: None,
         };
         assert_eq!(surfaces(&toast, &palette).len(), 2);
         assert_eq!(toast.control_geometry().details.2, 0.0);
         toast.close.clear();
         assert_eq!(surfaces(&toast, &palette).len(), 1);
+    }
+
+    /// Should 12 of the 6.0 UI review: a toast's Show and Dismiss, and a
+    /// notice's Open config and Dismiss, had no hover. The button under the
+    /// pointer now takes the confirmation buttons' 9% step, alone, and its
+    /// label keeps 4.5:1 on it in every theme.
+    #[test]
+    fn the_toast_button_under_the_pointer_lights_alone() {
+        let theme = kettle_config::Theme::default();
+        let palette = palette(&theme, theme.palette[4], &mut chrome::Colors::default());
+        let geometry =
+            crate::persistent_notice_geometry((0.0, 0.0, 800.0, 600.0), (8.0, 16.0), 2, 12, 7)
+                .unwrap();
+        let mut toast = crate::UpdateToastOverlay {
+            geometry,
+            message: "Config has errors".into(),
+            details: "Open config".into(),
+            close: "Dismiss".into(),
+            opacity: 1.0,
+            focused: None,
+            hovered: None,
+        };
+        let rest = surfaces(&toast, &palette);
+        for part in [1, 2] {
+            toast.hovered = Some(part);
+            let lit = surfaces(&toast, &palette);
+            for (index, (rest, lit)) in rest.iter().zip(&lit).enumerate() {
+                assert_eq!(
+                    rest.fill != lit.fill,
+                    index == part,
+                    "part {part}, surface {index}"
+                );
+            }
+        }
+        let mut colors = chrome::Colors::default();
+        for name in kettle_config::Theme::list() {
+            let theme = kettle_config::Theme::by_name(name);
+            for accent in theme.palette {
+                let p = super::palette(&theme, accent, &mut colors);
+                assert_ne!(p.hover, p.control, "{name}");
+                assert!(
+                    crate::color::contrast_ratio(p.text_for(1, Some(1)), p.hover) + 1e-6 >= 4.5,
+                    "{name}"
+                );
+                assert_eq!(p.text_for(1, Some(2)), p.text[1]);
+                assert_eq!(p.text_for(0, Some(1)), p.text[0]);
+            }
+        }
+        let src: String = crate::production_source().split_whitespace().collect();
+        assert!(src.contains("letink=palette.text_for(i,toast.hovered);"));
     }
 
     #[test]

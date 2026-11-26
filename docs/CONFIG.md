@@ -118,7 +118,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `tab-bar-position` (`tab-position`) | `top`\|`bottom`\|`left`\|`right`\|`hidden` | `top` | Where the tab bar sits. `left`/`right` render a **vertical** tab strip (its width is `tab-bar-width`); when its tabs don't fit the window's height it scrolls with `⌃ ⌄` buttons and the mouse wheel, keeping the active tab in view. `hidden` forces the bar off regardless of `tab-bar` |
 | `tab-bar-width` | float 40–600 px | `180` | Width of the vertical tab strip when `tab-bar-position = left`/`right`. Clamped `[40, 600]`; ignored for `top`/`bottom` bars |
 | `tab-min-width` | float 40–600 logical px | `120` | Minimum width of a top or bottom tab, in logical pixels (points on macOS), so it is the same size at every display scale. Tabs divide and fill the bar evenly; in a title bar (macOS, or Kettle's GNOME header) they divide what is left after its controls and a 48 logical pixel window-drag lane, a lone tab included. Once tabs would shrink below this minimum, the bar overflows and (with `scroll-tabbar`) scrolls. In a title bar too narrow for its tabs at the minimum (one tab between the scroll arrows once they overflow), the Settings gear goes first, then the drag lane narrows to 16 logical pixels, and only then does a tab narrow. Clamped `[40, 600]` |
-| `scroll-tabbar` | bool | `true` | When horizontal tabs would shrink below `tab-min-width`, keep them at that width and scroll the bar with `‹ ›` arrow buttons + the mouse wheel (active tab kept in view). In a title bar `‹` sits at the strip's start and `›` just after the last tab shown, before the drag lane; the arrows, the wheel and a horizontal swipe scroll it one tab at a time without changing the active tab, and a new tab, a tab chosen from the keyboard, a close, a resize or a display-scale change scrolls the active tab back into view. A plain strip scrolls by moving the active tab instead. `false` lets them keep shrinking to fit instead. A side bar's rows can't shrink, so it always scrolls |
+| `scroll-tabbar` | bool | `true` | When horizontal tabs would shrink below `tab-min-width`, keep them at that width and scroll the bar with `‹ ›` arrow buttons + the mouse wheel (active tab kept in view). In a title bar `‹` sits at the strip's start and `›` just after the last tab shown, before the drag lane; the arrows, the wheel and a horizontal swipe scroll it one tab at a time without changing the active tab, and a new tab, a tab chosen from the keyboard, a close, a resize or a display-scale change scrolls the active tab back into view. A plain strip scrolls by moving the active tab instead. The arrows light and show the pointing hand under the pointer, and their tooltips say what a press does: Previous Tab and Next Tab with their shortcuts, or Scroll Tabs Left and Right in a title bar. A tab dragged onto an arrow and held there scrolls the strip a tab toward it every 0.4 seconds, so it can be dropped past the tabs shown. `false` lets them keep shrinking to fit instead. A side bar's rows can't shrink, so it always scrolls |
 | `unfocused-split-opacity` | float 0.1–1 | `0.7` | Dim level of unfocused split panes |
 | `scroll-multiplier` (`mouse-scroll-multiplier`) | float 0.1–50 | `1.0` | Mouse-wheel scroll-speed multiplier (1.0 ≈ 3 lines/notch). Applied with **sub-notch precision**: precision touchpads and high-resolution wheels report a fraction of a notch per event, and the remainder is carried across events instead of being rounded away, so slow gestures scroll smoothly and proportionally. Small multipliers stay usable for the same reason — at `0.1` a notch is 0.3 lines, which accumulates over three notches rather than vanishing |
 | `disable-mousewheel-zoom` | bool | `false` | When `true`, Ctrl+wheel does NOT change the font size. Useful for users who accidentally scroll-zoom on a laptop touchpad. The keyboard IncreaseFontSize / DecreaseFontSize / ResetFontSize chords still work |
@@ -793,7 +793,8 @@ or OSC 777 (`printf '\e]777;notify;Title;Body\a'`), and a Lua script with
   Under the pointer or assistive focus it shows at full strength, even if
   it had begun to fade, and afterwards it stays at least 3 more seconds.
   Screen readers announce it politely. With assistive focus on its Show or
-  Dismiss button, Enter, Space, Tab and Escape answer the toast.
+  Dismiss button, Enter, Space, Tab and Escape answer the toast. Show and ×
+  light up under the pointer, as a dialog's buttons do.
 - **No Kettle window has focus**: a desktop notification, as before, and
   the window asks for attention. If the desktop refuses it or the delivery
   fails (a D-Bus error on Linux, a toast error on Windows), the toast is
@@ -1074,7 +1075,14 @@ only once it is ready (the place shows the one asked for meanwhile), starts
 fitted and its source from the top, and stays put if it cannot be drawn.
 `↻` reads a Markdown file's gallery again at the diagram shown. Where the header is too narrow, these give way,
 open outside first, then zoom out, zoom in and fit, copy, browsing, the
-background and the source, and reload last. A press or the wheel over a lane never
+background and the source, and reload last. Each of these buttons takes a
+press anywhere in a target at least 24 by 24 points, so the header row, and a
+gallery's detail line, are that tall even where a line of text is shorter;
+the button under the pointer lights, unless it would do nothing (browsing
+past either end). Resting the pointer on a button shows its name in a
+tooltip, with the key that does the same while the lane holds the keyboard
+(`+`, `-`, `0`, `C`, `K`, `M`, `T`, `F`, Page Up and Page Down, and in the
+centred viewer `P` and Esc), or otherwise the shortcut bound to its action. A press or the wheel over a lane never
 reaches the terminal, and menus and dialogs open over it without closing it.
 The command palette lists it as "Open media shelf". On macOS its default
 chord is `Ctrl+Shift+Cmd+I`; elsewhere it has no default binding.
@@ -1293,7 +1301,8 @@ Values are omitted, including environment values. Filenames and keys have
 control characters removed and are limited to 64 characters each.
 
 **Open Config** opens the file named by the notice with the operating system's
-default app, using the same mechanism as **Advanced…**. If a screen reader
+default app, using the same mechanism as **Advanced…**. It and **Dismiss**
+light up under the pointer. If a screen reader
 moves focus to the notice, Enter opens the file and Escape dismisses it. While
 the terminal retains focus, those keys go to the running shell or program. Both
 buttons remain available to screen readers. The terminal grid and IME cursor
@@ -1312,9 +1321,21 @@ including its transparency, and keeps an accent line. Wallpaper strips retain
 Horizontal New Tab Options and New Tab controls each have a hit area of at
 least 28 by 28 points (growing with a taller strip), a 4 point gap, an 8 point outside margin, and rounded hover and
 pressed feedback. Their tooltips follow the UI language; New Tab also shows
-its current configured shortcut. At 420 by 260 points, overflow keeps the
+its current configured shortcut. A tooltip shows once the pointer has rested
+on its control for half a second, and at once on the next control within a
+second of the last tooltip going away. A click hides it until the pointer
+leaves the control. The same timing applies to every tooltip in the strip, the
+GNOME header bar and the media viewer. At 420 by 260 points, overflow keeps the
 active title visible alongside both controls. Closing or renaming tabs uses
 the same layout as pointer actions and accessibility.
+
+A tab title too long for its tab is shortened with an ellipsis. A title
+derived from the working directory keeps its last folder, and a title that
+looks like a path keeps its end. Any other title keeps both ends when at least
+16 columns of it show, and only its start in a narrower tab, so tabs whose
+titles differ near the start still read apart. Resting the pointer on a
+shortened tab shows its whole title, or its whole working directory, in a
+tooltip.
 
 When a window loses focus on macOS or Linux, tab text and controls dim toward
 their backgrounds while retaining at least 3:1 contrast, and the active accent

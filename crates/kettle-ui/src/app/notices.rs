@@ -73,7 +73,60 @@ pub(super) fn config_notice_message(
     Some(tr.config_notice(&lines.join("\n")))
 }
 
+/// The toast button at `(x, y)` on `geometry`, numbered as a toast's
+/// `focused` is: 1 its details action (Show, Open config), 2 its close.
+pub(super) fn toast_button_at(
+    geometry: &kettle_render::UpdateToastGeometry,
+    x: f32,
+    y: f32,
+) -> Option<usize> {
+    match geometry.hit_test(x, y)? {
+        kettle_render::UpdateToastHit::Details => Some(1),
+        kettle_render::UpdateToastHit::Close => Some(2),
+        kettle_render::UpdateToastHit::Body => None,
+    }
+}
+
 impl App {
+    /// The button of the toast laid out at `geometry` under the real
+    /// pointer, which lights; none under a dialog or menu.
+    pub(super) fn toast_control_hover(
+        &self,
+        ws: &WindowState,
+        geometry: &kettle_render::UpdateToastGeometry,
+    ) -> Option<usize> {
+        if self.non_search_modal_open(ws) {
+            return None;
+        }
+        let pointer = ws.native_pointer?;
+        toast_button_at(geometry, pointer.x as f32, pointer.y as f32)
+    }
+
+    /// Repaint as the pointer moves onto or off a toast's or notice's
+    /// button, so it lights and goes out with it.
+    pub(super) fn sync_toast_control_hover(&self, ws: &mut WindowState) {
+        let hovered = self
+            .persistent_notices(ws)
+            .into_iter()
+            .map(|(_, toast)| toast)
+            .chain(
+                self.notification_toast_projection(ws)
+                    .map(|view| view.overlay),
+            )
+            .chain(self.update_toast_projection(ws))
+            .find_map(|toast| match toast.hovered {
+                Some(1) => Some(toast.geometry.details),
+                Some(2) => Some(toast.geometry.close),
+                _ => None,
+            });
+        if hovered != ws.toast_control_hover {
+            ws.toast_control_hover = hovered;
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+    }
+
     pub(super) fn set_config_notice(
         &mut self,
         path: &std::path::Path,
@@ -174,6 +227,7 @@ impl App {
                         close,
                         opacity: 1.0,
                         focused: None,
+                        hovered: self.toast_control_hover(ws, &geometry),
                     },
                 ));
             }
@@ -213,6 +267,7 @@ impl App {
                         close,
                         opacity: 1.0,
                         focused: None,
+                        hovered: self.toast_control_hover(ws, &geometry),
                     },
                 ));
             }

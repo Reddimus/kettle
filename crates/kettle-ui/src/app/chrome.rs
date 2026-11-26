@@ -102,39 +102,67 @@ impl App {
         }
     }
 
-    fn new_tab_tooltip(
-        &self,
-        ws: &WindowState,
-        controls: &[kettle_render::WindowControlButton],
-    ) -> Option<String> {
-        if !ws.window_focused
-            || self.pointer_modal_open(ws)
-            || ws.context_menu.is_some()
-            || ws.pressed_new_tab
-            || ws.pressed_new_tab_menu
-            || ws.pressed_settings
-            || ws.pressed_search
-            || ws.pressed_window_control.is_some()
+    /// What a strip tooltip needs besides the window's own state.
+    fn strip_tooltip_context(&self, ws: &WindowState, bar: &TabBar) -> StripTooltipContext<'_> {
+        // The cell the strip fits tab titles by, as the renderer has it.
+        let cell = self.overlay_text_cell_width(ws);
+        StripTooltipContext {
+            modal_open: self.pointer_modal_open(ws),
+            bindings: &self.cfg.keybinds,
+            tr: &self.ui_text,
+            tab_format: &self.cfg.tab_format,
+            tab_cell_width: if bar.in_titlebar {
+                cell * kettle_render::tab_text_scale(bar.height, self.overlay_text_line_height(ws))
+            } else {
+                cell
+            },
+        }
+    }
+
+    /// Give `bar` the strip's tooltip in this frame: the hovered control's,
+    /// once [`crate::tooltip::TooltipClock`] says it shows.
+    fn attach_strip_tooltip(&self, ws: &WindowState, bar: &mut TabBar) {
+        let now = std::time::Instant::now();
+        // Most layouts have no tooltip showing: skip working one out.
+        if ws.tooltip.shown(now).is_none() {
+            return;
+        }
+        if let Some(tip) = shown_strip_tooltip(ws, bar, &self.strip_tooltip_context(ws, bar), now) {
+            bar.tooltip = Some(tip.text);
+            bar.tooltip_anchor = tip.anchor;
+        }
+    }
+
+    /// Give the frame's `bar` the tooltip of the lane button under the
+    /// pointer, when the strip has none, once it shows. A strip hidden with
+    /// one tab still carries it to the renderer.
+    pub(super) fn attach_lane_tooltip(&self, ws: &WindowState, bar: &mut TabBar) {
+        let shown = ws.tooltip.shown(std::time::Instant::now());
+        if bar.tooltip.is_some() || !matches!(shown, Some(crate::tooltip::TooltipTarget::Media(..)))
         {
-            return None;
+            return;
         }
-        if let Some(label) = window_control_tooltip_label(controls) {
-            return Some(label.to_owned());
+        if let Some(tip) = self
+            .lane_control_tooltip(ws)
+            .filter(|tip| shown == Some(tip.target))
+        {
+            bar.tooltip = Some(tip.text);
+            bar.tooltip_anchor = tip.anchor;
         }
-        if ws.hovered_new_tab_menu && ws.linux_titlebar {
-            return Some(self.ui_text.text(kettle_i18n::Text::A11yMainMenu).into());
+    }
+
+    /// Tell the window's tooltip clock which strip control is under the
+    /// pointer, after a pointer move set the strip's hover, and repaint when
+    /// the tooltip shown changes.
+    pub(super) fn sync_tooltip(&self, ws: &mut WindowState, bar: &TabBar) {
+        let target = strip_tooltip_target(ws, bar, &self.strip_tooltip_context(ws, bar))
+            .or_else(|| self.lane_control_tooltip(ws))
+            .map(|tip| tip.target);
+        if ws.tooltip.hover(target, std::time::Instant::now())
+            && let Some(window) = &ws.window
+        {
+            window.request_redraw();
         }
-        let target = if ws.hovered_settings {
-            Some(NewTabHoverTarget::Settings)
-        } else if ws.hovered_search {
-            Some(NewTabHoverTarget::Search)
-        } else if ws.hovered_new_tab_menu {
-            Some(NewTabHoverTarget::Menu)
-        } else {
-            ws.hovered_new_tab.then_some(NewTabHoverTarget::Plus)
-        };
-        let shortcut = target.and_then(|target| chrome_button_shortcut(&self.cfg.keybinds, target));
-        new_tab_tooltip(target, &self.ui_text, shortcut.as_deref())
     }
 
     pub(super) fn tab_bar(&self, ws: &WindowState) -> TabBar {
@@ -181,6 +209,7 @@ impl App {
                 new_tab_shortcut: None,
                 settings_shortcut: None,
                 tooltip: None,
+                tooltip_anchor: None,
                 in_titlebar: ws.macos_titlebar_tabs,
                 linux_header: ws.linux_titlebar,
                 lone_title: false,
@@ -210,6 +239,8 @@ impl App {
                 band,
                 scroll_left: (0.0, 0.0, 0.0, 0.0),
                 scroll_right: (0.0, 0.0, 0.0, 0.0),
+                hovered_scroll_left: false,
+                hovered_scroll_right: false,
             };
         }
         let labels = ws.mux.tab_labels(&self.ui_text);
@@ -360,8 +391,7 @@ impl App {
         let arrow_width = layout.arrow_width;
         let to_btn =
             |ox: Option<f32>| ox.map_or((0.0, 0.0, 0.0, 0.0), |x| (x0 + x, y, arrow_width, height));
-        let tooltip = self.new_tab_tooltip(ws, &window_controls);
-        TabBar {
+        let mut bar = TabBar {
             window_controls,
             pressed_new_tab: ws.pressed_new_tab,
             pressed_new_tab_menu: ws.pressed_new_tab_menu,
@@ -379,7 +409,8 @@ impl App {
                 NewTabHoverTarget::Settings,
                 &self.ui_text,
             ),
-            tooltip,
+            tooltip: None,
+            tooltip_anchor: None,
             in_titlebar: ws.macos_titlebar_tabs,
             linux_header: ws.linux_titlebar,
             lone_title,
@@ -425,7 +456,11 @@ impl App {
             band,
             scroll_left: to_btn(layout.arrow_left),
             scroll_right: to_btn(layout.arrow_right),
-        }
+            hovered_scroll_left: ws.hovered_scroll_arrow == Some(false),
+            hovered_scroll_right: ws.hovered_scroll_arrow == Some(true),
+        };
+        self.attach_strip_tooltip(ws, &mut bar);
+        bar
     }
 
     pub(super) fn title_edit_rect(&self, ws: &WindowState) -> kettle_render::Rect4 {
@@ -532,7 +567,7 @@ impl App {
             (strip_x, plus_y, strip_w, height),
             height.min(strip_w * 0.5),
         );
-        TabBar {
+        let mut bar = TabBar {
             window_controls: Vec::new(),
             pressed_new_tab: ws.pressed_new_tab,
             pressed_new_tab_menu: ws.pressed_new_tab_menu,
@@ -550,7 +585,8 @@ impl App {
                 NewTabHoverTarget::Settings,
                 &self.ui_text,
             ),
-            tooltip: self.new_tab_tooltip(ws, &[]),
+            tooltip: None,
+            tooltip_anchor: None,
             in_titlebar: false,
             linux_header: false,
             lone_title: false,
@@ -604,7 +640,11 @@ impl App {
             // and next tab, which scrolls the strip.
             scroll_left: arrow(0),
             scroll_right: arrow(layout.plus.saturating_sub(1)),
-        }
+            hovered_scroll_left: ws.hovered_scroll_arrow == Some(false),
+            hovered_scroll_right: ws.hovered_scroll_arrow == Some(true),
+        };
+        self.attach_strip_tooltip(ws, &mut bar);
+        bar
     }
 
     /// A press on an overflow arrow, native or ctl. A title-bar strip
@@ -1146,6 +1186,179 @@ pub(super) fn chrome_button_description(
         .map(|trigger| trigger.spoken_label(macos, tr))
 }
 
+/// What a chrome tooltip says and the control it names. `anchor` is the
+/// control's rect when it is not one of the strip's own buttons, which the
+/// renderer finds from their hover state.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct ChromeTooltip {
+    pub(super) target: crate::tooltip::TooltipTarget,
+    pub(super) text: String,
+    pub(super) anchor: Option<kettle_render::Rect4>,
+}
+
+/// What a strip tooltip needs besides the window's own state.
+pub(super) struct StripTooltipContext<'a> {
+    /// A modal owns the pointer.
+    pub(super) modal_open: bool,
+    pub(super) bindings: &'a kettle_config::keybinds::Bindings,
+    pub(super) tr: &'a kettle_i18n::Translator,
+    /// What tab labels are made of, and the cell the strip fits them by.
+    pub(super) tab_format: &'a str,
+    pub(super) tab_cell_width: f32,
+}
+
+/// The strip control under the pointer on `bar` that has a tooltip, and
+/// what the tooltip says, whether or not it shows yet. Nothing in an
+/// unfocused window, under a modal or menu, while a strip button is held, or
+/// while a tab is dragged.
+pub(super) fn strip_tooltip_target(
+    ws: &WindowState,
+    bar: &TabBar,
+    context: &StripTooltipContext<'_>,
+) -> Option<ChromeTooltip> {
+    use crate::tooltip::TooltipTarget;
+    let (bindings, tr) = (context.bindings, context.tr);
+    if !ws.window_focused
+        || context.modal_open
+        || ws.context_menu.is_some()
+        || ws.pressed_new_tab
+        || ws.pressed_new_tab_menu
+        || ws.pressed_settings
+        || ws.pressed_search
+        || ws.pressed_window_control.is_some()
+        || ws.tab_drag_active
+        || ws.dock_preview.is_some()
+        || !matches!(ws.detach_drag, crate::detach::DragState::Idle)
+    {
+        return None;
+    }
+    let strip = |target, text| {
+        Some(ChromeTooltip {
+            target,
+            text,
+            anchor: None,
+        })
+    };
+    if let Some(button) = hovered_window_control_button(&bar.window_controls) {
+        return strip(
+            TooltipTarget::WindowControl(button.action),
+            button.label.clone(),
+        );
+    }
+    if ws.hovered_new_tab_menu && ws.linux_titlebar {
+        return strip(
+            TooltipTarget::NewTabMenu,
+            tr.text(kettle_i18n::Text::A11yMainMenu).into(),
+        );
+    }
+    if let Some(tip) = scroll_arrow_tooltip(ws, bar, bindings, tr) {
+        return Some(tip);
+    }
+    let target = if ws.hovered_settings {
+        Some(NewTabHoverTarget::Settings)
+    } else if ws.hovered_search {
+        Some(NewTabHoverTarget::Search)
+    } else if ws.hovered_new_tab_menu {
+        Some(NewTabHoverTarget::Menu)
+    } else {
+        ws.hovered_new_tab.then_some(NewTabHoverTarget::Plus)
+    };
+    let Some(target) = target else {
+        return cut_tab_title_tooltip(ws, bar, context);
+    };
+    let shortcut = chrome_button_shortcut(bindings, target);
+    let text = new_tab_tooltip(Some(target), tr, shortcut.as_deref())?;
+    let target = match target {
+        NewTabHoverTarget::Menu => TooltipTarget::NewTabMenu,
+        NewTabHoverTarget::Plus => TooltipTarget::NewTab,
+        NewTabHoverTarget::Settings => TooltipTarget::Settings,
+        NewTabHoverTarget::Search => TooltipTarget::Search,
+    };
+    strip(target, text)
+}
+
+/// The tab under the pointer, off its close button, when the strip shows
+/// its title shortened: the tooltip names the whole title. A lone title-bar
+/// title stands for the window and has none.
+fn cut_tab_title_tooltip(
+    ws: &WindowState,
+    bar: &TabBar,
+    context: &StripTooltipContext<'_>,
+) -> Option<ChromeTooltip> {
+    let pointer = ws.native_pointer?;
+    let (x, y) = (pointer.x as f32, pointer.y as f32);
+    if bar.lone_title || bar.height <= 0.0 {
+        return None;
+    }
+    let seg = bar.segments.iter().find(|s| rect_contains(s.rect, x, y))?;
+    if seg.close.2 > 0.0 && rect_contains(seg.close, x, y) {
+        return None;
+    }
+    kettle_render::tab_segment_label_cut(
+        seg,
+        context.tab_format,
+        context.tab_cell_width,
+        &bar.recording_notice,
+    )
+    .then(|| ChromeTooltip {
+        target: crate::tooltip::TooltipTarget::TabTitle(seg.idx),
+        text: seg.path.as_deref().unwrap_or(&seg.title).to_owned(),
+        anchor: Some(seg.rect),
+    })
+}
+
+/// The overflow arrow under the pointer, named for what a press on it does:
+/// a title-bar strip scrolls and leaves the selected tab alone, any other
+/// strip selects the previous or next tab, whose shortcut follows.
+fn scroll_arrow_tooltip(
+    ws: &WindowState,
+    bar: &TabBar,
+    bindings: &kettle_config::keybinds::Bindings,
+    tr: &kettle_i18n::Translator,
+) -> Option<ChromeTooltip> {
+    use crate::tooltip::TooltipTarget;
+    use kettle_i18n::Text;
+    let forward = ws.hovered_scroll_arrow?;
+    let rect = if forward {
+        bar.scroll_right
+    } else {
+        bar.scroll_left
+    };
+    if rect.2 <= 0.0 || rect.3 <= 0.0 {
+        return None;
+    }
+    let (label, action) = match (bar.in_titlebar, forward) {
+        (true, false) => (Text::TabScrollLeft, None),
+        (true, true) => (Text::TabScrollRight, None),
+        (false, false) => (Text::TabScrollPrevious, Some(Action::PrevTab)),
+        (false, true) => (Text::TabScrollNext, Some(Action::NextTab)),
+    };
+    let label = tr.text(label);
+    let shortcut =
+        action.and_then(|action| kettle_config::keybinds::ui_hint_label(bindings, &action));
+    Some(ChromeTooltip {
+        target: if forward {
+            TooltipTarget::ScrollForward
+        } else {
+            TooltipTarget::ScrollBack
+        },
+        text: shortcut.map_or_else(|| label.to_owned(), |key| format!("{label}  {key}")),
+        anchor: Some(rect),
+    })
+}
+
+/// The strip's tooltip at `now`: the hovered control's, once the pointer has
+/// rested on it or tooltips are warm, and never after a press on it until
+/// the pointer leaves (see [`crate::tooltip::TooltipClock`]).
+pub(super) fn shown_strip_tooltip(
+    ws: &WindowState,
+    bar: &TabBar,
+    context: &StripTooltipContext<'_>,
+    now: std::time::Instant,
+) -> Option<ChromeTooltip> {
+    strip_tooltip_target(ws, bar, context).filter(|tip| ws.tooltip.shown(now) == Some(tip.target))
+}
+
 pub(super) fn new_tab_tooltip(
     target: Option<NewTabHoverTarget>,
     tr: &kettle_i18n::Translator,
@@ -1282,7 +1495,15 @@ pub(super) fn release_settings_gear(
 
 /// What in the tab bar is under the pointer. A change between two pointer
 /// moves calls for a redraw.
-pub(super) type TabBarHover = (Option<usize>, Option<usize>, bool, bool, bool, bool);
+pub(super) type TabBarHover = (
+    Option<usize>,
+    Option<usize>,
+    bool,
+    bool,
+    bool,
+    bool,
+    Option<bool>,
+);
 
 pub(super) fn tab_bar_hover(ws: &WindowState) -> TabBarHover {
     (
@@ -1292,6 +1513,7 @@ pub(super) fn tab_bar_hover(ws: &WindowState) -> TabBarHover {
         ws.hovered_new_tab_menu,
         ws.hovered_settings,
         ws.hovered_search,
+        ws.hovered_scroll_arrow,
     )
 }
 
@@ -1334,7 +1556,17 @@ pub(super) fn hover_tab_bar(
     ws.hovered_new_tab_menu = target == Some(NewTabHoverTarget::Menu);
     ws.hovered_settings = target == Some(NewTabHoverTarget::Settings);
     ws.hovered_search = target == Some(NewTabHoverTarget::Search);
+    ws.hovered_scroll_arrow = scroll_arrow_at(bar, x, y);
     (target, tab_bar_hover(ws) != before)
+}
+
+/// The overflow arrow at `(x, y)`, from the rects a press uses: `Some(true)`
+/// for forward, `Some(false)` for back.
+pub(super) fn scroll_arrow_at(bar: &TabBar, x: f32, y: f32) -> Option<bool> {
+    [(bar.scroll_left, false), (bar.scroll_right, true)]
+        .into_iter()
+        .find(|(arrow, _)| arrow.2 > 0.0 && arrow.3 > 0.0 && rect_contains(*arrow, x, y))
+        .map(|(_, forward)| forward)
 }
 
 pub(super) fn new_tab_hover_target(bar: &TabBar, x: f32, y: f32) -> Option<NewTabHoverTarget> {

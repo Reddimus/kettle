@@ -2798,6 +2798,18 @@ context = "crates/kettle-ui/src/settings.rs: description of Automatic, On and Of
 [messages.tab_new_options]
 context = "Tab-strip dropdown tooltip. Opens shell choices and tab options."
 
+[messages.tab_scroll_previous]
+context = "crates/kettle-ui/src/app/chrome.rs strip_tooltip: tooltip of the tab strip's back overflow arrow (a chevron at the start of a top or bottom strip, above the rows of a side strip). A press selects the previous tab, which scrolls the strip. Followed by the shortcut when one is bound."
+
+[messages.tab_scroll_next]
+context = "crates/kettle-ui/src/app/chrome.rs strip_tooltip: tooltip of the tab strip's forward overflow arrow. A press selects the next tab, which scrolls the strip. Followed by the shortcut when one is bound."
+
+[messages.tab_scroll_left]
+context = "crates/kettle-ui/src/app/chrome.rs strip_tooltip: tooltip of the macOS title-bar tab strip's left overflow arrow. A press scrolls the strip one tab toward its start and leaves the selected tab as it is."
+
+[messages.tab_scroll_right]
+context = "crates/kettle-ui/src/app/chrome.rs strip_tooltip: tooltip of the macOS title-bar tab strip's right overflow arrow. A press scrolls the strip one tab toward its end and leaves the selected tab as it is."
+
 [messages.menu_new_window_profile]
 context = "crates/kettle-ui/src/app/menus.rs and macos_menu.rs: Profile submenu title in the new-tab dropdown and the macOS Shell menu. Each profile opens a new window in a separate process, never a tab, so the title says window."
 

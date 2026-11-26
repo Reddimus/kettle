@@ -287,8 +287,12 @@ pub(crate) fn activity_marker_quads(
 
 /// Anchor to the actual control while keeping tooltips outside the header.
 /// The GNOME header's `+` leads the strip, so its tooltip hangs under it
-/// rather than at the far end where every other strip keeps `+`.
+/// rather than at the far end where every other strip keeps `+`. A control
+/// the UI names (`tooltip_anchor`) anchors it instead.
 pub(crate) fn tooltip_anchor(bar: &TabBar) -> Rect4 {
+    if let Some(anchor) = bar.tooltip_anchor {
+        return anchor;
+    }
     if bar.in_titlebar && !bar.linux_header {
         if bar.hovered_new_tab && !bar.pressed_new_tab {
             return bar.new_tab;
@@ -720,6 +724,24 @@ pub(crate) fn header_icon_buttons(bar: &TabBar) -> impl Iterator<Item = HeaderIc
 /// toggled on (Find while it is open) keeps a fill at rest, `tab_detail`'s
 /// 1.5:1, deepening to 1.8:1 under the pointer, as GNOME fills a checked
 /// flat button.
+/// The hover fill of each overflow arrow the pointer is over, as the
+/// strip's other flat buttons have: `(button, fill)`.
+pub(crate) fn scroll_arrow_fills(
+    bar: &TabBar,
+    strip: Rgb,
+    fg: Rgb,
+) -> impl Iterator<Item = (Rect4, Rgb)> {
+    [
+        (bar.scroll_left, bar.hovered_scroll_left),
+        (bar.scroll_right, bar.hovered_scroll_right),
+    ]
+    .into_iter()
+    .filter(|(button, _)| button.2 > 0.0 && button.3 > 0.0)
+    .filter_map(move |(button, hovered)| {
+        flat_button_fill(strip, fg, hovered, false, false).map(|fill| (button, fill))
+    })
+}
+
 pub(crate) fn flat_button_fill(
     strip: Rgb,
     fg: Rgb,
@@ -2790,5 +2812,57 @@ mod compact_header_contrast_tests {
                 .count(),
             2
         );
+    }
+}
+
+#[cfg(test)]
+mod scroll_arrow_tests {
+    use super::*;
+
+    /// Should 11 of the 6.0 UI review: an overflow arrow under the pointer
+    /// takes the strip's flat-button hover fill, only while hovered and
+    /// only where the strip has one, and its glyph is resolved against it.
+    #[test]
+    fn overflow_arrows_prelight_like_the_other_flat_buttons() {
+        let strip = Rgb::new(30, 30, 36);
+        let fg = Rgb::new(220, 220, 220);
+        let mut bar = TabBar::hidden();
+        bar.scroll_left = (0.0, 0.0, 20.0, 28.0);
+        bar.scroll_right = (580.0, 0.0, 20.0, 28.0);
+        assert_eq!(scroll_arrow_fills(&bar, strip, fg).count(), 0);
+        bar.hovered_scroll_right = true;
+        let fills: Vec<_> = scroll_arrow_fills(&bar, strip, fg).collect();
+        assert_eq!(
+            fills,
+            vec![(
+                bar.scroll_right,
+                flat_button_fill(strip, fg, true, false, false).unwrap()
+            )]
+        );
+        assert!(crate::color::contrast_ratio(fills[0].1, strip) >= 1.3 - 1e-6);
+        // A strip that does not overflow has no arrow to light.
+        bar.scroll_right = (0.0, 0.0, 0.0, 0.0);
+        assert_eq!(scroll_arrow_fills(&bar, strip, fg).count(), 0);
+        let src: String = crate::production_source().split_whitespace().collect();
+        assert!(src.contains(
+            "for(bounds,fill)intab_strip::scroll_arrow_fills(tabbar,chrome_strip_bg,theme.foreground)"
+        ));
+        assert!(src.contains(
+            "letbackground=tab_strip::scroll_arrow_fills(tabbar,chrome_strip_bg,fg).find(|(button,_)|*button==rect)"
+        ));
+    }
+
+    /// A control the UI names anchors the tooltip; without one the strip's
+    /// hovered button does, as before.
+    #[test]
+    fn a_named_anchor_places_the_tooltip_under_that_control() {
+        let mut bar = TabBar::hidden();
+        bar.band = (0.0, 0.0, 640.0, 28.0);
+        assert_eq!(tooltip_anchor(&bar), bar.band);
+        bar.tooltip_anchor = Some((580.0, 0.0, 20.0, 28.0));
+        assert_eq!(tooltip_anchor(&bar), (580.0, 0.0, 20.0, 28.0));
+        let (x, y, w, _) = tooltip_rect(tooltip_anchor(&bar), (640.0, 400.0), (90.0, 16.0), 1.0);
+        assert!(y >= 28.0, "below the strip");
+        assert!(x + w <= 600.0, "ends inside the arrow's end");
     }
 }

@@ -176,6 +176,7 @@ fn notification_view(label: Option<&str>, show: bool) -> super::NotificationToas
             close: "\u{00d7}".into(),
             opacity: 1.0,
             focused: None,
+            hovered: None,
         },
         source: crate::notification_router::Source {
             window: 1,

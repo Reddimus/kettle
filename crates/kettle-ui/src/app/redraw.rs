@@ -819,7 +819,8 @@ impl App {
         // must not be stranded by a run of context-menu hover frames.
         self.publish_accessibility_if_due(ws, &overlay);
         let area = self.area(ws);
-        let tabbar = self.tab_bar(ws);
+        let mut tabbar = self.tab_bar(ws);
+        self.attach_lane_tooltip(ws, &mut tabbar);
         // Build status bar BEFORE the &mut renderer borrow
         // since `build_status_bar` reads ws.mux / self.cfg
         // immutably.

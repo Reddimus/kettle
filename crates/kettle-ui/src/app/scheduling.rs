@@ -738,6 +738,24 @@ impl App {
             at.saturating_duration_since(now)
                 .max(std::time::Duration::from_millis(1))
         });
+        // A tooltip comes due once, at its deadline: one frame shows it, and
+        // nothing redraws while it waits.
+        let (tooltip_due, tooltip_wake) = ws.tooltip.poll(now);
+        if tooltip_due
+            && !render_hidden
+            && let Some(window) = &ws.window
+        {
+            window.request_redraw();
+        }
+        let tooltip_wait = tooltip_wake.map(|at| {
+            at.saturating_duration_since(now)
+                .max(std::time::Duration::from_millis(1))
+        });
+        // A tab drag resting on an overflow arrow scrolls the strip.
+        let tab_drag_scroll_wait = self.scroll_tab_drag_at_arrow(ws, now).map(|at| {
+            at.saturating_duration_since(now)
+                .max(std::time::Duration::from_millis(1))
+        });
         let media_receipt_wait = ws
             .media_paste_receipt
             .as_ref()
@@ -1028,6 +1046,12 @@ impl App {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = card_settle_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = tooltip_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = tab_drag_scroll_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = cards_tip_wait {

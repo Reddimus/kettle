@@ -154,6 +154,29 @@ Window-chrome regressions use `kettle-render`'s `solid_chrome_is_quiet`,
 traffic-light insets, 1x/1.5x/2x scaling, active-tab overflow, control hit corners,
 gaps, AccessKit bounds and the production `ui_geometry` serializer.
 `new_tab_tooltips_translate` checks English/Spanish labels and live shortcuts.
+`kettle-ui`'s `tooltip::tests` and `strip_tooltips_wait_for_a_rest` check
+tooltip timing: the 500 ms rest, the one-second warm spell, a press hiding the
+tooltip until the pointer leaves, and a single scheduler wake per deadline;
+`the_tooltip_clock_follows_moves_presses_leaves` guards the wiring.
+`overflow_arrows_light_point_and_name_what_a_press_does` (`kettle-ui`) and
+`overflow_arrows_prelight_like_the_other_flat_buttons` (`kettle-render`) cover
+the arrows' hover, hand cursor, translated tooltips and anchor.
+`a_cut_tab_title_shows_whole_in_a_tooltip` (`kettle-ui`) and
+`a_tab_label_is_cut_only_when_the_strip_shortens_it` (`kettle-render`) cover
+the full-title tooltip, and `narrow_tab_titles_keep_the_start_that_tells_them_apart`
+the end ellipsis below 16 columns.
+`every_lane_button_is_a_24_pixel_target`, `a_hovered_lane_button_lights_its_chip`
+and `browsing_past_an_end_is_not_a_live_button` (`kettle-render`) and
+`moving_onto_a_lane_button_repaints_to_light_it` (`kettle-ui`) cover the media
+lane buttons' WCAG 2.5.8 targets and hover fill.
+`lane_button_tooltips_name_the_keys_the_lane_acts_on` checks every key a lane
+button's tooltip names against the lane's own key handling, and
+`lane_button_tooltips_share_the_clock_and_the_screen_reader_name` guards their
+timing and names. `the_toast_button_under_the_pointer_lights_alone`
+(`kettle-render`) and `toast_and_notice_buttons_light_under_the_pointer`
+(`kettle-ui`) cover the toast and notice buttons' hover.
+`a_tab_drag_resting_on_an_overflow_arrow_scrolls_the_strip` covers the
+400 ms drag auto-scroll; the drag itself needs a desktop.
 Full render/UI suites and clippy remain required; native focus changes,
 hover/press feedback, tooltip placement and Spanish acceptance need a desktop.
 

@@ -82,6 +82,10 @@ a11y_window_restore = "accepted"
 a11y_window_close = "accepted"
 
 tab_new_options = "accepted"
+tab_scroll_previous = "draft"
+tab_scroll_next = "draft"
+tab_scroll_left = "draft"
+tab_scroll_right = "draft"
 
 notify_profile_launch_busy = "accepted"
 notify_profile_launch_failed_body = "accepted"

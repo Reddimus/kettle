@@ -312,11 +312,38 @@ fn tab_title_uses_tail_only_for_tiny_path_budget() {
 #[test]
 fn tab_title_keeps_middle_ellipsis_for_non_paths() {
     let title = "abcdefghijklmnopqrstuvwxyz";
-    let cut = fit_tab_title(title, 11);
+    let cut = fit_tab_title(title, 20);
     assert!(cut.contains('…'));
     assert!(cut.starts_with('a'), "front kept: {cut}");
     assert!(cut.ends_with('z'), "back kept: {cut}");
-    assert!(display_width(&cut) <= 11);
+    assert!(display_width(&cut) <= 20);
+}
+
+/// The review's case: four tabs titled `Tab N: Build and deploy …` in a
+/// narrow window. A middle ellipsis kept `Tab ` and the shared end, so every
+/// tab read `Tab …t-1`; in fewer than 16 columns the start is kept, and the
+/// tabs read apart. From 16 columns the middle ellipsis is back.
+#[test]
+fn narrow_tab_titles_keep_the_start_that_tells_them_apart() {
+    let long = "Build and deploy the production cluster migration script for region eu-west-1";
+    let titles: Vec<String> = (1..=4).map(|n| format!("Tab {n}: {long}")).collect();
+    for n in 8..super::labels::TAB_TITLE_MIDDLE_ELLIPSIS_COLUMNS {
+        let fitted: Vec<String> = titles.iter().map(|t| fit_tab_title(t, n)).collect();
+        for (i, cut) in fitted.iter().enumerate() {
+            assert!(display_width(cut) <= n, "{cut:?} at {n}");
+            assert!(cut.starts_with(&format!("Tab {}", i + 1)), "{cut:?} at {n}");
+            assert!(cut.ends_with('…'), "{cut:?} at {n}");
+        }
+        let distinct: std::collections::HashSet<&String> = fitted.iter().collect();
+        assert_eq!(distinct.len(), 4, "tabs read alike at {n}: {fitted:?}");
+    }
+    let wide = fit_tab_title(&titles[0], super::labels::TAB_TITLE_MIDDLE_ELLIPSIS_COLUMNS);
+    assert_eq!(wide, "Tab 1: B…-west-1");
+    // The whole budget path the strip paints goes the same way.
+    assert_eq!(
+        fit_tab_segment_title(&titles[1], None, 1, "{title}", 9.0 * 8.0, 8.0),
+        "Tab 2: B…"
+    );
 }
 
 #[test]
@@ -546,4 +573,42 @@ fn review_recording_notice_survives_custom_formats_and_title_fitting() {
             }
         }
     }
+}
+
+/// A tab's tooltip names its full title only when the strip cut it: a
+/// shortened title, a path shown by its last folder, or a recording notice
+/// that leaves no room; never a title shown whole.
+#[test]
+fn a_tab_label_is_cut_only_when_the_strip_shortens_it() {
+    let seg = |title: &str, path: Option<&str>, width: f32| super::TabSeg {
+        idx: 2,
+        rect: (0.0, 0.0, width + 16.0, 28.0),
+        title_rect: (8.0, 0.0, width, 28.0),
+        close: (0.0, 0.0, 0.0, 0.0),
+        hint: None,
+        title: title.into(),
+        path: path.map(Into::into),
+        active: true,
+        activity: super::TabActivity::Normal,
+    };
+    let cut = |seg: &super::TabSeg, format: &str, notice: &str| {
+        super::tab_segment_label_cut(seg, format, 8.0, notice)
+    };
+    assert!(!cut(&seg("shell", None, 80.0), "{title}", ""));
+    assert!(cut(
+        &seg("Tab 3: Build and deploy", None, 80.0),
+        "{title}",
+        ""
+    ));
+    // Exactly as wide as the label: whole.
+    assert!(!cut(&seg("abcdefghij", None, 80.0), "{title}", ""));
+    assert!(cut(&seg("abcdefghij", None, 80.0), "{n}: {title}", ""));
+    let path = "~/Repos/kettle/crates/kettle-ui";
+    assert!(cut(&seg("kettle-ui", Some(path), 80.0), "{title}", ""));
+    assert!(!cut(&seg("kettle-ui", Some(path), 400.0), "{title}", ""));
+    assert!(cut(
+        &seg("shell", None, 80.0),
+        "{title}",
+        "REC recording input"
+    ));
 }

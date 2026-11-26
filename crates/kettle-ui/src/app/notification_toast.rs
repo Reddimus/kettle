@@ -384,6 +384,7 @@ impl App {
                     Some(ACCESSIBILITY_NOTIFICATION_DISMISS_ID) => Some(2),
                     _ => None,
                 },
+                hovered: self.toast_control_hover(ws, &geometry),
             },
             source: toast.source,
             show,

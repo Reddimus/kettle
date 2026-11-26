@@ -717,18 +717,62 @@ pub(super) fn lane_interactive_controls(
         .collect()
 }
 
+/// The same test the renderer lights a hovered button by.
 pub(super) fn lane_control_enabled(
     lane: &kettle_render::MediaLanePanel,
     hit: kettle_render::MediaLaneHit,
 ) -> bool {
+    kettle_render::media_lane_control_enabled(lane, hit)
+}
+
+/// The key that does what `hit` does while a lane holds the keyboard
+/// ([`crate::media::preview_key`] and, in the centred `viewer`,
+/// [`crate::media::viewer_key`]), for its tooltip. Esc closes the viewer but
+/// only gives a lane's keyboard back, and P pins only the viewer.
+pub(super) fn lane_control_key(
+    hit: kettle_render::MediaLaneHit,
+    viewer: bool,
+) -> Option<kettle_config::Key> {
+    use kettle_config::Key;
     use kettle_render::MediaLaneHit as Hit;
-    match hit {
-        Hit::Previous => lane.position.0 > 1,
-        Hit::Next => lane.position.0 < lane.position.1,
-        Hit::PreviousPage => lane.page.is_some_and(|(page, _)| page > 1),
-        Hit::NextPage => lane.page.is_some_and(|(page, count)| page < count),
-        _ => true,
-    }
+    Some(match hit {
+        Hit::ZoomIn => Key::Char('+'),
+        Hit::ZoomOut => Key::Char('-'),
+        Hit::Fit => Key::Char('0'),
+        Hit::Copy => Key::Char('c'),
+        Hit::Play => Key::Char('k'),
+        Hit::Sound => Key::Char('m'),
+        Hit::Theater => Key::Char('t'),
+        Hit::Fullscreen => Key::Char('f'),
+        Hit::PreviousPage => Key::PageUp,
+        Hit::NextPage => Key::PageDown,
+        Hit::Pin if viewer => Key::Char('p'),
+        Hit::Close if viewer => Key::Escape,
+        _ => return None,
+    })
+}
+
+/// The action a lane control works as, whose bound shortcut its tooltip
+/// names: the inverse of [`lane_action_hit`].
+pub(super) fn lane_control_action(hit: kettle_render::MediaLaneHit) -> Option<Action> {
+    [
+        Action::PreviewNext,
+        Action::PreviewPrevious,
+        Action::PreviewNextDiagram,
+        Action::PreviewPreviousDiagram,
+        Action::ClosePreview,
+        Action::PreviewSource,
+        Action::PreviewCanvas,
+        Action::PreviewCopy,
+        Action::PreviewReload,
+        Action::VideoPlay,
+        Action::VideoMute,
+        Action::PreviewZoomIn,
+        Action::PreviewZoomOut,
+        Action::PreviewFit,
+    ]
+    .into_iter()
+    .find(|action| lane_action_hit(action) == Some(hit))
 }
 
 /// A lane control's name in ctl `ui_geometry`.

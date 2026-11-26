@@ -136,6 +136,7 @@ pub(crate) const TAB_CLOSE_GLYPH_SCALE: f32 = 1.5;
 
 pub use labels::{
     display_width, fit_pane_titlebar_title, fit_tab_segment_title, tab_segment_label,
+    tab_segment_label_cut,
 };
 #[cfg(test)]
 use labels::{fit_tab_path, fit_tab_title};
@@ -404,7 +405,8 @@ const _: () = assert!(TEXT_FIELD_PLACEHOLDER_SEGMENT < SEARCH_SEGMENTS);
 pub use media_lane::{
     MediaCanvas, MediaLaneEdge, MediaLaneFrame, MediaLaneGeometry, MediaLaneHit, MediaLaneMode,
     MediaLanePanel, MediaLanePlay, MediaLaneScrubber, MediaLaneSender, MediaLaneSound,
-    MediaLaneSource, MediaLaneTile, media_lane_geometry, media_lane_geometry_scaled,
+    MediaLaneSource, MediaLaneTile, media_lane_control_enabled, media_lane_geometry,
+    media_lane_geometry_scaled,
 };
 
 pub use media_viewport::{MAX_MEDIA_ZOOM, MEDIA_ZOOM_STEP, MIN_MEDIA_ZOOM, MediaViewport};
@@ -1781,6 +1783,20 @@ impl Renderer {
                         );
                     }
                 }
+            }
+            // The overflow arrows prelight like the strip's other flat
+            // buttons while the pointer is over them.
+            for (bounds, fill) in
+                tab_strip::scroll_arrow_fills(tabbar, chrome_strip_bg, theme.foreground)
+            {
+                tab_strip::rounded_fill(
+                    &mut quads,
+                    bounds,
+                    6.0 * self.scale,
+                    (true, true),
+                    (fill, 1.0),
+                    None,
+                );
             }
             // Drag-in-progress ghost. While the user holds a
             // left button down on the tab bar, paint a
@@ -3986,12 +4002,10 @@ impl Renderer {
                         right: (ax + aw).floor() as i32,
                         bottom: (ay + ah).floor() as i32,
                     },
-                    default_color: GColor::rgba(
-                        palette.text[i].r,
-                        palette.text[i].g,
-                        palette.text[i].b,
-                        (alpha * 255.0).round() as u8,
-                    ),
+                    default_color: {
+                        let ink = palette.text_for(i, toast.hovered);
+                        GColor::rgba(ink.r, ink.g, ink.b, (alpha * 255.0).round() as u8)
+                    },
                     custom_glyphs: &[],
                 });
             }
@@ -4329,43 +4343,29 @@ impl Renderer {
             if let Some(paint) = transport_paint {
                 transport_surfaces.extend(paint.shapes);
             }
-            for button in [
-                geometry.play,
-                geometry.sound,
-                geometry.theater,
-                geometry.fullscreen,
-                geometry.previous,
-                geometry.next,
-                geometry.open_outside,
-                geometry.mode,
-                geometry.canvas,
-                geometry.copy,
-                geometry.reload,
-                geometry.zoom_out,
-                geometry.zoom_in,
-                geometry.zoom_fit,
-                geometry.page_previous,
-                geometry.page_next,
-                Some(geometry.toggle),
-                Some(geometry.close),
-            ]
-            .into_iter()
-            .flatten()
-            {
+            // Each button's chip, lit while the pointer is over a button
+            // that would act, as the player's buttons are.
+            let hovered = overlay
+                .media_pointer
+                .and_then(|(px, py)| geometry.hit_test(px, py))
+                .filter(|hit| media_lane::media_lane_control_enabled(lane, *hit));
+            for (button, hit) in geometry.chip_controls() {
+                let Some(button) = button else {
+                    continue;
+                };
                 if geometry
                     .transport
                     .is_some_and(|transport| button.1 >= transport.1)
                 {
                     continue;
                 }
-                lane_q.push(rect(
-                    button.0,
-                    button.1,
-                    button.2,
-                    button.3,
-                    palette.divider,
-                    1.0,
-                ));
+                let fill = if hovered == Some(hit) {
+                    media_transport::hover_fill(palette.divider, palette.label)
+                } else {
+                    palette.divider
+                };
+                let (x, y, w, h) = media_lane::control_chip(button, self.metrics.line_height);
+                lane_q.push(rect(x, y, w, h, fill, 1.0));
             }
             if let Some((fx, fy, fw, fh)) = lane.focused_control {
                 let line = (2.0 * self.scale).max(1.0).min(fw / 2.0).min(fh / 2.0);
@@ -5078,6 +5078,10 @@ impl Renderer {
                         bottom: tb,
                     }
                 };
+                // Resolved against the hover fill the arrow sits on.
+                let background = tab_strip::scroll_arrow_fills(tabbar, chrome_strip_bg, fg)
+                    .find(|(button, _)| *button == rect)
+                    .map_or(chrome_strip_bg, |(_, fill)| fill);
                 areas.push(TextArea {
                     buffer,
                     left,
@@ -5086,7 +5090,7 @@ impl Renderer {
                     bounds,
                     default_color: gc(self.chrome_colors.tab_text(
                         fg,
-                        chrome_strip_bg,
+                        background,
                         overlay.window_focused,
                     )),
                     custom_glyphs: &[],

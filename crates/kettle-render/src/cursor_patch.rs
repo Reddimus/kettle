@@ -2582,6 +2582,7 @@ mod tests {
             close: "\u{00d7}".into(),
             opacity: 1.0,
             focused: None,
+            hovered: None,
         });
         capture(&mut renderer, &cfg, &panes, &overlay);
         assert_eq!(
