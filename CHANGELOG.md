@@ -1095,6 +1095,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A long value scrolled in a text field, such as a path in Settings' Image
+  file prompt, no longer shows a cut-off sliver of a letter at the left edge
+  that looked like a second caret.
+
 - While you search Settings, its title reads "Search results" and no
   category is marked as open, since the results come from every category.
 
