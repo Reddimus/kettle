@@ -108,6 +108,10 @@ pub(crate) struct ContextMenuSession {
     /// The tallest the menu's own panel may be, in surface pixels. `None`
     /// leaves it as tall as the surface allows.
     pub(super) root_max_h: Option<f32>,
+    /// For a tab's menu, that tab, by the panes it holds
+    /// (`Mux::tab_anchor_panes`), so a tab closing meanwhile cannot
+    /// retarget it.
+    pub(super) tab: Option<Vec<u64>>,
 }
 
 /// Move the hover to `hit`. `panels` are the levels' rectangles, the menu

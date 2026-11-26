@@ -4196,6 +4196,31 @@ impl Mux {
         self.relocate_active_tab(to)
     }
 
+    /// Move tab `idx` `delta` places along the bar, wrapping like
+    /// [`Mux::nudge_active_tab`], while the active tab stays active: the tab
+    /// menu moves the tab it was opened on, which need not be the active one.
+    pub fn nudge_tab(&mut self, idx: usize, delta: i32) -> bool {
+        if idx == self.active {
+            return self.nudge_active_tab(delta);
+        }
+        let n = self.tabs.len();
+        if n < 2 || delta == 0 || idx >= n {
+            return false;
+        }
+        let to = (idx as i32 + delta).rem_euclid(n as i32) as usize;
+        let tab = self.tabs.remove(idx);
+        let mut active = self.active;
+        if active > idx {
+            active -= 1;
+        }
+        self.tabs.insert(to, tab);
+        if active >= to {
+            active += 1;
+        }
+        self.active = active;
+        true
+    }
+
     /// Lift the active tab out of the bar and put it back down at `to`,
     /// following it with the focus. Shared by the drag and keyboard paths so
     /// they cannot drift apart on the part that actually reorders.
@@ -10653,6 +10678,55 @@ mod node_tests {
         });
         assert!(!single.nudge_active_tab(1));
         assert!(!single.nudge_active_tab(-1));
+    }
+
+    #[test]
+    fn nudging_a_background_tab_keeps_the_active_tab_active() {
+        let tab = |id: u64| Tab {
+            root: Node::Leaf(id),
+            focus: id,
+            title_override: None,
+            zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
+            lanes: HashMap::new(),
+        };
+        let order = |m: &Mux| m.tabs.iter().map(|t| t.focus).collect::<Vec<_>>();
+        let active = |m: &Mux| m.tabs[m.active].focus;
+        // (active tab, moved tab, delta, order after)
+        for (on, moved, delta, after) in [
+            (1, 3, -1, vec![1, 3, 2, 4]),
+            (1, 2, 1, vec![1, 3, 2, 4]),
+            (4, 1, 1, vec![2, 1, 3, 4]),
+            (3, 2, 1, vec![1, 3, 2, 4]),
+            (2, 3, -1, vec![1, 3, 2, 4]),
+            // Wrapping past either end, as Move Tab Left/Right do.
+            (2, 1, -1, vec![2, 3, 4, 1]),
+            (3, 4, 1, vec![4, 1, 2, 3]),
+        ] {
+            let mut m = Mux::new();
+            m.tabs.extend((1..=4).map(tab));
+            m.active = (on - 1) as usize;
+            assert!(
+                m.nudge_tab((moved - 1) as usize, delta),
+                "{on} {moved} {delta}"
+            );
+            assert_eq!(order(&m), after, "{on} {moved} {delta}");
+            assert_eq!(active(&m), on, "the active tab stays active");
+        }
+        // The active tab itself moves with the focus, as the keys move it.
+        let mut m = Mux::new();
+        m.tabs.extend((1..=3).map(tab));
+        m.active = 1;
+        assert!(m.nudge_tab(1, 1));
+        assert_eq!((order(&m), m.active), (vec![1, 3, 2], 2));
+        assert!(!m.nudge_tab(7, 1), "no such tab");
+        let mut single = Mux::new();
+        single.tabs.push(tab(1));
+        assert!(!single.nudge_tab(0, 1));
     }
 
     #[test]

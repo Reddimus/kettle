@@ -5381,6 +5381,14 @@ and a menu too tall for either side slides onto the window. A menu opened
 from the keyboard is anchored on the text cursor's line: too tall for either
 side, it takes the roomier one and is held short enough to leave the line in
 view (`ContextMenuSession::root_max_h`), and scrolls.
+A right-click on a tab segment, native or through `ctl`, opens that tab's
+menu (`open_tab_menu`): Rename Tab…, Duplicate Tab, Move Tab Left/Right and
+Close Tab, as ordinary action rows. The menu records the tab by the panes it
+holds (`ContextMenuSession::tab`), so a shell exiting meanwhile cannot
+retarget it, and `act_on_menu_tab` runs the row on that tab: Close asks as
+the tab's ✕ does, Move uses `Mux::nudge_tab` and leaves the active tab active,
+and Rename and Duplicate bring the tab forward first. No action closes the
+other tabs, so the menu has no Close Other Tabs.
 
 Other additions:
 

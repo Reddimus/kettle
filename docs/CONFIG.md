@@ -1022,7 +1022,8 @@ Settings Theme row opens it.
 inline rename overlay for the OS window / active tab / focused pane). None has
 a default key. `edit_tab_title` is also "Rename tab…" in the command palette
 and Rename Tab… in the macOS Window menu; all three are in the right-click
-menu as Set Window / Tab / Pane Title….
+menu as Set Window / Tab / Pane Title…, and a tab's own right-click menu has
+Rename Tab… for that tab.
 
 **Media**: `open_media_shelf` opens the focused pane's newest shelf item,
 or closes its open preview. Clicking an inline card opens that item. By

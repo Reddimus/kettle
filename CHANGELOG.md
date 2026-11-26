@@ -992,6 +992,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   instead of appending to it.
 - A tab with a single pane no longer draws a frame around it; pane borders
   appear once a tab is split, and while broadcast input is on.
+- Right-clicking a tab opens a menu for that tab, with Rename Tab…,
+  Duplicate Tab, Move Tab Left, Move Tab Right and Close Tab, instead of the
+  terminal's menu. Each acts on the tab you clicked, not the active one.
 
 ### Security
 

@@ -797,6 +797,13 @@ impl App {
                 {
                     return;
                 }
+                // A right-click on a tab opens that tab's menu.
+                if bcode == 2
+                    && let Some(idx) = tab_menu_segment(&bar, px, py)
+                {
+                    self.open_tab_menu(ws, idx, px, py);
+                    return;
+                }
                 if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
                     if press_settings_gear(ws, &bar, (px, py), bcode) {
                         // The Settings gear opens on release, like a native

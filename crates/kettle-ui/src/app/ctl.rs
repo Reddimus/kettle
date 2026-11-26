@@ -2562,6 +2562,13 @@ impl App {
         if ws.linux_titlebar && linux_title_space(&bar, px, py) {
             return true;
         }
+        // As natively, a right-click on a tab opens that tab's menu.
+        if bcode == 2
+            && let Some(idx) = tab_menu_segment(&bar, px, py)
+        {
+            self.open_tab_menu(ws, idx, px, py);
+            return true;
+        }
         if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
             if press_settings_gear(ws, &bar, (px, py), bcode) {
                 // Armed on a primary press; opens on release.

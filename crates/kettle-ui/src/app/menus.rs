@@ -1017,6 +1017,82 @@ impl App {
         items
     }
 
+    /// Open the menu of tab `idx` at the pointer `(px, py)`, as a right-click
+    /// on the tab does. Its rows act on that tab, whichever tab is active.
+    pub(super) fn open_tab_menu(&mut self, ws: &mut WindowState, idx: usize, px: f32, py: f32) {
+        self.close_all_modals(ws);
+        let tab = ws.mux.tab_anchor_panes(idx);
+        if tab.is_empty() {
+            return;
+        }
+        let items = tab_menu_items(ws.mux.tabs.len(), self.ui_text);
+        self.show_context_menu(ws, items, px, py);
+        // Opening a menu resets both, so name and target it afterwards.
+        ws.context_menu_session.tab = Some(tab);
+        ws.context_menu_a11y_label = Some(
+            self.ui_text
+                .text(kettle_i18n::Text::MenuA11yTab)
+                .to_string(),
+        );
+    }
+
+    /// Run a tab menu's `action` on the tab holding the panes `tab`, if it is
+    /// still open. Rename and Duplicate bring the tab forward first, since
+    /// they show it; moving or closing it leaves the active tab alone.
+    fn act_on_menu_tab(
+        &mut self,
+        ws: &mut WindowState,
+        tab: &[u64],
+        dispatch: TabMenuDispatch,
+        event_loop: &ActiveEventLoop,
+    ) {
+        let Some(idx) = ws.mux.tab_index_of_any_pane(tab) else {
+            return;
+        };
+        match dispatch {
+            TabMenuDispatch::Close => {
+                // The question the tab's ✕ asks, about this tab.
+                let (panes, busy) = tab_close_scope(ws, idx);
+                if self.confirm_close(
+                    ws,
+                    panes,
+                    busy,
+                    ConfirmAction::CloseTabHolding(ws.mux.tab_anchor_panes(idx)),
+                ) {
+                    return;
+                }
+                let pre = self.focus_key(ws);
+                if ws.mux.close_tab_at(idx) {
+                    self.fire_tab_close_event(ws, idx);
+                    self.save_session(ws);
+                    self.request_window_close(ws.seq);
+                    return;
+                }
+                self.fire_tab_close_event(ws, idx);
+                self.note_focus_change(ws, pre);
+            }
+            TabMenuDispatch::Move(delta) => {
+                if ws.mux.nudge_tab(idx, delta) {
+                    self.save_session(ws);
+                }
+            }
+            TabMenuDispatch::Activate(action) => {
+                if idx != ws.mux.active {
+                    let pre = self.focus_key(ws);
+                    ws.mux.active = idx;
+                    ws.mux.touch_active_tab_seen();
+                    ws.reveal_active_tab();
+                    self.note_focus_change(ws, pre);
+                }
+                self.handle_action(ws, action, event_loop);
+            }
+        }
+        self.resize_all(ws);
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
     /// The About panel — version + git hash, update
     /// status, and link rows, reusing the context-menu machinery (Info rows
     /// render dimmed and are not clickable; UrlItem rows copy/open).
@@ -1384,6 +1460,13 @@ impl App {
             }
             ContextMenuClick::Action(action) => {
                 ws.context_menu = None;
+                // A tab's menu acts on that tab, not the active one.
+                if let Some(tab) = ws.context_menu_session.tab.take()
+                    && let Some(dispatch) = tab_menu_dispatch(&action)
+                {
+                    self.act_on_menu_tab(ws, &tab, dispatch, event_loop);
+                    return;
+                }
                 // From the terminal menu, Select Command Output selects the
                 // output under the right-click, captured when the menu opened.
                 match (action, ws.context_menu_output_row.take()) {
@@ -2206,6 +2289,64 @@ pub(super) fn link_menu_rows(
     rows.push(row(T::MenuCopyLink, UrlHow::Copy));
     rows.push(ContextMenuItem::Separator);
     rows
+}
+
+/// The rows of a tab's menu, for a window of `tabs` tabs. Close Other Tabs
+/// is not offered: no action closes the other tabs yet.
+pub(super) fn tab_menu_items(tabs: usize, tr: kettle_i18n::Translator) -> Vec<ContextMenuItem> {
+    use kettle_i18n::Text as T;
+    let row = |label, action, enabled| ContextMenuItem::Item {
+        label: tr.text(label),
+        action,
+        enabled,
+    };
+    let moves = tabs > 1;
+    filter_disabled(vec![
+        row(T::MenuRenameTab, Action::EditTabTitle, true),
+        row(T::MenuDuplicateTab, Action::DuplicateTab, true),
+        ContextMenuItem::Separator,
+        row(T::MenuMoveTabLeft, Action::MoveTabLeft, moves),
+        row(T::MenuMoveTabRight, Action::MoveTabRight, moves),
+        ContextMenuItem::Separator,
+        row(T::MenuCloseTab, Action::CloseTab, true),
+    ])
+}
+
+/// The tab whose segment of `bar` holds the point `(x, y)`, for a right-click
+/// that opens that tab's menu.
+pub(super) fn tab_menu_segment(bar: &TabBar, x: f32, y: f32) -> Option<usize> {
+    if !tab_bar_pointer_region_contains(bar, x, y) {
+        return None;
+    }
+    bar.segments
+        .iter()
+        .find(|segment| rect_contains(segment.rect, x, y))
+        .map(|segment| segment.idx)
+}
+
+/// How a tab menu's row reaches its tab.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum TabMenuDispatch {
+    /// Close it, asking first as its ✕ does.
+    Close,
+    /// Move it this many places along the bar.
+    Move(i32),
+    /// Make it the active tab, then run the action.
+    Activate(Action),
+}
+
+/// How a tab's menu runs `action` on its tab; `None` for an action that is
+/// not one of its rows.
+pub(super) fn tab_menu_dispatch(action: &Action) -> Option<TabMenuDispatch> {
+    match action {
+        Action::CloseTab => Some(TabMenuDispatch::Close),
+        Action::MoveTabLeft => Some(TabMenuDispatch::Move(-1)),
+        Action::MoveTabRight => Some(TabMenuDispatch::Move(1)),
+        Action::EditTabTitle | Action::DuplicateTab => {
+            Some(TabMenuDispatch::Activate(action.clone()))
+        }
+        _ => None,
+    }
 }
 
 /// What a link row of the context menu does with its address.
