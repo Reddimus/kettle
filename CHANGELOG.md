@@ -1101,6 +1101,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Screen readers treat the command palette, the pickers, Settings and title
   editing as modal dialogs, as they already treated confirmations.
 
+- On Linux, screen readers report each Settings switch as checked or not
+  checked.
+
 - `tab-min-width` is measured in logical pixels, as documented. On a display
   with a scale above 100% tabs could shrink to a fraction of the width set
   (half on a Retina display) before the tab bar started to scroll.

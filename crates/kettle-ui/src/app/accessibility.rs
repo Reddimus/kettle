@@ -970,6 +970,10 @@ impl App {
                 row.disabled.hash(&mut hasher);
                 row.reset.hash(&mut hasher);
                 row.unavailable.hash(&mut hasher);
+                // A switch's checked state, which an unavailable switch's
+                // value does not show.
+                matches!(row.control, kettle_render::SettingsControl::Toggle(true))
+                    .hash(&mut hasher);
             }
         }
         if let Some(menu) = &ws.context_menu {
@@ -3441,8 +3445,8 @@ pub(super) fn modal_accessibility_projection(
     projection
 }
 
-/// How a Settings row's value reaches each platform's screen reader, for
-/// `settings_row_node`.
+/// How a Settings row's value and a switch's state reach each platform's
+/// screen reader, for `settings_row_node`.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct SettingsRowSpeech {
     /// macOS maps list options to static text and uses the label as AXValue,
@@ -3453,17 +3457,25 @@ pub(super) struct SettingsRowSpeech {
     /// read the row's name alone; there the value also leads the description,
     /// which Orca speaks after the name. Windows reads the value itself.
     pub(super) value_in_description: bool,
+    /// A switch's state is the option's checked state, which AT-SPI reports
+    /// as checkable and checked. The locked macOS adapter would put that
+    /// state in the option's AXValue, where its name is, and leave it
+    /// unnamed, so VoiceOver keeps hearing the state as the value in the
+    /// name.
+    pub(super) checked: bool,
 }
 
 /// This platform's [`SettingsRowSpeech`].
 pub(super) const SETTINGS_ROW_SPEECH: SettingsRowSpeech = SettingsRowSpeech {
     value_in_name: cfg!(target_os = "macos"),
     value_in_description: cfg!(all(unix, not(target_os = "macos"))),
+    checked: !cfg!(target_os = "macos"),
 };
 
 /// A Settings row as a list option before its bounds, actions and selection:
 /// named for its label, with its value (a choice's current choice, a
-/// switch's On or Off) and description as `speech` says.
+/// switch's On or Off) and description as `speech` says, and a switch's
+/// state as its checked state where `speech` allows.
 pub(super) fn settings_row_node(
     row: &kettle_render::SettingsRow,
     speech: SettingsRowSpeech,
@@ -3483,6 +3495,11 @@ pub(super) fn settings_row_node(
         });
     } else if !row.description.is_empty() {
         node.set_description(row.description.clone());
+    }
+    if speech.checked
+        && let kettle_render::SettingsControl::Toggle(on) = row.control
+    {
+        node.set_toggled(accesskit::Toggled::from(on));
     }
     node
 }

@@ -3466,6 +3466,10 @@ it does not establish VoiceOver speech output. Control diagnostics retain the
 field name alone, including on macOS. `settings_row_text_follows_each_platforms_reader`
 builds a row the macOS, AT-SPI and UI Automation ways on any host, so each
 platform's text keeps unit coverage off its own runner.
+`settings_switches_expose_their_checked_state` gives a switch row its checked
+state wherever the speech choice allows it (every platform but macOS) and no
+other row one, keeps each row's value, and checks that the accessibility key
+follows a switch's state.
 
 ## Static text names on every platform
 

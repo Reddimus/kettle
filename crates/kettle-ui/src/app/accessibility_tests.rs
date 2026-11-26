@@ -2912,9 +2912,9 @@ fn settings_row_text_follows_each_platforms_reader() {
         control: kettle_render::SettingsControl::Choice,
         ..Default::default()
     };
-    let mac = SettingsRowSpeech { value_in_name: true, value_in_description: false };
-    let atspi = SettingsRowSpeech { value_in_name: false, value_in_description: true };
-    let uia = SettingsRowSpeech { value_in_name: false, value_in_description: false };
+    let mac = SettingsRowSpeech { value_in_name: true, value_in_description: false, checked: false };
+    let atspi = SettingsRowSpeech { value_in_name: false, value_in_description: true, checked: true };
+    let uia = SettingsRowSpeech { value_in_name: false, value_in_description: false, checked: true };
     for (speech, name, description) in [
         (mac, "Cursor shape, Block", "Choose the terminal cursor shape."),
         (atspi, "Cursor shape", "Block. Choose the terminal cursor shape."),
@@ -2931,4 +2931,87 @@ fn settings_row_text_follows_each_platforms_reader() {
         SETTINGS_ROW_SPEECH.value_in_description,
         cfg!(all(unix, not(target_os = "macos")))
     );
+}
+
+/// A Settings switch exposes whether it is on as its checked state where the
+/// platform's adapter can carry it (AT-SPI: checkable and checked), and every
+/// other row has none. On macOS, where the locked adapter would replace the
+/// option's name with the state, the name keeps saying On or Off instead.
+/// The host's own rows follow its platform's choice.
+#[test]
+fn settings_switches_expose_their_checked_state() {
+    use super::accessibility::{SETTINGS_ROW_SPEECH, SettingsRowSpeech, settings_row_node};
+    use accesskit::Toggled;
+    use kettle_render::SettingsControl;
+    let rows = [
+        ("Window blur", "On", SettingsControl::Toggle(true), Some(Toggled::True)),
+        ("Show pane titlebars", "Off", SettingsControl::Toggle(false), Some(Toggled::False)),
+        ("Cursor shape", "Block", SettingsControl::Choice, None),
+        ("Font size", "14 px", SettingsControl::Value, None),
+        ("Background image", "", SettingsControl::Text, None),
+    ]
+    .map(|(label, value, control, checked)| {
+        (
+            kettle_render::SettingsRow {
+                label: label.into(),
+                value: value.into(),
+                control,
+                ..Default::default()
+            },
+            checked,
+        )
+    });
+    for value_in_name in [false, true] {
+        for value_in_description in [false, true] {
+            for checked in [false, true] {
+                let speech = SettingsRowSpeech { value_in_name, value_in_description, checked };
+                for (row, state) in &rows {
+                    let node = settings_row_node(row, speech);
+                    assert_eq!(node.toggled(), state.filter(|_| checked), "{} {speech:?}", row.label);
+                    // The choice, the size or the switch's word stays the value.
+                    assert_eq!(node.value(), Some(row.value.as_str()), "{} {speech:?}", row.label);
+                    if value_in_name && !row.value.is_empty() {
+                        assert_eq!(node.label(), Some(format!("{}, {}", row.label, row.value).as_str()));
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(SETTINGS_ROW_SPEECH.checked, !cfg!(target_os = "macos"));
+    // The host's projection: one switch on, one off, as its reader gets them.
+    let overlay = kettle_render::Overlay {
+        settings: Some(kettle_render::SettingsOverlay {
+            categories: vec!["Appearance".into()],
+            rows: rows.iter().map(|(row, _)| row.clone()).collect(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let projection =
+        super::modal_accessibility_projection(&overlay, (1280.0, 820.0), (8.4, 17.5), 1.0, &EN_TEXT);
+    for (index, (row, state)) in rows.iter().enumerate() {
+        let node = &projection
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == super::accessibility_modal_id(5, index + 2))
+            .unwrap()
+            .1;
+        assert_eq!(
+            node.toggled(),
+            state.filter(|_| SETTINGS_ROW_SPEECH.checked),
+            "{}",
+            row.label
+        );
+    }
+    // A switch that flips republishes the tree even where its value (an
+    // unavailable switch's) does not change.
+    let key = production_source()
+        .split_once("fn accessibility_key(&self, ws: &WindowState, overlay: &Overlay) -> u64")
+        .unwrap()
+        .1
+        .split("fn publish_accessibility_if_due")
+        .next()
+        .unwrap()
+        .to_string();
+    assert!(key.contains("matches!(row.control, kettle_render::SettingsControl::Toggle(true))"));
 }
