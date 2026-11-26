@@ -36,11 +36,8 @@ pub(super) fn settings_footer_note(
             notes.push(tr.text(Text::SettingsNoteBlur));
         }
         Some("completion-overlay") => notes.push(tr.text(Text::SettingsNoteNewShells)),
-        // A new window keeps the process's language, unlike the changes the
-        // general restart note covers.
-        Some("language") if !language_pending => {
-            notes.push(tr.text(Text::SettingsNoteLanguage));
-        }
+        // The Language row's description already says a change waits for a
+        // restart; the footer says so only once one is waiting.
         _ => {}
     }
     if language_pending {

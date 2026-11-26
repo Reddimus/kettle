@@ -761,7 +761,6 @@ settings_note_codex_new_panes = "Applies to zsh and fish started in a new pane; 
 settings_note_codex_translocated = "Move Kettle to Applications to use this. It is running from a temporary copy."
 settings_note_codex_unavailable = "Kettle could not prepare its Codex startup files. Details are in the log."
 settings_note_codex_unsupported = "Not available on this system yet."
-settings_note_language = "Applies when Kettle restarts."
 settings_note_language_pending = "Restart Kettle to change the language."
 settings_note_new_shells = "Applies to new shells."
 settings_note_graphics_restart = "Restart Kettle to apply graphics changes."

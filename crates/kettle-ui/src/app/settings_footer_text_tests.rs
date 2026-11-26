@@ -725,23 +725,29 @@ fn the_settings_hints_fit_a_default_window_in_every_language() {
     }
 }
 
-/// The Language row says a change waits for a restart; once the saved
-/// language differs from the running one, every row says so, ahead of the
-/// general restart note, which a new window would satisfy.
+/// The Language row's description says a change waits for a restart, so
+/// its footer repeats nothing while the choice is the running language.
+/// Once the saved language differs from the running one, every row says
+/// so, ahead of the general restart note, which a new window would satisfy.
 #[test]
 fn a_language_change_waits_for_a_restart() {
-    assert_eq!(
-        settings_footer_note(
-            &EN,
-            None,
-            Some("language"),
-            false,
-            SettingsApply::None,
-            false,
+    for tr in [EN, ES] {
+        assert_eq!(
+            settings_footer_note(
+                &tr,
+                None,
+                Some("language"),
+                false,
+                SettingsApply::None,
+                false,
+                None
+            ),
             None
-        )
-        .as_deref(),
-        Some("Applies when Kettle restarts.")
+        );
+    }
+    assert!(
+        EN.text(kettle_i18n::Text::SettingsDescriptionFieldLanguage)
+            .contains("restarting Kettle")
     );
     assert_eq!(
         settings_footer_note(
