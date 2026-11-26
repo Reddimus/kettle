@@ -73,33 +73,36 @@ pub(super) fn config_notice_message(
     Some(tr.config_notice(&lines.join("\n")))
 }
 
-/// The toast button at `(x, y)` on `geometry`, numbered as a toast's
-/// `focused` is: 1 its details action (Show, Open config), 2 its close.
+/// The part of a toast at `(x, y)` on `geometry` that a click acts on,
+/// numbered as a toast's `focused` is: 1 its details action (Show, Open
+/// config), 2 its close, and 0 its body when `body_acts`, as a notification
+/// toast's does.
 pub(super) fn toast_button_at(
     geometry: &kettle_render::UpdateToastGeometry,
-    x: f32,
-    y: f32,
+    (x, y): (f32, f32),
+    body_acts: bool,
 ) -> Option<usize> {
     match geometry.hit_test(x, y)? {
         kettle_render::UpdateToastHit::Details => Some(1),
         kettle_render::UpdateToastHit::Close => Some(2),
-        kettle_render::UpdateToastHit::Body => None,
+        kettle_render::UpdateToastHit::Body => body_acts.then_some(0),
     }
 }
 
 impl App {
-    /// The button of the toast laid out at `geometry` under the real
-    /// pointer, which lights; none under a dialog or menu.
+    /// The part of the toast laid out at `geometry` under the real pointer
+    /// that a click acts on, which lights; none under a dialog or menu.
     pub(super) fn toast_control_hover(
         &self,
         ws: &WindowState,
         geometry: &kettle_render::UpdateToastGeometry,
+        body_acts: bool,
     ) -> Option<usize> {
         if self.non_search_modal_open(ws) {
             return None;
         }
         let pointer = ws.native_pointer?;
-        toast_button_at(geometry, pointer.x as f32, pointer.y as f32)
+        toast_button_at(geometry, (pointer.x as f32, pointer.y as f32), body_acts)
     }
 
     /// Repaint as the pointer moves onto or off a toast's or notice's
@@ -115,6 +118,7 @@ impl App {
             )
             .chain(self.update_toast_projection(ws))
             .find_map(|toast| match toast.hovered {
+                Some(0) => Some(toast.geometry.rect),
                 Some(1) => Some(toast.geometry.details),
                 Some(2) => Some(toast.geometry.close),
                 _ => None,
@@ -227,7 +231,7 @@ impl App {
                         close,
                         opacity: 1.0,
                         focused: None,
-                        hovered: self.toast_control_hover(ws, &geometry),
+                        hovered: self.toast_control_hover(ws, &geometry, false),
                     },
                 ));
             }
@@ -267,7 +271,7 @@ impl App {
                         close,
                         opacity: 1.0,
                         focused: None,
-                        hovered: self.toast_control_hover(ws, &geometry),
+                        hovered: self.toast_control_hover(ws, &geometry, false),
                     },
                 ));
             }

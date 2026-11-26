@@ -1735,14 +1735,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - The tab strip's overflow arrows light up and show the pointing hand under
   the pointer, and their tooltips say what a press does.
 - A tab whose title is too long to show whole now shows the full title in a
-  tooltip when the pointer rests on it.
+  tooltip when the pointer rests on it. A tooltip too long for the window
+  ends with an ellipsis rather than covering the tab or running off the
+  window.
 - The media viewer's and preview lane's header buttons light up under the
   pointer and take a press anywhere in a 24 by 24 point target, up from 25
-  by 17.5 pixels; the header row is a little taller to make room.
+  by 17.5 pixels. The header row grows only where the viewer has room; a
+  viewer or lane that fitted before still fits. A collapsed lane's strip is
+  tall enough for those targets where the terminal keeps its 5 rows, and a
+  short lane's buttons no longer overlap the edge that resizes it.
 - Those buttons have tooltips naming what they do and the key that does the
   same.
-- A toast's Show and × buttons, and the bad-config notice's Open Config and
-  Dismiss, light up under the pointer.
+- A toast's Show and × buttons and its body, which a click answers as Show
+  does, and the bad-config notice's Open Config and Dismiss, light up under
+  the pointer.
 - A tab dragged onto a tab-strip overflow arrow and held there scrolls the
   strip, so it can be moved past the tabs shown.
 

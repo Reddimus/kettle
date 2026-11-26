@@ -293,7 +293,9 @@ accessibility. Rebinding confirmations use friendly action names and never
 include the payload of a SendText action.
 
 Video viewer geometry also reports `transport`, `timeline`, and `time_label`
-rectangles, plus `hovered_control` and `scrubbing`. `timeline` describes the
+rectangles, plus `hovered_control` and `scrubbing`. A lane's `hovered_control`
+names the button the physical pointer lights, a header button or a player's,
+and is null when none is lit. `timeline` describes the
 painted row; `time_label` includes the initial duration before playback, and
 `controls.scrubber` is present once seeking is available. All rectangles are
 physical pixels and use the same display scale as pointer and accessibility

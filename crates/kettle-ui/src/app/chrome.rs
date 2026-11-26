@@ -157,8 +157,9 @@ impl App {
     pub(super) fn sync_tooltip(&self, ws: &mut WindowState, bar: &TabBar) {
         let target = strip_tooltip_target(ws, bar, &self.strip_tooltip_context(ws, bar))
             .or_else(|| self.lane_control_tooltip(ws))
-            .map(|tip| tip.target);
-        if ws.tooltip.hover(target, std::time::Instant::now())
+            .map(|tip| (tip.target, tip.rect));
+        let pointer = ws.native_pointer.map(|p| (p.x as f32, p.y as f32));
+        if ws.tooltip.hover(target, pointer, std::time::Instant::now())
             && let Some(window) = &ws.window
         {
             window.request_redraw();
@@ -1231,6 +1232,9 @@ pub(super) struct ChromeTooltip {
     pub(super) target: crate::tooltip::TooltipTarget,
     pub(super) text: String,
     pub(super) anchor: Option<kettle_render::Rect4>,
+    /// Where the control is: a press hides its tooltip until the pointer
+    /// leaves this.
+    pub(super) rect: kettle_render::Rect4,
 }
 
 /// What a strip tooltip needs besides the window's own state.
@@ -1269,23 +1273,26 @@ pub(super) fn strip_tooltip_target(
     {
         return None;
     }
-    let strip = |target, text| {
+    let strip = |target, text, rect| {
         Some(ChromeTooltip {
             target,
             text,
             anchor: None,
+            rect,
         })
     };
     if let Some(button) = hovered_window_control_button(&bar.window_controls) {
         return strip(
             TooltipTarget::WindowControl(button.action),
             button.label.clone(),
+            button.rect,
         );
     }
     if ws.hovered_new_tab_menu && ws.linux_titlebar {
         return strip(
             TooltipTarget::NewTabMenu,
             tr.text(kettle_i18n::Text::A11yMainMenu).into(),
+            bar.new_tab_menu,
         );
     }
     if let Some(tip) = scroll_arrow_tooltip(ws, bar, bindings, tr) {
@@ -1305,13 +1312,13 @@ pub(super) fn strip_tooltip_target(
     };
     let shortcut = chrome_button_shortcut(bindings, target);
     let text = new_tab_tooltip(Some(target), tr, shortcut.as_deref())?;
-    let target = match target {
-        NewTabHoverTarget::Menu => TooltipTarget::NewTabMenu,
-        NewTabHoverTarget::Plus => TooltipTarget::NewTab,
-        NewTabHoverTarget::Settings => TooltipTarget::Settings,
-        NewTabHoverTarget::Search => TooltipTarget::Search,
+    let (target, rect) = match target {
+        NewTabHoverTarget::Menu => (TooltipTarget::NewTabMenu, bar.new_tab_menu),
+        NewTabHoverTarget::Plus => (TooltipTarget::NewTab, bar.new_tab),
+        NewTabHoverTarget::Settings => (TooltipTarget::Settings, bar.settings),
+        NewTabHoverTarget::Search => (TooltipTarget::Search, bar.search),
     };
-    strip(target, text)
+    strip(target, text, rect)
 }
 
 /// The tab under the pointer, off its close button, when the strip shows
@@ -1341,6 +1348,7 @@ fn cut_tab_title_tooltip(
         target: crate::tooltip::TooltipTarget::TabTitle(seg.idx),
         text: seg.path.as_deref().unwrap_or(&seg.title).to_owned(),
         anchor: Some(seg.rect),
+        rect: seg.rect,
     })
 }
 
@@ -1381,6 +1389,7 @@ fn scroll_arrow_tooltip(
         },
         text: shortcut.map_or_else(|| label.to_owned(), |key| format!("{label}  {key}")),
         anchor: Some(rect),
+        rect,
     })
 }
 

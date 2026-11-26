@@ -2094,17 +2094,19 @@ impl App {
                 .is_some_and(|playback| playback.serves(item.id, item.generation))
         });
         match action {
-            K::Exit if ws.preview_overlay.is_some_and(|open| open.fullscreen) => {
-                if let Some(open) = &mut ws.preview_overlay {
-                    open.fullscreen = false;
+            K::Exit => match preview_exit(LaneKeys::of(ws.preview_overlay)) {
+                PreviewExit::LeaveFullscreen => {
+                    if let Some(open) = &mut ws.preview_overlay {
+                        open.fullscreen = false;
+                    }
+                    if let Some(window) = &ws.window {
+                        window.set_fullscreen(None);
+                    }
+                    self.lanes_changed(ws, false);
                 }
-                if let Some(window) = &ws.window {
-                    window.set_fullscreen(None);
-                }
-                self.lanes_changed(ws, false);
-            }
-            K::Exit if ws.preview_overlay.is_some() => self.close_preview(ws, pane),
-            K::Exit => self.exit_preview_focus(ws),
+                PreviewExit::CloseViewer => self.close_preview(ws, pane),
+                PreviewExit::ReturnKeyboard => self.exit_preview_focus(ws),
+            },
             K::Move(right, 0) if playing && !source => {
                 let step = LANE_SEEK_STEP.as_millis() as u64;
                 if let Some(playback) = ws.lane_playbacks.get_mut(&pane) {
@@ -2993,21 +2995,12 @@ impl App {
                     .lane_drag
                     .is_some_and(|drag| drag.pane == pane && drag.scrub)
                     .into();
-                lane["hovered_control"] = ws
-                    .native_pointer
-                    .filter(|_| !self.non_search_modal_open(ws))
-                    .and_then(|p| geometry.hit_test(p.x as f32, p.y as f32))
-                    .filter(|hit| {
-                        matches!(
-                            hit,
-                            kettle_render::MediaLaneHit::Play
-                                | kettle_render::MediaLaneHit::Sound
-                                | kettle_render::MediaLaneHit::Scrub
-                                | kettle_render::MediaLaneHit::Theater
-                                | kettle_render::MediaLaneHit::Fullscreen
-                        )
-                    })
-                    .map(lane_control_name)
+                // The control the pointer lights: a header button or a
+                // player's, as the frame draws it.
+                lane["hovered_control"] = self
+                    .hovered_lane_control(ws)
+                    .filter(|&(hovered, _)| hovered == pane)
+                    .map(|(_, hit)| lane_control_name(hit))
                     .into();
                 lane["keyboard"] = if ws.preview_focus.is_some_and(|focus| focus.pane == pane) {
                     "preview"
@@ -3254,11 +3247,8 @@ impl App {
         }
         let (lane, button, hit) = self.hovered_lane_button(ws)?;
         let label = self.lane_control_label(ws, &lane, hit)?;
-        let viewer = ws
-            .preview_overlay
-            .is_some_and(|open| open.pane == lane.pane);
         let shortcut = if self.preview_holds_keyboard(ws, lane.pane) {
-            lane_control_key(hit, viewer).map(|key| {
+            lane_control_key(hit, LaneKeys::of(ws.preview_overlay)).map(|key| {
                 kettle_config::Trigger::new(kettle_config::Mods::empty(), key)
                     .ui_label(cfg!(target_os = "macos"))
             })
@@ -3274,6 +3264,7 @@ impl App {
             target: crate::tooltip::TooltipTarget::Media(lane.pane, hit),
             text: shortcut.map_or_else(|| label.to_owned(), |key| format!("{label}  {key}")),
             anchor: button,
+            rect: button.unwrap_or(lane.rect),
         })
     }
 

@@ -406,7 +406,7 @@ pub use media_lane::{
     MediaCanvas, MediaLaneEdge, MediaLaneFrame, MediaLaneGeometry, MediaLaneHit, MediaLaneMode,
     MediaLanePanel, MediaLanePlay, MediaLaneScrubber, MediaLaneSender, MediaLaneSound,
     MediaLaneSource, MediaLaneTile, media_lane_control_enabled, media_lane_geometry,
-    media_lane_geometry_scaled,
+    media_lane_geometry_scaled, media_lane_header_room,
 };
 
 pub use media_viewport::{MAX_MEDIA_ZOOM, MEDIA_ZOOM_STEP, MIN_MEDIA_ZOOM, MediaViewport};
@@ -712,6 +712,8 @@ pub struct Renderer {
     new_tab_arrow_buffer: TextBuffer,
     tab_tooltip_buffer: TextBuffer,
     tab_tooltip_text: String,
+    /// The line cap, wrap width and text size the tooltip was shaped for.
+    tab_tooltip_fit: (usize, u32, u32),
     /// The Settings gear's coverage at its last side length, so a frame
     /// reuses it instead of rasterizing the gear again.
     settings_gear_mask: tab_strip::GearMask,
@@ -1063,6 +1065,7 @@ impl Renderer {
                 invalidate_pane_titlebar_texts(&mut self.pane_titlebar_texts);
                 self.tab_texts.clear();
                 self.tab_tooltip_text.clear();
+                self.tab_tooltip_fit = (0, 0, 0);
                 self.tab_close_text.clear();
                 self.tabbar_text.clear();
                 self.new_tab_arrow_text.clear();
@@ -3185,17 +3188,29 @@ impl Renderer {
         }
 
         let tab_tooltip = tabbar.tooltip.as_ref().map(|text| {
+            let anchor = tab_strip::tooltip_anchor(tabbar);
+            // As many lines as fit beside the control it names; a longer
+            // text ends in an ellipsis.
+            let max_lines = tab_strip::tooltip_max_lines(anchor, (sw, sh), tab_ch, self.scale);
+            let wrap_width = (sw - 16.0 * self.scale).max(1.0);
             self.tab_tooltip_buffer.set_metrics(tab_metrics);
-            self.tab_tooltip_buffer
-                .set_size(Some((sw - 16.0 * self.scale).max(1.0)), None);
-            if self.tab_tooltip_text != *text {
-                fonts::set_chrome_text(
+            self.tab_tooltip_buffer.set_size(Some(wrap_width), None);
+            let fit = (
+                max_lines,
+                wrap_width.to_bits(),
+                tab_metrics.font_size.to_bits(),
+            );
+            if self.tab_tooltip_text != *text || self.tab_tooltip_fit != fit {
+                tab_strip::shape_tooltip(
+                    &mut self.font_system,
                     &mut self.tab_tooltip_buffer,
                     text,
                     &Attrs::new().family(Family::Name(&family)),
                     self.emoji_family,
+                    max_lines,
                 );
                 self.tab_tooltip_text.clone_from(text);
+                self.tab_tooltip_fit = fit;
             }
             self.tab_tooltip_buffer
                 .shape_until_scroll(&mut self.font_system, false);
@@ -3205,12 +3220,7 @@ impl Renderer {
                 .map(|r| r.line_w)
                 .fold(0.0, f32::max);
             let lines = self.tab_tooltip_buffer.layout_runs().count().max(1) as f32;
-            tab_strip::tooltip_rect(
-                tab_strip::tooltip_anchor(tabbar),
-                (sw, sh),
-                (width, tab_ch * lines),
-                self.scale,
-            )
+            tab_strip::tooltip_rect(anchor, (sw, sh), (width, tab_ch * lines), self.scale)
         });
         let toast_count = usize::from(overlay.update_toast.is_some()) + overlay.notices.len();
         while self.update_toast_buffers.len() < toast_count * 3 {
@@ -4370,7 +4380,7 @@ impl Renderer {
                 } else {
                     palette.divider
                 };
-                let (x, y, w, h) = media_lane::control_chip(button, self.metrics.line_height);
+                let (x, y, w, h) = geometry.chip(button);
                 lane_q.push(rect(x, y, w, h, fill, 1.0));
             }
             if let Some((fx, fy, fw, fh)) = lane.focused_control {
@@ -5991,6 +6001,7 @@ impl Renderer {
             self.tab_close_text.hash(&mut h);
             self.new_tab_arrow_text.hash(&mut h);
             tabbar.tooltip.hash(&mut h);
+            self.tab_tooltip_fit.hash(&mut h);
             self.scroll_left_text.hash(&mut h);
             self.scroll_right_text.hash(&mut h);
             self.resize_overlay_text.hash(&mut h);

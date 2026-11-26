@@ -155,7 +155,17 @@ impl App {
     ) -> Option<std::time::Instant> {
         let dragging = ws.tab_drag_active && ws.tab_drag_press.is_none();
         let over = ws.hovered_scroll_arrow.filter(|_| dragging);
-        let (step, rest) = tab_drag_arrow_step(ws.tab_drag_arrow, over, now);
+        // The dragged tab is the active one: at either end it can go no
+        // further that way, and the drag waits on nothing there.
+        let (active, tabs) = (ws.mux.active, ws.mux.tabs.len());
+        let can_step = |forward: bool| {
+            if forward {
+                active + 1 < tabs
+            } else {
+                active > 0
+            }
+        };
+        let (step, rest) = tab_drag_arrow_step(ws.tab_drag_arrow, over, can_step, now);
         ws.tab_drag_arrow = rest;
         if let Some(forward) = step
             && ws.mux.move_active_tab(if forward { 1 } else { -1 })
@@ -2376,16 +2386,21 @@ pub(super) const TAB_DRAG_SCROLL_DWELL: std::time::Duration = std::time::Duratio
 
 /// A tab drag and the overflow arrows at `now`: `rest` is the arrow the drag
 /// rests on (`true` forward) and since when, `over` the arrow under the
-/// pointer while a drag is live. Returns the way to scroll now, if the rest
-/// has lasted [`TAB_DRAG_SCROLL_DWELL`], and the rest to keep: a step starts
-/// the next one, and moving to the other arrow or off them starts over.
+/// pointer while a drag is live, and `can_step` whether the dragged tab can
+/// move a place that way. Returns the way to scroll now, if the rest has
+/// lasted [`TAB_DRAG_SCROLL_DWELL`], and the rest to keep: a step starts the
+/// next one, and moving to the other arrow or off them starts over. Where
+/// the tab can go no further there is no rest and nothing to wake for; the
+/// rest starts again once a move or a new tab lets it.
 pub(super) fn tab_drag_arrow_step(
     rest: Option<(bool, std::time::Instant)>,
     over: Option<bool>,
+    can_step: impl Fn(bool) -> bool,
     now: std::time::Instant,
 ) -> (Option<bool>, Option<(bool, std::time::Instant)>) {
     match (rest, over) {
         (_, None) => (None, None),
+        (_, Some(arrow)) if !can_step(arrow) => (None, None),
         (Some((forward, since)), Some(arrow)) if forward == arrow => {
             if now.saturating_duration_since(since) >= TAB_DRAG_SCROLL_DWELL {
                 (Some(forward), Some((forward, now)))

@@ -300,6 +300,11 @@ impl MediaLaneSender {
 /// Exact paint and input geometry of a lane.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MediaLaneGeometry {
+    /// The lines the header's and the detail line's text and button chips
+    /// are drawn on, as top and height: a line of text high, inside the
+    /// buttons' taller pointer targets. The detail line's is empty without
+    /// page buttons.
+    pub chip_lines: [(f32, f32); 2],
     pub pinning: bool,
     /// The lane.
     pub rect: Rect4,
@@ -542,16 +547,50 @@ impl MediaLaneGeometry {
     }
 }
 
-/// The chip drawn behind a lane button's glyph: a line of text high, centred
-/// in the button, whose pointer target may be taller.
-pub(crate) fn control_chip(button: Rect4, line_height: f32) -> Rect4 {
-    let height = line_height.min(button.3).max(0.0);
-    (
-        button.0,
-        button.1 + (button.3 - height) / 2.0,
-        button.2,
-        height,
-    )
+impl MediaLaneGeometry {
+    /// The chip drawn behind `button`'s glyph: the line its row's text is
+    /// drawn on (the one through the button's middle), across the button,
+    /// which as a pointer target may reach above and below it.
+    pub(crate) fn chip(&self, button: Rect4) -> Rect4 {
+        self.chip_lines
+            .into_iter()
+            .find(|&(top, height)| {
+                let middle = top + height / 2.0;
+                height > 0.0 && middle >= button.1 && middle <= button.1 + button.3
+            })
+            .map_or_else(
+                || {
+                    let height = self.chip_lines[0].1.min(button.3).max(0.0);
+                    (
+                        button.0,
+                        button.1 + (button.3 - height) / 2.0,
+                        button.2,
+                        height,
+                    )
+                },
+                |(top, height)| (button.0, top, button.2, height),
+            )
+    }
+}
+
+/// The least height a lane needs for header buttons a full pointer target
+/// tall, from the overlay text's cell and the display scale: a strip's, and
+/// an expanded lane's, whose buttons stay clear of the edge it resizes by.
+pub fn media_lane_header_room(text_cell: (f32, f32), scale: f32) -> (f32, f32) {
+    let row = (MIN_CONTROL_TARGET * scale).max(text_cell.1);
+    (row, row + lane_pad(text_cell.0))
+}
+
+/// A row a line of text high, grown toward `target` by what is `spare`.
+fn grow_row(spare: &mut f32, line: f32, target: f32) -> f32 {
+    let by = (target - line).max(0.0).min(*spare);
+    *spare -= by;
+    line + by
+}
+
+/// The padding inside a lane's edge, from the overlay text's column width.
+fn lane_pad(text_column: f32) -> f32 {
+    (text_column * 0.75).round().max(4.0)
 }
 
 /// Whether `hit` does anything on `lane` now: browsing past either end of
@@ -619,43 +658,85 @@ pub fn media_lane_geometry_scaled(
         return None;
     }
     let rect = lane.rect;
-    let pad = (tw * 0.75).round().max(4.0);
-    // Every button is a pointer target at least MIN_CONTROL_TARGET square
-    // (WCAG 2.5.8). A row of them is that tall even when a line of text is
-    // shorter; the text and the chips drawn behind the glyphs stay a line
-    // high, centred in it.
+    let pad = lane_pad(tw);
     let min_target = MIN_CONTROL_TARGET * scale;
-    let button = (3.0 * tw).max(min_target);
-    let toggle_width = lane.pin_label.as_ref().map_or(button, |label| {
-        ((crate::display_width(label).min(16) as f32 + 2.0).max(3.0) * tw).max(min_target)
+    // A lane needs the room it always has: buttons three columns wide and
+    // rows a line of text high. Where it has more, its buttons become full
+    // pointer targets, MIN_CONTROL_TARGET square (WCAG 2.5.8), so a lane or
+    // viewer that fitted before still does.
+    let narrow_toggle = lane.pin_label.as_ref().map_or(3.0 * tw, |label| {
+        (crate::display_width(label).min(16) as f32 + 2.0).max(3.0) * tw
     });
-    if rect.2 < button + toggle_width + MIN_TITLE_COLUMNS * tw + 2.0 * pad || rect.3 < lh {
+    let header_width =
+        |button: f32, toggle: f32| button + toggle + MIN_TITLE_COLUMNS * tw + 2.0 * pad;
+    if rect.2 < header_width(3.0 * tw, narrow_toggle) || rect.3 < lh {
         return None;
     }
-    let row = lh.max(min_target);
+    let (button, toggle_width) = {
+        let wide = ((3.0 * tw).max(min_target), narrow_toggle.max(min_target));
+        if rect.2 >= header_width(wide.0, wide.1) {
+            wide
+        } else {
+            (3.0 * tw, narrow_toggle)
+        }
+    };
     // Header, detail, sender, a line of image and the hint, with padding
     // above, between the header block and the image, and below.
-    let full = !lane.collapsed && rect.3 >= 4.0 * lh + row + 4.0 * pad;
+    let least = 5.0 * lh + 4.0 * pad;
+    let full = !lane.collapsed && rect.3 >= least;
     let left = rect.0 + pad;
     let right = rect.0 + rect.2 - pad;
-    // A header alone is centred down its strip, as tall as the strip lets
-    // its row be, clear of the padding a drag along the top edge resizes by.
-    let row = if full {
-        row
+    // Height past the least goes to the header's row, then to a gallery's
+    // detail line, up to a full target each.
+    let mut spare = if full { rect.3 - least } else { 0.0 };
+    let page = lane.page.filter(|&(_, count)| count > 1);
+    let page_counter_width =
+        page.map(|page| (media_lane_counter(page).chars().count() as f32 + 1.0) * tw);
+    // A gallery's page before, its counter and the page after end the detail
+    // line, when the detail keeps its few columns beside them.
+    let page_start = page_counter_width
+        .map(|counter| right - 2.0 * button - counter)
+        .filter(|start| full && start - pad - left >= MIN_TITLE_COLUMNS * tw);
+    // The padding along the top edge is what a drag resizes the lane by:
+    // no button reaches into it.
+    let top_band = if lane.edge == Some(MediaLaneEdge::Top) {
+        pad
     } else {
-        let room = if lane.edge == Some(MediaLaneEdge::Top) {
-            rect.3 - 2.0 * pad
-        } else {
-            rect.3
+        0.0
+    };
+    // The header row as laid out, the line its text and chips are drawn on,
+    // and how far its buttons reach above and below the row to be full
+    // targets: into the padding above (where no drag resizes the lane), then
+    // into the detail line below, which holds only text.
+    let (header_y, row, text_y, up, down) = if full {
+        let row = grow_row(&mut spare, lh, min_target);
+        let header_y = rect.1 + pad;
+        let short = (min_target - row).max(0.0);
+        let up = if top_band > 0.0 { 0.0 } else { short.min(pad) };
+        let down = (short - up).min(lh);
+        (header_y, row, header_y + (row - lh) / 2.0, up, down)
+    } else {
+        // A header alone is centred down its strip, its buttons as tall as
+        // the strip lets them be below any resize edge, never in it.
+        let top = rect.1 + top_band;
+        let bottom = rect.1 + rect.3;
+        let room = (bottom - top).max(0.0);
+        let text_y = (rect.1 + (rect.3 - lh) / 2.0).floor().max(top.ceil());
+        let row = min_target.max(lh).min(room);
+        let header_y = (text_y + lh / 2.0 - row / 2.0).clamp(top, (bottom - row).max(top));
+        (header_y, row, text_y, 0.0, 0.0)
+    };
+    // Above a gallery's page buttons the header reaches no more than a
+    // pixel into the detail line, so a press on a page button reaches it.
+    let page_columns = page_start.map(|start| (start, right));
+    let down_over_pages = down.min(scale);
+    let button_rect = |x: f32, width: f32| {
+        let down = match page_columns {
+            Some((start, end)) if x < end && x + width > start => down_over_pages,
+            _ => down,
         };
-        row.min(room).max(lh)
+        (x, header_y - up, width, row + up + down)
     };
-    let header_y = if full {
-        rect.1 + pad
-    } else {
-        (rect.1 + (rect.3 - row) / 2.0).floor()
-    };
-    let text_y = header_y + (row - lh) / 2.0;
     // Controls take the header from the right, close first; each one past
     // collapse appears only while the title keeps its few columns, in order
     // of need: a video's play, its sound, reload, the mode, the canvas, browsing,
@@ -666,7 +747,7 @@ pub fn media_lane_geometry_scaled(
     let mut take = |width: f32, always: bool| {
         (always || edge - width >= title_floor).then(|| {
             edge -= width;
-            (edge, header_y, width, row)
+            button_rect(edge, width)
         })
     };
     let close = take(button, true).unwrap_or_default();
@@ -710,8 +791,8 @@ pub fn media_lane_geometry_scaled(
     let (previous, next) = if lane.position.1 > 1 {
         match take(2.0 * button, false) {
             Some(pair) => (
-                Some((pair.0, pair.1, button, row)),
-                Some((pair.0 + button, pair.1, button, row)),
+                Some((pair.0, pair.1, button, pair.3)),
+                Some((pair.0 + button, pair.1, button, pair.3)),
             ),
             None => (None, None),
         }
@@ -742,6 +823,7 @@ pub fn media_lane_geometry_scaled(
     let empty = (left, header_y, 0.0, 0.0);
     if !full {
         return Some(MediaLaneGeometry {
+            chip_lines: [(text_y, lh), (0.0, 0.0)],
             pinning: lane.pin_label.is_some(),
             rect,
             title,
@@ -793,21 +875,22 @@ pub fn media_lane_geometry_scaled(
     let detail_y = header_y + row;
     let mut detail = (left, detail_y, right - left, lh);
     let mut detail_row = lh;
-    // A gallery's page before, its counter and the page after end the detail
-    // line, when the detail keeps its few columns beside them. The line is
-    // then a row of buttons as tall as the header's.
     let (mut page_previous, mut page_counter, mut page_next) = (None, None, None);
-    if let Some(page) = lane.page.filter(|&(_, count)| count > 1) {
-        let counter = (media_lane_counter(page).chars().count() as f32 + 1.0) * tw;
-        let start = right - 2.0 * button - counter;
-        if start - pad - left >= MIN_TITLE_COLUMNS * tw {
-            detail_row = row;
-            detail.1 = detail_y + (row - lh) / 2.0;
-            page_previous = Some((start, detail_y, button, row));
-            page_counter = Some((start + button, detail.1, counter, lh));
-            page_next = Some((start + button + counter, detail_y, button, row));
-            detail.2 = start - pad - left;
-        }
+    if let (Some(start), Some(counter)) = (page_start, page_counter_width) {
+        detail_row = grow_row(&mut spare, lh, min_target);
+        detail.1 = detail_y + (detail_row - lh) / 2.0;
+        // The page buttons start below what the header reached into and
+        // reach down into the sender line, which holds only text, to a full
+        // target.
+        let top = detail_y + down_over_pages;
+        let bottom = (top + min_target)
+            .max(detail_y + detail_row)
+            .min(detail_y + detail_row + lh);
+        let tall = bottom - top;
+        page_previous = Some((start, top, button, tall));
+        page_counter = Some((start + button, detail.1, counter, lh));
+        page_next = Some((start + button + counter, top, button, tall));
+        detail.2 = start - pad - left;
     }
     let sender = (left, detail_y + detail_row, right - left, lh);
     let hint = (left, rect.1 + rect.3 - pad - lh, right - left, lh);
@@ -878,6 +961,14 @@ pub fn media_lane_geometry_scaled(
         (None, false) => fit.and_then(|fit| lane.view.place(fit, content)),
     };
     let mut geometry = MediaLaneGeometry {
+        chip_lines: [
+            (text_y, lh),
+            if page_previous.is_some() {
+                (detail.1, lh)
+            } else {
+                (0.0, 0.0)
+            },
+        ],
         pinning: lane.pin_label.is_some(),
         rect,
         title,
@@ -2158,9 +2249,8 @@ mod tests {
         assert_eq!(knob_left((10.0, 0.0, 100.0, 4.0), 100.0, 6.0), 104.0);
         assert_eq!(knob_left((10.0, 0.0, 3.0, 4.0), 3.0, 6.0), 10.0);
         assert_eq!(knob_left((10.0, 0.0, 0.0, 4.0), 0.0, 6.0), 10.0);
-        // Full, but with only a line of picture: no bar under it. The header
-        // row is a full button target high.
-        lane.rect.3 = 4.0 * CELL.1 + MIN_CONTROL_TARGET + 4.0 * 8.0;
+        // Full, but with only a line of picture: no bar under it.
+        lane.rect.3 = 5.0 * CELL.1 + 4.0 * 8.0;
         let short = media_lane_geometry(&lane, CELL, CELL).unwrap();
         assert!(short.full);
         assert_eq!((short.scrubber, short.scrub_label), (None, None));
@@ -3052,17 +3142,12 @@ mod tests {
                             || other.1 + other.3 <= rect.1;
                         assert!(apart, "{hit:?} overlaps {other_hit:?}");
                     }
-                    let chip = control_chip(rect, text.1);
+                    let chip = geometry.chip(rect);
                     assert!(chip.3 <= text.1 + 1e-3, "the chip stays a line high");
-                    let middle = |r: Rect4| r.1 + r.3 / 2.0;
-                    assert!((middle(chip) - middle(rect)).abs() < 1e-3);
+                    assert!(chip.1 >= rect.1 && chip.1 + chip.3 <= rect.1 + rect.3 + 1e-3);
                 }
-                // The title stays centred on the header row.
-                let close = geometry.close;
-                assert!(
-                    (geometry.title.1 + geometry.title.3 / 2.0 - (close.1 + close.3 / 2.0)).abs()
-                        < 1e-3
-                );
+                // The title shares the line the buttons' chips are drawn on.
+                assert_eq!(geometry.chip(geometry.close).1, geometry.title.1);
             }
         }
     }
@@ -3101,5 +3186,142 @@ mod tests {
         assert!(src.contains(
             "letfill=ifhovered==Some(hit){media_transport::hover_fill(palette.divider,palette.label)}else{palette.divider};"
         ));
+    }
+
+    /// Defect 1 of the 6.0 final review: rows a full target tall raised the
+    /// height a viewer needs from 111.5 to 118 px at the audited 8.4 by 17.5
+    /// px overlay cell, so a 128 px pane's 115.2 px centred viewer had no
+    /// picture and would not open. A viewer that fitted before fits as it
+    /// did, its buttons full targets that reach into the padding above and
+    /// the line of text below; given more room its rows grow instead.
+    #[test]
+    fn a_viewer_that_fitted_before_still_fits_with_full_targets() {
+        for scale in [1.0_f32, 2.0] {
+            let text = (8.4 * scale, 17.5 * scale);
+            let least = 5.0 * text.1 + 4.0 * lane_pad(text.0);
+            for (height, gallery) in [
+                (least, false),
+                (least, true),
+                (115.2 * scale, false),
+                (115.2 * scale, true),
+                (600.0 * scale, true),
+            ] {
+                let mut panel = viewer((2, 3), Some((640, 480)));
+                panel.pin_label = Some("Pin".into());
+                panel.copy = true;
+                panel.open_outside = true;
+                if gallery {
+                    panel.page = Some((2, 4));
+                }
+                panel.rect = (10.0, 20.5, 900.0 * scale, height);
+                let case = format!("{height} px at {scale}x, gallery {gallery}");
+                let geometry =
+                    media_lane_geometry_scaled(&panel, (8.0 * scale, 16.0 * scale), text, scale)
+                        .expect("the viewer fits");
+                assert!(geometry.full, "{case}: no room");
+                assert!(geometry.image.is_some(), "{case}: no picture");
+                assert!(geometry.zoom_in.is_some(), "{case}: no zoom");
+                assert_eq!(geometry.page_previous.is_some(), gallery, "{case}");
+                let buttons: Vec<(Rect4, MediaLaneHit)> = geometry
+                    .chip_controls()
+                    .into_iter()
+                    .filter_map(|(rect, hit)| Some((rect?, hit)))
+                    .collect();
+                let side = MIN_CONTROL_TARGET * scale;
+                for (i, &(rect, hit)) in buttons.iter().enumerate() {
+                    assert!(rect.2 >= side - 1e-3, "{case}: {hit:?} {rect:?}");
+                    assert!(rect.3 >= side - 1e-3, "{case}: {hit:?} {rect:?}");
+                    assert!(rect.1 >= panel.rect.1, "{case}: {hit:?} leaves the viewer");
+                    assert!(
+                        rect.1 + rect.3 <= geometry.content.1,
+                        "{case}: {hit:?} reaches the picture"
+                    );
+                    for (x, y) in [
+                        (rect.0 + 0.5, rect.1 + 0.25),
+                        (rect.0 + rect.2 - 0.5, rect.1 + rect.3 - 0.25),
+                    ] {
+                        assert_eq!(geometry.hit_test(x, y), Some(hit), "{case}: {hit:?}");
+                    }
+                    for &(other, other_hit) in &buttons[i + 1..] {
+                        let apart = rect.0 + rect.2 <= other.0
+                            || other.0 + other.2 <= rect.0
+                            || rect.1 + rect.3 <= other.1
+                            || other.1 + other.3 <= rect.1;
+                        assert!(apart, "{case}: {hit:?} overlaps {other_hit:?}");
+                    }
+                    let chip = geometry.chip(rect);
+                    assert!((chip.3 - text.1).abs() < 1e-3, "{case}: {hit:?} chip");
+                }
+                // Chips and text share their row's line.
+                assert_eq!(geometry.chip(geometry.close).1, geometry.title.1, "{case}");
+                if let Some(next) = geometry.page_next {
+                    assert_eq!(geometry.chip(next).1, geometry.detail.1, "{case}");
+                }
+            }
+        }
+    }
+
+    /// Defect 4 of the 6.0 final review: a short expanded lane at a
+    /// fractional origin floored its centred header into the padding a drag
+    /// resizes it by, so a press at y = 104.25 in the lane at (0, 100.5,
+    /// 400, 22) closed it instead of starting a resize. Its buttons now stay
+    /// below that edge at any origin, as tall as the lane lets them, and a
+    /// strip with the room has full targets.
+    #[test]
+    fn a_short_lanes_buttons_never_reach_its_resize_edge() {
+        let mut lane = viewer((1, 2), Some((64, 48)));
+        lane.copy = true;
+        lane.rect = (0.0, 100.5, 400.0, 22.0);
+        lane.edge = Some(MediaLaneEdge::Top);
+        let (cell, text) = ((5.0, 5.0), (5.0, 10.0));
+        let geometry = media_lane_geometry_scaled(&lane, cell, text, 1.0).unwrap();
+        assert!(!geometry.full);
+        let close = geometry.close;
+        assert_eq!(
+            geometry.hit_test(close.0 + close.2 / 2.0, 104.25),
+            Some(MediaLaneHit::Resize),
+            "a press on the edge resizes"
+        );
+        for origin in [100.0, 100.25, 100.5, 100.75, 101.3] {
+            for height in [12.0, 22.0, 30.0, 40.0] {
+                lane.rect = (0.0, origin, 400.0, height);
+                let geometry = media_lane_geometry_scaled(&lane, cell, text, 1.0).unwrap();
+                let edge = geometry.resize.expect("an expanded lane resizes");
+                for (rect, hit) in geometry
+                    .chip_controls()
+                    .into_iter()
+                    .filter_map(|(rect, hit)| Some((rect?, hit)))
+                {
+                    let case = format!("{hit:?} {rect:?} at {origin}, {height}");
+                    assert!(rect.1 >= edge.1 + edge.3, "{case} reaches the edge");
+                    assert!(rect.1 + rect.3 <= origin + height + 1e-3, "{case}");
+                    let room = origin + height - (edge.1 + edge.3);
+                    assert!(rect.3 >= MIN_CONTROL_TARGET.min(room) - 1e-3, "{case}");
+                    assert_eq!(
+                        geometry.hit_test(rect.0 + 1.0, rect.1 + 0.25),
+                        Some(hit),
+                        "{case}"
+                    );
+                }
+            }
+        }
+        // A strip as tall as its room asks for has full targets.
+        let (strip, expanded) = media_lane_header_room(text, 1.0);
+        assert_eq!(
+            (strip, expanded),
+            (MIN_CONTROL_TARGET, MIN_CONTROL_TARGET + 4.0)
+        );
+        lane.edge = None;
+        lane.collapsed = true;
+        lane.rect = (0.0, 100.5, 400.0, strip);
+        let geometry = media_lane_geometry_scaled(&lane, cell, text, 1.0).unwrap();
+        assert!(geometry.close.3 >= MIN_CONTROL_TARGET - 1e-3);
+        // So has a short expanded lane with the room for its edge as well.
+        lane.edge = Some(MediaLaneEdge::Top);
+        lane.collapsed = false;
+        lane.rect = (0.0, 100.5, 400.0, expanded);
+        let geometry = media_lane_geometry_scaled(&lane, cell, text, 1.0).unwrap();
+        assert!(geometry.close.3 >= MIN_CONTROL_TARGET - 1e-3);
+        assert!(geometry.close.1 >= 100.5 + 4.0);
     }
 }

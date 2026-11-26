@@ -501,9 +501,23 @@ impl App {
             .cfg
             .show_titlebar
             .then(|| ws.renderer.as_ref().map(|r| r.cell_h + 6.0).unwrap_or(20.0));
+        // A lane keeps the room its header's buttons need to be full
+        // pointer targets, measured as the lane lays them out.
+        let scale = ws
+            .window
+            .as_ref()
+            .map_or(ws.startup_scale, |window| window.scale_factor() as f32);
+        let lane_header = kettle_render::media_lane_header_room(
+            (
+                self.overlay_text_cell_width(ws),
+                self.overlay_text_line_height(ws),
+            ),
+            scale,
+        );
         LayoutStyle::new(cell, padding, titlebar, self.cfg.title_at_bottom)
             .or_else(|| LayoutStyle::new((8.0, 16.0), padding, titlebar, self.cfg.title_at_bottom))
             .unwrap_or_else(LayoutStyle::fallback)
+            .with_lane_header(lane_header)
     }
 
     /// The active tab's panes laid out over `area`, each divided between its

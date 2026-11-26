@@ -725,13 +725,54 @@ pub(super) fn lane_control_enabled(
     kettle_render::media_lane_control_enabled(lane, hit)
 }
 
+/// Whose keyboard a key held by a lane reaches: a lane's own, the centred
+/// viewer's, or the viewer's while it fills the screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LaneKeys {
+    Lane,
+    Viewer,
+    FullscreenViewer,
+}
+
+impl LaneKeys {
+    /// Whose keyboard it is while `overlay` is the window's viewer, if any.
+    pub(super) fn of(overlay: Option<crate::media::Overlay>) -> Self {
+        match overlay {
+            Some(open) if open.fullscreen => Self::FullscreenViewer,
+            Some(_) => Self::Viewer,
+            None => Self::Lane,
+        }
+    }
+}
+
+/// What Esc does with a lane's keyboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PreviewExit {
+    /// The viewer leaves fullscreen and stays open.
+    LeaveFullscreen,
+    /// The viewer closes.
+    CloseViewer,
+    /// The lane gives the keyboard back to the terminal.
+    ReturnKeyboard,
+}
+
+/// What Esc does in `keys`: the dispatch and the tooltips both ask here.
+pub(super) fn preview_exit(keys: LaneKeys) -> PreviewExit {
+    match keys {
+        LaneKeys::FullscreenViewer => PreviewExit::LeaveFullscreen,
+        LaneKeys::Viewer => PreviewExit::CloseViewer,
+        LaneKeys::Lane => PreviewExit::ReturnKeyboard,
+    }
+}
+
 /// The key that does what `hit` does while a lane holds the keyboard
-/// ([`crate::media::preview_key`] and, in the centred `viewer`,
-/// [`crate::media::viewer_key`]), for its tooltip. Esc closes the viewer but
-/// only gives a lane's keyboard back, and P pins only the viewer.
+/// ([`crate::media::preview_key`] and, in the centred viewer,
+/// [`crate::media::viewer_key`]), for its tooltip: only a key that does it
+/// in `keys`. Esc closes the viewer only when it does not fill the screen,
+/// and P pins only the viewer.
 pub(super) fn lane_control_key(
     hit: kettle_render::MediaLaneHit,
-    viewer: bool,
+    keys: LaneKeys,
 ) -> Option<kettle_config::Key> {
     use kettle_config::Key;
     use kettle_render::MediaLaneHit as Hit;
@@ -746,8 +787,8 @@ pub(super) fn lane_control_key(
         Hit::Fullscreen => Key::Char('f'),
         Hit::PreviousPage => Key::PageUp,
         Hit::NextPage => Key::PageDown,
-        Hit::Pin if viewer => Key::Char('p'),
-        Hit::Close if viewer => Key::Escape,
+        Hit::Pin if keys != LaneKeys::Lane => Key::Char('p'),
+        Hit::Close if preview_exit(keys) == PreviewExit::CloseViewer => Key::Escape,
         _ => return None,
     })
 }

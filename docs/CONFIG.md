@@ -794,7 +794,8 @@ or OSC 777 (`printf '\e]777;notify;Title;Body\a'`), and a Lua script with
   it had begun to fade, and afterwards it stays at least 3 more seconds.
   Screen readers announce it politely. With assistive focus on its Show or
   Dismiss button, Enter, Space, Tab and Escape answer the toast. Show and ×
-  light up under the pointer, as a dialog's buttons do.
+  light up under the pointer, as a dialog's buttons do, and so does the rest
+  of the toast, which a click answers as Show does.
 - **No Kettle window has focus**: a desktop notification, as before, and
   the window asks for attention. If the desktop refuses it or the delivery
   fails (a D-Bus error on Linux, a toast error on Windows), the toast is
@@ -1042,7 +1043,10 @@ Choose **Pin** (or P) to keep the same item, zoom and playback in a lane.
 Only then does the terminal resize. `media-open-mode = lane` opens directly
 in that layout. A lane takes about 40% of the pane on `preview-lane-side`,
 leaving at least 20 terminal columns and 5 rows. With less room it becomes
-a one-row strip; a pane too small even for that gets a notice.
+a strip along the bottom, tall enough for 24-point buttons where the terminal
+keeps its 5 rows with that and one row where it does not; a pane too small
+even for that gets a notice. A bottom lane's buttons never reach the edge it
+resizes by.
 Keys still go to the terminal while a lane shows. Drag the lane's edge
 beside the terminal, marked by a short grip, to give it more or less of the
 pane: the terminal keeps its 20 columns and 5 rows and the lane its least,
@@ -1076,13 +1080,16 @@ fitted and its source from the top, and stays put if it cannot be drawn.
 `↻` reads a Markdown file's gallery again at the diagram shown. Where the header is too narrow, these give way,
 open outside first, then zoom out, zoom in and fit, copy, browsing, the
 background and the source, and reload last. Each of these buttons takes a
-press anywhere in a target at least 24 by 24 points, so the header row, and a
-gallery's detail line, are that tall even where a line of text is shorter;
-the button under the pointer lights, unless it would do nothing (browsing
+press anywhere in a target at least 24 by 24 points. Where the lane has the
+room, the header row (and a gallery's detail line) grows to that height; where
+it has only the room it always needed, the buttons reach into the padding
+above and the line of text below instead, so a lane or viewer that fitted
+before still fits. The button under the pointer lights, unless it would do nothing (browsing
 past either end). Resting the pointer on a button shows its name in a
 tooltip, with the key that does the same while the lane holds the keyboard
 (`+`, `-`, `0`, `C`, `K`, `M`, `T`, `F`, Page Up and Page Down, and in the
-centred viewer `P` and Esc), or otherwise the shortcut bound to its action. A press or the wheel over a lane never
+centred viewer `P`, and Esc for × except in fullscreen, where Esc leaves
+fullscreen), or otherwise the shortcut bound to its action. A press or the wheel over a lane never
 reaches the terminal, and menus and dialogs open over it without closing it.
 The command palette lists it as "Open media shelf". On macOS its default
 chord is `Ctrl+Shift+Cmd+I`; elsewhere it has no default binding.
@@ -1335,7 +1342,8 @@ looks like a path keeps its end. Any other title keeps both ends when at least
 16 columns of it show, and only its start in a narrower tab, so tabs whose
 titles differ near the start still read apart. Resting the pointer on a
 shortened tab shows its whole title, or its whole working directory, in a
-tooltip.
+tooltip. A tooltip with more lines than fit beside the control it names, in
+the window, keeps the lines that fit and ends with an ellipsis.
 
 When a window loses focus on macOS or Linux, tab text and controls dim toward
 their backgrounds while retaining at least 3:1 contrast, and the active accent
