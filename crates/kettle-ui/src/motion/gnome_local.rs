@@ -49,17 +49,23 @@ pub(crate) fn gnome_like(desktop: Option<&OsStr>) -> bool {
     })
 }
 
-/// Each `gsettings` file in the absolute entries of `path` (`PATH`) that
-/// this process may run, in order and looked at only as the caller asks
-/// for the next; relative entries are skipped, and so is a file it may not
-/// run, so one earlier in `PATH` cannot hide a working one.
-pub(crate) fn gsettings_candidates(path: Option<&OsStr>) -> impl Iterator<Item = PathBuf> + use<> {
+/// One item for each absolute entry of `path` (`PATH`), in order: its
+/// `gsettings` if this process may run it, `None` if not. Each entry is
+/// looked at only when the caller asks for its item, so the caller can stop
+/// between entries; relative entries are skipped, and so is a file it may
+/// not run, so one earlier in `PATH` cannot hide a working one.
+pub(crate) fn gsettings_candidates(
+    path: Option<&OsStr>,
+) -> impl Iterator<Item = Option<PathBuf>> + use<> {
     let dirs: Vec<PathBuf> =
         path.map_or_else(Vec::new, |path| std::env::split_paths(path).collect());
     dirs.into_iter()
         .filter(|dir| dir.is_absolute())
         .map(|dir| dir.join("gsettings"))
-        .filter(|file| std::fs::metadata(file).is_ok_and(|meta| meta.is_file()) && runnable(file))
+        .map(|file| {
+            (std::fs::metadata(&file).is_ok_and(|meta| meta.is_file()) && runnable(&file))
+                .then_some(file)
+        })
 }
 
 /// Whether this process may execute `file`, as the kernel decides it for
@@ -210,16 +216,19 @@ impl LocalWatch {
     }
 
     /// Read the switch on a thread with the commands `candidates` yields
-    /// there, so finding `gsettings` stays off the caller's thread too. A
-    /// read tries them in order, moving on from one that cannot be started,
-    /// all within its deadline and stop; the first that runs is kept for the
-    /// refreshes until it cannot be started either, and then the search
-    /// runs again. With no candidate, or no thread, the switch is
-    /// unavailable. `wake` runs when the reading changes.
+    /// there, so finding `gsettings` stays off the caller's thread too; an
+    /// item may be `None`, a place that had none. A read tries them in
+    /// order, moving on from one that cannot be started, and checks its
+    /// deadline and stop before asking for each item, so a lookup held past
+    /// either is the last; the first that runs is kept for the refreshes
+    /// until it cannot be started either, and then the search runs again.
+    /// With no candidate, or no thread, the switch is unavailable. `wake`
+    /// runs when the reading changes.
     pub(crate) fn start<C, I>(candidates: C, wake: kettle_core::Waker) -> Self
     where
         C: FnMut() -> I + Send + 'static,
-        I: IntoIterator<Item = Command>,
+        I: IntoIterator,
+        I::Item: Into<Option<Command>>,
     {
         Self::start_with(candidates, wake, REFRESH, TIMEOUT)
     }
@@ -232,7 +241,8 @@ impl LocalWatch {
     ) -> Self
     where
         C: FnMut() -> I + Send + 'static,
-        I: IntoIterator<Item = Command>,
+        I: IntoIterator,
+        I::Item: Into<Option<Command>>,
     {
         let started = Instant::now();
         let state = Arc::new(AtomicU8::new(PENDING));
@@ -260,7 +270,17 @@ impl LocalWatch {
                                 Read::Unstartable => kept = None,
                             }
                         }
-                        for mut command in candidates() {
+                        let mut search = candidates().into_iter();
+                        loop {
+                            if Instant::now() >= deadline || self::stopped(&stopped) {
+                                break 'read None;
+                            }
+                            let Some(item) = search.next() else {
+                                break 'read None;
+                            };
+                            let Some(mut command) = item.into() else {
+                                continue;
+                            };
                             match read(&mut command, deadline, &stopped) {
                                 Read::Ran(answer) => {
                                     kept = Some(command);
@@ -270,7 +290,6 @@ impl LocalWatch {
                                 Read::Unstartable => {}
                             }
                         }
-                        None
                     };
                     match answer {
                         Some(enabled) => {

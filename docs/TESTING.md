@@ -4183,7 +4183,8 @@ GNOME read with `/bin/sh` stand-ins for `gsettings`: its parsing and output
 cap, a `gsettings` its owner may not run (mode 0010) or that cannot start (a
 missing interpreter) skipped for a working one later in `PATH`, a search that
 runs again at the next refresh rather than keeping what cannot start, a
-deadline and a stop that hold across the whole search, an overrunning and a stopped read killed and reaped, a watch that follows
+deadline and a stop that hold across the whole search, including a held
+lookup in one `PATH` entry after which no other entry is looked at, an overrunning and a stopped read killed and reaped, a watch that follows
 a change and is dropped mid-read without leaving a child or thread, a drop
 that returns at once while the lookup is held and starts no child after it,
 a held lookup that stops counting as pending once the first answer's time is

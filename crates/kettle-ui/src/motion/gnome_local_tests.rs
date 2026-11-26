@@ -167,10 +167,15 @@ fn gsettings_is_found_only_as_an_executable_file_on_an_absolute_path() {
     ])
     .unwrap();
     assert_eq!(
-        gsettings_candidates(Some(&path)).collect::<Vec<_>>(),
+        gsettings_candidates(Some(&path))
+            .flatten()
+            .collect::<Vec<_>>(),
         [first.join("gsettings"), second.join("gsettings")]
     );
-    assert_eq!(gsettings_candidates(Some(folder.as_os_str())).next(), None);
+    assert_eq!(
+        gsettings_candidates(Some(folder.as_os_str())).collect::<Vec<_>>(),
+        [None]
+    );
     assert_eq!(gsettings_candidates(None).next(), None);
     assert_eq!(
         gsettings_get(first.join("gsettings"))
@@ -204,14 +209,14 @@ fn a_gsettings_this_process_may_not_run_does_not_hide_a_working_one() {
     let working = script("working", "printf 'false\\n'", 0o700);
     let path = std::env::join_paths([blocked, working.clone()]).unwrap();
     assert_eq!(
-        gsettings_candidates(Some(&path)).next(),
+        gsettings_candidates(Some(&path)).flatten().next(),
         Some(working.join("gsettings")),
         "the file its owner may not run hid the working one"
     );
     // A refresh well inside the wait retries a spawn another test's fork
     // happened to make busy.
     let watch = LocalWatch::start_with(
-        move || gsettings_candidates(Some(&path)).map(gsettings_get),
+        move || gsettings_candidates(Some(&path)).map(|file| file.map(gsettings_get)),
         Arc::new(|| {}),
         Duration::from_millis(20),
         TIMEOUT,
@@ -489,7 +494,9 @@ fn a_gsettings_that_cannot_start_does_not_hide_a_working_one() {
     let working = script(&root.path().join("working"), "/bin/sh", "printf 'false\\n'");
     let path = std::env::join_paths([broken.parent().unwrap(), working.parent().unwrap()]).unwrap();
     assert_eq!(
-        gsettings_candidates(Some(&path)).collect::<Vec<_>>(),
+        gsettings_candidates(Some(&path))
+            .flatten()
+            .collect::<Vec<_>>(),
         [broken.clone(), working]
     );
     let (_open, stop) = mpsc::channel();
@@ -504,7 +511,7 @@ fn a_gsettings_that_cannot_start_does_not_hide_a_working_one() {
     // A refresh well inside the wait retries a spawn another test's fork
     // happened to make busy.
     let watch = LocalWatch::start_with(
-        move || gsettings_candidates(Some(&path)).map(gsettings_get),
+        move || gsettings_candidates(Some(&path)).map(|file| file.map(gsettings_get)),
         Arc::new(|| {}),
         Duration::from_millis(20),
         TIMEOUT,
@@ -525,7 +532,7 @@ fn the_search_runs_again_rather_than_keeping_what_cannot_start() {
     std::fs::create_dir(&second).unwrap();
     let path = std::env::join_paths([&first, &second]).unwrap();
     let watch = LocalWatch::start_with(
-        move || gsettings_candidates(Some(&path)).map(gsettings_get),
+        move || gsettings_candidates(Some(&path)).map(|file| file.map(gsettings_get)),
         Arc::new(|| {}),
         Duration::from_millis(20),
         TIMEOUT,
@@ -596,4 +603,78 @@ fn the_deadline_and_the_stop_hold_across_the_whole_search() {
         worker.upgrade().is_none()
     });
     assert!(!started(&starts), "a candidate after the stop was started");
+}
+
+/// A lookup in one `PATH` entry held past the deadline, or past the stop
+/// (a hung mount), is the last: no lookup starts in the next entry once it
+/// returns, so a second hung mount cannot keep the switch unavailable or
+/// keep a dropped watch's thread alive.
+#[test]
+fn no_lookup_starts_after_a_held_one_outlasts_the_deadline_or_the_stop() {
+    use std::sync::atomic::AtomicUsize;
+    // Two `PATH` entries, both misses; the first holds until released.
+    let held_search = |held: mpsc::Receiver<()>, lookups: Arc<AtomicUsize>| {
+        let mut held = Some(held);
+        move || {
+            let held = held.take();
+            let lookups = lookups.clone();
+            let mut entry = 0;
+            std::iter::from_fn(move || {
+                entry += 1;
+                if entry > 2 {
+                    return None;
+                }
+                lookups.fetch_add(1, Ordering::AcqRel);
+                if let Some(held) = held.as_ref().filter(|_| entry == 1) {
+                    let _ = held.recv_timeout(Duration::from_secs(20));
+                }
+                Some(None::<Command>)
+            })
+        }
+    };
+    let (release, held) = mpsc::channel::<()>();
+    let lookups = Arc::new(AtomicUsize::new(0));
+    let watch = LocalWatch::start_with(
+        held_search(held, lookups.clone()),
+        Arc::new(|| {}),
+        Duration::from_secs(30),
+        Duration::from_millis(200),
+    );
+    wait_for("the first lookup started", || {
+        lookups.load(Ordering::Acquire) == 1
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    release.send(()).unwrap();
+    wait_for("the search gave up", || {
+        watch.state.load(Ordering::Acquire) == UNAVAILABLE
+    });
+    assert_eq!(
+        lookups.load(Ordering::Acquire),
+        1,
+        "a lookup started past the deadline"
+    );
+    drop(watch);
+    let (release, held) = mpsc::channel::<()>();
+    let lookups = Arc::new(AtomicUsize::new(0));
+    let wake: kettle_core::Waker = Arc::new(|| {});
+    let worker = Arc::downgrade(&wake);
+    let watch = LocalWatch::start_with(
+        held_search(held, lookups.clone()),
+        wake,
+        Duration::from_secs(30),
+        Duration::from_secs(30),
+    );
+    wait_for("the first lookup started", || {
+        lookups.load(Ordering::Acquire) == 1
+    });
+    drop(watch);
+    release.send(()).unwrap();
+    wait_for("the thread ended after its lookup", || {
+        worker.upgrade().is_none()
+    });
+    assert_eq!(
+        lookups.load(Ordering::Acquire),
+        1,
+        "a lookup started after the stop"
+    );
 }
