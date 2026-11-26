@@ -157,7 +157,7 @@ impl SystemMotion {
             gnome_local::LocalWatch::start(
                 move || {
                     gnome_local::gsettings_candidates(path.as_deref())
-                        .map(gnome_local::gsettings_get)
+                        .map(|file| file.map(gnome_local::gsettings_get))
                 },
                 self.wake.clone(),
             )

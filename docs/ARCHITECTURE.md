@@ -6448,7 +6448,10 @@ with the first `gsettings` on an absolute `PATH` entry that the process may
 run (as `faccessat` decides it for the effective user) and that starts: the
 search moves past one that cannot be started, such as a script whose
 interpreter is missing, all within the read's deadline and stop, so an
-unusable one earlier in `PATH` cannot hide a working one. The one that ran
+unusable one earlier in `PATH` cannot hide a working one. The search yields
+one item per `PATH` entry, hit or miss, and the deadline and stop are checked
+before each entry is looked at, so a lookup held past either (a hung mount)
+is the last one that search starts. The one that ran
 is kept for the refreshes until it no longer starts; one that never started
 is not kept, so each refresh searches again and finds a later fix
 (`motion/gnome_local.rs`, `Preference::linux`). Finding `gsettings` and the read run on the watch's
