@@ -28,7 +28,8 @@ and values shorten with an ellipsis.
 Click **Search settings**, or press **Cmd+F** on macOS or **Ctrl+F** elsewhere.
 With `vim-menu-nav` enabled, **/** also focuses the search field. Type to match
 labels, descriptions or config keys across every category. Matching ignores
-case and Spanish accents. Results stay grouped by category; **Enter** or
+case and Spanish accents. While a query is typed the title reads **Search
+results** and no category is marked as open. Results stay grouped by category; **Enter** or
 **Down** moves from the search field into the results. Normal navigation and
 value editing work there too; Home, End and the page keys stop at the first
 and last results. A search with no matches shows **No settings

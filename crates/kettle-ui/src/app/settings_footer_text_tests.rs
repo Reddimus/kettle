@@ -947,3 +947,24 @@ fn the_settings_projection_carries_reset_and_stable_widths() {
         assert!(mouse.contains(wiring), "{wiring}");
     }
 }
+
+/// While the search field holds a query the panel's title says it lists
+/// search results, rather than naming the category it opened on.
+#[test]
+fn the_settings_title_says_search_results_while_searching() {
+    use kettle_i18n::Text;
+    assert_eq!(
+        super::settings_title(&EN, Text::SettingsCategoryAppearance, ""),
+        "Appearance"
+    );
+    assert_eq!(
+        super::settings_title(&EN, Text::SettingsCategoryAppearance, "font"),
+        "Search results"
+    );
+    assert_eq!(
+        super::settings_title(&ES, Text::SettingsCategoryGraphics, "qqzz"),
+        "Resultados de la búsqueda"
+    );
+    let source = include_str!("modals.rs");
+    assert!(source.contains("title: settings_title(tr, active.name, nav.query.text()),"));
+}

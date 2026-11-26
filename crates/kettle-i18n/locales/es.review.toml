@@ -318,6 +318,7 @@ settings_description_keybind_split_right = "accepted"
 settings_description_keybind_start_search = "accepted"
 settings_description_keybind_toggle_zoom = "accepted"
 settings_search_placeholder = "accepted"
+settings_search_results = "draft"
 settings_no_matches = "accepted"
 
 notify_body_reconnect_environment_unavailable = "draft"

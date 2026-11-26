@@ -5406,7 +5406,10 @@ impl Renderer {
             }
             // Focus shows as a bar, not only as the light fill.
             let bar = settings::settings_focus_bar_width(line / self.scale) * self.scale;
-            if let Some(Some(r)) = layout.category_rects.get(set.active_category) {
+            if let Some(Some(r)) = set
+                .highlighted_category()
+                .and_then(|index| layout.category_rects.get(index))
+            {
                 shape(*r, selected, 1.0, selected, 0.0, 4.0);
                 shape(
                     settings::settings_focus_bar(*r, bar, self.scale),
@@ -6917,3 +6920,6 @@ mod scrollback_pill_tests;
 
 #[cfg(test)]
 mod settings_hierarchy_tests;
+
+#[cfg(test)]
+mod settings_state_tests;

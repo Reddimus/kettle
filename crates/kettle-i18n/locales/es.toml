@@ -914,6 +914,7 @@ settings_description_keybind_start_search = "Cambiar el atajo de teclado que abr
 settings_description_keybind_toggle_zoom = "Cambiar el atajo de teclado que amplía el panel activo."
 settings_a11y_search = "Buscar configuración"
 settings_search_placeholder = "Buscar configuración"
+settings_search_results = "Resultados de la búsqueda"
 settings_no_matches = "No hay opciones que coincidan"
 
 macos_menu_app = "Kettle"

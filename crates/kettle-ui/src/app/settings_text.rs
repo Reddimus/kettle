@@ -116,6 +116,22 @@ pub(super) fn agent_previews_note(
     }
 }
 
+/// The Settings panel's title: the open category's name, or while the
+/// search field holds a query, which lists rows from every category,
+/// "Search results".
+pub(super) fn settings_title(
+    tr: &kettle_i18n::Translator,
+    category: kettle_i18n::Text,
+    query: &str,
+) -> String {
+    let title = if query.is_empty() {
+        category
+    } else {
+        kettle_i18n::Text::SettingsSearchResults
+    };
+    tr.text(title).to_string()
+}
+
 /// The Settings footer: each key followed by what it does, the groups apart
 /// by ` · ` as in the picker hints. The keys are the same in every language;
 /// the vim keys show when `vim-menu-nav` is on.

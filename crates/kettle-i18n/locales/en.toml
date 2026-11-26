@@ -913,6 +913,7 @@ settings_description_keybind_start_search = "Rebind the shortcut that opens term
 settings_description_keybind_toggle_zoom = "Rebind the shortcut that zooms the focused pane."
 settings_a11y_search = "Search settings"
 settings_search_placeholder = "Search settings"
+settings_search_results = "Search results"
 settings_no_matches = "No settings match"
 
 macos_menu_app = "Kettle"

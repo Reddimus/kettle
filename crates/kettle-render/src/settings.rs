@@ -41,6 +41,12 @@ impl SettingsOverlay {
     pub(crate) fn backdrop_alpha(&self) -> f32 {
         if self.background_page { 0.30 } else { 0.55 }
     }
+
+    /// The category the sidebar or strip marks as open: none while a
+    /// search lists results from every category.
+    pub fn highlighted_category(&self) -> Option<usize> {
+        self.search_query.is_empty().then_some(self.active_category)
+    }
 }
 
 /// How strongly the focused row and the active category are filled with the
@@ -1223,7 +1229,7 @@ pub(crate) fn settings_text_color(
 ) -> Rgb {
     let (fg, bg) = (theme.foreground, theme.background);
     let index = match kind {
-        SettingsTextKind::Category(index) if index == set.active_category => {
+        SettingsTextKind::Category(index) if set.highlighted_category() == Some(index) => {
             return colors.text(fg, palette.selected);
         }
         SettingsTextKind::Title | SettingsTextKind::Heading | SettingsTextKind::Category(_) => {

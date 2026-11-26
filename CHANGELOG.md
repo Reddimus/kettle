@@ -1095,6 +1095,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- While you search Settings, its title reads "Search results" and no
+  category is marked as open, since the results come from every category.
+
 - Reset in Settings removes the option from your config file instead of
   writing today's default into it, so the option follows the platform's
   default (and later ones) and the file no longer gains a line with each

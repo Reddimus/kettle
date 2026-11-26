@@ -2502,6 +2502,9 @@ context = "crates/kettle-ui/src/settings.rs: One-line factual Settings descripti
 [messages.settings_description_keybind_toggle_zoom]
 context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
 
+[messages.settings_search_results]
+context = "crates/kettle-ui/src/app/settings_text.rs settings_title: the Settings panel's title while the search field holds a query, in place of the open category's name; the results below come from every category. A heading."
+
 [messages.settings_search_placeholder]
 context = "crates/kettle-ui/src/settings.rs: Settings search input placeholder and accessible name."
 

@@ -926,7 +926,7 @@ impl App {
                 .iter()
                 .position(|&identity| identity == (cat, fld))
                 .unwrap_or(0),
-            title: tr.text(active.name).to_string(),
+            title: settings_title(tr, active.name, nav.query.text()),
             hints: settings_hints(tr, self.cfg.vim_menu_nav),
             reset_label: tr.text(kettle_i18n::Text::SettingsResetButton).to_string(),
             reset_name: active
