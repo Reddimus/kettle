@@ -2774,6 +2774,11 @@ fn a_tabs_menu_runs_each_row_on_its_own_tab() {
     assert!(act.contains("ConfirmAction::CloseTabHolding(ws.mux.tab_anchor_panes(idx))"));
     assert!(act.contains("ws.mux.close_tab_at(idx)"));
     let open = finding_body(&src, "open_tab_menu");
+    assert!(
+        open.contains("self.close_modals_for_context_menu(ws);")
+            && !open.contains("close_all_modals"),
+        "a tab's menu keeps Find open, as the terminal's menu does"
+    );
     let shown = open
         .find("self.show_context_menu(ws, items, px, py);")
         .unwrap();

@@ -1065,7 +1065,8 @@ impl App {
     /// Open the menu of tab `idx` at the pointer `(px, py)`, as a right-click
     /// on the tab does. Its rows act on that tab, whichever tab is active.
     pub(super) fn open_tab_menu(&mut self, ws: &mut WindowState, idx: usize, px: f32, py: f32) {
-        self.close_all_modals(ws);
+        // Find stays open under it, as under the terminal's menu.
+        self.close_modals_for_context_menu(ws);
         let tab = ws.mux.tab_anchor_panes(idx);
         if tab.is_empty() {
             return;

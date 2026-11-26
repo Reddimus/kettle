@@ -5393,7 +5393,8 @@ off the window. A resize places it again beside the cursor's line once the
 terminals have reflowed (`follow_line_menu`), closing it if no row fits.
 A right-click on a tab segment, native or through `ctl`, opens that tab's
 menu (`open_tab_menu`): Rename Tab…, Duplicate Tab, Move Tab Left/Right and
-Close Tab, as ordinary action rows. The menu records the tab by the panes it
+Close Tab, as ordinary action rows. Like the terminal's menu it leaves an open
+Find bar, and its search, in place (`close_modals_for_context_menu`). The menu records the tab by the panes it
 holds (`ContextMenuSession::tab`), so a shell exiting meanwhile cannot
 retarget it, and the menu closes once that tab is gone
 (`dismiss_orphaned_tab_menu`, checked each event-loop turn). `step_tab_menu_row`
