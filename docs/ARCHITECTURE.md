@@ -5330,7 +5330,10 @@ invalidation consistent with the grid. The renderer marks the mode from the
 captured `PaneSnapshot::vi_mode` with a chip (`scrollback::vi_mode_chip`) in the
 kept-history label's lane and style: top right, else bottom right above the
 jump button, placed only where `rect_covers_text` finds no text, cursor or
-selection under it, and left out when both places are covered.
+selection under it, and left out when both places are covered. It looks for
+them where the frame drew them: in a row with right-to-left text, at the
+visual columns of that frame's bidi layout (`PaneBidi`), not at their
+logical cells.
 
 ## Key design choices
 

@@ -3030,11 +3030,16 @@ impl Renderer {
             })
             .collect();
         // The chip that says a pane is in vi mode, where it hides no text:
-        // under the kept-history label, or above the jump button.
+        // under the kept-history label, or above the jump button. Text and
+        // the cursor are where this frame's bidi layouts (`build_pane`) drew
+        // them.
+        let empty_bidi = bidi_rows::PaneBidi::default();
         let vi_mode_chips: Vec<scrollback::ViModeChip> = panes
             .iter()
-            .filter(|pane| pane.snap.vi_mode)
-            .filter_map(|pane| {
+            .enumerate()
+            .filter(|(_, pane)| pane.snap.vi_mode)
+            .filter_map(|(index, pane)| {
+                let bidi = self.pane_bidi.get(index).unwrap_or(&empty_bidi);
                 let kept = kept_history_label(
                     pane.terminal,
                     pane.snap.history_view(),
@@ -3059,6 +3064,7 @@ impl Renderer {
                     |rect| {
                         scrollback::rect_covers_text(
                             pane.snap,
+                            bidi,
                             origin,
                             (self.cell_w, self.cell_h),
                             rect,

@@ -962,6 +962,7 @@ fn the_vi_mode_chip_takes_a_corner_that_hides_no_text() {
 #[test]
 fn the_vi_mode_chip_sees_text_and_the_cursor_under_it() {
     use crate::scrollback::rect_covers_text;
+    let bidi = crate::bidi_rows::PaneBidi::default();
     let snap = crate::headless_tests::snapshot_of(20, 4, "ab\r\n   \u{4e2d}".as_bytes());
     let (origin, cell) = ((5.0, 7.0), (10.0, 20.0));
     let at = |row: f32, col: f32, cols: f32| {
@@ -973,23 +974,23 @@ fn the_vi_mode_chip_sees_text_and_the_cursor_under_it() {
         )
     };
     assert!(
-        rect_covers_text(&snap, origin, cell, at(0.0, 1.0, 1.0)),
+        rect_covers_text(&snap, &bidi, origin, cell, at(0.0, 1.0, 1.0)),
         "a letter"
     );
     assert!(
-        !rect_covers_text(&snap, origin, cell, at(0.0, 10.0, 4.0)),
+        !rect_covers_text(&snap, &bidi, origin, cell, at(0.0, 10.0, 4.0)),
         "spaces"
     );
     assert!(
-        rect_covers_text(&snap, origin, cell, at(1.0, 4.0, 1.0)),
+        rect_covers_text(&snap, &bidi, origin, cell, at(1.0, 4.0, 1.0)),
         "the right half of a wide character"
     );
     assert!(
-        rect_covers_text(&snap, origin, cell, at(1.0, 5.0, 1.0)),
+        rect_covers_text(&snap, &bidi, origin, cell, at(1.0, 5.0, 1.0)),
         "the cursor"
     );
     assert!(
-        !rect_covers_text(&snap, origin, cell, at(3.0, 0.0, 20.0)),
+        !rect_covers_text(&snap, &bidi, origin, cell, at(3.0, 0.0, 20.0)),
         "a blank row"
     );
     use alacritty_terminal::index::{Column, Line, Point};
@@ -1000,7 +1001,94 @@ fn the_vi_mode_chip_sees_text_and_the_cursor_under_it() {
         false,
     ));
     assert!(
-        rect_covers_text(&selected, origin, cell, at(3.0, 10.0, 4.0)),
+        rect_covers_text(&selected, &bidi, origin, cell, at(3.0, 10.0, 4.0)),
         "selected blanks"
     );
+}
+
+/// Review: the vi-mode chip goes by where the painter draws text and the vi
+/// cursor, not by their logical cells, in a row drawn right to left. The
+/// review's grid: 80 columns of 8x16 cells in a 640 px terminal, eight Hebrew
+/// letters at logical columns 0-7 and one at 79, the vi cursor on column 3.
+/// They are drawn at visual columns 72-79 and 0, and the cursor at 76, under
+/// the chip's top-right place (columns 69-78), so the chip takes the bottom
+/// right, and with such a row at the bottom too there is no chip.
+#[test]
+fn the_vi_mode_chip_avoids_right_to_left_text_and_cursor_where_they_are_drawn() {
+    use crate::bidi_rows::PaneBidi;
+    use crate::scrollback::{rect_covers_text, vi_mode_chip};
+    use alacritty_terminal::index::{Column, Line, Point};
+    use alacritty_terminal::vte::ansi::CursorShape;
+    let tr = Translator::new(Language::En);
+    let cell = (8.0, 16.0);
+    let terminal = (0.0, 0.0, 640.0, 320.0);
+    let mixed = format!(
+        "\u{5d0}\u{5d1}\u{5d2}\u{5d3}\u{5d4}\u{5d5}\u{5d6}\u{5d7}{}\u{5d0}",
+        " ".repeat(71)
+    );
+    let pane = |text: &str, cursor: (i32, usize)| {
+        let mut snap = crate::headless_tests::snapshot_of(80, 20, text.as_bytes());
+        snap.vi_mode = true;
+        snap.cursor.shape = CursorShape::Block;
+        snap.cursor.point = Point::new(Line(cursor.0), Column(cursor.1));
+        let mut bidi = PaneBidi::default();
+        bidi.update(&snap, true);
+        (snap, bidi)
+    };
+    let chip = |snap: &crate::PaneSnapshot, bidi: &PaneBidi| {
+        vi_mode_chip(
+            terminal,
+            1.0,
+            cell,
+            6.0,
+            None,
+            None,
+            |rect| rect_covers_text(snap, bidi, (0.0, 0.0), cell, rect),
+            &tr,
+        )
+    };
+    let top = vi_mode_chip(terminal, 1.0, cell, 6.0, None, None, |_| false, &tr)
+        .unwrap()
+        .rect;
+    let columns = (
+        (top.0 / 8.0).floor() as usize,
+        ((top.0 + top.2) / 8.0).ceil() as usize - 1,
+    );
+    assert_eq!(columns, (69, 78), "the review's chip place");
+    // The review's row, and its cursor.
+    let (snap, bidi) = pane(&mixed, (0, 3));
+    let map = bidi.row(0).expect("a right-to-left row");
+    let drawn: Vec<usize> = (0..8).chain([79]).map(|col| map.visual(col)).collect();
+    assert_eq!(drawn, [79, 78, 77, 76, 75, 74, 73, 72, 0]);
+    assert_eq!(map.visual(3), 76);
+    let placed = chip(&snap, &bidi).expect("a chip");
+    assert!(
+        placed.rect.1 > terminal.3 / 2.0,
+        "bottom right, not over the text: {:?}",
+        placed.rect
+    );
+    // The text alone, with the cursor on a blank row, covers the top place.
+    let (snap, bidi) = pane(&mixed, (10, 0));
+    assert!(
+        rect_covers_text(&snap, &bidi, (0.0, 0.0), cell, top),
+        "right-to-left text"
+    );
+    // The cursor alone: letters at both ends, drawn at columns 79 and 0,
+    // clear of the place, and the cursor on logical column 5, drawn at 74.
+    let ends = format!("\u{5d0}{}\u{5d0}", " ".repeat(78));
+    let (snap, bidi) = pane(&ends, (10, 0));
+    assert!(
+        !rect_covers_text(&snap, &bidi, (0.0, 0.0), cell, top),
+        "text at the ends"
+    );
+    let (snap, bidi) = pane(&ends, (0, 5));
+    assert_eq!(bidi.row(0).unwrap().visual(5), 74);
+    assert!(
+        rect_covers_text(&snap, &bidi, (0.0, 0.0), cell, top),
+        "the vi cursor"
+    );
+    // Such rows at the top and the bottom leave no place.
+    let both = format!("{mixed}{}{mixed}", "\r\n".repeat(19));
+    let (snap, bidi) = pane(&both, (0, 3));
+    assert!(chip(&snap, &bidi).is_none(), "no chip over text");
 }
