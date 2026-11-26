@@ -432,7 +432,17 @@ fn is_windows_drive_colon(path: &str, pos: usize) -> bool {
 }
 
 fn has_parent_component(path: &str) -> bool {
-    path.split('/').any(|part| part == "..")
+    path.split('/').any(climbs)
+}
+
+/// Whether a path segment names the parent directory: `..`, or `..` and
+/// trailing spaces and dots, which Windows drops from the end of a name
+/// (`.. `). A segment of dots alone stays a name there, so `...` and
+/// `a..b` do not climb.
+fn climbs(segment: &str) -> bool {
+    segment.starts_with("..")
+        && segment.bytes().all(|b| b == b'.' || b == b' ')
+        && (segment == ".." || segment.contains(' '))
 }
 
 fn encode_file_path(path: &str) -> String {
@@ -532,7 +542,7 @@ fn decoded_file_url_path(uri: &str) -> Option<String> {
     let decoded = String::from_utf8(bytes).ok()?;
     let clean = !decoded.chars().any(char::is_control)
         && !decoded.starts_with("//")
-        && !decoded.split(['/', '\\']).any(|segment| segment == "..");
+        && !decoded.split(['/', '\\']).any(climbs);
     clean.then_some(decoded)
 }
 
@@ -737,20 +747,19 @@ pub fn names_program_or_shortcut(path: &std::path::Path, is_dir: bool) -> bool {
 /// authentication / pass-the-hash) plus SSRF to an arbitrary host, all reachable
 /// from untrusted PTY output (autodetected link or OSC 8). Accept only an empty
 /// authority (`file:///path`) or an explicit loopback host, and reject any
-/// backslash / `file:////` / percent-encoded traversal that could smuggle an
-/// authority back in.
+/// backslash / `file:////` / percent-encoded separator that could smuggle an
+/// authority back in. Traversal is judged on the decoded path's segments, so a
+/// name holding dots (`a..b`, `...`) or a query mentioning them stays local.
 fn is_local_file_url(uri: &str) -> bool {
     // is_safe_url lowercases the scheme before the `file` arm, so accept
-    // `FILE://` / `File://` here too. The authority and traversal checks below
+    // `FILE://` / `File://` here too. The authority and separator checks below
     // already use a lowercased copy.
     let rest = match uri.get(..7) {
         Some(p) if p.eq_ignore_ascii_case("file://") => &uri[7..],
         _ => return false,
     };
     let lowered = uri.to_ascii_lowercase();
-    if uri.contains("..")
-        || lowered.contains("%2e%2e")
-        || uri.contains('\\')
+    if uri.contains('\\')
         || lowered.contains("%5c")
         // `file:////host/...` leaves an empty authority but a `//host` path that
         // some openers still treat as a UNC share — reject the double slash.
@@ -1449,6 +1458,60 @@ mod tests {
             "file:///tmp/x.pdf#page=2",
         ] {
             assert!(is_safe_url(uri), "{uri}");
+        }
+    }
+
+    /// Only a segment that names the parent climbs: dots inside a name, a
+    /// name of three or more dots, and dots in a query or fragment are
+    /// local file URLs like any other.
+    #[test]
+    fn dots_inside_a_file_url_name_are_not_traversal() {
+        use super::file_url_for_path;
+        use std::path::Path;
+        for uri in [
+            "file:///foo..bar/x",
+            "file:///.../x",
+            "file:///tmp/...",
+            "file:///..hidden/x",
+            "file:///tmp/a..b.pdf",
+            "file:///tmp/a%2e%2eb.pdf",
+            "file:///tmp/x.pdf?note=a..b",
+            "file:///tmp/x#frag..ment",
+            "file://localhost/tmp/v1..v2/report.pdf",
+        ] {
+            assert!(is_safe_url(uri), "{uri}");
+        }
+        for uri in [
+            "file:///tmp/../etc/passwd",
+            "file:///tmp/..",
+            "file:///tmp/.%2e/x",
+            "file:///tmp/%2e%2e/x",
+            "file:///tmp/%2E./x",
+            "file://../../etc/passwd",
+            "file://localhost/../etc/passwd",
+            // Windows drops trailing spaces and dots from a name.
+            "file:///C:/Users/me/..%20/secret.txt",
+            "file:///C:/Users/me/..%20./secret.txt",
+        ] {
+            assert!(!is_safe_url(uri), "{uri}");
+        }
+        assert_eq!(
+            file_url_for_path(Path::new("/tmp/foo..bar/baz.rs")).as_deref(),
+            Some("file:///tmp/foo..bar/baz.rs")
+        );
+        assert_eq!(
+            file_url_for_path(Path::new("/tmp/...")).as_deref(),
+            Some("file:///tmp/...")
+        );
+        assert_eq!(file_url_for_path(Path::new("/tmp/../etc")), None);
+        for (line, uri) in [
+            ("see /tmp/a..b.pdf here", "file:///tmp/a..b.pdf"),
+            ("ls /tmp/.../x.txt now", "file:///tmp/.../x.txt"),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert_eq!(found.len(), 1, "{line}: {found:?}");
+            assert_eq!(found[0].uri, uri, "{line}");
         }
     }
 
