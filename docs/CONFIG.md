@@ -1173,7 +1173,9 @@ from the bottom of the viewport. Blank cells before a match hold its label;
 at column zero blank cells after it are used when available. Without space the
 label overlays the match start. A translated legend explains the available
 plain-label and Shift-label actions and Esc cancellation. Explicit OSC 8 captions
-use their stored destination. Quick-select hints is also available in the
+use their stored destination. When nothing on screen can be labelled,
+**No hints here** shows along the bottom of the pane for three seconds
+instead. Quick-select hints is also available in the
 macOS Edit menu, the palette (with its current binding), and the terminal context
 menu when a link or path is visible. This adds no configuration keys.
 

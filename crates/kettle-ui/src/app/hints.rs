@@ -167,6 +167,40 @@ pub(super) fn hint_legend_text(
     }
 }
 
+/// Quick select found nothing to label in the focused pane: say so for a
+/// moment where its legend would have been, so the key does not seem to do
+/// nothing.
+pub(super) fn show_no_hints(ws: &mut WindowState, now: std::time::Instant) {
+    let Some(pane) = ws.mux.active_focus() else {
+        return;
+    };
+    ws.no_hints_notice.show(pane, now);
+    ws.accessibility_pending = true;
+    if let Some(window) = &ws.window {
+        window.request_redraw();
+    }
+}
+
+/// "No hints here" along the bottom of `terminal`, the focused pane's
+/// terminal, while `notice` is up on that pane at `now`: a status lane like
+/// the legend quick select shows there.
+pub(super) fn no_hints_status(
+    notice: &crate::window_state::NoHintsNotice,
+    focus: Option<u64>,
+    terminal: Rect,
+    cell: (f32, f32),
+    now: std::time::Instant,
+    tr: &kettle_i18n::Translator,
+) -> Option<kettle_render::PaneStatus> {
+    if notice.pane().is_none()
+        || notice.pane() != focus
+        || notice.deadline().is_none_or(|until| now >= until)
+    {
+        return None;
+    }
+    kettle_render::hint_legend_layout(terminal, cell, tr.text(kettle_i18n::Text::HintNone))
+}
+
 impl App {
     pub(super) fn hint_legend(&self, ws: &WindowState, targets: &[HintTarget]) -> String {
         let mut plain = Vec::new();

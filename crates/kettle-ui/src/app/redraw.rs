@@ -208,6 +208,15 @@ impl App {
                     kettle_render::avoid_hint_labels(&mut status, pane, &hint_bounds);
                     pane_statuses.push(status);
                 }
+            } else if let Some(status) = no_hints_status(
+                &ws.no_hints_notice,
+                ws.mux.active_focus(),
+                pane,
+                status_cell,
+                std::time::Instant::now(),
+                tr,
+            ) {
+                pane_statuses.push(status);
             } else if let Some(status) =
                 self.selection_hint_status(ws, pane, status_cell, std::time::Instant::now())
             {

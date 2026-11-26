@@ -2962,6 +2962,9 @@ args = [{ name = "plain", type = "str" }, { name = "alternate", type = "str" }]
 context = "crates/kettle-ui/src/app/hints.rs or links.rs: Hint-mode instructions when Shift does not change the action."
 args = [{ name = "plain", type = "str" }]
 
+[messages.hint_none]
+context = "crates/kettle-ui/src/app/hints.rs no_hints_status: brief pane status, shown for three seconds along the bottom of the pane, when quick select (palette_hint_mode) found nothing on screen to label: no URL, path, git hash or IP address. The hints are the labels quick select puts on those (etiquetas in Spanish, as in palette_hint_mode). Also a polite screen-reader Status."
+
 [messages.settings_category_sessions]
 context = "crates/kettle-ui/src/settings.rs, session_content.rs: Settings category for saved workspace and terminal output."
 

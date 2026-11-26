@@ -471,3 +471,86 @@ fn a_selected_hovered_link_loses_its_underline_until_the_selection_clears() {
         "every link keeps its rect"
     );
 }
+
+/// Review D20: quick select with nothing to label says so for a moment,
+/// along the bottom of the focused pane where its legend would have been,
+/// in the UI language and as a polite status, then leaves. Another pane, or
+/// no notice, shows nothing.
+#[test]
+fn quick_select_with_nothing_to_label_says_so_briefly() {
+    use crate::window_state::{NO_HINTS_NOTICE_LIFETIME, NoHintsNotice};
+    use std::time::{Duration, Instant};
+    let (en, es) = (Translator::new(Language::En), Translator::new(Language::Es));
+    let now = Instant::now();
+    let terminal = (10.0, 20.0, 400.0, 300.0);
+    let cell = (8.0, 16.0);
+    let mut notice = NoHintsNotice::default();
+    assert!(no_hints_status(&notice, None, terminal, cell, now, &en).is_none());
+    assert!(no_hints_status(&notice, Some(7), terminal, cell, now, &en).is_none());
+    notice.show(7, now);
+    let status = no_hints_status(&notice, Some(7), terminal, cell, now, &en).expect("a notice");
+    assert_eq!(status.text, "No hints here");
+    assert_eq!(
+        status.description, "No hints here",
+        "what a screen reader hears"
+    );
+    assert!(status.target.is_none() && !status.selection_hint);
+    let legend = kettle_render::hint_legend_layout(terminal, cell, "No hints here").unwrap();
+    assert_eq!(status.rect, legend.rect, "the legend's lane");
+    assert_eq!(
+        status.rect.1 + status.rect.3,
+        terminal.1 + terminal.3,
+        "at the bottom"
+    );
+    assert_eq!(
+        no_hints_status(&notice, Some(7), terminal, cell, now, &es)
+            .unwrap()
+            .text,
+        "No hay etiquetas aquí"
+    );
+    assert!(
+        no_hints_status(&notice, Some(8), terminal, cell, now, &en).is_none(),
+        "another pane"
+    );
+    let gone = now + NO_HINTS_NOTICE_LIFETIME;
+    assert!(no_hints_status(&notice, Some(7), terminal, cell, gone, &en).is_none());
+    assert!(!notice.expire(gone - Duration::from_millis(1)));
+    assert_eq!(notice.deadline(), Some(gone), "the scheduler wakes for it");
+    assert!(notice.expire(gone));
+    assert_eq!(notice.pane(), None);
+    // Without a focused pane there is nothing to say it on.
+    let mut ws = WindowState::new(1, Mux::new());
+    show_no_hints(&mut ws, now);
+    assert_eq!(ws.no_hints_notice.pane(), None);
+}
+
+/// Quick select with no targets shows the notice (previews keep their
+/// notification), one that opens takes it down, the frame paints it where
+/// the legend goes, and the scheduler expires it without continuous redraw.
+#[test]
+fn hint_mode_with_no_targets_raises_the_notice() {
+    let src = production_source();
+    let action = src
+        .split("Action::HintMode | Action::PreviewLink => {")
+        .nth(1)
+        .and_then(|rest| rest.split("Action::ToggleViMode =>").next())
+        .expect("the quick select action");
+    let action = action.split_whitespace().collect::<Vec<_>>().join(" ");
+    let empty = action
+        .find("if targets.is_empty() {")
+        .expect("the empty case");
+    let opens = action[empty..].find("} else { ws.no_hints_notice.dismiss();");
+    let shown = action[empty..].find("show_no_hints(ws, std::time::Instant::now());");
+    assert!(
+        shown.is_some_and(|shown| opens.is_some_and(|opens| shown < opens)),
+        "no targets: the notice; targets: it goes"
+    );
+    let overlay = src.split("fn overlay(").nth(1).expect("overlay");
+    assert!(overlay.contains("no_hints_status("));
+    let wait = src
+        .split("fn about_to_wait_inner(")
+        .nth(1)
+        .expect("scheduler");
+    assert!(wait.contains("if ws.no_hints_notice.expire(now) {"));
+    assert!(wait.contains("if let Some(next) = no_hints_wait {"));
+}

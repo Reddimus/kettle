@@ -6349,7 +6349,10 @@ Link hover and hint chrome use `kettle-render::PaneStatus` projections from the
 focused terminal rectangle. `link_status_layout` shares destination elision and
 avoidance bounds across painting, AccessKit and `ui_geometry`; hint chips share
 `hint_label_rect`. The legend wraps and moves clear of bottom-row chips when
-space permits. All are passive overlays, so they reserve no terminal cells and
+space permits. Quick select with nothing to label shows "No hints here" in
+the legend's place for three seconds (`NoHintsNotice`, `no_hints_status`),
+which the scheduler expires and which a screen reader hears as a polite
+status. All are passive overlays, so they reserve no terminal cells and
 do not change pointer grid mapping or terminal IME placement. A hover records
 `LinksScanKey` at native pointer movement and becomes invalid on viewport or
 focus changes. Typing, wheel input, pointer exit and focus events explicitly

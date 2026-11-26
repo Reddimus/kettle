@@ -1569,6 +1569,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   that scrolls out of view moves, to the nearest row still shown.
 - Vi mode shows a small "Vi mode" chip in a corner of the pane, placed only
   over blank cells, so it never covers text.
+- Quick-select hints with nothing on screen to label says "No hints here"
+  for a moment instead of doing nothing.
 
 ## Older releases
 

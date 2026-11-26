@@ -131,6 +131,7 @@ hint_action_copy = "accepted"
 hint_action_preview = "accepted"
 hint_legend = "accepted"
 hint_legend_plain = "accepted"
+hint_none = "draft"
 
 settings_category_sessions = "accepted"
 settings_field_restore_scrollback_lines = "accepted"
@@ -1255,6 +1256,7 @@ keys = [
 
     "hint_legend",
     "hint_legend_plain",
+    "hint_none",
     "link_open_click",
     "link_open_command_click",
     "link_open_control_click",

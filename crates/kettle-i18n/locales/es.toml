@@ -1067,6 +1067,7 @@ hint_action_copy = "copiar texto"
 hint_action_preview = "ver vista previa"
 hint_legend = "Etiqueta: {plain} · Shift+etiqueta: {alternate} · Esc para cancelar"
 hint_legend_plain = "Etiqueta: {plain} · Esc para cancelar"
+hint_none = "No hay etiquetas aquí"
 
 a11y_window_minimize = "Minimizar ventana"
 a11y_window_maximize = "Maximizar ventana"

@@ -581,6 +581,42 @@ pub(crate) struct PickerView {
     pub(crate) preview_at: Option<std::time::Instant>,
 }
 
+/// How long "No hints here" stays on its pane.
+pub(crate) const NO_HINTS_NOTICE_LIFETIME: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The pane status that says quick select found nothing to label, so the
+/// key that asked for it does not seem to do nothing.
+#[derive(Debug, Default)]
+pub(crate) struct NoHintsNotice {
+    showing: Option<(u64, std::time::Instant)>,
+}
+
+impl NoHintsNotice {
+    /// Show the notice on `pane` for `NO_HINTS_NOTICE_LIFETIME` from `now`.
+    pub(crate) fn show(&mut self, pane: u64, now: std::time::Instant) {
+        self.showing = Some((pane, now + NO_HINTS_NOTICE_LIFETIME));
+    }
+
+    /// The pane the notice shows on, until it expires or is dismissed.
+    pub(crate) fn pane(&self) -> Option<u64> {
+        self.showing.map(|(pane, _)| pane)
+    }
+
+    pub(crate) fn deadline(&self) -> Option<std::time::Instant> {
+        self.showing.map(|(_, until)| until)
+    }
+
+    /// Take the notice down, saying whether it was up.
+    pub(crate) fn dismiss(&mut self) -> bool {
+        self.showing.take().is_some()
+    }
+
+    /// Take the notice down once its time is up, saying whether it was.
+    pub(crate) fn expire(&mut self, now: std::time::Instant) -> bool {
+        self.deadline().is_some_and(|until| now >= until) && self.dismiss()
+    }
+}
+
 const MEDIA_RECEIPT_EXPANDED: std::time::Duration = std::time::Duration::from_secs(4);
 const MEDIA_RECEIPT_LIFETIME: std::time::Duration = std::time::Duration::from_secs(30);
 const MEDIA_RECEIPT_HARD_LIFETIME: std::time::Duration = std::time::Duration::from_secs(120);
@@ -1619,6 +1655,8 @@ pub(crate) struct WindowState {
     /// The Shift hint over a program that uses the mouse; see
     /// `MouseOverrideHint`.
     pub(crate) mouse_override_hint: MouseOverrideHint,
+    /// "No hints here" after quick select found nothing; see `NoHintsNotice`.
+    pub(crate) no_hints_notice: NoHintsNotice,
     /// The open picker's scroll, pointer and preview state; see `PickerView`.
     pub(crate) picker_view: PickerView,
     /// The first `Resized` after window creation is the initial
@@ -2053,6 +2091,7 @@ impl WindowState {
             resize_overlay: None,
             resize_overlay_label: None,
             mouse_override_hint: MouseOverrideHint::default(),
+            no_hints_notice: NoHintsNotice::default(),
             picker_view: PickerView::default(),
             seen_first_resize: false,
             spawned_at: std::time::Instant::now(),
