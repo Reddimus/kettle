@@ -374,16 +374,24 @@ def _read_owned_json(
         _fail(f"{label} is not strict UTF-8 JSON: {error}")
 
 
-def _read_pending(root_fd: int, prefix: str) -> Dict[str, List[Dict[str, Any]]]:
+RECEIPT_UPDATE_KEYS = ("removed_files", "removed_directories", "created_directories")
+
+
+def _read_receipt(
+    root_fd: int, prefix: str
+) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, List[str]]]:
     """Files an interrupted install was writing or uninstall was removing last,
-    by path; empty when there is no pending receipt."""
+    by path, and what an interrupted repair learned from a self-update journal
+    it had already retired; both empty when there is no pending receipt."""
+    update: Dict[str, List[str]] = {key: [] for key in RECEIPT_UPDATE_KEYS}
     document = _read_owned_json(root_fd, PENDING_RELATIVE, 0o600, "install receipt")
     if document is None:
-        return {}
+        return {}, update
     expected = {"schema", "product", "managed_by", "prefix", "owner_uid", "files"}
     if (
         not isinstance(document, dict)
-        or set(document) != expected
+        or not expected.issubset(document)
+        or not set(document).issubset(expected | {"update"})
         or not _is_int(document["schema"])
         or document["schema"] != MANIFEST_SCHEMA
         or document["product"] != "kettle"
@@ -399,7 +407,30 @@ def _read_pending(root_fd: int, prefix: str) -> Dict[str, List[Dict[str, Any]]]:
     for record in document["files"]:
         record = _validate_file_record(record)
         pending.setdefault(record["path"], []).append(record)
-    return pending
+    if "update" in document:
+        section = document["update"]
+        if not isinstance(section, dict) or set(section) != set(RECEIPT_UPDATE_KEYS):
+            _fail("install receipt does not identify this installation")
+        for key in RECEIPT_UPDATE_KEYS:
+            paths = section[key]
+            if not isinstance(paths, list) or len(paths) > MAX_ENTRIES:
+                _fail("install receipt does not identify this installation")
+            for path in paths:
+                if not isinstance(path, str) or path in (
+                    MANIFEST_RELATIVE,
+                    PENDING_RELATIVE,
+                    UNINSTALL_RELATIVE,
+                ):
+                    _fail("install receipt does not identify this installation")
+                _relative_parts(path)
+            update[key] = paths
+    return pending, update
+
+
+def _read_pending(root_fd: int, prefix: str) -> Dict[str, List[Dict[str, Any]]]:
+    """Files an interrupted install was writing or uninstall was removing last,
+    by path; empty when there is no pending receipt."""
+    return _read_receipt(root_fd, prefix)[0]
 
 
 def _publish_pending(
@@ -407,24 +438,24 @@ def _publish_pending(
     prefix: str,
     pending: Dict[str, List[Dict[str, Any]]],
     created: Dict[str, int],
+    update: Optional[Dict[str, List[str]]] = None,
 ) -> None:
     records = [record for path in sorted(pending) for record in pending[path]]
     if not 1 <= len(records) <= 2 * MAX_ENTRIES:
         _fail("install receipt exceeds its bounded entry count")
-    encoded = (
-        json.dumps(
-            {
-                "schema": MANIFEST_SCHEMA,
-                "product": "kettle",
-                "managed_by": "kettle-installer",
-                "prefix": prefix,
-                "owner_uid": os.geteuid(),
-                "files": records,
-            },
-            indent=2,
-        )
-        + "\n"
-    ).encode("utf-8")
+    receipt: Dict[str, Any] = {
+        "schema": MANIFEST_SCHEMA,
+        "product": "kettle",
+        "managed_by": "kettle-installer",
+        "prefix": prefix,
+        "owner_uid": os.geteuid(),
+        "files": records,
+    }
+    if update and any(update[key] for key in RECEIPT_UPDATE_KEYS):
+        if any(len(update[key]) > MAX_ENTRIES for key in RECEIPT_UPDATE_KEYS):
+            _fail("install receipt exceeds its bounded entry count")
+        receipt["update"] = {key: sorted(update[key]) for key in RECEIPT_UPDATE_KEYS}
+    encoded = (json.dumps(receipt, indent=2) + "\n").encode("utf-8")
     if len(encoded) > MAX_MANIFEST_BYTES:
         _fail("install receipt exceeds its bounded size")
     _publish_bytes(root_fd, PENDING_RELATIVE, encoded, 0o600, created)
@@ -684,11 +715,11 @@ def _adopt_interrupted_update(
     return adopted, gone
 
 
-def _update_created_directories(root_fd: int, journal: Dict[str, Any]) -> Dict[str, int]:
-    """The directories the interrupted self-update created that are still
+def _update_created_directories(root_fd: int, paths: Sequence[str]) -> Dict[str, int]:
+    """Of the directories an interrupted self-update created, those still
     there as it made them, so this install can record them as its own."""
     directories: Dict[str, int] = {}
-    for path in journal.get("created_directories", {}):
+    for path in paths:
         try:
             handle = _open_relative_directory(root_fd, _relative_parts(path), create=False)
         except (InstallerError, OSError):
@@ -1192,8 +1223,9 @@ def _install(arguments: argparse.Namespace) -> None:
             if _read_manifest(root_fd, prefix, uninstall=True) is not None:
                 _fail("an interrupted uninstall must be completed before installing")
             existing = _read_manifest(root_fd, prefix)
+            receipt_pending, receipt_update = _read_receipt(root_fd, prefix)
             pending = {}
-            for path, candidates in _read_pending(root_fd, prefix).items():
+            for path, candidates in receipt_pending.items():
                 for record in candidates:
                     if _file_matches(root_fd, record):
                         pending[path] = [record]
@@ -1206,19 +1238,32 @@ def _install(arguments: argparse.Namespace) -> None:
             update_journal = _read_update_journal(root_fd)
             if update_journal is not None and update_journal["phase"] == "committed":
                 update_journal = None
-            update_directories: Dict[str, int] = {}
-            # Paths the update created that are gone again: a record the update
-            # wrote may still list them.
-            update_gone: set = set()
+            # What an interrupted self-update created: the files and directories
+            # its rollback removed again, which a record the update wrote may
+            # still list, and the directories still there. A repair interrupted
+            # after retiring the journal kept these in its receipt.
+            update_gone = set(receipt_update["removed_files"])
+            update_gone_directories = set(receipt_update["removed_directories"])
+            update_created = set(receipt_update["created_directories"])
             if update_journal is not None:
                 owned = {spec["path"] for spec in specs}
                 if existing is not None:
                     owned.update(record["path"] for record in existing["files"])
-                adopted, update_gone = _adopt_interrupted_update(root_fd, update_journal, owned)
+                adopted, gone = _adopt_interrupted_update(root_fd, update_journal, owned)
+                update_gone |= gone
                 for path, record in adopted.items():
                     if record not in pending.setdefault(path, []):
                         pending[path].append(record)
-                update_directories = _update_created_directories(root_fd, update_journal)
+                update_created |= set(update_journal.get("created_directories", {}))
+            # A removal stands only while the path is still gone.
+            update_gone = {path for path in update_gone if not _destination_exists(root_fd, path)}
+            update_gone_directories |= {
+                path for path in update_created if not _destination_exists(root_fd, path)
+            }
+            update_gone_directories = {
+                path for path in update_gone_directories if not _destination_exists(root_fd, path)
+            }
+            update_directories = _update_created_directories(root_fd, sorted(update_created))
             planned = {spec["path"]: _planned_record(spec) for spec in specs}
 
             def written_by_interrupted_install(path: str) -> bool:
@@ -1229,6 +1274,8 @@ def _install(arguments: argparse.Namespace) -> None:
                 owned_directories: Dict[str, int] = {}
             else:
                 for directory in existing["directories"]:
+                    if directory["path"] in update_gone_directories:
+                        continue
                     _verify_directory(root_fd, directory)
                 for record in existing["files"]:
                     if record["path"] in update_gone:
@@ -1241,7 +1288,9 @@ def _install(arguments: argparse.Namespace) -> None:
                     if record["path"] not in update_gone
                 }
                 owned_directories = {
-                    record["path"]: record["mode"] for record in existing["directories"]
+                    record["path"]: record["mode"]
+                    for record in existing["directories"]
+                    if record["path"] not in update_gone_directories
                 }
             # What the interrupted update created now holds this install's files.
             owned_directories.update(update_directories)
@@ -1273,7 +1322,19 @@ def _install(arguments: argparse.Namespace) -> None:
             for path, record in planned.items():
                 if record not in pending.setdefault(path, []):
                     pending[path].append(record)
-            _publish_pending(root_fd, prefix, pending, created)
+            # Durable before the journal goes, so a repair interrupted from
+            # here on still knows what the update created and removed.
+            _publish_pending(
+                root_fd,
+                prefix,
+                pending,
+                created,
+                {
+                    "removed_files": sorted(update_gone),
+                    "removed_directories": sorted(update_gone_directories),
+                    "created_directories": sorted(update_directories),
+                },
+            )
             if update_journal is not None:
                 # The receipt now names every file the update left, which is all
                 # the journal protected. Retire it before writing anything, or
