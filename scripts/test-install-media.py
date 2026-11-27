@@ -1027,6 +1027,95 @@ module._uninstall(arguments)
                 for relative in written:
                     self.assertEqual(relative in recorded, state == "installed", relative)
 
+    def leave_update_record(self, journal, files=(), directories=()):
+        """Make the prefix look as an update that wrote its own install record
+        and then rolled back everything else leaves it: the record still lists
+        the files and directories the update added, which the rollback removed,
+        and the journal shows the record could not be restored."""
+        manifest_path = self.prefix / "share/kettle/install-files.json"
+        previous = manifest_path.read_bytes()
+        manifest = json.loads(previous)
+        document = json.loads(journal.read_text())
+        for relative in files:
+            data = b"added by the update: " + relative.encode()
+            manifest["files"].append({
+                "path": relative,
+                "size": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "mode": 0o644,
+            })
+            document["entries"].insert(0, {
+                "relative": relative,
+                "existed": False,
+                "previous_size": None,
+                "previous_sha256": None,
+                "replacement_size": len(data),
+                "replacement_sha256": hashlib.sha256(data).hexdigest(),
+                "state": "restored",
+            })
+        for relative in directories:
+            manifest["directories"].append({"path": relative, "mode": 0o755})
+            document.setdefault("created_directories", {})[relative] = 0o755
+        manifest["files"].sort(key=lambda record: record["path"])
+        manifest["directories"].sort(key=lambda record: record["path"])
+        replacement = (json.dumps(manifest, indent=2) + "\n").encode()
+        manifest_path.write_bytes(replacement)
+        manifest_path.chmod(0o644)
+        document["entries"].append({
+            "relative": "share/kettle/install-files.json",
+            "existed": True,
+            "previous_unix_mode": 0o644,
+            "previous_size": len(previous),
+            "previous_sha256": hashlib.sha256(previous).hexdigest(),
+            "replacement_size": len(replacement),
+            "replacement_sha256": hashlib.sha256(replacement).hexdigest(),
+            "state": "installed",
+        })
+        journal.write_text(json.dumps(document))
+        return manifest_path
+
+    def test_a_record_listing_a_directory_the_rollback_removed_is_repaired(self):
+        installed = self.run_installer()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        journal, backup = self.interrupted_self_update()
+        added = "share/kettle/added-by-update"
+        manifest_path = self.leave_update_record(
+            journal, files=(f"{added}/file",), directories=(added,)
+        )
+        self.assertFalse((self.prefix / added).exists())
+
+        repaired = self.run_installer()
+
+        self.assertEqual(repaired.returncode, 0, repaired.stderr)
+        manifest = json.loads(manifest_path.read_text())
+        self.assertNotIn(added, {record["path"] for record in manifest["directories"]})
+        self.assertFalse(journal.exists() or backup.exists())
+
+    def test_a_repair_interrupted_after_retiring_the_journal_still_finishes(self):
+        installed = self.helper()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        journal, _backup = self.interrupted_self_update(files=(
+            ("share/kettle/install.sh", b"#!/bin/sh\n# 9.9.9\n", "installed"),
+            ("bin/kettle", b"9.9.9 kettle", "prepared"),
+        ))
+        added = "share/kettle/added-by-update"
+        manifest_path = self.leave_update_record(
+            journal, files=(f"{added}/file", "share/kettle/added-file"), directories=(added,)
+        )
+
+        # Killed right after the first file the repair publishes, once the
+        # journal that recorded the removals is gone.
+        cut = self.helper(kill_at=1)
+
+        self.assertEqual(cut.returncode, 9, cut.stderr)
+        self.assertFalse(journal.exists())
+        retried = self.helper()
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        manifest = json.loads(manifest_path.read_text())
+        recorded = {record["path"] for record in manifest["files"]}
+        self.assertFalse({f"{added}/file", "share/kettle/added-file"} & recorded)
+        self.assertNotIn(added, {record["path"] for record in manifest["directories"]})
+
     def test_a_journal_naming_a_path_kettle_does_not_own_is_refused(self):
         installed = self.run_installer()
         self.assertEqual(installed.returncode, 0, installed.stderr)

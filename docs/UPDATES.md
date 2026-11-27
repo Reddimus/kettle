@@ -342,7 +342,11 @@ installer then lays the whole release over the prefix. Before writing anything
 it retires the journal, so that kettle does not roll the update back over the
 new install, and removes the backup copies whose bytes and marker match the
 journal. A backup that still holds anything else, such as a copy the update
-stopped part-way through, keeps its marker. A
+stopped part-way through, keeps its marker. Files and directories the update
+created that its rollback removed again are dropped from any record the update
+left, and the directories it created that remain become the install's. The
+installer's own receipt keeps both lists from before the journal is retired,
+so a repair interrupted after that still finishes. A
 journaled path holding anything else, the installer's own record included, is
 refused rather than replaced. A committed update's journal is left for kettle to
 confirm and remove, and a journal the installer cannot read stops it with the
