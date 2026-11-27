@@ -290,8 +290,9 @@ stateDiagram-v2
         Restoring a destination requires its current
         size and SHA-256 to equal the journalled
         replacement fingerprint. If another writer
-        changed it, rollback stops and preserves
-        everything for manual resolution.
+        changed it, rollback leaves it, restores the
+        rest, and keeps the journal and backup for
+        manual resolution.
     end note
 ```
 
@@ -302,11 +303,19 @@ integrity, an id-bound marker, and the exact absence of unjournaled backup files
 or directories, then checkpoints every restored entry, so a second interruption
 simply resumes rollback. Before restoring or deleting a destination, recovery
 requires its current size and SHA-256 to equal the replacement fingerprint in
-the journal. If another writer changed it after the update, rollback stops with
-an explicit conflict and preserves the destination, journal, and backup for
-manual resolution. A `prepared` entry also recognizes the exact prior
-fingerprint, covering a crash before publication without treating it as a
+the journal. If another writer changed it after the update, rollback leaves it
+alone and reports an explicit conflict, preserving the destination, journal,
+and backup for manual resolution. A `prepared` entry also recognizes the exact
+prior fingerprint, covering a crash before publication without treating it as a
 conflict.
+
+One entry that cannot be restored, for a conflict or any other reason, does not
+stop the others. Rollback still restores every other destination, so a single
+stuck file never leaves the rest of the install at the new release beside the
+old binary, then keeps the journal and backups and fails, naming each file it
+could not restore. The next start or update resumes from there, before it
+checks the install record. Releases before 2.54.0 checked the record first and
+so could never resume their own rollback.
 
 A durable commit retains the journal and last-known-good backup. They are
 discarded only after a process running at least the target version reaches the

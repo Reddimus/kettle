@@ -5469,27 +5469,51 @@ impl Transaction {
         self.persist_journal()
     }
 
+    /// Restore every entry that can be restored, newest first, and fail if any
+    /// could not.
+    ///
+    /// One entry that cannot be restored does not stop the others (#846). The
+    /// entries are independent files, and stopping at the first failure left
+    /// every older one at the update's bytes: the installer scripts, which an
+    /// update replaces first, beside the old binary. A failed entry keeps its
+    /// journal state, and the failure keeps the journal and backups, so the
+    /// next start or update retries exactly what is left. An entry restored
+    /// whose checkpoint could not be written is replayed then, which restoring
+    /// is safe to repeat.
     fn restore_entries(&mut self) -> Result<(), UpdateError> {
+        let mut failures = Vec::new();
         for index in (0..self.journal.entries.len()).rev() {
-            match self.journal.entries[index].state {
-                JournalEntryState::Restored | JournalEntryState::BackupDiscarded => continue,
-                JournalEntryState::BackingUp => {
-                    discard_incomplete_backup(
-                        &self.prefix,
-                        &self.backup_dir,
-                        &self.journal.entries[index],
-                    )?;
-                    self.journal.entries[index].state = JournalEntryState::BackupDiscarded;
-                    self.persist_journal()?;
-                    continue;
-                }
-                JournalEntryState::Prepared | JournalEntryState::Installed => {}
+            if let Err(error) = self.restore_entry_at(index) {
+                failures.push(format!("{}: {error}", self.journal.entries[index].relative));
             }
-            restore_entry(&self.prefix, &self.backup_dir, &self.journal.entries[index])?;
-            self.journal.entries[index].state = JournalEntryState::Restored;
-            self.persist_journal()?;
         }
-        Ok(())
+        if failures.is_empty() {
+            return Ok(());
+        }
+        Err(UpdateError::Transaction(format!(
+            "rollback restored every other file but not {}; the journal and backups are kept, \
+             and the next start or update retries",
+            failures.join("; ")
+        )))
+    }
+
+    fn restore_entry_at(&mut self, index: usize) -> Result<(), UpdateError> {
+        match self.journal.entries[index].state {
+            JournalEntryState::Restored | JournalEntryState::BackupDiscarded => return Ok(()),
+            JournalEntryState::BackingUp => {
+                discard_incomplete_backup(
+                    &self.prefix,
+                    &self.backup_dir,
+                    &self.journal.entries[index],
+                )?;
+                self.journal.entries[index].state = JournalEntryState::BackupDiscarded;
+                return self.persist_journal();
+            }
+            JournalEntryState::Prepared | JournalEntryState::Installed => {}
+        }
+        restore_entry(&self.prefix, &self.backup_dir, &self.journal.entries[index])?;
+        self.journal.entries[index].state = JournalEntryState::Restored;
+        self.persist_journal()
     }
 
     fn finish_cleanup(&mut self) -> Result<(), UpdateError> {
@@ -9294,6 +9318,83 @@ mod tests {
         after.retain(|path, _| !path.starts_with(".kettle-update-backup-"));
         assert_eq!(after, before, "a destination changed before the refusal");
         assert!(!prefix.join(".kettle-update-journal.json").exists());
+    }
+
+    /// #846: a rollback restores every entry it can. One it cannot restore,
+    /// here because its directory turned group-writable after the update
+    /// published it, used to stop the rollback before the entries published
+    /// earlier, so the installer scripts an update replaces first stayed at
+    /// the new release's bytes beside the old binary. The failed entry stays
+    /// journaled, and the next update recovers it before it checks the
+    /// install record.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_rollback_restores_every_entry_it_can_and_keeps_the_rest_for_recovery() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = test_tempdir();
+        let prefix = root.path().join("install");
+        create_linux_install_dir_all(&prefix, &prefix.join("share/kettle"));
+        let marker_path = prefix.join("share/kettle/install.json");
+        fs::write(&marker_path, marker_json("2.52.0").unwrap()).unwrap();
+        seed_linux_install_provenance_with(
+            &prefix,
+            &[("share/doc/kettle/LICENSE", b"old license".as_slice(), 0o644)],
+        );
+        let install = ManagedInstall {
+            prefix: prefix.clone(),
+            executable: prefix.join("bin/kettle"),
+            marker_path,
+        };
+        let before = install_tree(&prefix);
+        let mut transaction = Transaction::begin(&prefix, "99.0.0").unwrap();
+        for (relative, bytes, mode) in [
+            (
+                "share/kettle/install.sh",
+                b"new installer".as_slice(),
+                0o755,
+            ),
+            (
+                "share/kettle/install-unix.py",
+                b"new unix installer".as_slice(),
+                0o755,
+            ),
+            ("share/doc/kettle/LICENSE", b"new license".as_slice(), 0o644),
+        ] {
+            transaction
+                .install_bytes(Path::new(relative), bytes, Some(mode))
+                .unwrap();
+        }
+        let doc = prefix.join("share/doc/kettle");
+        fs::set_permissions(&doc, fs::Permissions::from_mode(0o775)).unwrap();
+
+        let error = transaction.rollback().unwrap_err();
+
+        for relative in ["share/kettle/install.sh", "share/kettle/install-unix.py"] {
+            assert_eq!(
+                fs::read(prefix.join(relative)).unwrap(),
+                before[Path::new(relative)].clone().unwrap(),
+                "{relative} was left at the update's bytes"
+            );
+        }
+        assert!(
+            error.to_string().contains("share/doc/kettle/LICENSE"),
+            "the failure names what is left: {error}"
+        );
+        assert_eq!(fs::read(doc.join("LICENSE")).unwrap(), b"new license");
+        assert!(
+            prefix.join(".kettle-update-journal.json").is_file(),
+            "what could not be restored stays journaled"
+        );
+
+        // Once the directory is fixed, the next update finishes the rollback
+        // before it reads the install record, which still describes the old
+        // files.
+        fs::set_permissions(&doc, fs::Permissions::from_mode(0o755)).unwrap();
+        let running = semver::Version::new(2, 52, 0);
+        drop(prepare_update_transaction(&install, &running).unwrap());
+        assert!(!prefix.join(".kettle-update-journal.json").exists());
+        assert_eq!(install_tree(&prefix), before);
+        read_linux_install_provenance(&prefix).unwrap();
     }
 
     /// Under the update lock the candidate must be newer than the installed
