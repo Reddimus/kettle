@@ -315,7 +315,22 @@ stuck file never leaves the rest of the install at the new release beside the
 old binary, then keeps the journal and backups and fails, naming each file it
 could not restore. The next start or update resumes from there, before it
 checks the install record. Releases before 2.54.0 checked the record first and
-so could never resume their own rollback.
+so could never resume their own rollback; the installer can recover one of
+those, as described next.
+
+If the bundled `install.sh` or the online installer runs while a rollback is
+still pending, it reads the updater's journal as the receipt it is, after the
+same validation the updater applies to it. A file at a journaled path is
+treated as one the interrupted install wrote only when its bytes are what the
+journal shows the update left there in that entry's state: the file it found,
+before publication or once restored, or either file in between. The installer
+then lays the whole release over the prefix. Before writing anything it retires
+the journal, so that kettle does not roll the update back over the new install,
+and removes the backup copies whose bytes and marker match the journal. A
+journaled path holding anything else, the installer's own record included, is
+refused rather than replaced. A committed update's journal is left for kettle to
+confirm and remove, and a journal the installer cannot read stops it with the
+advice to start kettle once first.
 
 A durable commit retains the journal and last-known-good backup. They are
 discarded only after a process running at least the target version reaches the

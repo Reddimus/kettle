@@ -1765,6 +1765,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   other users can write, such as a `~/.local/share/doc/kettle` left `0775` by
   umask `002`, now stops before downloading anything and names the directories
   and the `chmod go-w` that fixes them, instead of failing part-way (#847).
+- Linux: a self-update rollback that cannot restore one file still restores
+  all the others, and `install.sh` can install over a rollback an older
+  release left unfinished instead of refusing its installer files (#846).
 
 ## Older releases
 

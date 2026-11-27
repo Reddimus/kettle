@@ -9,6 +9,7 @@ import errno
 import hashlib
 import json
 import os
+import re
 import secrets
 import stat
 import sys
@@ -39,6 +40,13 @@ REQUIRED_PATHS = frozenset(
 MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_MANIFEST_BYTES = 1024 * 1024
 UPDATE_LOCK = ".kettle-update.lock"
+# The self-updater's transaction journal and the marker inside its backups.
+UPDATE_JOURNAL = ".kettle-update-journal.json"
+UPDATE_BACKUP_MARKER = ".kettle-update-backup.json"
+UPDATE_JOURNAL_PHASES = frozenset({"prepared", "applying", "rolling_back", "committed"})
+UPDATE_JOURNAL_STATES = frozenset(
+    {"backing_up", "prepared", "installed", "restored", "backup_discarded"}
+)
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 FILE_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 
@@ -292,7 +300,9 @@ def _validate_directory_record(record: Any) -> Dict[str, Any]:
     return {"path": path, "mode": mode}
 
 
-def _read_owned_json(root_fd: int, relative: str, mode: int, label: str) -> Optional[Any]:
+def _read_owned_json(
+    root_fd: int, relative: str, mode: int, label: str, object_pairs_hook: Any = None
+) -> Optional[Any]:
     """The JSON in the owned, bounded regular file at `relative`, or `None`
     when there is none."""
     try:
@@ -321,7 +331,7 @@ def _read_owned_json(root_fd: int, relative: str, mode: int, label: str) -> Opti
     finally:
         os.close(handle)
     try:
-        return json.loads(raw.decode("utf-8"))
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=object_pairs_hook)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         _fail(f"{label} is not strict UTF-8 JSON: {error}")
 
@@ -380,6 +390,298 @@ def _publish_pending(
     if len(encoded) > MAX_MANIFEST_BYTES:
         _fail("install receipt exceeds its bounded size")
     _publish_bytes(root_fd, PENDING_RELATIVE, encoded, 0o600, created)
+
+
+def _is_digest(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+SEMVER = re.compile(
+    r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+    r"(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?"
+)
+
+
+def _not_from_updater() -> NoReturn:
+    _fail("the update journal is not one Kettle's self-updater wrote")
+
+
+def _unique_keys(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+    if len({key for key, _ in pairs}) != len(pairs):
+        _not_from_updater()
+    return dict(pairs)
+
+
+def _read_update_journal(root_fd: int) -> Optional[Dict[str, Any]]:
+    """The self-updater's transaction journal, or `None` when there is none.
+
+    Validated as the updater's own `validate_journal` validates it, so the
+    installer never acts on a journal the updater would refuse to recover."""
+    document = _read_owned_json(
+        root_fd, UPDATE_JOURNAL, 0o600, "update journal", object_pairs_hook=_unique_keys
+    )
+    if document is None:
+        return None
+    if (
+        not isinstance(document, dict)
+        or not _is_int(document.get("schema"))
+        or document["schema"] != 2
+    ):
+        _fail(
+            "an interrupted Kettle self-update is journaled in a form this installer "
+            "cannot read; start the installed kettle once so it rolls the update "
+            "back, then run this installer again"
+        )
+    required = {"schema", "transaction_id", "target_version", "phase", "backup_dir", "entries"}
+    if not required.issubset(document) or not set(document).issubset(
+        required | {"created_directories"}
+    ):
+        _not_from_updater()
+    transaction = document["transaction_id"]
+    phase = document["phase"]
+    directories = document.get("created_directories", {})
+    entries = document["entries"]
+    if (
+        not isinstance(transaction, str)
+        or len(transaction) > 64
+        or transaction.count("-") != 1
+        or not all(part.isascii() and part.isdigit() for part in transaction.split("-"))
+        or document["backup_dir"] != f".kettle-update-backup-{transaction}"
+        or not isinstance(document["target_version"], str)
+        or len(document["target_version"]) > 64
+        or not SEMVER.fullmatch(document["target_version"])
+        or not isinstance(phase, str)
+        or phase not in UPDATE_JOURNAL_PHASES
+        or not isinstance(directories, dict)
+        or len(directories) > MAX_ENTRIES
+        or not isinstance(entries, list)
+        or len(entries) > MAX_ENTRIES
+    ):
+        _not_from_updater()
+    seen_directories = set()
+    for path, mode in directories.items():
+        _relative_parts(path)
+        if not _is_int(mode) or mode != 0o755 or path.lower() in seen_directories:
+            _not_from_updater()
+        seen_directories.add(path.lower())
+    entry_keys = {
+        "relative",
+        "existed",
+        "previous_size",
+        "previous_sha256",
+        "replacement_size",
+        "replacement_sha256",
+        "state",
+    }
+    destinations = set()
+    for index, entry in enumerate(entries):
+        if (
+            not isinstance(entry, dict)
+            or not entry_keys.issubset(entry)
+            or not set(entry).issubset(entry_keys | {"previous_unix_mode"})
+            or not isinstance(entry["relative"], str)
+            or not isinstance(entry["existed"], bool)
+            or not isinstance(entry["state"], str)
+            or entry["state"] not in UPDATE_JOURNAL_STATES
+            or not _is_int(entry["replacement_size"])
+            or not 0 <= entry["replacement_size"] <= MAX_FILE_BYTES
+            or not _is_digest(entry["replacement_sha256"])
+        ):
+            _not_from_updater()
+        _relative_parts(entry["relative"])
+        existed = entry["existed"]
+        state = entry["state"]
+        mode = entry.get("previous_unix_mode")
+        previous_valid = (
+            _is_int(entry["previous_size"])
+            and 0 <= entry["previous_size"] <= MAX_FILE_BYTES
+            and _is_digest(entry["previous_sha256"])
+            if existed
+            else entry["previous_size"] is None and entry["previous_sha256"] is None
+        )
+        if (
+            not previous_valid
+            or entry["relative"].lower() in destinations
+            or not (mode is None or (_is_int(mode) and existed))
+            or state == "backing_up"
+            and (
+                not existed
+                or index + 1 != len(entries)
+                or phase not in ("applying", "rolling_back")
+            )
+            or state == "backup_discarded"
+            and (not existed or phase != "rolling_back")
+            or state == "restored"
+            and phase != "rolling_back"
+        ):
+            _not_from_updater()
+        destinations.add(entry["relative"].lower())
+    return document
+
+
+def _journaled_fingerprints(entry: Dict[str, Any]) -> Tuple[List[Tuple[int, str]], bool]:
+    """The `(size, sha256)` an updater leaves at a journaled path in the
+    entry's state, and whether it may leave nothing there.
+
+    The same states the updater's own recovery accepts: before publication
+    only the previous file; between publication and its checkpoint either
+    file; once restored only the previous one again."""
+    previous = (
+        [(entry["previous_size"], entry["previous_sha256"])] if entry["existed"] else []
+    )
+    replacement = [(entry["replacement_size"], entry["replacement_sha256"])]
+    if entry["state"] in ("prepared", "installed"):
+        return previous + replacement, not entry["existed"]
+    return previous, not entry["existed"]
+
+
+def _current_record(root_fd: int, relative: str) -> Optional[Dict[str, Any]]:
+    """A file record for what is at `relative` now, or `None` when nothing is.
+    Only a single-link regular file of this user's has one."""
+    try:
+        parent_fd, leaf = _open_parent(root_fd, relative)
+    except FileNotFoundError:
+        return None
+    try:
+        try:
+            handle = os.open(leaf, FILE_READ_FLAGS, dir_fd=parent_fd)
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            if error.errno in (errno.ELOOP, errno.ENOTDIR):
+                _fail(f"an interrupted Kettle self-update path is a symlink: {relative}")
+            raise
+    finally:
+        os.close(parent_fd)
+    try:
+        metadata = os.fstat(handle)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.geteuid()
+            or metadata.st_size > MAX_FILE_BYTES
+        ):
+            _fail(f"an interrupted Kettle self-update path changed identity: {relative}")
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(handle, min(1024 * 1024, metadata.st_size - total + 1))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > metadata.st_size:
+                _fail(f"an interrupted Kettle self-update path grew while hashing: {relative}")
+            digest.update(chunk)
+        return {
+            "path": relative,
+            "size": total,
+            "sha256": digest.hexdigest(),
+            "mode": stat.S_IMODE(metadata.st_mode),
+        }
+    finally:
+        os.close(handle)
+
+
+def _adopt_interrupted_update(
+    root_fd: int, journal: Dict[str, Any]
+) -> Tuple[Dict[str, Dict[str, Any]], set]:
+    """Records for the files an interrupted self-update left, by path, and the
+    paths it created that are gone again.
+
+    The updater's journal is its receipt, as the pending receipt is this
+    installer's: a file whose bytes are those the journal shows the update
+    left in the entry's state came from Kettle. Anything else at a journaled
+    path changed afterwards, and is refused rather than replaced. The
+    installer's own record is checked the same way but never adopted, since
+    the installer rewrites it."""
+    adopted: Dict[str, Dict[str, Any]] = {}
+    gone = set()
+    for entry in journal["entries"]:
+        path = entry["relative"]
+        if path in (PENDING_RELATIVE, UNINSTALL_RELATIVE):
+            _not_from_updater()
+        fingerprints, may_be_absent = _journaled_fingerprints(entry)
+        current = _current_record(root_fd, path)
+        if current is None:
+            if may_be_absent:
+                gone.add(path)
+            # A file it found there and that is now missing is the install
+            # record's to report.
+            continue
+        if (current["size"], current["sha256"]) not in fingerprints:
+            _fail(
+                f"{path} changed after an interrupted Kettle self-update, so this "
+                "installer will not replace it"
+            )
+        if path == MANIFEST_RELATIVE:
+            continue
+        if current["mode"] not in (0o644, 0o755):
+            _fail(f"an interrupted Kettle self-update left {path} with an unexpected mode")
+        adopted[path] = current
+    return adopted, gone
+
+
+def _update_created_directories(root_fd: int, journal: Dict[str, Any]) -> Dict[str, int]:
+    """The directories the interrupted self-update created that are still
+    there as it made them, so this install can record them as its own."""
+    directories: Dict[str, int] = {}
+    for path in journal.get("created_directories", {}):
+        try:
+            handle = _open_relative_directory(root_fd, _relative_parts(path), create=False)
+        except (InstallerError, OSError):
+            continue
+        try:
+            metadata = os.fstat(handle)
+            if metadata.st_uid == os.geteuid() and stat.S_IMODE(metadata.st_mode) == 0o755:
+                directories[path] = 0o755
+        finally:
+            os.close(handle)
+    return directories
+
+
+def _remove_update_backup(root_fd: int, journal: Dict[str, Any]) -> None:
+    """Remove a retired self-update's backups, best effort and exactly.
+
+    Only a backup whose marker names this transaction is touched, and in it
+    only the copies whose bytes are the previous files the journal records,
+    then the marker and the directories that leaves empty. Anything else
+    stays where it is."""
+    name = journal["backup_dir"]
+    try:
+        marker = _read_owned_json(
+            root_fd, f"{name}/{UPDATE_BACKUP_MARKER}", 0o600, "update backup marker"
+        )
+    except (InstallerError, OSError):
+        return
+    if marker != {"schema": 2, "product": "kettle", "transaction_id": journal["transaction_id"]}:
+        return
+    directories = set()
+    for entry in journal["entries"]:
+        if not entry["existed"] or entry["state"] == "backup_discarded":
+            continue
+        relative = f"{name}/{entry['relative']}"
+        parts = _relative_parts(relative)
+        directories.update("/".join(parts[:index]) for index in range(2, len(parts)))
+        try:
+            copy = _current_record(root_fd, relative)
+            if copy is not None and (copy["size"], copy["sha256"]) == (
+                entry["previous_size"],
+                entry["previous_sha256"],
+            ):
+                _unlink_recorded(root_fd, relative)
+        except (InstallerError, OSError):
+            continue
+    try:
+        _unlink_recorded(root_fd, f"{name}/{UPDATE_BACKUP_MARKER}")
+        for directory in sorted(directories, key=lambda path: path.count("/"), reverse=True):
+            _remove_recorded_directory(root_fd, directory)
+        _remove_recorded_directory(root_fd, name)
+    except (InstallerError, OSError):
+        pass
 
 
 def _read_manifest(
@@ -830,6 +1132,24 @@ def _install(arguments: argparse.Namespace) -> None:
                     if _file_matches(root_fd, record):
                         pending[path] = [record]
                         break
+            # A self-update that failed and could not finish rolling back keeps
+            # its journal, and its files then differ from the install record.
+            # The journal proves which of them the update wrote, so they join
+            # this install's receipt. A committed update's record already
+            # describes its files, and kettle cleans that journal up itself.
+            update_journal = _read_update_journal(root_fd)
+            if update_journal is not None and update_journal["phase"] == "committed":
+                update_journal = None
+            update_directories: Dict[str, int] = {}
+            # Paths the update created that are gone again: a record the update
+            # wrote may still list them.
+            update_gone: set = set()
+            if update_journal is not None:
+                adopted, update_gone = _adopt_interrupted_update(root_fd, update_journal)
+                for path, record in adopted.items():
+                    if record not in pending.setdefault(path, []):
+                        pending[path].append(record)
+                update_directories = _update_created_directories(root_fd, update_journal)
             planned = {spec["path"]: _planned_record(spec) for spec in specs}
 
             def written_by_interrupted_install(path: str) -> bool:
@@ -842,12 +1162,20 @@ def _install(arguments: argparse.Namespace) -> None:
                 for directory in existing["directories"]:
                     _verify_directory(root_fd, directory)
                 for record in existing["files"]:
+                    if record["path"] in update_gone:
+                        continue
                     if not written_by_interrupted_install(record["path"]):
                         _verify_file(root_fd, record)
-                old_files = {record["path"]: record for record in existing["files"]}
+                old_files = {
+                    record["path"]: record
+                    for record in existing["files"]
+                    if record["path"] not in update_gone
+                }
                 owned_directories = {
                     record["path"]: record["mode"] for record in existing["directories"]
                 }
+            # What the interrupted update created now holds this install's files.
+            owned_directories.update(update_directories)
             for path, records in pending.items():
                 for record in records:
                     if _file_matches(root_fd, record):
@@ -877,6 +1205,13 @@ def _install(arguments: argparse.Namespace) -> None:
                 if record not in pending.setdefault(path, []):
                     pending[path].append(record)
             _publish_pending(root_fd, prefix, pending, created)
+            if update_journal is not None:
+                # The receipt now names every file the update left, which is all
+                # the journal protected. Retire it before writing anything, or
+                # the next kettle start would roll the update back over this
+                # install. Nothing restores from its backups after that.
+                _unlink_recorded(root_fd, UPDATE_JOURNAL)
+                _remove_update_backup(root_fd, update_journal)
             new_records: Dict[str, Dict[str, Any]] = dict(old_files)
             try:
                 for spec in specs:
