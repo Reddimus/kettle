@@ -2378,6 +2378,37 @@ mod tests {
         }
     }
 
+    /// An apostrophe inside a word (`can't`, `it's`, `users'`) opens no
+    /// quoted string, so the JSON quotes after it are read as they are: the
+    /// tail of a quoted name with a space is no file of its own.
+    #[test]
+    fn an_apostrophe_in_a_word_opens_no_quote() {
+        let found = |line: &str| {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>()
+        };
+        for line in [
+            r#"can't open {"file":"/Users/me/my app/x.py"}"#,
+            r#"it's in {"file":"/Users/me/my app/x.py"}"#,
+            r#"the users' {"file":"/Users/me/my app/x.py"}"#,
+            r#"don't 7'x {"file":"docs/my dir/a/b"}"#,
+        ] {
+            assert!(found(line).is_empty(), "{line}: {:?}", found(line));
+        }
+        for (line, uri) in [
+            (
+                r#"can't open {"file":"/Users/me/x.py"}"#,
+                "file:///Users/me/x.py",
+            ),
+            (r#"it's at '/tmp/x.log'"#, "file:///tmp/x.log"),
+        ] {
+            assert_eq!(found(line), [uri], "{line}");
+        }
+    }
+
     /// Compact JSON closes each string before the next opens, so a later
     /// value's path links whatever an earlier value held.
     #[test]

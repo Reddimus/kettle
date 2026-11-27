@@ -348,21 +348,28 @@ fn continues_a_quoted_token(line: &str, start: usize) -> bool {
 /// double quote (`"a\"b"`). Before a single quote or a backtick it is a
 /// shell's literal backslash where a shell token boundary follows
 /// (`'C:\work\';`), so the quote closes the string, and an escape, as in
-/// JavaScript or Python, where more text is glued on (`'docs/a\'b'`).
+/// JavaScript or Python, where more text is glued on (`'docs/a\'b'`). An
+/// apostrophe inside a word (`can't`, `it's`, `users'`) opens nothing: a
+/// single quote opens a string only at the start of `text`, after
+/// whitespace, or after `=`, `:`, `(`, `[`, `{` or `,`.
 fn open_quote(text: &str, after: Option<char>) -> Option<(char, usize)> {
     let boundary =
         |next: Option<char>| next.is_none_or(|c| c.is_whitespace() || ";&|)><".contains(c));
     let mut open: Option<(char, usize)> = None;
     let mut backslashes = 0usize;
+    let mut previous: Option<char> = None;
     let mut chars = text.char_indices().peekable();
     while let Some((at, c)) = chars.next() {
         let escaped = backslashes % 2 == 1;
         backslashes = if c == '\\' { backslashes + 1 } else { 0 };
+        let before = previous.replace(c);
         if !matches!(c, '"' | '\'' | '`') {
             continue;
         }
+        let opens = c != '\''
+            || before.is_none_or(|before| before.is_whitespace() || "=:([{,".contains(before));
         match open {
-            None if !escaped => open = Some((c, at)),
+            None if !escaped && opens => open = Some((c, at)),
             Some((quote, _)) if quote == c => {
                 let next = chars.peek().map(|&(_, next)| next).or(after);
                 if !escaped || (c != '"' && boundary(next)) {
@@ -1842,6 +1849,24 @@ mod tests {
             let spans = detect(&[line]);
             assert!(
                 spans.iter().any(|span| span.text == path && span.bounded),
+                "{line}: {spans:?}"
+            );
+        }
+    }
+
+    /// An apostrophe inside a word opens no quoted string, so the tail of a
+    /// quoted JSON name after it is no openable path.
+    #[test]
+    fn an_apostrophe_in_a_word_opens_no_quote() {
+        for line in [
+            r#"can't open {"file":"/Users/me/my app/x.py"}"#,
+            r#"it's in {"file":"/Users/me/my app/x.py"}"#,
+        ] {
+            let spans = detect(&[line]);
+            assert!(
+                spans
+                    .iter()
+                    .all(|span| span.text != "app/x.py" || !span.bounded),
                 "{line}: {spans:?}"
             );
         }
