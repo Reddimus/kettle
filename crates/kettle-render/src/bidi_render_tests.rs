@@ -920,6 +920,96 @@ fn highlights_cover_the_drawn_width_of_arabic_words() {
 }
 
 parity_scene! {
+/// The bismillah ligature U+FDFD is a bidi neutral that Arabic faces draw
+/// many cells wide. Its highlight follows it in a row without a bidi layout
+/// and where a layout shows it left to right, as for an Arabic letter.
+fn highlights_cover_an_arabic_ligature_outside_right_to_left_text() {
+    let _serial = gpu_test_guard();
+    // The text, the ligature's column, and whether the row has a layout.
+    let cases = [
+        ("abcdefghij\u{FDFD}klmnop", 10, false),
+        ("\u{FDFD} سلام", 0, true),
+    ];
+    for family in crate::arabic_join_tests::ARABIC_FACES {
+        let Some((mut renderer, mut cfg)) = arabic_renderer(family) else {
+            continue;
+        };
+        cfg.padding_x = 24.25;
+        cfg.padding_y = 4.0;
+        let (ox, _) = pane_grid_origin((0.0, 0.0, 640.0, 220.0), (cfg.padding_x, cfg.padding_y));
+        'face: for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+            cfg.text_renderer = mode;
+            for scale in [1.0, 2.0] {
+                renderer.set_scale(scale);
+                for (text, column, laid_out) in cases {
+                    // Legacy draws a pane without layouts or emoji through
+                    // glyphon, whose glyphs this test cannot see. An emoji on
+                    // the next row has the shared emit draw the pane, in the
+                    // same places.
+                    let text = if mode == TextRendererMode::Legacy && !laid_out {
+                        format!("{text}\r\n\u{1F600}")
+                    } else {
+                        text.to_owned()
+                    };
+                    for highlight in Highlight::ALL {
+                        let context = format!("{family} {mode:?}@{scale} {text:?} {highlight:?}");
+                        let mut snap = snapshot_of(40, 4, format!("{text}\x1b[?25l").as_bytes());
+                        let mut overlay = focused(false);
+                        highlight.apply(&mut snap, &mut overlay, column..=column + 1);
+                        let frame =
+                            capture(&mut renderer, &cfg, &[pane(&snap, 640, 220)], &overlay);
+                        let map = renderer.pane_bidi[0].row(0);
+                        assert_eq!(map.is_some(), laid_out, "{context}: layout");
+                        assert!(
+                            map.is_none_or(|map| !map.is_rtl(column)),
+                            "{context}: the ligature is shown left to right"
+                        );
+                        let rows = row_pixels(&renderer, &cfg, 0);
+                        let left = ox + column as f32 * renderer.cell_w;
+                        let right = left + 2.0 * renderer.cell_w;
+                        let (grid_left, grid_right) = (first_pixel(left), first_pixel(right));
+                        let (ink_left, ink_right) =
+                            ink_columns(&renderer, &rows, (left, right), frame.width())
+                                .unwrap_or_else(|| panic!("{context}: the ligature is drawn"));
+                        if ink_right < first_pixel(right + 2.0 * renderer.cell_w) {
+                            eprintln!(
+                                "ARABIC_LIGATURE_SKIP: {family} draws U+FDFD within about a \
+                                 cell ({ink_left}..{ink_right})"
+                            );
+                            break 'face;
+                        }
+                        let fill = dominant(&frame, grid_left..grid_right, &rows);
+                        assert_ne!(fill, cfg.theme.background, "{context}: highlighted");
+                        let colors: Vec<_> = std::iter::once(fill)
+                            .chain(highlight.outline(&renderer, &cfg))
+                            .collect();
+                        let (lo, hi) = (ink_left.min(grid_left), ink_right.max(grid_right));
+                        for x in lo..hi {
+                            let share = painted(&frame, x, &rows, &colors);
+                            assert!(
+                                share >= 0.1,
+                                "{context}: column {x} of the ligature's {lo}..{hi} is drawn \
+                                 but not highlighted ({share:.2}); its cells are \
+                                 {grid_left}..{grid_right}"
+                            );
+                        }
+                        for x in [lo - 1, hi] {
+                            let share = painted(&frame, x, &rows, &colors);
+                            assert!(
+                                share < 0.05,
+                                "{context}: column {x}, past the ligature's {lo}..{hi}, is \
+                                 highlighted ({share:.2})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+}
+
+parity_scene! {
 /// Without bidi, and in rows without right-to-left text, every highlight
 /// fill stays on the cell grid as before.
 fn highlights_off_bidi_rows_stay_on_the_grid() {
@@ -935,8 +1025,10 @@ fn highlights_off_bidi_rows_stay_on_the_grid() {
             for (bidi, text, columns) in [
                 (false, "ab نص cd", 3..=4),
                 (false, "ص", 0..=0),
+                (false, "ab \u{FDFD} cd", 3..=3),
                 (true, "ab cd", 0..=4),
                 (true, "\x1b[?1049hab نص cd", 3..=4),
+                (true, "\x1b[?1049hab \u{FDFD} cd", 3..=3),
             ] {
                 cfg.bidi = bidi;
                 for highlight in Highlight::ALL {

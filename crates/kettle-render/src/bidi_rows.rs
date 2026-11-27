@@ -96,6 +96,23 @@ impl PaneBidi {
     }
 }
 
+/// Whether `c` is in one of Unicode's Arabic blocks. Arabic faces draw these
+/// at their own widths, often wider than a cell, and not all of them are
+/// strong right-to-left: the bismillah ligature U+FDFD is a neutral, so a row
+/// can hold it without a layout, or show it in left-to-right order.
+pub(crate) fn is_arabic(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0600}'..='\u{06FF}'
+            | '\u{0750}'..='\u{077F}'
+            | '\u{0870}'..='\u{08FF}'
+            | '\u{FB50}'..='\u{FDFF}'
+            | '\u{FE70}'..='\u{FEFC}'
+            | '\u{10EC0}'..='\u{10EFF}'
+            | '\u{1EE00}'..='\u{1EEFF}'
+    )
+}
+
 /// What the layout needs from a snapshot cell: its raw character (an inline
 /// card's placeholder, a hidden cell's text), its width and its joiners.
 fn bidi_cell(cell: &SnapCell) -> BidiCell {

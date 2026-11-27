@@ -91,10 +91,10 @@ pub(crate) fn search_highlight_at(
         .then_some(span.active)
 }
 
-/// Where highlighted runs of cells in bidi rows start and end when the
-/// right-to-left text in them is drawn past their cell edges: the x of a
-/// run's left side, keyed by its viewport row and first visual column, and
-/// of its right side, keyed by its last.
+/// Where highlighted runs of cells start and end when the right-to-left or
+/// Arabic text in them is drawn past their cell edges: the x of a run's left
+/// side, keyed by its viewport row and first visual column, and of its right
+/// side, keyed by its last.
 #[derive(Default)]
 pub(crate) struct HighlightReach {
     left: std::collections::HashMap<(i32, usize), f32>,
@@ -103,9 +103,9 @@ pub(crate) struct HighlightReach {
 
 impl HighlightReach {
     /// Add one viewport row's runs. `cells` are its highlighted cells sorted
-    /// by visual column, each with whether it is right-to-left text; `drawn`
-    /// is the x span each visual column's text is drawn over. A run reaches
-    /// only over its right-to-left text, within `clip`, the pixel columns
+    /// by visual column, each with whether it is right-to-left or Arabic
+    /// text; `drawn` is the x span each visual column's text is drawn over. A
+    /// run reaches only over that text, within `clip`, the pixel columns
     /// that keep the pane's text. The fills at a run's ends take its reach,
     /// whichever highlight they are, so the run's fill stays one block. Two
     /// runs reaching into the same gap meet halfway through their overlap.
@@ -965,9 +965,29 @@ impl Renderer {
         let mut search_quads = Vec::new();
         let mut highlight_decorations = Vec::new();
         let mut selection_cell_fills = Vec::new();
-        // The highlighted cells of rows drawn in bidi order: viewport row,
-        // visual column, and whether the cell is right-to-left text.
+        // The highlighted cells of rows drawn in bidi order or holding Arabic
+        // text: viewport row, visual column, and whether the cell is
+        // right-to-left or Arabic text, whose drawn width its highlight
+        // follows.
         let mut bidi_highlights = Vec::new();
+        // Rows without a layout whose Arabic text is not strong right to
+        // left, such as U+FDFD drawn many cells wide. Like the layouts, only
+        // the normal screen with `bidi` on has them.
+        let mut arabic_rows = Vec::new();
+        if cfg.bidi
+            && !snap.alt_screen
+            && (selection_range.is_some() || !search_highlights.is_empty())
+        {
+            arabic_rows.resize(screen_rows.max(0) as usize, false);
+            for cell in &snap.cells {
+                if super::bidi_rows::is_arabic(cell.c)
+                    && let Ok(row) = usize::try_from(cell.line + display_off)
+                    && let Some(arabic) = arabic_rows.get_mut(row)
+                {
+                    *arabic = true;
+                }
+            }
+        }
 
         for (snapshot_index, sc) in snap.cells.iter().enumerate() {
             let row = sc.line;
@@ -1131,10 +1151,16 @@ impl Renderer {
                 None if selected => CellHighlight::Selection,
                 None => CellHighlight::None,
             };
-            if let Some(map) = map
-                && !matches!(highlight, CellHighlight::None)
+            if !matches!(highlight, CellHighlight::None)
+                && (map.is_some()
+                    || usize::try_from(vrow)
+                        .ok()
+                        .and_then(|row| arabic_rows.get(row))
+                        == Some(&true))
             {
-                bidi_highlights.push((vrow, vcol, map.is_rtl(col)));
+                let reaches =
+                    map.is_some_and(|map| map.is_rtl(col)) || super::bidi_rows::is_arabic(sc.c);
+                bidi_highlights.push((vrow, vcol, reaches));
             }
             let highlight_bg = if matches!(highlight, CellHighlight::None) {
                 bg
@@ -1720,9 +1746,10 @@ impl Renderer {
                 ));
             }
         }
-        // Right-to-left text can be drawn wider than its cells: a wide Arabic
-        // final overhangs its open side, a wide isolated letter its right. A
-        // highlighted run of a bidi row reaches as far as its text is drawn.
+        // Right-to-left and Arabic text can be drawn wider than its cells: a
+        // wide Arabic final overhangs its open side, a wide isolated letter
+        // or ligature its right. A highlighted run reaches as far as that
+        // text is drawn.
         let mut reach = HighlightReach::default();
         if bidi_highlights.iter().any(|&(_, _, rtl)| rtl) {
             bidi_highlights.sort_unstable_by_key(|&(row, column, _)| (row, column));

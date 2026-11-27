@@ -4212,18 +4212,22 @@ reuses these positioned masks and connector samples in cursor colour in both
 renderers; its cache distinguishes natural masks from stretched samples.
 
 A wide final still overhangs its open side, and a wide isolated letter its
-right, so highlight fills in bidi rows follow the drawn text. After shaping,
-the pane walk measures each row holding highlighted right-to-left cells once
+right, so highlight fills in bidi rows follow the drawn text. Arabic text that
+is not strong right-to-left counts too: the bismillah ligature U+FDFD is a
+bidi neutral that Arabic faces draw many cells wide, so it can sit in a row
+without a layout or in a layout's left-to-right text. After shaping, the pane
+walk measures each row holding highlighted right-to-left or Arabic cells once
 with `batching::drawn_cell_spans`: the same grid emit through a source that
 reads raster placements and never rasterizes into or evicts from the atlas.
-`terminal::HighlightReach` takes each run of highlighted visual cells
+A row without cell metadata reports each glyph at the column its text starts
+in. `terminal::HighlightReach` takes each run of highlighted visual cells
 (selection and search together) and widens the fills at its ends over the
-right-to-left text drawn past them, inside both the pane rect that clips its
-quads and the pixel columns its glyph scissor keeps; two runs reaching into
-one gap meet halfway. Selection runs carry the x their widened sides moved
-to, and the outline traces those, joining runs only where moved sides meet.
-Underlines, links and cursors stay on the cell grid, and rows without a bidi
-layout are untouched.
+right-to-left or Arabic text drawn past them, inside both the pane rect that
+clips its quads and the pixel columns its glyph scissor keeps; two runs
+reaching into one gap meet halfway. Selection runs carry the x their widened
+sides moved to, and the outline traces those, joining runs only where moved
+sides meet. Underlines, links and cursors stay on the cell grid, and other
+left-to-right text, `bidi = false` and the alternate screen are untouched.
 
 This repairs connector gaps, not proportional glyph widths, fallback
 baselines, or contextual mark shaping. Preferring a metric-compatible Arabic

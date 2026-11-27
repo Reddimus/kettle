@@ -2328,8 +2328,12 @@ and another search match and focused and unfocused selections, in Grid and
 Legacy at 1x and 2x over fractional padding. Each named face draws sad wider
 than its cell, and the test fails if a case does not overhang. The fill must
 cover exactly the pixel columns the word is drawn over, cells included.
+`highlights_cover_an_arabic_ligature_outside_right_to_left_text` does the
+same for U+FDFD, a bidi neutral drawn many cells wide, in a row without a
+layout and shown left to right before Arabic text; a face that draws it
+within about a cell prints `ARABIC_LIGATURE_SKIP`.
 `highlights_off_bidi_rows_stay_on_the_grid` keeps every fill on cell edges
-with `bidi = false`, on the alternate screen and in rows without
+with `bidi = false`, on the alternate screen and in rows without Arabic or
 right-to-left text, and `a_selection_outline_follows_the_arabic_overhang`
 requires the outline of a low-contrast selection at the widened edge, not
 the cell edge. `HighlightReach` and the outline's pixel spans have unit
