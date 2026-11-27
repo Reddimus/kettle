@@ -244,7 +244,10 @@ fn quote_has_end(line: &str, close: usize) -> bool {
     grep || ends_a_match(tail) || tail.starts_with([',', ';', ':', ')', ']', '}', '>'])
 }
 
-/// Whether a bare path reaches the end of any quoted run holding it.
+/// Whether a bare path reaches the end of any quoted run holding it. A run
+/// holding a character that hides text (`"docs/old\u{a0}dir/x.txt"`) does
+/// not read as the name it spells, so no piece of it is whole. Only a path
+/// that ends at the close reaches the body check, so it is read once.
 pub(crate) fn path_reaches_quote(
     line: &str,
     runs: &[(usize, usize)],
@@ -256,12 +259,13 @@ pub(crate) fn path_reaches_quote(
     runs[..holder]
         .last()
         .filter(|&&(_, close)| end <= close)
-        .is_none_or(|&(_, close)| {
+        .is_none_or(|&(open, close)| {
             quote_has_end(line, close)
                 && skip_location(&line[end..close])
                     .0
                     .trim_start_matches(|c| ",;:?!.".contains(c))
                     .is_empty()
+                && !path_hides_text(&line[open + 1..close])
         })
 }
 
@@ -1256,6 +1260,22 @@ mod tests {
             assert!(paths.iter().all(|span| !span.bounded), "{line}: {spans:?}");
         }
         let spans = detect(&["open \"docs/my café.pdf\" now"]);
+        assert_eq!(spans.len(), 1);
+        assert!(spans[0].bounded);
+        // A quoted name the quoted pattern refuses for such a character
+        // leaves bare pieces, none of them whole: `dir/x.txt` names
+        // another file.
+        for line in [
+            "open \"docs/old\u{a0}dir/x.txt\" now",
+            "open \"docs/old\u{2007}dir/.env\" now",
+            "\"see\u{a0}src/main.rs\"",
+        ] {
+            let spans = detect(&[line]);
+            assert!(!spans.is_empty(), "{line}");
+            assert!(spans.iter().all(|span| !span.bounded), "{line}: {spans:?}");
+        }
+        // Without one, a bare path ending at the quote is whole, as before.
+        let spans = detect(&["\"see src/main.rs\""]);
         assert_eq!(spans.len(), 1);
         assert!(spans[0].bounded);
     }

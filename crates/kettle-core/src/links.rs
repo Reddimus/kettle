@@ -1644,13 +1644,15 @@ mod tests {
                 "U+{:04X}",
                 u32::from(c)
             );
-            let line = format!("open \"docs/my a{c}b.pdf\" now");
-            let term = term_with(line.chars().count(), &[&line], &[]);
-            assert!(
-                links_with_cwd(&term, Some("/work")).is_empty(),
-                "U+{:04X}",
-                u32::from(c)
-            );
+            // Quoted, no piece of the name links: not `dir/x.txt` either.
+            for line in [
+                format!("open \"docs/my a{c}b.pdf\" now"),
+                format!("open \"docs/old{c}dir/x.txt\" now"),
+            ] {
+                let term = term_with(line.chars().count(), &[&line], &[]);
+                let found = links_with_cwd(&term, Some("/work"));
+                assert!(found.is_empty(), "U+{:04X}: {found:?}", u32::from(c));
+            }
         }
         for uri in [
             "https://x.test/café",
