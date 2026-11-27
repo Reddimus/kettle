@@ -175,21 +175,25 @@ const MAX_QUOTED_PATH: usize = 1024;
 /// the string where a shell token boundary follows (`'C:\work\';`), as a
 /// shell's literal backslash does, and escapes the quote where more text is
 /// glued on (`'docs/a\'b'`), as JavaScript and Python do. Outside a string
-/// an escaped quote is a plain character. Whitespace outside strings
-/// separates words, unless a backslash escapes it, so a string may sit
-/// inside a word (`x="a b"`, `{"k":"v"}`, `prefix"…"`).
+/// an escaped quote is a plain character. Whitespace and the shell's
+/// separators `;`, `&`, `|`, `<` and `>` outside strings separate words,
+/// unless a backslash escapes them, so a string may sit inside a word
+/// (`x="a b"`, `{"k":"v"}`, `prefix"…"`). A `(` or `)` does not: glued to a
+/// closed string it keeps the word quoted (`a"b"(/tmp/r.pdf`).
 ///
 /// A `'` right after a letter or digit is an apostrophe (`can't`, `it's`,
-/// `users'`) unless a later `'` closes it at the end of a shell token, as a
-/// shell would read it (`prefix'a b'`): then the text up to that `'` may be
-/// quoted or not, and is unsure, so a contraction and a later possessive
-/// (`Bob's … users'`) leave the text between them unsure.
+/// `users'`) unless a later `'` that ends a word, one after a word's text
+/// that the word does not run on from (see [`runs_on`]), closes it, as a
+/// shell would read it (`prefix'a b'`,
+/// `pre'a b':x`): then the text up to that `'` may be quoted or not, and is
+/// unsure, so a contraction and a later possessive (`Bob's … users'`) leave
+/// the text between them unsure. Two contractions (`don't … it's`) do not.
 ///
 /// A quote that never closes makes the whole line uncertain, since every
 /// string on it may be read out of step, before it as after it (`x 'tis
 /// A='/a b/c d.txt'`). So does an apostrophe that could close a string,
 /// one a letter or digit does not follow (`users'`, unlike `can't`), unless
-/// a later `'` closes it at the end of a shell token. And so does a string
+/// a later `'` that ends a word closes it. And so does a string
 /// that runs on into more of its word after it closes (`"a"b`,
 /// `"$src"/a.txt`): two stray quotes, or one and an apostrophe, pair with
 /// each other and with the strings between them and leave no quote open
@@ -199,6 +203,9 @@ pub(crate) struct Quotes {
     /// Closed strings, as the byte offsets of their opening and closing
     /// quotes, in order.
     strings: Vec<(usize, usize)>,
+    /// Whether each of `strings` holds a character that hides text, a space
+    /// aside, found once here rather than for every path in it.
+    hiding: Vec<bool>,
     /// Unsure text, as the byte offsets of the apostrophe that starts it and
     /// of the `'` that ends it, in order.
     unsure: Vec<(usize, usize)>,
@@ -218,6 +225,7 @@ impl Quotes {
     pub(crate) fn read(line: &str) -> Self {
         let mut quotes = Self {
             strings: Vec::new(),
+            hiding: Vec::new(),
             unsure: Vec::new(),
             marks: Vec::new(),
             words: Vec::new(),
@@ -241,7 +249,7 @@ impl Quotes {
             backslashes = if c == '\\' { backslashes + 1 } else { 0 };
             let before = previous.replace(c);
             let next = at + c.len_utf8();
-            if c.is_whitespace() && !escaped {
+            if (c.is_whitespace() || ";&|<>".contains(c)) && !escaped {
                 if let Some(start) = word.take() {
                     quotes.words.push((start, at));
                 }
@@ -255,7 +263,17 @@ impl Quotes {
             }
             let apostrophe = c == '\'' && before.is_some_and(char::is_alphanumeric);
             let close = closing_quote(line, at);
-            let at_a_token_end = |close: usize| shell_boundary(line[close + 1..].chars().next());
+            // A `'` after a word's text that the word does not run on from
+            // may close a string, glued to more of its word or not (`'a
+            // b':x`); one after a space or `=` opens the next string, and one
+            // the word runs on from opens one inside it (`prefix'./a b'`).
+            let closes_a_word = |close: usize| {
+                line[..close]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| !c.is_whitespace() && !"=:([{,".contains(c))
+                    && !runs_on(&line[close + 1..])
+            };
             let ends_a_word = line[next..]
                 .chars()
                 .next()
@@ -270,18 +288,19 @@ impl Quotes {
                 }
                 Some(close) if !apostrophe => {
                     quotes.strings.push((at, close));
+                    quotes.hiding.push(hides_text_in(&line[at + 1..close]));
                     quotes.marks.extend([at, close]);
                     at = close + 1;
                 }
-                Some(close) if at_a_token_end(close) => {
+                Some(close) if closes_a_word(close) => {
                     quotes.unsure.push((at, close));
                     quotes.marks.extend([at, close]);
                     split(at, close + 1, &mut word, &mut quotes.words);
                     at = close + 1;
                 }
                 // A quote no quote closes, or an apostrophe that could close
-                // a string (`users'`, not `can't`) that no later `'` closes
-                // as a shell would, leaves the whole line uncertain.
+                // a string (`users'`, not `can't`) that no later `'` ending a
+                // word closes, leaves the whole line uncertain.
                 None if !apostrophe => {
                     quotes.uncertain = true;
                     break;
@@ -367,14 +386,11 @@ impl Quotes {
     /// may open. Otherwise these may open:
     ///
     /// - a path outside strings and unsure text whose word holds no quote
-    ///   character before it, since the last string that closed in the
-    ///   word, nor after it: a whole word (`src/main.rs`,
-    ///   `--out=/tmp/x.png`), or a path after a closed string, which never
-    ///   affects what follows it (`echo "hi " src/main.rs`,
-    ///   `key="a/b";other=/tmp/c.txt`); a path glued to the closing quote
-    ///   continues the string's word (`"a b"x/y.txt` is `a bx/y.txt`), and
-    ///   [`match_has_end`] refuses it as it refuses any path a quote right
-    ///   before it does not close after;
+    ///   character: a whole word (`src/main.rs`, `--out=/tmp/x.png`), or a
+    ///   word after a closed string's, which the string never affects
+    ///   (`echo "hi " src/main.rs`, `key="a/b";other=/tmp/c.txt`). A closed
+    ///   string glued to more of its word keeps the whole word quoted, so no
+    ///   piece of it opens (`pre"fix"=/tmp/r.pdf` is `prefix=/tmp/r.pdf`);
     /// - the whole text of a string that starts a token at a word's start or
     ///   after `=`, `:`, `,`, `;`, an opening bracket, `<`, `>`, `|` or `&`
     ///   (`x="a/b.rs"`, `{"file":"a/b.rs"}`), but not one glued to a word,
@@ -403,9 +419,12 @@ impl Quotes {
             return rooted;
         }
         let held = self.strings.partition_point(|&(open, _)| open < start);
-        if let Some(&(open, close)) = held.checked_sub(1).map(|at| &self.strings[at])
-            && end <= close
+        if let Some(at) = held.checked_sub(1)
+            && end <= self.strings[at].1
         {
+            // Each check costs no more than this path's own length, so a
+            // string listing many paths is read in linear time.
+            let (open, close) = self.strings[at];
             let reaches = skip_location(&line[end..close])
                 .0
                 .trim_start_matches(|c| ",;:?!.".contains(c))
@@ -413,9 +432,7 @@ impl Quotes {
             let whole = start == open + 1 && starts_a_token(line, open, "=:,;([{<>|&");
             let from_a_root = line[..start].ends_with(char::is_whitespace)
                 && starts_its_own_path(&line[start..])
-                && !line[open + 1..close]
-                    .chars()
-                    .any(|c| c != ' ' && crate::links::hides_text(c));
+                && !self.hiding[at];
             return reaches && (whole || from_a_root);
         }
         let unsure = self.unsure.partition_point(|&(open, _)| open < start);
@@ -429,11 +446,23 @@ impl Quotes {
             let at = self.marks.partition_point(|&mark| mark < from);
             self.marks.get(at).is_some_and(|&mark| mark < to)
         };
-        let since = self.strings[..held]
-            .last()
-            .map_or(word.0, |&(_, close)| word.0.max(close + 1));
-        !quoted(since, start) && (rooted || !quoted(end, word.1))
+        !quoted(word.0, start) && (rooted || !quoted(end, word.1))
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Bytes of string text [`hides_text_in`] has searched on this thread,
+    /// so a test can bound the work detection does.
+    pub(crate) static HIDES_SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether `text` holds a character that hides text, a space aside.
+fn hides_text_in(text: &str) -> bool {
+    #[cfg(test)]
+    HIDES_SCANNED.with(|scanned| scanned.set(scanned.get() + text.len()));
+    text.chars()
+        .any(|c| c != ' ' && crate::links::hides_text(c))
 }
 
 /// Whether `rest`, right after a string's closing quote, goes on with more
