@@ -266,6 +266,7 @@ impl SyncGraphicsHarness {
             &self.geometry,
             None,
             None,
+            None,
             desired,
             options,
             usize::MAX,

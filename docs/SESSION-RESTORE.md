@@ -105,6 +105,9 @@ excluded after `ssh` exits: what the remote session wrote, and anything on
 screen when it ended, stays out of the saved output until all of it has left
 the pane, scrolled out of the scrollback limit, cleared with Clear Scrollback
 once it is off screen, or reset. Output written after that is saved as usual.
+Resizing the pane keeps it out. If the pane's width changes while the cursor
+is still on a row that was on screen when the session ended, everything then
+in the pane stays out.
 Turning the option off also prevents replaying output previously marked remote.
 
 Output lives next to `session.json` in `session.content` (or `NAME.content` next

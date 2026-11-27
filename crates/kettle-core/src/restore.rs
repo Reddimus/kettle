@@ -28,6 +28,78 @@ pub fn primary_end_row<T: EventListener>(term: &Term<T>) -> u64 {
     grid.history_origin() + grid.history_size() as u64 + grid.screen_lines() as u64
 }
 
+/// A row boundary from [`primary_end_row`], read before a column change.
+/// Reflow rewraps rows, so the document rows after it are other rows; see
+/// [`reflowed_boundary`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReflowBoundary {
+    /// Every row before the boundary has left the grid. Rows only leave from
+    /// the top, so the number stays below the grid's first row.
+    Gone(u64),
+    /// The boundary is this many whole lines above the line the cursor is
+    /// on. Reflow keeps every line above the cursor's in order and splits or
+    /// joins only within a line, so it is there again afterwards.
+    LinesAboveCursor(usize),
+    /// The boundary reaches the cursor's line: everything stays before it.
+    All,
+}
+
+/// Where `end` stands among the primary grid's lines before a reflow. A
+/// boundary inside a soft-wrapped line moves to that line's end.
+pub(crate) fn boundary_before_reflow<T: EventListener>(term: &Term<T>, end: u64) -> ReflowBoundary {
+    let grid = term.primary_grid();
+    let origin = grid.history_origin();
+    if end <= origin {
+        return ReflowBoundary::Gone(end);
+    }
+    let top = grid.topmost_line().0;
+    let last = grid.last_column();
+    let wraps = |line: i32| grid[Line(line)][last].flags.contains(Flags::WRAPLINE);
+    let mut cursor_line = grid.cursor.point.line.0;
+    while cursor_line > top && wraps(cursor_line - 1) {
+        cursor_line -= 1;
+    }
+    let Ok(mut line) = i32::try_from((end - origin) as i128 - grid.history_size() as i128) else {
+        return ReflowBoundary::All;
+    };
+    if line > cursor_line {
+        return ReflowBoundary::All;
+    }
+    while wraps(line - 1) {
+        line += 1;
+    }
+    ReflowBoundary::LinesAboveCursor((line..cursor_line).filter(|&l| !wraps(l)).count())
+}
+
+/// The document row `before` stands for after the reflow, in the reflowed
+/// grid's numbering. A boundary whose lines left the top while the grid
+/// rewrapped excludes nothing.
+pub(crate) fn reflowed_boundary<T: EventListener>(term: &Term<T>, before: ReflowBoundary) -> u64 {
+    let lines = match before {
+        ReflowBoundary::Gone(end) => return end,
+        ReflowBoundary::All => return primary_end_row(term),
+        ReflowBoundary::LinesAboveCursor(lines) => lines,
+    };
+    let grid = term.primary_grid();
+    let top = grid.topmost_line().0;
+    let last = grid.last_column();
+    let wraps = |line: i32| grid[Line(line)][last].flags.contains(Flags::WRAPLINE);
+    let mut line = grid.cursor.point.line.0;
+    while line > top && wraps(line - 1) {
+        line -= 1;
+    }
+    for _ in 0..lines {
+        if line <= top {
+            return grid.history_origin();
+        }
+        line -= 1;
+        while line > top && wraps(line - 1) {
+            line -= 1;
+        }
+    }
+    (grid.history_origin() as i128 + grid.history_size() as i128 + i128::from(line)) as u64
+}
+
 /// Generate SGR from cell state, never from raw output. OSC, DCS, links, cursor
 /// movement and device requests cannot cross this boundary. Budget includes JSON
 /// string escaping so the persistence envelope can enforce a total file cap.
@@ -595,6 +667,83 @@ mod tests {
                 .flags
                 .contains(Flags::BLINK | Flags::BOLD | Flags::DIM)
         );
+    }
+
+    /// A width change rewraps rows, so a boundary counted in rows would land
+    /// inside the remote output. Carried by lines, it keeps every remote row
+    /// out and every whole line after it in, through narrowing and widening,
+    /// eviction before or during the reflow, and a boundary inside a line.
+    #[test]
+    fn a_remote_boundary_moves_with_the_lines_through_a_width_change() {
+        let resize = |term: &mut Term<EventProxy>, end: u64, columns: usize, rows: usize| {
+            let before = boundary_before_reflow(term, end);
+            term.resize(TermSize::new(columns, rows));
+            reflowed_boundary(term, before)
+        };
+        let saved = |term: &Term<EventProxy>, end: u64| {
+            texts(&snapshot_from(term, 1000, end, &mut usize::MAX.clone())).concat()
+        };
+        let remote = "REMOTE_SECRET_ABCDEFGHIJKLMNOPQRSTUVWXYZ\r\n".repeat(3);
+        let local: String = (0..8)
+            .map(|n| format!("local {n} {}\r\n", "x".repeat(n * 6)))
+            .collect();
+
+        // Local lines scrolled past the boundary: they stay, through several
+        // narrower and wider sizes.
+        let mut term = terminal();
+        let mut parser = Processor::new();
+        parser.advance(&mut term, remote.as_bytes());
+        let mut end = primary_end_row(&term);
+        parser.advance(&mut term, local.as_bytes());
+        for (columns, rows) in [(10, 4), (13, 4), (80, 4), (25, 7), (40, 3)] {
+            end = resize(&mut term, end, columns, rows);
+            let text = saved(&term, end);
+            assert!(
+                !text.contains("REMOTE") && !text.contains("RET_"),
+                "{columns}: {text:?}"
+            );
+            for n in 1..8 {
+                assert!(text.contains(&format!("local {n} ")), "{columns}: {text:?}");
+            }
+        }
+
+        // No line past the boundary yet: everything stays out.
+        let mut term = terminal();
+        parser.advance(&mut term, remote.as_bytes());
+        let end = primary_end_row(&term);
+        let end = resize(&mut term, end, 10, 4);
+        assert_eq!(saved(&term, end), "");
+        parser.advance(&mut term, b"after\r\n".repeat(8).as_slice());
+        assert!(saved(&term, end).contains("after"));
+
+        // Remote rows evicted before the reflow, and while it rewraps into
+        // more rows than the history holds: nothing stays out.
+        for (lines, columns) in [(40, 30), (0, 4)] {
+            let (tx, _) = crossbeam_channel::unbounded();
+            let mut small = Term::new(
+                Config {
+                    scrolling_history: 6,
+                    ..Config::default()
+                },
+                &TermSize::new(40, 4),
+                EventProxy::new(tx, Arc::new(|| {})),
+            );
+            parser.advance(&mut small, remote.as_bytes());
+            let end = primary_end_row(&small);
+            parser.advance(&mut small, b"local\r\n".repeat(lines + 6).as_slice());
+            let end = resize(&mut small, end, columns, 4);
+            assert!(end <= primary_first_row(&small), "{lines}");
+        }
+
+        // A boundary inside a soft-wrapped line keeps that whole line out.
+        let mut term = terminal();
+        parser.advance(&mut term, b"REMOTE".repeat(10).as_slice());
+        let end = primary_end_row(&term) - 3;
+        parser.advance(&mut term, local.as_bytes());
+        let end = resize(&mut term, end, 20, 4);
+        let text = saved(&term, end);
+        assert!(!text.contains("REMOTE"), "{text:?}");
+        assert!(text.contains("local 7 "), "{text:?}");
     }
 
     /// Rows a remote session wrote stay out of a snapshot taken from its end
