@@ -1858,21 +1858,26 @@ const IN_TRANSACTION: TrustRefusal = TrustRefusal {
 /// Before an interrupted update's rollback resumes.
 #[cfg(target_os = "linux")]
 const ROLLBACK_WAITS: TrustRefusal = TrustRefusal {
-    outcome: "An interrupted update is still journaled and is rolled back once it can be.",
+    outcome: "Every other file of the interrupted update was restored; these stay journaled \
+              until they can be.",
     retry: "and start kettle again",
 };
 
-/// Resume an interrupted Linux transaction's rollback, but first refuse,
-/// with the #847 message, when it would have to write into a directory the
-/// writes themselves refuse (#846).
+/// Resume an interrupted Linux transaction's rollback, and explain with the
+/// #847 message when what stops it is a directory the writes refuse (#846).
 ///
-/// Only the directories the rollback writes into count: an entry it can skip,
-/// such as one whose file it never replaced, needs nothing from its directory,
-/// so it never blocks a rollback that would otherwise finish.
+/// The rollback runs first. It restores every entry it can, each write making
+/// its own trust check, and keeps the rest journaled, so one untrusted
+/// directory never keeps the others' files at the update's bytes. Only then
+/// are the entries still waiting checked, and an untrusted directory among
+/// them is named with its `chmod go-w`. Any other failure is returned as is.
 #[cfg(target_os = "linux")]
 fn resume_pending_rollback(prefix: &Path) -> Result<(), UpdateError> {
+    let Err(error) = recover_transaction(prefix) else {
+        return Ok(());
+    };
     if let Some(journal) = pending_journal(prefix) {
-        let writes = journal
+        let waiting = journal
             .entries
             .iter()
             .filter(|entry| {
@@ -1886,9 +1891,9 @@ fn resume_pending_rollback(prefix: &Path) -> Result<(), UpdateError> {
             })
             .map(|entry| PathBuf::from(&entry.relative))
             .collect::<Vec<_>>();
-        require_trusted_install_directories(prefix, &writes, ROLLBACK_WAITS)?;
+        require_trusted_install_directories(prefix, &waiting, ROLLBACK_WAITS)?;
     }
-    recover_transaction(prefix)
+    Err(error)
 }
 
 /// The schema-2 journal of a transaction that has not committed, if one is
@@ -9691,7 +9696,7 @@ mod tests {
             "{message}"
         );
         assert!(message.contains("chmod go-w"), "{message}");
-        assert!(message.contains("still journaled"), "{message}");
+        assert!(message.contains("stay journaled"), "{message}");
         assert_eq!(install_tree(&prefix), stuck);
 
         let notice = report_blocked_linux_rollback(&install.executable, &running, &state_root);
@@ -9719,6 +9724,73 @@ mod tests {
             0,
             "no record outlives the rollback it reported"
         );
+    }
+
+    /// #846 again, one level up: the update dies before any rollback, then a
+    /// directory turns group-writable. Startup must still restore every file
+    /// whose directory is trusted, keep the rest journaled, and name the
+    /// directory with its `chmod` on the update path.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_untrusted_directory_never_stops_the_other_restores() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = test_tempdir();
+        let prefix = root.path().join("install");
+        create_linux_install_dir_all(&prefix, &prefix.join("share/kettle"));
+        let marker_path = prefix.join("share/kettle/install.json");
+        fs::write(&marker_path, marker_json("2.52.0").unwrap()).unwrap();
+        seed_linux_install_provenance_with(
+            &prefix,
+            &[("share/doc/kettle/LICENSE", b"old license".as_slice(), 0o644)],
+        );
+        let install = ManagedInstall {
+            prefix: prefix.clone(),
+            executable: prefix.join("bin/kettle"),
+            marker_path,
+        };
+        let before = install_tree(&prefix);
+        let mut transaction = Transaction::begin(&prefix, "99.0.0").unwrap();
+        for (relative, bytes, mode) in [
+            (
+                "share/kettle/install.sh",
+                b"new installer".as_slice(),
+                0o755,
+            ),
+            ("share/doc/kettle/LICENSE", b"new license".as_slice(), 0o644),
+        ] {
+            transaction
+                .install_bytes(Path::new(relative), bytes, Some(mode))
+                .unwrap();
+        }
+        // The process dies here, before any rollback.
+        std::mem::forget(transaction);
+        let doc = prefix.join("share/doc/kettle");
+        fs::set_permissions(&doc, fs::Permissions::from_mode(0o775)).unwrap();
+        let running = semver::Version::new(2, 52, 0);
+
+        prepare_linux_process_start_at(&install.executable, &running).unwrap();
+
+        assert_eq!(
+            fs::read(prefix.join("share/kettle/install.sh")).unwrap(),
+            before[Path::new("share/kettle/install.sh")]
+                .clone()
+                .unwrap(),
+            "one untrusted directory kept install.sh at the update's bytes"
+        );
+        assert_eq!(fs::read(doc.join("LICENSE")).unwrap(), b"new license");
+        assert!(prefix.join(".kettle-update-journal.json").is_file());
+        let error = prepare_update_transaction(&install, &running).unwrap_err();
+        assert!(
+            matches!(&error, UpdateError::UnsafeInstallDirectory(message)
+                if message.contains(&format!("{} (mode 0775)", doc.display()))
+                    && message.contains("chmod go-w")),
+            "unexpected error: {error}"
+        );
+
+        fs::set_permissions(&doc, fs::Permissions::from_mode(0o755)).unwrap();
+        drop(prepare_update_transaction(&install, &running).unwrap());
+        assert!(!prefix.join(".kettle-update-journal.json").exists());
+        assert_eq!(install_tree(&prefix), before);
     }
 
     /// The trust check covers only what the rollback writes. An entry whose

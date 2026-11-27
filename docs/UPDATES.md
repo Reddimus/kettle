@@ -319,10 +319,10 @@ checks the install record. Releases before 2.54.0 checked the record first and
 so could never resume their own rollback; the installer can recover one of
 those, as described next.
 
-Resuming a rollback runs the same directory check first, over the directories
-the rollback has to write into. An entry it can skip, such as a file the update
-never replaced, needs nothing from its directory and never blocks it. A
-directory that fails is named with its `chmod go-w`, as before an update.
+Resuming a rollback restores every file it can first, each write making its own
+directory check, and keeps the rest journaled; one untrusted directory never
+holds back the others. When what is left lies in a directory the writes refuse,
+that directory is named with its `chmod go-w`, as before an update.
 Recovery at startup is best effort: a rollback that cannot finish never stops
 kettle from starting, `--version`, `--help` and `kettle ctl` included, and
 startup prints nothing about it. The app names the reason once for each journal
