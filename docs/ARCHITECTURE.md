@@ -4193,7 +4193,10 @@ and presents the frame's own damage.
 `kettle-core::bidi` chooses Arabic presentation forms in logical order and
 reports their visual joining sides only at RTL levels. U+0640 tatweel also
 participates; joining characters from other scripts do not. Lam-alef remains
-two cells. Each row is independent, including across soft wraps.
+two cells. Each row is independent, including across soft wraps. A
+zero-width joiner stored with a cell is join causing, as in text shapers: the
+letter on either side of it takes its joined form even when the letter on the
+other side cannot join, and then only that one cell reports a joining side.
 
 Grid and bidi Legacy rows carry these sides in `GridGlyphCell`, whose full
 metadata participates in the shaped-row key. `arabic_join::JoinedRow` collects
