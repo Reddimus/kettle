@@ -1626,8 +1626,16 @@ mod tests {
             ),
             (
                 "open \"/Users/me/Desktop/Screenshot 2026-11-26 at 10.00.00\u{202f}AM.png\"",
-                &[],
-                &[(Kind::Path, "/Users/me/Desktop/Screenshot", false)],
+                &[(
+                    "file:///Users/me/Desktop/Screenshot%202026-11-26%20at%2010.00.00%E2%80%AFAM.png",
+                    6,
+                    63,
+                )],
+                &[(
+                    Kind::Path,
+                    "/Users/me/Desktop/Screenshot 2026-11-26 at 10.00.00\u{202f}AM.png",
+                    true,
+                )],
             ),
             (
                 "[{\"filePath\":\"/Users/me/p/a.ts\"},{\"filePath\":\"/Users/me/p/b.ts\"}]",
@@ -2169,11 +2177,61 @@ mod tests {
         assert_eq!(found(line), ["file:///tmp/report.pdf"], "{line}");
         for line in [
             "\"docs/%2e%2e/a?=/tmp/report.pdf\"",
-            "\"docs/old\u{a0}dir name/x.txt\"",
             "\"Compare docs/a\u{200b}b.txt with /tmp/report.pdf\"",
         ] {
             assert!(found(line).is_empty(), "{line}: {:?}", found(line));
         }
+        // A visible space is a space: the quoted name links whole.
+        assert_eq!(
+            found("\"docs/old\u{a0}dir name/x.txt\""),
+            ["file:///work/docs/old%C2%A0dir%20name/x.txt"]
+        );
+    }
+
+    /// Inside quotes, every visible space is a space: the quoted path links
+    /// whole, as with an ASCII space, and a rooted tail of it does not.
+    #[test]
+    fn a_quoted_path_with_a_visible_space_links_whole() {
+        let found = |line: &str| {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| (link.uri, link.start_col, link.end_col))
+                .collect::<Vec<_>>()
+        };
+        // The line with `c` for each space inside its quotes.
+        let inside = |line: &str, c: char| {
+            let (open, close) = (line.find('"').unwrap(), line.rfind('"').unwrap());
+            let quoted = line[open..close].replace(' ', &c.to_string());
+            format!("{}{quoted}{}", &line[..open], &line[close..])
+        };
+        for (c, escaped) in [
+            ('\u{a0}', "%C2%A0"),
+            ('\u{202f}', "%E2%80%AF"),
+            ('\u{3000}', "%E3%80%80"),
+        ] {
+            for line in [
+                "open \"/tmp/a b.png\" now",
+                "\"docs/a b=/tmp/report.pdf\"",
+                "open \"/tmp/my dir/report.pdf.\" now",
+            ] {
+                let visible = inside(line, c);
+                let ascii = found(line);
+                let links = found(&visible)
+                    .into_iter()
+                    .map(|(uri, start, end)| (uri.replace(escaped, "%20"), start, end))
+                    .collect::<Vec<_>>();
+                assert_eq!(links, ascii, "U+{:04X} in {visible:?}", u32::from(c));
+            }
+        }
+        assert_eq!(
+            found("\"docs/a\u{a0}b=/tmp/report.pdf\""),
+            [(
+                "file:///work/docs/a%C2%A0b%3D/tmp/report.pdf".to_string(),
+                1,
+                24
+            )]
+        );
     }
 
     /// Quoted prose that starts with a path still links a later path from a

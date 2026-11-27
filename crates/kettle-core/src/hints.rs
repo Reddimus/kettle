@@ -247,7 +247,7 @@ fn quote_has_end(line: &str, close: usize) -> bool {
 }
 
 /// Whether a bare path reaches the end of any quoted run holding it. Quoted
-/// text holding a character that hides text (`"docs/old\u{a0}dir/x.txt"`)
+/// text holding a character that hides text (`"docs/old\u{200b}dir/x.txt"`)
 /// may be one name, so no piece of it is whole. Nor is a path joined to a
 /// path-shaped word before it, one holding a separator: the quotes hold
 /// one token that the quoted pattern could not read whole, and its end is
@@ -405,7 +405,7 @@ fn quoted_path_len(body: &str, quote: char) -> Option<usize> {
     // decomposed form (`cafe\u{301}`, as macOS often writes it) is whole.
     static NAME_CHARS: OnceLock<Regex> = OnceLock::new();
     let name_chars =
-        NAME_CHARS.get_or_init(|| Regex::new(r"^[\w .\-@+,()\[\]{}#&!$%=~;'/\\]*$").unwrap());
+        NAME_CHARS.get_or_init(|| Regex::new(r"^[\w\p{Zs}.\-@+,()\[\]{}#&!$%=~;'/\\]*$").unwrap());
     if !name_chars.is_match(rest)
         || rest.contains(quote)
         || rest.chars().any(|c| c == '\\' && !is_separator(c))
@@ -419,7 +419,10 @@ fn quoted_path_len(body: &str, quote: char) -> Option<usize> {
     }
     let first = segments[0];
     let anchored = drive || matches!(first, "" | "~" | "." | "..");
-    if !anchored && first.contains(' ') {
+    // A visible space, such as the narrow no-break space macOS writes
+    // before AM in a screenshot's name, is a space here as anywhere.
+    let space = crate::links::visible_space;
+    if !anchored && first.contains(space) {
         return None;
     }
     if segments[usize::from(anchored)..]
@@ -431,7 +434,7 @@ fn quoted_path_len(body: &str, quote: char) -> Option<usize> {
     let last = segments.len() - 1;
     for (index, segment) in segments.iter().enumerate() {
         let edge = (index == 0 && anchored) || index == last;
-        if (segment.is_empty() && !edge) || segment.starts_with(' ') || segment.ends_with(' ') {
+        if (segment.is_empty() && !edge) || segment.starts_with(space) || segment.ends_with(space) {
             return None;
         }
     }
@@ -1630,17 +1633,28 @@ mod tests {
         let spans = detect(&["open \"docs/my café.pdf\" now"]);
         assert_eq!(spans.len(), 1);
         assert!(spans[0].bounded);
-        // A quoted name the quoted pattern refuses for such a character
-        // leaves bare pieces, none of them whole: `dir/x.txt` names
-        // another file.
-        for line in [
-            "open \"docs/old\u{a0}dir/x.txt\" now",
-            "open \"docs/old\u{2007}dir/.env\" now",
-            "\"see\u{200d}src/main.rs\"",
+        // A quoted name holding such a character leaves no piece whole.
+        let spans = detect(&["\"see\u{200d}src/main.rs\""]);
+        assert!(!spans.is_empty());
+        assert!(spans.iter().all(|span| !span.bounded), "{spans:?}");
+        // A visible space is a space: the quoted name is one path, whole.
+        for (line, text) in [
+            (
+                "open \"docs/old\u{a0}dir/x.txt\" now",
+                "docs/old\u{a0}dir/x.txt",
+            ),
+            (
+                "open \"docs/old\u{2007}dir/.env\" now",
+                "docs/old\u{2007}dir/.env",
+            ),
         ] {
             let spans = detect(&[line]);
-            assert!(!spans.is_empty(), "{line}");
-            assert!(spans.iter().all(|span| !span.bounded), "{line}: {spans:?}");
+            assert_eq!(spans.len(), 1, "{line}: {spans:?}");
+            assert_eq!(
+                (spans[0].text.as_str(), spans[0].bounded),
+                (text, true),
+                "{line}"
+            );
         }
         // A path naming a parent once decoded opens as nothing else either,
         // as a clicked link refuses it.
@@ -1666,7 +1680,6 @@ mod tests {
         );
         for line in [
             "\"docs/%2e%2e/a?=/tmp/report.pdf\"",
-            "\"docs/old\u{a0}dir name/x.txt\"",
             "\"Compare docs/a\u{200b}b.txt with /tmp/report.pdf\"",
         ] {
             let spans = detect(&[line]);
@@ -1747,6 +1760,54 @@ mod tests {
                 "{body}: {spans:?}"
             );
         }
+    }
+
+    /// Inside quotes, every visible space is a space: a quoted path holding
+    /// a no-break or narrow no-break space reads as it does with an ASCII
+    /// one, as a quoted macOS screenshot name needs.
+    #[test]
+    fn a_visible_space_in_a_quoted_path_is_a_space() {
+        let spaces = [
+            '\u{a0}', '\u{1680}', '\u{2000}', '\u{2007}', '\u{200a}', '\u{202f}', '\u{205f}',
+            '\u{3000}',
+        ];
+        let read = |line: &str| {
+            detect(&[line])
+                .into_iter()
+                .map(|span| (span.kind, span.text, span.bounded))
+                .collect::<Vec<_>>()
+        };
+        // The line with `c` for each space inside its quotes.
+        let inside = |line: &str, c: char| {
+            let (open, close) = (line.find('"').unwrap(), line.rfind('"').unwrap());
+            let quoted = line[open..close].replace(' ', &c.to_string());
+            format!("{}{quoted}{}", &line[..open], &line[close..])
+        };
+        for c in spaces {
+            for line in [
+                "open \"/tmp/a b.png\" now",
+                "\"docs/a b=/tmp/report.pdf\"",
+                "open \"docs/my dir/a/b\" now",
+                "open \"/tmp/my dir/report.pdf.\" now",
+            ] {
+                let visible = inside(line, c);
+                let ascii = read(line);
+                let spans = read(&visible)
+                    .into_iter()
+                    .map(|(kind, text, bounded)| (kind, text.replace(c, " "), bounded))
+                    .collect::<Vec<_>>();
+                assert_eq!(spans, ascii, "U+{:04X} in {visible:?}", u32::from(c));
+            }
+        }
+        let shot = "open \"/Users/me/Desktop/Screenshot 2026-11-26 at 10.00.00\u{202f}AM.png\"";
+        assert_eq!(
+            read(shot),
+            [(
+                Kind::Path,
+                "/Users/me/Desktop/Screenshot 2026-11-26 at 10.00.00\u{202f}AM.png".to_string(),
+                true
+            )]
+        );
     }
 
     /// Quoted prose that starts with a path keeps a later path from a root
