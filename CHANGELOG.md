@@ -1289,6 +1289,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   drawn only when a theme makes that colour too close in brightness to the
   other matches' to tell them apart, as about one bundled theme in five does.
 
+- Kettle's whole-scrollback search function, used by its tests and fuzzing, now finds exactly what the find bar finds: matches across a soft wrap, `^`, `$` and `\b` only at real line edges, one match per accented cell, and both cells of a wide character.
+
 - On Linux machines with many processors, about 12 or more, ffmpeg drew no
   video poster, video frame or HEIC/AVIF photo. Left to choose, it started
   filter and encoder threads for every processor, and their stacks and
@@ -1423,6 +1425,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   suites and smokes set it, and the `kettle` crate's unit tests no longer
   look for a running Kettle at all.
 
+- `run_command` output cut at its 512 KiB cap no longer ends with the spaces that came just before the cut.
+
+- `run_command` no longer reports its output truncated when all that lay past the 512 KiB cap was blank space.
+
 - On macOS, title-bar buttons no longer drag the window. AppKit moved the
   window with any press in the title bar, so a press on the Settings gear,
   `▾`, `+` or a tab's close button that was dragged off came back over the
@@ -1485,6 +1491,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   released, a selected link keeps its hint and hand cursor, and its underline
   comes back when the selection is cleared. ⌘-click and Ctrl+click still open
   it.
+
+- Double-clicking a URL or path that wraps onto the next row selects all of it, from either row, instead of nothing.
 
 - Starting a recording into a directory could fail with "resource
   temporarily unavailable" when a new pane opened at the same moment as

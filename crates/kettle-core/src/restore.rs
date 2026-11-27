@@ -1067,8 +1067,11 @@ mod tests {
         );
         let matches = crate::search(&term, "needle");
         assert_eq!(matches.len(), 1);
-        assert!(matches[0].line < 0, "fixture must search retained history");
-        let point = Point::new(Line(matches[0].line), Column(0));
+        assert!(
+            matches[0].start.line < 0,
+            "fixture must search retained history"
+        );
+        let point = Point::new(Line(matches[0].start.line), Column(0));
         let mut selection = Selection::new(SelectionType::Lines, point, Side::Left);
         selection.update(Point::new(point.line, Column(39)), Side::Right);
         term.selection = Some(selection);

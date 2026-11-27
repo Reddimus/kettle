@@ -110,8 +110,9 @@ current Cmd shortcuts, including config overrides. See
 
 ## Selecting text
 
-- Drag to select text. Double-click selects a word or detected path; triple-click
-  selects a line. Drag past the top or bottom to scroll through history.
+- Drag to select text. Double-click selects a word or a detected URL or path,
+  including one that wraps onto the next row; triple-click selects a line.
+  Drag past the top or bottom to scroll through history.
 - **Option-drag on macOS / Alt-drag elsewhere** selects a rectangular block.
 - **Shift-click** extends the existing selection from its anchor; keep dragging
   to adjust the end. Without a selection it starts one. Shift also bypasses a
