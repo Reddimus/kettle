@@ -63,8 +63,8 @@ tabs and panes in layout order, retaining the newest rows within each pane.
 The snapshot is saved as [When Kettle saves](#when-kettle-saves) describes.
 It is a bounded recent snapshot, not a complete log or a running process.
 
-Restored output keeps colors, bold, italic, underline and wide/combined text.
-A tab comes back as spaces, so the text after it keeps its column.
+Restored output keeps colors, bold, italic, underline, blink and wide/combined
+text. A tab comes back as spaces, so the text after it keeps its column.
 It appears faint, followed by **Restored · YYYY-MM-DD HH:MM:SS** in the UI language
 and local time, then a fresh shell prompt. Search, selection and copy use the
 ordinary terminal scrollback. Normal scrollback memory/line limits still apply,

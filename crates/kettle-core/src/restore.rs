@@ -85,20 +85,7 @@ pub fn snapshot_from<T: EventListener>(
             if crate::grid_text::is_spacer(cell.flags) {
                 continue;
             }
-            let style = (
-                cell.fg,
-                cell.bg,
-                cell.underline_color(),
-                cell.flags
-                    & (Flags::BOLD
-                        | Flags::DIM
-                        | Flags::ITALIC
-                        | Flags::ALL_UNDERLINES
-                        | Flags::INVERSE
-                        | Flags::HIDDEN
-                        | Flags::STRIKEOUT
-                        | Flags::OVERLINE),
-            );
+            let style = cell_style(cell);
             let mut part = String::new();
             if previous != Some(style) {
                 part.push_str("\x1b[0");
@@ -111,6 +98,7 @@ pub fn snapshot_from<T: EventListener>(
                     (Flags::UNDERCURL, ";4:3"),
                     (Flags::DOTTED_UNDERLINE, ";4:4"),
                     (Flags::DASHED_UNDERLINE, ";4:5"),
+                    (Flags::BLINK, ";5"),
                     (Flags::INVERSE, ";7"),
                     (Flags::HIDDEN, ";8"),
                     (Flags::STRIKEOUT, ";9"),
@@ -163,6 +151,28 @@ pub fn snapshot_from<T: EventListener>(
     }
     rows.reverse();
     rows
+}
+
+/// What a cell's saved SGR records: colours and every SGR text attribute.
+/// `PROTECTED` is DECSCA, not SGR, and links never cross the boundary.
+fn cell_style(
+    cell: &alacritty_terminal::term::cell::Cell,
+) -> (AnsiColor, AnsiColor, Option<AnsiColor>, Flags) {
+    (
+        cell.fg,
+        cell.bg,
+        cell.underline_color(),
+        cell.flags
+            & (Flags::BOLD
+                | Flags::DIM
+                | Flags::ITALIC
+                | Flags::ALL_UNDERLINES
+                | Flags::BLINK
+                | Flags::INVERSE
+                | Flags::HIDDEN
+                | Flags::STRIKEOUT
+                | Flags::OVERLINE),
+    )
 }
 
 fn color(out: &mut String, color: AnsiColor, base: usize) {
@@ -517,6 +527,27 @@ mod tests {
             );
             assert_eq!(text(&restored), text(&source), "{columns}x{rows}");
         }
+    }
+
+    /// SGR 5 and 6 both set blink, which the snapshot never recorded.
+    #[test]
+    fn restored_text_keeps_blink() {
+        let (source, restored, _) = round_trip(
+            b"\x1b[5mBLINK\x1b[0m \x1b[6mRAPID\x1b[0m \x1b[1;5;31mBOLD-BLINK-RED\x1b[0m",
+        );
+        for col in 0..26 {
+            let before = saved_cell(&source, 0, col);
+            let after = saved_cell(&restored, 0, col);
+            let mask = Flags::BLINK | Flags::BOLD;
+            assert_eq!(after.flags & mask, before.flags & mask, "column {col}");
+            assert_eq!(after.fg, before.fg, "column {col}");
+        }
+        assert!(saved_cell(&restored, 0, 6).flags.contains(Flags::BLINK));
+        assert!(
+            saved_cell(&restored, 0, 12)
+                .flags
+                .contains(Flags::BLINK | Flags::BOLD | Flags::DIM)
+        );
     }
 
     /// Rows a remote session wrote stay out of a snapshot taken from its end
