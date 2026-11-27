@@ -2709,14 +2709,17 @@ mod tests {
     /// and that link, as `ls --hyperlink` and eza print it, opens.
     #[test]
     fn a_visible_space_in_a_name_is_a_space() {
-        use super::{file_url_for_path, local_file_path};
+        use super::file_url_for_path;
         use std::path::Path;
         let name = "/Users/me/Desktop/Screenshot 2026-11-26 at 10.00.00\u{202f}AM.png";
         let url = "file:///Users/me/Desktop/Screenshot%202026-11-26%20at%2010.00.00%E2%80%AFAM.png";
         assert_eq!(file_url_for_path(Path::new(name)).as_deref(), Some(url));
         assert!(is_safe_url(url));
         #[cfg(unix)]
-        assert_eq!(local_file_path(url), Some(std::path::PathBuf::from(name)));
+        assert_eq!(
+            super::local_file_path(url),
+            Some(std::path::PathBuf::from(name))
+        );
         for uri in [
             "https://x.test/Screenshot%2010.00.00%E2%80%AFAM.png",
             "file:///tmp/a%C2%A0b.pdf",

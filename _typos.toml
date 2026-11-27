@@ -58,6 +58,7 @@ ifself = "ifself"
 projets = "projets"
 contorl = "contorl"
 alwyas = "alwyas"
+rror = "rror"      # a search test's partial-word pattern
 botom = "botom"
 evrywhere = "evrywhere"
 flase = "flase"
