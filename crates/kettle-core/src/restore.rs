@@ -130,6 +130,8 @@ pub fn snapshot_from<T: EventListener>(
             }
             let (ch, marks) =
                 crate::inline_text::text_parts(cell.c, cell.zerowidth().unwrap_or_default());
+            // A tab is stored as a `'\t'` cell; a blank keeps its column.
+            let ch = if ch.is_control() { ' ' } else { ch };
             for ch in std::iter::once(ch).chain(marks.iter().copied()) {
                 if line.len() + part.len() + ch.len_utf8() + 4 > MAX_RESTORE_LINE_BYTES {
                     wrapped = false;
@@ -395,6 +397,29 @@ mod tests {
     ) -> &alacritty_terminal::term::cell::Cell {
         let top = term.grid().topmost_line().0;
         &term.grid()[Point::new(Line(top + k as i32), Column(col))]
+    }
+
+    /// A tab is stored as a `'\t'` cell. The snapshot used to drop it, which
+    /// moved everything after each tab one column left.
+    #[test]
+    fn restored_rows_keep_the_columns_after_a_tab() {
+        for script in [
+            &b"x\t=\r\n"[..],
+            b"ab\tcd\r\n",
+            b"\x1b[31mx\t\x1b[32m=\r\n",
+            b"a\tb\tc\r\n",
+        ] {
+            let (source, restored, rows) = round_trip(script);
+            for k in 0..rows {
+                for col in 0..40 {
+                    let before = saved_cell(&source, k, col);
+                    let after = saved_cell(&restored, k, col);
+                    let before_c = if before.c == '\t' { ' ' } else { before.c };
+                    assert_eq!(after.c, before_c, "{script:?} row {k} column {col}");
+                    assert_eq!(after.fg, before.fg, "{script:?} row {k} column {col}");
+                }
+            }
+        }
     }
 
     /// A row below a soft-wrapped one gets its line when its first character

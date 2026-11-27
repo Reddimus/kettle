@@ -1114,6 +1114,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - A restored line keeps its soft wrap when the row it wraps onto holds only
   blanks, so copying it adds no line break.
 
+- Restored output keeps the text after a tab in its column.
+
 - Screen readers can highlight a command palette or picker result by pressing
   or focusing it, and act on the highlighted result with the picker's Choose
   button. Selecting a result never runs it. Pressing a quick-select label acts
