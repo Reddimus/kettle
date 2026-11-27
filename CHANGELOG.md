@@ -6,6 +6,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+## [6.0.0] — 2026-11-27
+
 ### Added
 
 - On Linux, Kettle now draws on the CPU by default and presents through
@@ -17,10 +19,6 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   fails to start, Kettle tries the CPU renderer. If the CPU presenter cannot
   start or recover, Kettle tries wgpu. `kettle --gpu-info` reports the configured
   renderer preference and the adapter found by its headless probe.
-
-## [6.0.0] — 2026-11-08
-
-### Added
 
 - On Linux and Windows the Menu key, the one beside the right Ctrl on PC
   keyboards, opens the terminal menu at the text cursor, as it does in GNOME
