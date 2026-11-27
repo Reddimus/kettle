@@ -1283,6 +1283,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - Select Command Output no longer copies the next Bash prompt after output with no final newline, such as `printf done`; it stops where the output ends.
 
+- A recording to a file can start right after the previous recording to it stops, even if a pane was opening at that moment; it no longer reports the file as in use.
+
 - Closing the search bar no longer moves the text. When the prompt was above
   the bottom of the window, as after `clear`, closing it pulled lines from
   the scrollback back onto the screen and pushed everything down, so you lost
