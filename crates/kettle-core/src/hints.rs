@@ -178,27 +178,38 @@ const MAX_QUOTED_PATH: usize = 1024;
 /// separates words, unless a backslash escapes it, so a string may sit
 /// inside a word (`x="a b"`, `{"k":"v"}`, `prefix"…"`).
 ///
-/// Some text may be quoted or not, and is unsure: after a quote no quote
-/// closes, the rest of the line; and after a `'` right after a letter or
-/// digit, which is an apostrophe (`can't`, `it's`, `users'`) unless a later
-/// `'` closes it at the end of a shell token as a shell would read it
-/// (`prefix'a b'`), the text up to that `'`, so a contraction and a later
-/// possessive (`Bob's … users'`) leave the text between them unsure. An
-/// apostrophe with no such close opens nothing.
+/// A `'` right after a letter or digit is an apostrophe (`can't`, `it's`,
+/// `users'`) unless a later `'` closes it at the end of a shell token, as a
+/// shell would read it (`prefix'a b'`): then the text up to that `'` may be
+/// quoted or not, and is unsure, so a contraction and a later possessive
+/// (`Bob's … users'`) leave the text between them unsure.
+///
+/// A quote that never closes makes the whole line uncertain, since every
+/// string on it may be read out of step, before it as after it (`x 'tis
+/// A='/a b/c d.txt'`). So does an apostrophe that could close a string,
+/// one a letter or digit does not follow (`users'`, unlike `can't`), unless
+/// a later `'` closes it at the end of a shell token. And so does a string
+/// that runs on into more of its word after it closes (`"a"b`,
+/// `"$src"/a.txt`): two stray quotes, or one and an apostrophe, pair with
+/// each other and with the strings between them and leave no quote open
+/// (`the "quoted x="a b/c" the "quoted`), but the string a stray quote
+/// opens ends where the next string was to begin.
 pub(crate) struct Quotes {
     /// Closed strings, as the byte offsets of their opening and closing
     /// quotes, in order.
     strings: Vec<(usize, usize)>,
-    /// Unsure text, as the byte offsets of the quote that starts it and of
-    /// the quote that ends it or the line's end, in order.
+    /// Unsure text, as the byte offsets of the apostrophe that starts it and
+    /// of the `'` that ends it, in order.
     unsure: Vec<(usize, usize)>,
     /// The quote characters outside strings and unsure text, and those that
     /// delimit them, in order; an escaped one outside strings is text and
     /// not among them.
     marks: Vec<usize>,
-    /// The words, as byte ranges, in order. In unsure text whitespace alone
-    /// separates them.
+    /// The words, as byte ranges, in order. In unsure text, and on an
+    /// uncertain line, whitespace alone separates them.
     words: Vec<(usize, usize)>,
+    /// The line holds a quote that never closes.
+    uncertain: bool,
 }
 
 impl Quotes {
@@ -209,6 +220,7 @@ impl Quotes {
             unsure: Vec::new(),
             marks: Vec::new(),
             words: Vec::new(),
+            uncertain: false,
         };
         let mut word: Option<usize> = None;
         let split = |from: usize, to: usize, word: &mut Option<usize>, words: &mut Vec<_>| {
@@ -241,29 +253,54 @@ impl Quotes {
                 continue;
             }
             let apostrophe = c == '\'' && before.is_some_and(char::is_alphanumeric);
-            match closing_quote(line, at) {
+            let close = closing_quote(line, at);
+            let at_a_token_end = |close: usize| shell_boundary(line[close + 1..].chars().next());
+            let ends_a_word = line[next..]
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_alphanumeric());
+            match close {
+                // A string that runs on into more of its word after it closes
+                // (`"a"b`, `x='a'/b`) may have paired a stray quote with the
+                // next string's opening one, so the line is uncertain.
+                Some(close) if !apostrophe && runs_on(&line[close + 1..]) => {
+                    quotes.uncertain = true;
+                    break;
+                }
                 Some(close) if !apostrophe => {
                     quotes.strings.push((at, close));
                     quotes.marks.extend([at, close]);
                     at = close + 1;
                 }
-                Some(close) if shell_boundary(line[close + 1..].chars().next()) => {
+                Some(close) if at_a_token_end(close) => {
                     quotes.unsure.push((at, close));
                     quotes.marks.extend([at, close]);
                     split(at, close + 1, &mut word, &mut quotes.words);
                     at = close + 1;
                 }
-                _ if apostrophe => {
+                // A quote no quote closes, or an apostrophe that could close
+                // a string (`users'`, not `can't`) that no later `'` closes
+                // as a shell would, leaves the whole line uncertain.
+                None if !apostrophe => {
+                    quotes.uncertain = true;
+                    break;
+                }
+                _ if ends_a_word => {
+                    quotes.uncertain = true;
+                    break;
+                }
+                _ => {
                     quotes.marks.push(at);
                     at = next;
                 }
-                _ => {
-                    quotes.unsure.push((at, line.len()));
-                    quotes.marks.push(at);
-                    split(at, line.len(), &mut word, &mut quotes.words);
-                    at = line.len();
-                }
             }
+        }
+        if quotes.uncertain {
+            // Its strings may be read out of step, so its words are read by
+            // whitespace alone.
+            word = None;
+            quotes.words.clear();
+            split(0, line.len(), &mut word, &mut quotes.words);
         }
         if let Some(start) = word {
             quotes.words.push((start, line.len()));
@@ -307,6 +344,12 @@ impl Quotes {
         })
     }
 
+    /// Whether no quote on the line is left open, so its strings read as
+    /// written. On an uncertain line a quoted path is copied, never opened.
+    pub(crate) fn certain(&self) -> bool {
+        !self.uncertain
+    }
+
     /// Whether a closed string holding the bare path at `start..end` closes
     /// right at `end` and ends the token there, so its quote marks where the
     /// name ends: `"/tmp/a.."` names `a..`.
@@ -318,7 +361,9 @@ impl Quotes {
 
     /// Whether the bare path at `start..end` may open, by where it sits
     /// among the quotes. The token rules ([`match_has_end`] and the rest)
-    /// still apply on top. These may open:
+    /// still apply on top. On an uncertain line only a path from a root that
+    /// starts its word, or follows an `=`, `:`, `(`, `[` or `{` that does,
+    /// may open. Otherwise these may open:
     ///
     /// - a path outside strings and unsure text whose word holds no quote
     ///   character before it, since the last string that closed in the
@@ -345,6 +390,17 @@ impl Quotes {
     /// b=/tmp/b.pdf"` and in `prefix'docs/a*b=/tmp/b.pdf'`, `b/notes.txt` in
     /// `"a b/notes.txt"`, and a relative path in unsure text.
     pub(crate) fn lets_open(&self, line: &str, start: usize, end: usize) -> bool {
+        let word = self
+            .words
+            .partition_point(|&(word, _)| word <= start)
+            .checked_sub(1)
+            .map_or((start, end), |at| self.words[at]);
+        let leads =
+            start == word.0 || (start == word.0 + 1 && b"=:([{".contains(&line.as_bytes()[word.0]));
+        let rooted = leads && starts_its_own_path(&line[start..]);
+        if self.uncertain {
+            return rooted;
+        }
         let held = self.strings.partition_point(|&(open, _)| open < start);
         if let Some(&(open, close)) = held.checked_sub(1).map(|at| &self.strings[at])
             && end <= close
@@ -361,14 +417,6 @@ impl Quotes {
                     .any(|c| c != ' ' && crate::links::hides_text(c));
             return reaches && (whole || from_a_root);
         }
-        let word = self
-            .words
-            .partition_point(|&(word, _)| word <= start)
-            .checked_sub(1)
-            .map_or((start, end), |at| self.words[at]);
-        let leads =
-            start == word.0 || (start == word.0 + 1 && b"=:([{".contains(&line.as_bytes()[word.0]));
-        let rooted = leads && starts_its_own_path(&line[start..]);
         let unsure = self.unsure.partition_point(|&(open, _)| open < start);
         if unsure
             .checked_sub(1)
@@ -384,6 +432,18 @@ impl Quotes {
             .last()
             .map_or(word.0, |&(_, close)| word.0.max(close + 1));
         !quoted(since, start) && (rooted || !quoted(end, word.1))
+    }
+}
+
+/// Whether `rest`, right after a string's closing quote, goes on with more
+/// of a word: a letter, a digit, `/`, `~` or `\`, or a `.` before one of
+/// them, so not punctuation that ends a sentence (`"a/b.txt".`).
+fn runs_on(rest: &str) -> bool {
+    let word = |c: char| c.is_alphanumeric() || "/~\\".contains(c);
+    let mut chars = rest.chars();
+    match chars.next() {
+        Some('.') => chars.next().is_some_and(word),
+        next => next.is_some_and(word),
     }
 }
 
@@ -738,7 +798,7 @@ fn detect_line(
                     end: col_of_byte[be - 1],
                     kind: Kind::Path,
                     text: line[bs..be].to_string(),
-                    bounded: !path_misleads(&line[bs..be]),
+                    bounded: quotes.certain() && !path_misleads(&line[bs..be]),
                 });
             }
         }

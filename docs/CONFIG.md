@@ -680,9 +680,15 @@ closed before it (`src/main.rs`, `--out=/tmp/x.png`, `src/main.rs` in
 ends the string opens too (`"see /tmp/report.pdf"`). Any other piece of a
 quoted string, or of a word that holds a quote, is not underlined and quick
 select only copies it: `/tmp/report.pdf` in `prefix'docs/a*b=/tmp/report.pdf'`,
-`b/notes.txt` in `"a b/notes.txt"`. Text that may or may not be quoted, between
-such an apostrophe and the `'` that closes it or after a quote that never
-closes, opens only a path from a root at the start of a word.
+`b/notes.txt` in `"a b/notes.txt"`. Text between such an apostrophe and the `'`
+that closes it may or may not be quoted, and opens only a path from a root at
+the start of a word. A stray quote can shift every string on its line, so a line
+where one may have done so is uncertain as a whole: one holding a quote that
+never closes, an apostrophe that could close a string (`users'`) with no `'`
+closing it, or a string that runs on into more of its word after it closes
+(`"a"b`, `"$src"/a.txt`). On such a line only a path from a root at the start of
+a word opens, and relative and quoted paths are copied: nothing opens in
+`x 'tis A='/Users/me/a b/notes/my dir.txt'`.
 
 ### Selection and history controls
 

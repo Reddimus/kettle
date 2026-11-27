@@ -57,7 +57,8 @@ and confinement, described below.
   so a piece of a quoted name never becomes a link to another file: only a
   path with no quote beside it in its word, a quoted string's whole text, a
   path from a root starting a word, or one from a root that ends quoted
-  prose may open, and every other piece is copied (see
+  prose may open, and on a line a stray quote may have shifted, only a path
+  from a root starting a word; every other piece is copied (see
   `hints::Quotes::lets_open` and
   [link detection](docs/CONFIG.md#link-detection)). The underline and the
   destination pill show exactly what a click opens.
