@@ -17,8 +17,6 @@
 #   OSC 7       current working directory (powers new-tab/split cwd
 #               inheritance and "Open folder"; kettle validates the hostname
 #               so an ssh session's remote cwd is never adopted locally)
-#   CSI > 0 u   at each prompt, push legacy key reporting for zle
-#   CSI < u     before each command, pop it again
 
 # Percent-encode $PWD byte-by-byte (LC_ALL=C makes ${p[i]} a BYTE, so
 # multi-byte UTF-8 path characters encode as their UTF-8 byte sequence).
@@ -190,27 +188,6 @@ typeset -g __kettle_pending_token='' __kettle_command_token='' __kettle_active_t
 typeset -gi __kettle_correlation_enabled=0
 if __kettle_correlation_install; then __kettle_correlation_enabled=1; fi
 autoload -Uz add-zsh-hook
-# zle reads legacy key encodings only. A program can leave Kitty key
-# reporting on as it stops: a client suspended with Ctrl+Z may re-enable it
-# just before it actually stops. Each prompt pushes legacy reporting over
-# whatever is there, replacing the one this shell pushed before, and the next
-# command pops it, so `fg` hands a resumed program back its own flags. Leaving
-# the shell pops it too: Ctrl+D runs no command. A subshell that calls `exit`
-# runs zshexit as well, and must leave the prompt's entry alone.
-typeset -gi __kettle_keyboard_pushed=${__kettle_keyboard_pushed:-0}
-__kettle_keyboard_push() {
-  (( __kettle_keyboard_pushed )) && printf '\e[<u'
-  printf '\e[>0u'
-  __kettle_keyboard_pushed=1
-}
-__kettle_keyboard_pop() {
-  (( __kettle_keyboard_pushed )) || return 0
-  printf '\e[<u'
-  __kettle_keyboard_pushed=0
-}
-__kettle_keyboard_exit() {
-  (( ZSH_SUBSHELL )) || __kettle_keyboard_pop
-}
 __kettle_precmd() {
   local command_status=$?
   __kettle_command_token=''
@@ -230,11 +207,9 @@ __kettle_precmd() {
     printf '\e]133;A;kettle=0\a'
   fi
   __kettle_osc7
-  __kettle_keyboard_push
   return 0
 }
 __kettle_preexec() {
-  __kettle_keyboard_pop
   __kettle_active_token=$__kettle_command_token
   __kettle_command_token=''
   if [[ -n $__kettle_active_token ]]; then
@@ -245,7 +220,6 @@ __kettle_preexec() {
 }
 add-zsh-hook precmd __kettle_precmd
 add-zsh-hook preexec __kettle_preexec
-add-zsh-hook zshexit __kettle_keyboard_exit
 if [[ "$PS1" != $'%{\e]133;B\a%}'* ]]; then
   PS1=$'%{\e]133;B\a%}'"$PS1"
 fi

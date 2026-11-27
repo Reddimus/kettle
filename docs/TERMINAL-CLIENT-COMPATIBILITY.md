@@ -703,15 +703,13 @@ or exhaustive race coverage; the related background issue remains open.
 
 Kettle follows the client's negotiated modes. It does not clear them based on
 a process name or assume every foreground shell uses legacy keyboard input.
-Kettle's bash and zsh integration, automatic or sourced, protects its own
-prompt the way fish does: each prompt pushes legacy key reporting
-(`CSI > 0 u`) over whatever a stopped client left, and the next command pops
-it (`CSI < u`). When a client stops with its flags still pushed, as Codex
-does after the race, the shell's line editor still reads legacy keys, and
-`fg` gives the client back the flags it had. The handover follows the hook
-that marks a command's start; [the marks](SHELL-INTEGRATION.md#marks) list
-the command lines it misses. A bash or zsh without Kettle's integration,
-such as `zsh -f`, still sees the race.
+Its bash and zsh integration does not push or pop keyboard flags around the
+prompt either. The flag stack is positional and shared by every process on
+the terminal, so a shell cannot tell its own entry from a client's: a
+background client's balanced pop removes the shell's entry, a nested bash
+left with Ctrl+D leaves one behind, and `set -T`, `bind -x` widgets and zsh
+widgets that run `fg` slip past the command hooks such a handoff would need.
+Ghostty and kitty leave the flags to the programs as well.
 
 See [Unix suspend/resume compatibility](TESTING.md#unix-suspendresume-compatibility)
 for the offline regression scenario and the explicit real-Codex probe. Until a

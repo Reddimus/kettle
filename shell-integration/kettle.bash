@@ -17,8 +17,6 @@
 #   OSC 7       current working directory (powers new-tab/split cwd
 #               inheritance and `open_cwd`; kettle validates the hostname
 #               so an ssh session's remote cwd is never adopted locally)
-#   CSI > 0 u   at each prompt, push legacy key reporting for readline
-#   CSI < u     before each command, pop it again
 
 # Percent-encode $PWD byte-by-byte (LC_ALL=C makes ${p:i:1} a BYTE, so
 # multi-byte UTF-8 path characters encode as their UTF-8 byte sequence).
@@ -166,24 +164,7 @@ __kettle_command_token=''
 __kettle_active_token=''
 __kettle_correlation_enabled=0
 if __kettle_correlation_install 2>/dev/null; then __kettle_correlation_enabled=1; fi
-# Readline reads legacy key encodings only. A program can leave Kitty key
-# reporting on as it stops: a client suspended with Ctrl+Z may re-enable it
-# just before it actually stops. Each prompt pushes legacy reporting over
-# whatever is there, replacing the one this shell pushed before, and the next
-# command pops it, so `fg` hands a resumed program back its own flags.
-__kettle_keyboard_pushed=${__kettle_keyboard_pushed:-0}
-__kettle_keyboard_push() {
-  [[ $__kettle_keyboard_pushed == 1 ]] && printf '\033[<u'
-  printf '\033[>0u'
-  __kettle_keyboard_pushed=1
-}
-__kettle_keyboard_pop() {
-  [[ $__kettle_keyboard_pushed == 1 ]] || return 0
-  printf '\033[<u'
-  __kettle_keyboard_pushed=0
-}
 __kettle_command_begin() {
-  __kettle_keyboard_pop
   __kettle_active_token=${__kettle_command_token-}
   __kettle_command_token=''
   if [[ -n $__kettle_active_token ]]; then
@@ -217,7 +198,6 @@ __kettle_pc() {
     printf '\033]133;A;kettle=0\007'
   fi
   __kettle_osc7
-  __kettle_keyboard_push
   return "$__kettle_status"
 }
 __kettle_prompt_ready() {

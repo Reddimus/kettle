@@ -2662,15 +2662,6 @@ The harness uses PTY/control input rather than physical keyboard events.
 Check physical chords separately when native event routing is the suspected
 failure. Unix job control has no equivalent Windows acceptance leg.
 
-The offline smoke runs `zsh -f` or `bash --noprofile --norc`, without
-Kettle's integration, so its negative controls still see a stopped client's
-key reporting. The kettle-ui test
-`a_client_stopped_with_kitty_reporting_on_leaves_the_prompt_legacy` covers the
-integrated prompt: bash and zsh source the shipped hooks in a real PTY, and a
-client that pushes `CSI > 7 u` and stops before popping it leaves the prompt
-legacy, Alt+Backspace edits the line, and `fg` returns the client's flags,
-also after Ctrl+C, an empty line and, in zsh, a nested shell left with Ctrl+D.
-
 ### Automation surfaces and real integrations
 
 - [ ] Connect the actual agent/MCP client and check permissions, refusal text,
