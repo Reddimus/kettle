@@ -668,6 +668,11 @@ fn a_page_crosses_a_row_that_does_not_apply() {
     assert_eq!(page_target(&[true, true, false, true], 0, 2), 1);
     assert_eq!(page_target(&[true, true, true], 2, 5), 2);
     assert_eq!(page_target(&[false, true, true], 2, -5), 1);
+    // A focus a live reload turned off moves on, even at the end: End or
+    // Home from it picks the nearest row that applies, back the other way.
+    assert_eq!(page_target(&[true, true, false], 2, 5), 1);
+    assert_eq!(page_target(&[true, false, false], 1, 5), 0);
+    assert_eq!(page_target(&[false, false, true], 0, -5), 2);
 }
 
 /// Search results page by painted rows, the ones that do not apply
