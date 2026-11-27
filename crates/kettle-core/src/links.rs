@@ -1662,6 +1662,29 @@ mod tests {
         }
     }
 
+    /// Quotes around one path-shaped token the quoted pattern rejects leave
+    /// no piece of it linked as a file of its own; a path after a space in
+    /// quoted prose, or unquoted, still links.
+    #[test]
+    fn the_end_of_a_quoted_path_token_does_not_link() {
+        let found = |line: &str| {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>()
+        };
+        for line in [
+            "\"docs/\u{b2}www.example.com.txt#file=/tmp/report.pdf\"",
+            "\"docs/a*b=/tmp/report.pdf\"",
+        ] {
+            assert!(found(line).is_empty(), "{line}: {:?}", found(line));
+        }
+        for line in ["file=/tmp/report.pdf", "\"see /tmp/report.pdf\""] {
+            assert_eq!(found(line), ["file:///tmp/report.pdf"], "{line}");
+        }
+    }
+
     /// A quoted relative path with a space links whole whatever the length
     /// of its extension.
     #[test]

@@ -1652,6 +1652,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Text that trails off after a bare scheme, such as `see https://...` or `see www...`, is no longer offered as a link or a quick-select URL, and a web link with no host is refused.
 - URLs printed with an uppercase scheme, such as `HTTPS://`, `FILE://` or `WWW.`, are detected as links and quick-select URLs.
 - A file name holding `www.`, such as `docs/www.example.com.txt`, links the file rather than a web address.
+- The end of a quoted path that Kettle cannot read whole, such as `/tmp/report.pdf` in `"docs/a*b=/tmp/report.pdf"`, is no longer offered as a file of its own.
 - A path ending in a dotfile, such as `docs/.env` or a quoted `"docs/my dir/.env"`, is a link, and quick select no longer offers only the part after the space.
 - A quoted path with a space whose extension is long or hyphenated, such as `"docs/annual report.swiftinterface"` or `"docs/my app.code-workspace"`, is a link.
 - A file link naming a program in a Windows alternate data stream, such as `notes.txt:payload.exe::$DATA`, is refused like the program itself.

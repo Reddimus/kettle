@@ -244,10 +244,12 @@ fn quote_has_end(line: &str, close: usize) -> bool {
 
 /// Whether a bare path reaches the end of any quoted run holding it. Quoted
 /// text holding a character that hides text (`"docs/old\u{a0}dir/x.txt"`)
-/// may be one name, so no piece of it is whole; nor is a path joined to a
-/// word before it that names a parent once decoded (`"a/%2e%2e/b=/x.pdf"`).
-/// Only a path that ends at the close reaches those checks, so the run is
-/// read once.
+/// may be one name, so no piece of it is whole. Nor is a path joined to a
+/// path-shaped word before it, one holding a separator: the quotes hold
+/// one token that the quoted pattern could not read whole, and its end is
+/// not a file of its own (`"docs/a*b#file=/tmp/report.pdf"`). A path after
+/// a space in quoted prose is still whole. Only a path that ends at the
+/// close reaches those checks, so the run is read once.
 pub(crate) fn path_reaches_quote(
     line: &str,
     runs: &[(usize, usize)],
@@ -270,8 +272,8 @@ pub(crate) fn path_reaches_quote(
                     .any(|c| c != ' ' && crate::links::hides_text(c))
                 && {
                     let lead = &line[open + 1..start];
-                    let word = lead.rsplit(' ').next().unwrap_or(lead);
-                    !crate::links::climbs_once_decoded(word)
+                    let word = lead.rsplit(char::is_whitespace).next().unwrap_or(lead);
+                    !word.contains(['/', '\\'])
                 }
         })
 }
@@ -1462,6 +1464,35 @@ mod tests {
             assert!(
                 spans.iter().all(|span| !span.text.contains(' ')),
                 "{body}: {spans:?}"
+            );
+        }
+    }
+
+    /// Quotes around one path-shaped token the quoted pattern cannot read
+    /// whole leave no whole piece of it: its end is not a file of its own.
+    /// A path after a space in quoted prose, or unquoted, stays whole.
+    #[test]
+    fn the_end_of_a_quoted_path_token_is_not_whole() {
+        for line in [
+            "\"docs/\u{b2}www.example.com.txt#file=/tmp/report.pdf\"",
+            "\"docs/a*b=/tmp/report.pdf\"",
+            "\"docs/%2e%2e/a?=/tmp/report.pdf\"",
+        ] {
+            let spans = detect(&[line]);
+            assert!(spans.iter().all(|span| !span.bounded), "{line}: {spans:?}");
+        }
+        for (line, text) in [
+            ("\"see /tmp/report.pdf\"", "/tmp/report.pdf"),
+            ("file=/tmp/report.pdf", "/tmp/report.pdf"),
+            (
+                "\"Compare a/b*c.txt with /tmp/report.pdf\"",
+                "/tmp/report.pdf",
+            ),
+        ] {
+            let spans = detect(&[line]);
+            assert!(
+                spans.iter().any(|span| span.text == text && span.bounded),
+                "{line}: {spans:?}"
             );
         }
     }
