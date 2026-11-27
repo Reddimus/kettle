@@ -1822,6 +1822,9 @@ impl ExecProcessTree {
     }
 
     fn terminate_once(&self, term: &Terminal) -> bool {
+        // A child whose output cannot drain would otherwise wait in its exit
+        // after any signal below while Kettle holds the PTY slave.
+        term.release_retained_slave();
         let Some(root) = self.root.or_else(|| term.child_pid()) else {
             let direct = report_failed_termination(term.kill());
             #[cfg(unix)]

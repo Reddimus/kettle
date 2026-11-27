@@ -1283,6 +1283,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - Select Command Output no longer copies the next Bash prompt after output with no final newline, such as `printf done`; it stops where the output ends.
 
+- On macOS, output a program writes just before it exits is no longer lost when Kettle is slow to read it, in panes and in `kettle exec`; a program that exits while its output is paused with Ctrl+S now finishes when output resumes or its pane closes.
+
 - A recording to a file can start right after the previous recording to it stops, even if a pane was opening at that moment; it no longer reports the file as in use.
 
 - Closing the search bar no longer moves the text. When the prompt was above

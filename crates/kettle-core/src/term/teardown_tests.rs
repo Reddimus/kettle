@@ -2440,9 +2440,12 @@ fn the_pty_reader_knows_the_hostname_the_shell_starts_with() {
 }
 
 /// Pin the construction order and the Unix ownership handoff that close the
-/// short-child output race. Readiness alone is insufficient: a pump can be
-/// descheduled immediately after sending it, so the parent slave must stay
-/// alive until the pump owns it.
+/// short-child output race, and when the pump lets go of the slave.
+/// Readiness alone is insufficient: a pump can be descheduled immediately
+/// after sending it, so the parent slave must stay alive until the pump owns
+/// it. The pump then keeps it until the direct child has exited and the
+/// master is empty: on macOS the last close of a slave can discard output
+/// still unread, so neither a read nor the child's exit may release it.
 #[test]
 fn the_pty_reader_owns_the_startup_slave_before_the_parent_releases_it() {
     let src = super::production_source();
@@ -2456,20 +2459,14 @@ fn the_pty_reader_owns_the_startup_slave_before_the_parent_releases_it() {
         .find("SpawnedChildGuard::arm(child.clone_killer())")
         .expect("spawn guard armed");
     let handoff = src
-        .find(".send((pair.slave, lifecycle_watcher))")
-        .expect("Unix startup slave is handed to the pump");
+        .find("Some(pair.slave);")
+        .expect("Unix startup slave goes into the slot the pump and teardown share");
+    let watcher = src
+        .find(".send(lifecycle_watcher)")
+        .expect("the pump gets the child's lifecycle watcher");
     let receive = src
         .find("match startup_slave_rx.recv()")
-        .expect("pump receives the Unix startup slave");
-    let combined = src
-        .find("Ok(Some(UnixStartupWake::OutputAndChildExit)) => {")
-        .expect("combined output/exit arm");
-    let read = src
-        .find("match reader.read(&mut buffer) {")
-        .expect("pump read");
-    let release_after_read = src
-            .find("Ok(n) => {\n                                            #[cfg(unix)]\n                                            startup_slave_guard.take();")
-            .expect("pump releases the Unix startup slave after reading");
+        .expect("pump receives the watcher");
     let disarm = src.find("spawned.disarm();").expect("spawn guard disarmed");
     let construct = src
         .find("\n        Ok(Terminal {")
@@ -2480,30 +2477,93 @@ fn the_pty_reader_owns_the_startup_slave_before_the_parent_releases_it() {
             && ready < spawn
             && spawn < arm
             && arm < handoff
-            && handoff < disarm
+            && handoff < watcher
+            && watcher < disarm
             && disarm < construct,
         "the pump must be ready to receive the slave before child spawn; \
              the child and slave ownership guards stay live through handoff"
     );
     assert!(
-        receive < release_after_read,
-        "the pump must retain the startup slave until a read returns"
-    );
-    let combined_arm = &src[combined
-        ..src[combined..]
-            .find("Ok(Some(UnixStartupWake::ChildExit))")
-            .map(|offset| combined + offset)
-            .expect("child-only exit arm")];
-    assert!(
-        combined < read
-            && read < release_after_read
-            && !combined_arm.contains("startup_slave_guard.take()"),
-        "simultaneous output/exit must record exit but keep the slave through the read"
-    );
-    assert!(
         !src[arm..disarm].contains("return Ok("),
         "a success path that returns without disarming would kill a live \
              terminal's child"
+    );
+
+    let flat = src.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("const RETAIN_SLAVE_UNTIL_DRAINED: bool = cfg!(target_os = \"macos\");"),
+        "macOS keeps the slave until the exited child's output is read"
+    );
+    let pump = &flat[flat
+        .find("match startup_slave_rx.recv()")
+        .expect("pump receives the slave")..];
+    let pump = &pump[..pump
+        .find("failed to spawn PTY pump thread")
+        .expect("end of the pump")];
+    assert!(
+        pump.contains(
+            "if child_exit_deadline.is_some() && !master_readable_now(reader_poll_fd) \
+             { release_slave(&retained_slave); }"
+        ),
+        "after the exit the pump releases the slave once the master is empty"
+    );
+    assert!(
+        pump.contains(
+            "Ok(Some(UnixStartupWake::ChildExit)) => { record_child_exit(); \
+             if !RETAIN_SLAVE_UNTIL_DRAINED { release_slave(&retained_slave); } continue; }"
+        ),
+        "a bare child exit releases the slave only where it is not retained"
+    );
+    assert!(
+        pump.contains(
+            "Ok(n) => { #[cfg(unix)] if !RETAIN_SLAVE_UNTIL_DRAINED \
+             { release_slave(&retained_slave); }"
+        ),
+        "a read releases the slave only where it is not retained"
+    );
+    assert_eq!(
+        pump.matches("release_slave(&retained_slave)").count(),
+        7,
+        "drained, bare exit, EOF timeout, watcher failure, EOF, read failure \
+         and first read are the only releases in the pump"
+    );
+    for (arm, status) in [
+        (
+            "Ok(0) => {",
+            "pump_progress.set_status(PtyReadStatus::Eof);",
+        ),
+        (
+            "Err(error) => { #[cfg(unix)] release_slave(&retained_slave); let status",
+            "pump_progress.set_status(status);",
+        ),
+        ("Ok(None) => {", "set_status(PtyReadStatus::EofTimeout);"),
+    ] {
+        let arm = pump.find(arm).unwrap_or_else(|| panic!("pump arm {arm}"));
+        let release = arm + pump[arm..].find("release_slave(&retained_slave)").unwrap();
+        let status = arm + pump[arm..].find(status).unwrap();
+        assert!(
+            release < status,
+            "the slave goes before the pump publishes its end"
+        );
+    }
+    assert!(
+        pump.contains(
+            "impl Drop for ReleaseOnExit { fn drop(&mut self) { release_slave(&self.0); } }"
+        ) && pump.contains("let _release_on_exit = ReleaseOnExit(Arc::clone(&retained_slave));"),
+        "however the pump ends, it releases the shared slot"
+    );
+    let drop = &flat[flat
+        .find("impl Drop for Terminal {")
+        .expect("Terminal drop")..];
+    let reaper_release = drop
+        .find("release_slave(&reaper_slave);")
+        .expect("the reaper releases the slave");
+    let terminate = drop
+        .find("terminate_unreaped_child(child.as_mut())")
+        .expect("the reaper terminates the child");
+    assert!(
+        reaper_release < terminate,
+        "pane teardown closes the slave before ending the child, off the UI thread"
     );
 }
 
