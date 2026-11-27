@@ -2719,6 +2719,16 @@ mod tests {
                 &["file:///tmp/c.txt"][..],
                 &["/tmp/c.txt"][..],
             ),
+            (
+                r#"rg 'foo ' src/main.rs"#,
+                &["file:///work/src/main.rs"][..],
+                &["src/main.rs"][..],
+            ),
+            (
+                r#"rg foo' ' /abs/src/main.rs"#,
+                &["file:///abs/src/main.rs"][..],
+                &["/abs/src/main.rs"][..],
+            ),
             // Text between an apostrophe and a later `'` a shell would close
             // it at may be quoted or not: a path from a root starting a word
             // still opens there.
