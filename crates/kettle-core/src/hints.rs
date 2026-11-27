@@ -348,6 +348,14 @@ fn starts_its_own_path(path: &str) -> bool {
             && matches!(bytes[2], b'/' | b'\\'))
 }
 
+/// Whether a location (`:12`, `:12:5`) follows a match at `rest`, which
+/// ends the name before it as a closing quote does: `/tmp/a..:3` names
+/// `a..`, as the link pattern, which takes the location, reads it.
+fn location_follows(rest: &str) -> bool {
+    rest.strip_prefix(':')
+        .is_some_and(|after| after.starts_with(|c: char| c.is_ascii_digit()))
+}
+
 /// Whether the quoted run holding a bare path closes right at its `end`,
 /// the quote ending the token, so the quote marks where the name ends:
 /// `"/tmp/a.."` names `a..`.
@@ -671,7 +679,8 @@ fn detect_line(
                     Some(run)
                         if run > 0
                             && trimmed.len() + run == raw.len()
-                            && quote_closes_at(line, &runs, m_start, m.end()) =>
+                            && (quote_closes_at(line, &runs, m_start, m.end())
+                                || location_follows(&line[m.end()..])) =>
                     {
                         raw
                     }
@@ -979,6 +988,7 @@ mod tests {
             assert!(!spans[0].bounded, "{line}");
         }
         for (line, text) in [
+            ("ls /tmp/a..:3", "/tmp/a.."),
             ("ls \"/tmp/a..\"", "/tmp/a.."),
             ("'/tmp/...'", "/tmp/..."),
             ("open \"/tmp/my report.pdf..\" now", "/tmp/my report.pdf.."),
@@ -1000,6 +1010,7 @@ mod tests {
         for line in [
             "see file:///tmp/a..",
             "see file:///tmp/%2e.",
+            "see file:///tmp/a%2e.",
             "see http://127.1..",
         ] {
             let spans = detect(&[line]);

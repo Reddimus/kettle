@@ -97,8 +97,9 @@ pub(crate) fn names_a_target(url: &str) -> bool {
 /// Whether trimming dots off the detected URL `raw` (to `trimmed`, with
 /// `rest` the line after it) would change what it opens rather than drop
 /// prose. For a `file://` link: a dot run, which may be its file's
-/// (`file:///tmp/a..`), or a dot taken off a name made only of dots, which
-/// names another folder (`file:///tmp/%2e.` is `/tmp/..`, trimmed `/tmp/.`).
+/// (`file:///tmp/a..`), or a dot taken off a name that decodes to end in a
+/// dot, which makes one with an escape (`file:///tmp/a%2e.` is `/tmp/a..`,
+/// and `file:///tmp/%2e.` is `/tmp/..`, trimmed `/tmp/.`).
 /// For a bare host whose last label is a number, the dots ending the host
 /// itself: a dot run, as the trimmed host reads as an IPv4 address and the
 /// written one does not (`http://127.1..`, trimmed to loopback); after a
@@ -113,13 +114,11 @@ pub(crate) fn url_loses_a_dot_run(raw: &str, trimmed: &str, rest: &str) -> bool 
         .get(..7)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file://"))
     {
-        let dot_name = || {
-            decoded_file_url_path(trimmed).is_some_and(|path| {
-                let name = path.rsplit('/').next().unwrap_or("");
-                !name.is_empty() && name.bytes().all(|b| b == b'.')
-            })
-        };
-        return run || (tail.starts_with('.') && dot_name());
+        // A dot trimmed off a name that decodes to end in one leaves a run
+        // of them spelled with an escape (`a%2e.` is `a..`).
+        let ends_in_a_dot =
+            || decoded_file_url_path(trimmed).is_some_and(|path| path.ends_with('.'));
+        return run || (tail.starts_with('.') && ends_in_a_dot());
     }
     let after = trimmed.split_once("://").map_or(trimmed, |(_, rest)| rest);
     if !run || after.contains(['/', '?', '#']) {
@@ -1325,6 +1324,8 @@ mod tests {
             ),
             ("see /tmp/a.", "file:///tmp/a"),
             ("see /tmp/a.b..c", "file:///tmp/a.b..c"),
+            // A location after the dots ends the name, as a quote does.
+            ("ls /tmp/a..:3", "file:///tmp/a.."),
             // One dot ends a sentence, inside quotes too.
             ("cat \"/tmp/report.pdf.\"", "file:///tmp/report.pdf"),
             ("Saved to '/tmp/report.pdf.'", "file:///tmp/report.pdf"),
@@ -1388,6 +1389,8 @@ mod tests {
             "see file:///tmp/a,..",
             // `%2e.` decodes to `..`; trimmed, `%2e` would name `/tmp`.
             "see file:///tmp/%2e.",
+            "see file:///tmp/a%2e.",
+            "see file:///tmp/a%2E.",
             // Trimmed, these read as IPv4 loopback; as written, they do not.
             "see http://127.1..",
             "see http://0x7f.1...",
