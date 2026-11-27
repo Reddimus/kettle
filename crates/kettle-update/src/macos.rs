@@ -1435,8 +1435,17 @@ fn recover_quarantined(proof_root: &Path) -> Vec<PathBuf> {
             path: proof_root.join(&name),
             directory,
         };
-        let entries =
-            kettle_state::directory_entry_names(&quarantine.directory, 4).unwrap_or_default();
+        // Name what cannot be read rather than read it as empty: an empty
+        // directory is discarded with its origin record.
+        let Ok(entries) = kettle_state::directory_entry_names(&quarantine.directory, 4) else {
+            let bundle = quarantine.path.join(ARCHIVE_ROOT);
+            stranded.push(if bundle.exists() {
+                bundle
+            } else {
+                quarantine.path.clone()
+            });
+            continue;
+        };
         if !entries.iter().any(|entry| entry == ARCHIVE_ROOT) {
             if entries.iter().all(|entry| entry == ORIGIN_RECORD) {
                 quarantine.discard();
@@ -3877,6 +3886,117 @@ mod tests {
             "the same stranded bundle is named once"
         );
         assert!(bundle.exists());
+    }
+
+    /// A bundle a dead process left in quarantine, and the folder it came from.
+    fn stranded_bundle(
+        prefix: &str,
+    ) -> (
+        kettle_test_support::PrivateTempDir,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+    ) {
+        let temp = kettle_test_support::private_tempdir(prefix);
+        let root = temp.path().to_path_buf();
+        let executable = seed_bundle(&root, "kettle.app");
+        let state_root = root.join("state");
+        let leftover = seed_displaced(&root, ".kettle-update-previous-4-4", "5.6.0");
+        die_during_proof(&executable, &state_root);
+        let [bundle] = quarantined_bundles(&state_root).try_into().unwrap();
+        (temp, executable, state_root, leftover, bundle)
+    }
+
+    /// The bundle stayed in quarantine, undeleted, and the notice says where.
+    fn assert_kept_and_named(bundle: &Path, folder: &Path, notice: Option<String>) {
+        assert!(
+            bundle.join("Contents/Info.plist").exists(),
+            "the quarantined bundle moved or was deleted"
+        );
+        assert!(
+            !folder.join(ARCHIVE_ROOT).exists(),
+            "the bundle went into a folder that is not the one it came from"
+        );
+        assert!(
+            notice
+                .as_ref()
+                .is_some_and(|notice| notice.contains(&bundle.display().to_string())),
+            "{notice:?}"
+        );
+    }
+
+    /// The folder a bundle goes back to is the one it came from, by device
+    /// and inode, not whatever now has its name or the name in the record.
+    #[test]
+    fn a_quarantined_bundle_goes_back_only_to_the_folder_it_came_from() {
+        for case in [
+            "recreated under the same name",
+            "record names another folder",
+        ] {
+            let (temp, executable, state_root, leftover, bundle) =
+                stranded_bundle("kettle-macos-origin-");
+            let target = if case == "recreated under the same name" {
+                std::fs::rename(&leftover, temp.path().join("moved-away")).unwrap();
+                leftover.clone()
+            } else {
+                let other = temp.path().join(".kettle-update-previous-7-7");
+                let record = bundle.parent().unwrap().join(ORIGIN_RECORD);
+                let mut origin: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&record).unwrap()).unwrap();
+                origin["folder"] = other.display().to_string().into();
+                std::fs::write(&record, serde_json::to_vec(&origin).unwrap()).unwrap();
+                other
+            };
+            // As private and empty as the original was.
+            std::fs::create_dir(&target).unwrap();
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+            let notice = tidy_leftovers_beside_with(
+                &executable,
+                &state_root,
+                &StubSeal::official(),
+                &RUNNING,
+            );
+
+            assert_kept_and_named(&bundle, &target, notice);
+        }
+    }
+
+    /// The folder must also still be empty: anything in it now is not the
+    /// updater's, and the bundle is not put beside it.
+    #[test]
+    fn a_quarantined_bundle_does_not_go_back_into_a_folder_that_holds_something() {
+        let (_temp, executable, state_root, leftover, bundle) =
+            stranded_bundle("kettle-macos-origin-full-");
+        std::fs::write(leftover.join("note.txt"), b"mine").unwrap();
+
+        let notice =
+            tidy_leftovers_beside_with(&executable, &state_root, &StubSeal::official(), &RUNNING);
+
+        assert_kept_and_named(&bundle, &leftover, notice);
+        assert_eq!(std::fs::read(leftover.join("note.txt")).unwrap(), b"mine");
+    }
+
+    /// A quarantine directory that cannot be listed is named, and keeps the
+    /// record that lets a later pass put its bundle back.
+    #[test]
+    fn a_quarantine_that_cannot_be_listed_keeps_its_record_and_is_named() {
+        let (_temp, executable, state_root, leftover, bundle) =
+            stranded_bundle("kettle-macos-origin-unlisted-");
+        let held = bundle.parent().unwrap().to_path_buf();
+        for index in 0..4 {
+            std::fs::write(held.join(format!("extra-{index}")), b"x").unwrap();
+        }
+
+        let notice =
+            tidy_leftovers_beside_with(&executable, &state_root, &StubSeal::official(), &RUNNING);
+
+        assert!(
+            held.join(ORIGIN_RECORD).exists(),
+            "the origin record was deleted"
+        );
+        assert_kept_and_named(&bundle, &leftover, notice);
     }
 
     #[test]

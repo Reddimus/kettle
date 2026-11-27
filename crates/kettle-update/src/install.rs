@@ -1858,8 +1858,8 @@ const IN_TRANSACTION: TrustRefusal = TrustRefusal {
 /// Before an interrupted update's rollback resumes.
 #[cfg(target_os = "linux")]
 const ROLLBACK_WAITS: TrustRefusal = TrustRefusal {
-    outcome: "Every other file of the interrupted update was restored; these stay journaled \
-              until they can be.",
+    outcome: "The rollback restored every file it could; the rest stay journaled until they \
+              can be restored.",
     retry: "and start kettle again",
 };
 
@@ -3477,7 +3477,7 @@ struct LinuxInstallEntry {
     mode: u32,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 fn is_linux_changelog_archive_name(name: &str) -> bool {
     let Some(major) = name
         .strip_prefix("CHANGELOG-")
@@ -9318,6 +9318,64 @@ mod tests {
         assert!(installer.contains("UPDATER_SHELL_DIRECTORY = \"share/kettle/shell-integration\""));
     }
 
+    /// The installer's changelog rule must accept exactly the archive names the
+    /// updater installs, or a genuine journal naming one is refused (or a
+    /// name the updater never writes adopted). Runs the installer's own check.
+    #[cfg(unix)]
+    #[test]
+    fn the_installer_and_the_updater_agree_on_changelog_archive_names() {
+        let names = [
+            "CHANGELOG-0.x.md",
+            "CHANGELOG-1.x.md",
+            "CHANGELOG-10.x.md",
+            "CHANGELOG-01.x.md",
+            "CHANGELOG-00.x.md",
+            "CHANGELOG-.x.md",
+            "CHANGELOG-a.x.md",
+            "CHANGELOG-1.X.md",
+            "CHANGELOG-1.x.md.bak",
+            "CHANGELOG-1.x.mdx",
+            "XCHANGELOG-1.x.md",
+            "changelog-1.x.md",
+            "CHANGELOG-\u{661}.x.md",
+            "CHANGELOG-1.x.md/inner",
+            "CHANGELOG-1.2.x.md",
+        ];
+        let installer = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/install-unix.py");
+        let script = "import importlib.util, sys\n\
+                      spec = importlib.util.spec_from_file_location('installer', sys.argv[1])\n\
+                      module = importlib.util.module_from_spec(spec)\n\
+                      spec.loader.exec_module(module)\n\
+                      for name in sys.argv[2:]:\n\
+                      \x20   path = module.UPDATER_CHANGELOG_DIRECTORY + '/' + name\n\
+                      \x20   print(int(module._updater_writes(path)))\n";
+        let Ok(output) = std::process::Command::new("python3")
+            .arg("-I")
+            .arg("-c")
+            .arg(script)
+            .arg(installer)
+            .args(names)
+            .output()
+        else {
+            eprintln!("skipped: python3 is not available");
+            return;
+        };
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let installer_says = String::from_utf8(output.stdout).unwrap();
+        let installer_says = installer_says.lines().map(|line| line == "1");
+        for (name, accepted) in names.iter().zip(installer_says) {
+            assert_eq!(
+                accepted,
+                is_linux_changelog_archive_name(name),
+                "install-unix.py and the updater disagree on {name:?}"
+            );
+        }
+    }
+
     /// #847: the directory an update would refuse is named with its mode and
     /// the command that fixes it, and a directory the update has yet to create
     /// is judged by the deepest one that already exists.
@@ -9821,7 +9879,9 @@ mod tests {
         assert!(
             matches!(&error, UpdateError::UnsafeInstallDirectory(message)
                 if message.contains(&format!("{} (mode 0775)", doc.display()))
-                    && message.contains("chmod go-w")),
+                    && message.contains("chmod go-w")
+                    // Only what it could: another entry may have failed otherwise.
+                    && message.contains("restored every file it could")),
             "unexpected error: {error}"
         );
 
