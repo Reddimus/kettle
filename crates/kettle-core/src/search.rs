@@ -8,7 +8,6 @@ use alacritty_terminal::Term;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::{Cell, Flags};
-use regex::Regex;
 use regex_automata::Input;
 use regex_automata::meta::Regex as MetaRegex;
 use regex_automata::nfa::thompson::WhichCaptures;
@@ -1257,15 +1256,6 @@ fn clamp_point<T>(term: &Term<T>, point: SearchPoint) -> SearchPoint {
     )
 }
 
-/// A match expressed in absolute grid coordinates (line can be negative for
-/// scrollback).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Match {
-    pub line: i32,
-    pub start_col: usize,
-    pub end_col: usize,
-}
-
 /// Terminator parity (terminatorlib/config.py:117
 /// `case_sensitive`): override the default smart-case policy
 /// at search time. `Smart` keeps ripgrep/vim's smart-case
@@ -1280,90 +1270,39 @@ pub enum CaseSensitivity {
     Never,
 }
 
-/// Compile a search pattern with **smart-case** semantics: case-insensitive
-/// unless the pattern contains an uppercase letter (ripgrep/vim behavior).
-/// The pattern is a real regex; if it doesn't compile it falls back to a
-/// literal (escaped) search so a stray `(` or `*` never breaks search.
-///
-/// Preserved as the smart-case shorthand; new callers that want to
-/// honor a user-configured override should call `build_regex_with`.
-pub fn build_regex(pattern: &str) -> Option<Regex> {
-    build_regex_with(pattern, CaseSensitivity::Smart)
-}
-
-/// Same as `build_regex` but with an explicit override.
-/// Pure — no terminal state involved.
-pub fn build_regex_with(pattern: &str, mode: CaseSensitivity) -> Option<Regex> {
-    if pattern.is_empty() {
-        return None;
-    }
-    let ci = match mode {
-        CaseSensitivity::Smart => !pattern.chars().any(|c| c.is_uppercase()),
-        CaseSensitivity::Always => false,
-        CaseSensitivity::Never => true,
-    };
-    let flag = if ci { "(?i)" } else { "" };
-    Regex::new(&format!("{flag}{pattern}"))
-        .or_else(|_| Regex::new(&format!("{flag}{}", regex::escape(pattern))))
-        .ok()
-}
-
-pub fn search(term: &Term<EventProxy>, pattern: &str) -> Vec<Match> {
+/// [`search_with`] with smart case.
+pub fn search(term: &Term<EventProxy>, pattern: &str) -> Vec<SearchSpan> {
     search_with(term, pattern, CaseSensitivity::Smart)
 }
 
-/// Search with an explicit case-sensitivity override.
+/// Every match in the buffer (scrollback and screen) in reading order: the spans the find bar
+/// counts for the same regex query.
 ///
-/// This legacy whole-buffer scan returns at most [`MAX_SEARCH_MATCHES`] matches, the same hard
-/// ceiling the chunked [`CompiledSearch`] scanner enforces. Without it, a pattern that matches
-/// pathologically often across a large scrollback (a single common character, or repetitive
-/// hostile program output) would push one [`Match`] per hit into an unbounded `Vec` and block the
-/// calling thread.
-pub fn search_with(term: &Term<EventProxy>, pattern: &str, mode: CaseSensitivity) -> Vec<Match> {
-    let Some(re) = build_regex_with(pattern, mode) else {
+/// It runs the find bar's exact-count scan, [`SearchCountScan`], to the end, so it searches
+/// soft-wrapped logical lines as the find bar does. A match can cross a soft wrap, `^`, `$` and
+/// `\b` see the logical line's edges rather than a row's, a cell with combining marks is one
+/// match, and a match that ends on a wide character ends on its spacer cell. An empty query, or
+/// one [`CompiledSearch::compile`] rejects, finds nothing. Like the count, the scan stops at
+/// [`MAX_SEARCH_MATCHES`] matches and at a logical line too long to search exactly (see
+/// [`SearchBatch::accuracy_limited`]), so a pattern that matches every cell of a large scrollback
+/// cannot grow an unbounded result.
+pub fn search_with(
+    term: &Term<EventProxy>,
+    pattern: &str,
+    mode: CaseSensitivity,
+) -> Vec<SearchSpan> {
+    let Ok(Some(compiled)) = CompiledSearch::compile(pattern, mode) else {
         return Vec::new();
     };
-
-    let grid = term.grid();
-    let cols = grid.columns();
-    let top = grid.topmost_line().0;
-    let bottom = grid.bottommost_line().0;
-
-    let mut matches = Vec::new();
-    // Reuse the line-text + byte→column scratch buffers across every
-    // scrollback line instead of allocating a fresh String + Vec per line. On a
-    // 10k-line scrollback that's 2 allocations total rather than ~20k; `.clear()`
-    // keeps the capacity.
-    let mut text = String::with_capacity(cols);
-    let mut col_of_byte: Vec<usize> = Vec::with_capacity(cols * 2);
-    'lines: for line in top..=bottom {
-        // Build the spacer-aware line text and byte-to-column map with the
-        // shared helper, so its wide-char spacer handling can't drift.
-        crate::grid_text::row_text_into(grid, line, cols, &mut text, &mut col_of_byte);
-        for m in re.find_iter(&text) {
-            // Skip zero-width matches. A user pattern that can
-            // match empty (`a*`, `^`, `\b`) yields a zero-length match at every
-            // position; without this each produces a spurious one-cell highlight
-            // the match doesn't really cover.
-            if m.start() == m.end() {
-                continue;
-            }
-            let start_col = col_of_byte.get(m.start()).copied().unwrap_or(0);
-            let end_col = col_of_byte
-                .get(m.end().saturating_sub(1))
-                .copied()
-                .unwrap_or(start_col);
-            matches.push(Match {
-                line,
-                start_col,
-                end_col,
-            });
-            if matches.len() >= MAX_SEARCH_MATCHES {
-                break 'lines;
-            }
-        }
+    let mut count = SearchCountScan::new(
+        compiled,
+        SearchScanToken::capture(term, 0, 0),
+        SearchPoint::new(term.topmost_line().0, 0),
+    );
+    while !count.complete {
+        count.advance(term);
     }
-    matches
+    count.spans
 }
 
 /// The `display_offset` that brings a match on grid line `match_line`
@@ -2642,28 +2581,33 @@ mod tests {
         assert!(!token.is_current(&term, 4, 9));
     }
 
+    /// `search` is smart case: insensitive until the pattern has an uppercase
+    /// letter. Patterns are regexes, and one that does not parse is matched as
+    /// the literal text typed.
     #[test]
-    fn smart_case_is_insensitive_until_an_uppercase() {
-        // All-lowercase pattern → case-insensitive.
-        let re = build_regex("error").unwrap();
-        assert!(re.is_match("ERROR"));
-        assert!(re.is_match("Error"));
-        assert!(re.is_match("error"));
-        // Any uppercase → case-sensitive.
-        let re = build_regex("Error").unwrap();
-        assert!(re.is_match("Error"));
-        assert!(!re.is_match("error"));
-        assert!(!re.is_match("ERROR"));
-    }
-
-    #[test]
-    fn pattern_is_a_real_regex() {
-        let re = build_regex(r"warn|fail").unwrap();
-        assert!(re.is_match("a fail here"));
-        assert!(re.is_match("WARN: x"), "alternation + smart-case");
-        let re = build_regex(r"\bfoo\b").unwrap();
-        assert!(re.is_match("a foo b"));
-        assert!(!re.is_match("foobar"));
+    fn search_is_smart_case_regex_with_a_literal_fallback() {
+        let mut term = empty_term(24, 1);
+        write_ascii(&mut term, 0, 0, "ERROR Error a(b foobar");
+        let starts = |pattern: &str| -> Vec<usize> {
+            search(&term, pattern)
+                .iter()
+                .map(|found| found.start.column)
+                .collect()
+        };
+        assert_eq!(starts("error"), [0, 6]);
+        assert_eq!(starts("Error"), [6]);
+        assert_eq!(starts("rror|b"), [1, 7, 14, 19]);
+        assert_eq!(starts(r"foo"), Vec::<usize>::new());
+        assert_eq!(starts("a(b"), [12]);
+        assert_eq!(starts(""), Vec::<usize>::new());
+        for (mode, found) in [
+            (CaseSensitivity::Smart, 2),
+            (CaseSensitivity::Always, 0),
+            (CaseSensitivity::Never, 2),
+        ] {
+            assert_eq!(search_with(&term, "error", mode).len(), found, "{mode:?}");
+        }
+        assert_eq!(search_with(&term, "Error", CaseSensitivity::Never).len(), 2);
     }
 
     #[test]
@@ -2681,45 +2625,6 @@ mod tests {
         // Clamped to [0, hist]; never panics on extremes.
         assert!(reveal_offset(-9999, 0, 100, 40) <= 100);
         assert_eq!(reveal_offset(9999, 0, 100, 40), 0);
-    }
-
-    #[test]
-    fn invalid_regex_falls_back_to_literal() {
-        // Unbalanced paren is not a valid regex → literal search instead.
-        let re = build_regex("a(b").unwrap();
-        assert!(re.is_match("xx a(b yy"));
-        assert!(!re.is_match("ab"));
-        // Empty pattern yields nothing.
-        assert!(build_regex("").is_none());
-    }
-
-    /// Drift guard. The three CaseSensitivity modes drive
-    /// the (?i) flag override on `build_regex_with`:
-    ///   - Smart: case-insensitive unless any uppercase in pattern
-    ///   - Always: case-sensitive even for all-lowercase pattern
-    ///   - Never: case-insensitive even for mixed-case pattern
-    #[test]
-    fn build_regex_with_honors_explicit_case_sensitivity() {
-        use super::{CaseSensitivity, build_regex_with};
-        // Smart: lowercase → insensitive (matches ERROR).
-        let re = build_regex_with("error", CaseSensitivity::Smart).unwrap();
-        assert!(re.is_match("ERROR"));
-        // Always: even lowercase pattern is sensitive (no match on ERROR).
-        let re = build_regex_with("error", CaseSensitivity::Always).unwrap();
-        assert!(!re.is_match("ERROR"));
-        assert!(re.is_match("error"));
-        // Never: even mixed-case pattern is insensitive (matches ERROR).
-        let re = build_regex_with("Error", CaseSensitivity::Never).unwrap();
-        assert!(re.is_match("ERROR"));
-        assert!(re.is_match("error"));
-        // Empty pattern still None across all modes.
-        for mode in [
-            CaseSensitivity::Smart,
-            CaseSensitivity::Always,
-            CaseSensitivity::Never,
-        ] {
-            assert!(build_regex_with("", mode).is_none());
-        }
     }
 
     /// The cap is applied to the pattern the user typed, but escaping can
@@ -2827,23 +2732,15 @@ mod tests {
         assert_eq!(
             matches,
             vec![
-                Match {
-                    line: -1,
-                    start_col: 0,
-                    end_col: 5,
-                },
-                Match {
-                    line: 1,
-                    start_col: 1,
-                    end_col: 6,
-                },
+                SearchSpan::new(SearchPoint::new(-1, 0), SearchPoint::new(-1, 5)),
+                SearchSpan::new(SearchPoint::new(1, 1), SearchPoint::new(1, 6)),
             ]
         );
     }
 
     /// Regression guard for the audit finding that `search`/`search_with` had no ceiling of any
     /// kind: a pattern matching pathologically often across the buffer must stop accumulating
-    /// results at [`MAX_SEARCH_MATCHES`] instead of growing an unbounded `Vec<Match>`.
+    /// results at [`MAX_SEARCH_MATCHES`] instead of growing an unbounded `Vec<SearchSpan>`.
     #[test]
     fn search_with_stops_at_the_hard_match_ceiling() {
         // Size the grid to hold more cells than `MAX_SEARCH_MATCHES`, so a pattern matching
@@ -2859,5 +2756,190 @@ mod tests {
 
         let matches = search_with(&term, "a", CaseSensitivity::Always);
         assert_eq!(matches.len(), MAX_SEARCH_MATCHES);
+    }
+
+    fn span(start: (i32, usize), end: (i32, usize)) -> SearchSpan {
+        SearchSpan::new(
+            SearchPoint::new(start.0, start.1),
+            SearchPoint::new(end.0, end.1),
+        )
+    }
+
+    fn feed(term: &mut Term<EventProxy>, text: &str) {
+        let mut parser: alacritty_terminal::vte::ansi::Processor = Default::default();
+        parser.advance(term, text.as_bytes());
+    }
+
+    #[test]
+    fn search_with_finds_a_match_that_crosses_a_soft_wrap() {
+        let mut term = empty_term(8, 2);
+        feed(&mut term, "foobarbazqux");
+        assert!(row_wraps(&term, 0));
+        let always = CaseSensitivity::Always;
+        assert_eq!(search_with(&term, "barbaz", always), [span((0, 3), (1, 0))]);
+        assert_eq!(search_with(&term, "bazqux", always), [span((0, 6), (1, 3))]);
+        assert_eq!(search_with(&term, "foobar", always), [span((0, 0), (0, 5))]);
+        assert_eq!(search_with(&term, "qux", always), [span((1, 1), (1, 3))]);
+    }
+
+    #[test]
+    fn search_with_anchors_only_at_logical_line_edges() {
+        let mut term = empty_term(7, 2);
+        write_ascii(&mut term, 0, 0, "xxxxfoo");
+        write_ascii(&mut term, 1, 0, "barbazz");
+        term.grid_mut()[Line(0)][Column(6)]
+            .flags
+            .insert(Flags::WRAPLINE);
+        let always = CaseSensitivity::Always;
+        // `foo` runs straight on into `bar`: a soft wrap is no line edge or word boundary.
+        for pattern in ["^bar", "foo$", r"foo\b", r"\bbar"] {
+            assert_eq!(search_with(&term, pattern, always), [], "{pattern}");
+        }
+        assert_eq!(search_with(&term, "^xxxx", always), [span((0, 0), (0, 3))]);
+        assert_eq!(search_with(&term, r"bazz$", always), [span((1, 3), (1, 6))]);
+        assert_eq!(
+            search_with(&term, r"bazz\b", always),
+            [span((1, 3), (1, 6))]
+        );
+
+        // A hard line break is a line edge.
+        term.grid_mut()[Line(0)][Column(6)]
+            .flags
+            .remove(Flags::WRAPLINE);
+        assert_eq!(search_with(&term, "^bar", always), [span((1, 0), (1, 2))]);
+        assert_eq!(search_with(&term, "foo$", always), [span((0, 4), (0, 6))]);
+    }
+
+    #[test]
+    fn search_with_reports_a_cell_with_combining_marks_once() {
+        let mut term = empty_term(3, 1);
+        write_ascii(&mut term, 0, 0, "ab");
+        term.grid_mut()[Line(0)][Column(0)].push_zerowidth('\u{0301}');
+        let always = CaseSensitivity::Always;
+        let cells = [
+            span((0, 0), (0, 0)),
+            span((0, 1), (0, 1)),
+            span((0, 2), (0, 2)),
+        ];
+        // `.` matches the base and then the mark, both in column 0: one cell, one match.
+        assert_eq!(search_with(&term, ".", always), cells);
+        term.grid_mut()[Line(0)][Column(0)].push_zerowidth('\u{0305}');
+        assert_eq!(search_with(&term, ".", always), cells);
+        assert_eq!(
+            search_with(&term, "a|\u{0301}", always),
+            [span((0, 0), (0, 0))]
+        );
+    }
+
+    #[test]
+    fn search_with_ends_a_wide_match_on_its_spacer() {
+        let mut term = empty_term(20, 4);
+        feed(&mut term, "a\u{4f60}b\r\n");
+        let always = CaseSensitivity::Always;
+        assert_eq!(
+            search_with(&term, "\u{4f60}", always),
+            [span((0, 1), (0, 2))]
+        );
+        assert_eq!(
+            search_with(&term, "a\u{4f60}", always),
+            [span((0, 0), (0, 2))]
+        );
+        assert_eq!(search_with(&term, "b", always), [span((0, 3), (0, 3))]);
+    }
+
+    /// The spans the find bar reaches by pressing Next (or Previous) from the
+    /// buffer's first (or last) cell until no match is left. Each step starts
+    /// one cell past the focused match, as `search_step_match` does.
+    fn find_bar_steps(
+        term: &Term<EventProxy>,
+        pattern: &str,
+        direction: SearchDirection,
+    ) -> Vec<SearchSpan> {
+        let mut compiled = CompiledSearch::compile(pattern, CaseSensitivity::Always)
+            .unwrap()
+            .unwrap();
+        let first = SearchPoint::new(term.topmost_line().0, 0);
+        let last = SearchPoint::new(term.bottommost_line().0, term.last_column().0);
+        let mut origin = Some(match direction {
+            SearchDirection::Forward => first,
+            SearchDirection::Reverse => last,
+        });
+        let mut steps = Vec::new();
+        while let Some(from) = origin {
+            let outcome = compiled.find_next(term, from, direction, false);
+            assert!(!outcome.accuracy_limited && outcome.continuation.is_none());
+            let Some(found) = outcome.span else {
+                break;
+            };
+            steps.push(found);
+            origin = match direction {
+                SearchDirection::Forward if found.end == last => None,
+                SearchDirection::Forward if found.end.column == last.column => {
+                    Some(SearchPoint::new(found.end.line + 1, 0))
+                }
+                SearchDirection::Forward => {
+                    Some(SearchPoint::new(found.end.line, found.end.column + 1))
+                }
+                SearchDirection::Reverse if found.start == first => None,
+                SearchDirection::Reverse if found.start.column == 0 => {
+                    Some(SearchPoint::new(found.start.line - 1, last.column))
+                }
+                SearchDirection::Reverse => {
+                    Some(SearchPoint::new(found.start.line, found.start.column - 1))
+                }
+            };
+        }
+        if direction == SearchDirection::Reverse {
+            steps.reverse();
+        }
+        steps
+    }
+
+    /// `search_with` returns what the find bar counts and steps through, across
+    /// soft wraps, wide and combining cells, anchors and scrollback.
+    #[test]
+    fn search_with_returns_what_the_find_bar_counts_and_steps_through() {
+        let mut term = empty_term(8, 4);
+        feed(
+            &mut term,
+            "foobarbazqux\r\nx\u{4f60}e\u{0301}yfoo\r\nbar foo\r\nfoo.bar\u{4f60}\u{4f60}baz\r\n",
+        );
+        assert!(term.grid().history_size() > 0);
+        for pattern in [
+            "foo",
+            "barbaz",
+            "o.b",
+            "^bar",
+            "foo$",
+            r"\bfoo\b",
+            r"\w+",
+            ".",
+            "\u{4f60}",
+            "e\u{0301}",
+            "\u{4f60}baz",
+        ] {
+            let found = search_with(&term, pattern, CaseSensitivity::Always);
+            let compiled = CompiledSearch::compile(pattern, CaseSensitivity::Always)
+                .unwrap()
+                .unwrap();
+            let token = SearchScanToken::capture(&term, 0, 0);
+            let mut count =
+                SearchCountScan::new(compiled, token, SearchPoint::new(term.topmost_line().0, 0));
+            while !count.complete {
+                count.advance(&term);
+            }
+            assert!(!count.limited, "{pattern}");
+            assert_eq!(found, count.spans, "{pattern}: count");
+            assert_eq!(
+                found,
+                find_bar_steps(&term, pattern, SearchDirection::Forward),
+                "{pattern}: Next"
+            );
+            assert_eq!(
+                found,
+                find_bar_steps(&term, pattern, SearchDirection::Reverse),
+                "{pattern}: Previous"
+            );
+        }
     }
 }

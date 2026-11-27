@@ -1068,7 +1068,7 @@ fn remote_output_stays_out_of_the_saved_content_after_ssh_exits() {
         .nth(1)
         .and_then(|body| body.split("\n    }\n").next())
         .unwrap();
-    assert!(key.contains("remote_end: pane.remote_output_end,"));
+    assert!(key.contains("remote_end: pane.remote_output_end(),"));
 }
 
 /// A launch with restore mode off claims nothing and creates no lock file:

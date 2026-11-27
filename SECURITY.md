@@ -32,10 +32,15 @@ and confinement, described below.
   clipboard despite the `osc52` config gate (default `copy`).
 - **Hyperlink / URI abuse** — an `OSC 8` or auto-detected URL that
   bypasses `kettle_core::links::is_safe_url` and reaches the OS opener
-  with a hostile scheme, or a `file://` link that makes the OS opener run a
+  with a hostile scheme, with no host, or holding a character that hides or
+  reorders text (a zero-width or bidirectional control, a line separator, a
+  variation selector; a visible space such as a no-break space is a space),
+  as written or once its percent escapes are decoded,
+  or a `file://` link that makes the OS opener run a
   program or follow a shortcut. Kettle refuses local links to programs and
   shortcuts (see `names_program_or_shortcut` and `check_file_link`): by
-  extension, read as Windows reads a name; a macOS bundle folder; a macOS
+  extension, read as Windows reads a name, an alternate data stream's own
+  name included; a macOS bundle folder; a macOS
   alias by its Finder flag or bookmark data; a Linux launcher by its first
   group; or an executable file without a document extension. An encoded separator in a file link is refused before
   anything looks at the path, so it cannot spell a network share. It
@@ -48,6 +53,15 @@ and confinement, described below.
   first (`link_gate`, `pane_path_origin`). What runs in the pane when the
   link is opened decides, so output printed while a session was remote can
   still open locally after the pane returns to a local shell.
+  A detected path is read against its line's quotes as a shell reads them,
+  so a piece of a quoted name never becomes a link to another file: only a
+  path whose shell word holds no quote, a quoted string's whole text, a
+  path from a root starting a word, or one from a root that ends quoted
+  prose may open, and on a line a stray quote may have shifted, only a path
+  from a root starting a word; every other piece is copied (see
+  `hints::Quotes::lets_open` and
+  [link detection](docs/CONFIG.md#link-detection)). The underline and the
+  destination pill show exactly what a click opens.
   Every `file://` link and OSC 7 working directory is checked after
   decoding (`decoded_file_url_path`, `plain_cwd`): no `..` segment, network
   path, control character or encoded separator, however it is spelled. Two

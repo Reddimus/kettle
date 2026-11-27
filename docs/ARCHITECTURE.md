@@ -428,7 +428,11 @@ drive mapping. State and lock files, recordings, remote-command payloads,
 terminal logs, screenshots, pasted images, and runtime/GPU/crash diagnostics
 share these primitives. Advisory locks let callers serialize compound
 operations; configuration persistence holds one across the complete read,
-validate, backup, and replacement transaction.
+validate, backup, and replacement transaction. The kettle-state lock guards
+and recordings unlock explicitly instead of relying on close: a child forked
+meanwhile, such as a new pane's shell between fork and exec, holds a copy of
+every descriptor, and flock(2) keeps a lock those copies share until one of
+them unlocks or the last one closes.
 Windows lock creation requests DELETE access and shares deletion from the
 first handle while retaining the private creation checks. Retirement reopens
 that held object and uses POSIX deletion while the exclusive lock remains
@@ -1018,7 +1022,11 @@ naming every file it is about to write, and removes it once the new record is
 verified. A failed publish records what it did replace when that record would
 be complete; a retry or uninstall accepts a file that differs from its record,
 or has none, only when it matches the receipt. Equal bytes alone never adopt a
-file. Startup
+file. A self-update rollback that could not finish leaves its journal, which
+the installer reads as the same kind of receipt: files matching the bytes it
+shows the update left in each entry's state join `install-pending.json`, and
+the journal and its matching backups are retired before the installer writes
+anything. Startup
 and explicit update first authenticate the marker, layout, prefix ownership, and
 update journal under the update lock; they recover an incomplete transaction
 before checking file-content provenance, so the old record cannot strand the
@@ -1695,10 +1703,12 @@ hard wraps are joined back by inverting the harness's greedy word wrap: a
 row indented less than the body that no wrapper of that harness, or of
 either when it is unknown, could have kept on the row above is a
 continuation, joined with the space it took: one, however many the wrapper
-dropped, which Mermaid draws the same as a run. A row ending in a hyphen or
-slash before one that starts with a word (Codex may have broken a word or
-wrapped at a space after it), a full row a too-long word could have been cut
-at, a row that would have fit (wrapped at another width), and unindented
+dropped, which Mermaid draws the same as a run. A row ending where Codex may
+break inside a word (after a hyphen between letters or digits, or after a
+slash whatever comes before it, unless a digit or a closing mark follows: it
+may have broken a word or wrapped at a space after it), a full row a
+too-long word could have been cut at, a row that would have fit (wrapped at
+another width), and unindented
 text are refused, never guessed; without a width, so is any row that some width the
 rows fit in could have wrapped, by its shape or anywhere in an unindented
 body, and in an unindented body with a width too, since the pane may have
@@ -2712,6 +2722,10 @@ whole scrollback buffer:
   the engine's single leftmost-first pass; consequently, a nullable alternative
   that wins with an empty match can shadow a later consuming alternative at
   the same position.
+  `search`/`search_with`, the whole-buffer call that tests and the fuzz
+  harness use, runs the find bar's exact-count scan (`SearchCountScan`) to the
+  end, so it returns the same `SearchSpan`s the find bar counts and stops
+  where that count is limited.
 - **`kettle-ui` owns interaction and scheduling.** Each `WindowState` has one
   search state and an in-memory per-pane query map. An open search bar follows
   focus and carries its query to the newly focused pane, where closing it
@@ -4193,7 +4207,10 @@ and presents the frame's own damage.
 `kettle-core::bidi` chooses Arabic presentation forms in logical order and
 reports their visual joining sides only at RTL levels. U+0640 tatweel also
 participates; joining characters from other scripts do not. Lam-alef remains
-two cells. Each row is independent, including across soft wraps.
+two cells. Each row is independent, including across soft wraps. A
+zero-width joiner stored with a cell is join causing, as in text shapers: the
+letter on either side of it takes its joined form even when the letter on the
+other side cannot join, and then only that one cell reports a joining side.
 
 Grid and bidi Legacy rows carry these sides in `GridGlyphCell`, whose full
 metadata participates in the shaped-row key. `arabic_join::JoinedRow` collects
@@ -4212,18 +4229,23 @@ reuses these positioned masks and connector samples in cursor colour in both
 renderers; its cache distinguishes natural masks from stretched samples.
 
 A wide final still overhangs its open side, and a wide isolated letter its
-right, so highlight fills in bidi rows follow the drawn text. After shaping,
-the pane walk measures each row holding highlighted right-to-left cells once
+right, so highlight fills in bidi rows follow the drawn text. Arabic text that
+is not strong right-to-left counts too: the bismillah ligature U+FDFD is a
+bidi neutral that Arabic faces draw many cells wide, so it can sit in a row
+without a layout or in a layout's left-to-right text. After shaping, the pane
+walk measures each row holding highlighted right-to-left or Arabic cells once
 with `batching::drawn_cell_spans`: the same grid emit through a source that
 reads raster placements and never rasterizes into or evicts from the atlas.
-`terminal::HighlightReach` takes each run of highlighted visual cells
+A row without cell metadata reports each glyph at the column its text starts
+in. `terminal::HighlightReach` takes each run of highlighted visual cells
 (selection and search together) and widens the fills at its ends over the
-right-to-left text drawn past them, inside both the pane rect that clips its
-quads and the pixel columns its glyph scissor keeps; two runs reaching into
-one gap meet halfway. Selection runs carry the x their widened sides moved
-to, and the outline traces those, joining runs only where moved sides meet.
-Underlines, links and cursors stay on the cell grid, and rows without a bidi
-layout are untouched.
+right-to-left or Arabic text drawn past them, inside both the pane rect that
+clips its quads and the pixel columns its glyph scissor keeps; text drawn
+across a whole run reaches on past it, in that run's fill, and two runs
+reaching into one gap meet halfway. Selection runs carry the x their widened
+sides moved to, and the outline traces those, joining runs only where moved
+sides meet. Underlines, links and cursors stay on the cell grid, and other
+left-to-right text, `bidi = false` and the alternate screen are untouched.
 
 This repairs connector gaps, not proportional glyph widths, fallback
 baselines, or contextual mark shaping. Preferring a metric-compatible Arabic
@@ -5406,11 +5428,16 @@ still clear the ring rather than guessing which history row survived.
 Completed-command marks use the same ids. Each entry of their 2048-command
 ring holds the prompt row, the exit code and the output rows `output..end`:
 the cursor's row at OSC 133 C and at D, or the row below it when the cursor is
-past the first column. A scroll moves that span only when every row in it
-moves by the same amount, which checking the span's ends and the screen and
-region edges inside it proves; any other scroll empties the span and keeps the
-tick. Reflow, reset and a journal overflow clear the ring. Select Command
-Output converts the span back to grid lines under the term lock.
+past the first column. In that case D also keeps the cursor's column, unless a
+wrap is pending at the right margin, and a hash of the row's text from there
+on: the next prompt can follow the output on its last row. The selection
+stops before that column only once that text has changed, so a prompt that
+starts on another row leaves the row whole. A scroll moves that span only
+when every row in it moves by the same amount, which checking the span's ends
+and the screen and region edges inside it proves; any other scroll empties
+the span and keeps the tick. Reflow, reset and a journal overflow clear the
+ring. Select Command Output converts the span back to grid lines under the
+term lock.
 
 Vi mode deliberately stays inside `alacritty_terminal`: Kettle toggles
 `TermMode::VI`, dispatches native `ViMotion`, uses the engine's vi cursor and

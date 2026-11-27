@@ -599,11 +599,61 @@ impl Drop for Recorder {
     }
 }
 
+/// A recording's file, holding the exclusive lock that keeps a second
+/// recorder off it. The lock is released explicitly when the recording ends,
+/// not only by closing: a child forked meanwhile, such as a new pane's shell
+/// between fork and exec, holds a copy of the descriptor, and flock(2)
+/// releases a lock its duplicates share only on an explicit unlock or when the
+/// last of them closes.
+struct LockedCast(Option<File>);
+
+impl LockedCast {
+    fn new(file: File) -> Self {
+        Self(Some(file))
+    }
+
+    /// The file, unlocked, for a caller that disposes of it.
+    fn into_unlocked(mut self) -> File {
+        let file = self
+            .0
+            .take()
+            .expect("a recording file is present until taken");
+        let _ = fs4::FileExt::unlock(&file);
+        file
+    }
+}
+
+impl std::ops::Deref for LockedCast {
+    type Target = File;
+
+    fn deref(&self) -> &File {
+        self.0
+            .as_ref()
+            .expect("a recording file is present until taken")
+    }
+}
+
+impl std::ops::DerefMut for LockedCast {
+    fn deref_mut(&mut self) -> &mut File {
+        self.0
+            .as_mut()
+            .expect("a recording file is present until taken")
+    }
+}
+
+impl Drop for LockedCast {
+    fn drop(&mut self) {
+        if let Some(file) = &self.0 {
+            let _ = fs4::FileExt::unlock(file);
+        }
+    }
+}
+
 /// Buffer complete NDJSON records and roll a failed batch back to its previous
 /// file boundary. A short filesystem write must not leave a syntactically
 /// invalid tail that makes the otherwise useful trace unreplayable.
 struct ReplaySafeCastWriter {
-    file: File,
+    file: LockedCast,
     pending: Vec<u8>,
     committed_len: u64,
     #[cfg(test)]
@@ -613,7 +663,7 @@ struct ReplaySafeCastWriter {
 impl ReplaySafeCastWriter {
     fn new(file: File) -> Self {
         Self {
-            file,
+            file: LockedCast::new(file),
             pending: Vec::with_capacity(CAST_WRITE_BUFFER_BYTES),
             committed_len: 0,
             #[cfg(test)]
@@ -740,7 +790,7 @@ impl Write for LazyTargetCastWriter {
             if let Some(path) = self.initializing_path.take()
                 && let Some(writer) = self.writer.take()
             {
-                kettle_state::discard_created_private_file(writer.file, &path);
+                kettle_state::discard_created_private_file(writer.file.into_unlocked(), &path);
             }
             return Err(error);
         }
@@ -2134,6 +2184,70 @@ mod tests {
                 .unwrap()
                 .contains("preserve me"),
             "an inactive explicit target preserves the historical overwrite behavior"
+        );
+    }
+
+    /// A child forked while a recorder holds its file keeps a copy of the
+    /// descriptor until it execs, as a new pane's shell does between fork and
+    /// exec. A recorder that stops releases its lock all the same, so the next
+    /// recorder on that file starts instead of finding it in use.
+    #[cfg(unix)]
+    #[test]
+    fn a_stopped_recorder_releases_its_lock_while_a_forked_child_holds_the_file() {
+        use std::io::{Read as _, Write as _};
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::process::CommandExt as _;
+
+        let temp = test_tempdir();
+        let path = temp.path().join("forked.cast");
+        let first = Recorder::start(&path, 80, 24, false).unwrap();
+        let (mut ready_rx, ready_tx) = std::io::pipe().unwrap();
+        let (go_rx, mut go_tx) = std::io::pipe().unwrap();
+        let (ready, go) = (ready_tx.as_raw_fd(), go_rx.as_raw_fd());
+        let mut command = std::process::Command::new("/usr/bin/true");
+        // SAFETY: the hook calls only write and read, which are async-signal
+        // safe and allocate nothing, on two descriptors the parent keeps open
+        // until the child has exec'd.
+        unsafe {
+            command.pre_exec(move || {
+                let mut byte = 0u8;
+                let _ = libc::write(ready, (&raw const byte).cast(), 1);
+                let _ = libc::read(go, (&raw mut byte).cast(), 1);
+                Ok(())
+            });
+        }
+        // `spawn` returns once the child has exec'd, so it runs beside the
+        // test, which holds the child between fork and exec meanwhile. The
+        // spawner owns the parent's write end of the readiness pipe and drops
+        // it once `spawn` returns, so a spawn that fails before the hook runs,
+        // as under a process limit, ends the wait below with EOF.
+        let spawner = std::thread::spawn(move || {
+            let spawned = command.spawn();
+            drop(ready_tx);
+            spawned.and_then(|mut child| child.wait())
+        });
+        let mut poll_fd = libc::pollfd {
+            fd: ready_rx.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: poll_fd is a live, exclusively writable pollfd and the count
+        // is one; sixty seconds only stops a hang.
+        let polled = unsafe { libc::poll(&mut poll_fd, 1, 60_000) };
+        assert_eq!(polled, 1, "the child never reached its pre_exec hook");
+        let mut byte = [0];
+        if ready_rx.read(&mut byte).unwrap() == 0 {
+            let error = spawner.join().unwrap().unwrap_err();
+            panic!("the forked child could not start: {error}");
+        }
+        drop(first);
+        let replacement = Recorder::start(&path, 100, 30, false);
+        go_tx.write_all(b"g").unwrap();
+        assert!(spawner.join().unwrap().unwrap().success());
+        assert!(
+            replacement.is_ok(),
+            "the stopped recorder's lock stayed with the forked child: {:?}",
+            replacement.err()
         );
     }
 

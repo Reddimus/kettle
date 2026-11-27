@@ -40,17 +40,15 @@ fn harness_latched(
     (term, Processor::new(), rx, latched)
 }
 
-/// A one-column grid aborts the whole process on any wide character, and
+/// A one-column grid has no room for any wide character, and
 /// `kettle exec --cols 1`, a narrow enough split, and the `(1, 1, 1, 1)`
 /// geometry fallbacks can all request one.
 ///
 /// The engine declares `MIN_COLUMNS = 2` and then never enforces it. On a
-/// single-cell row the line-wrap path writes a leading spacer at column 0,
-/// wraps, writes the wide char at column 0 of the next row, and then indexes
-/// column 1 for the trailing spacer. `Row`'s `Index` is unchecked, so that
-/// panics on the PTY reader thread, and `panic = "abort"` in the release
-/// profile turns one bad cell into a dead application. A CJK filename in
-/// `ls` output is enough.
+/// single-cell row it prints a blank in place of each wide character, so a
+/// CJK filename in `ls` output would come out empty. Before the engine did
+/// that, the write indexed past the end of the row and panicked on the PTY
+/// reader thread, which `panic = "abort"` turned into a dead application.
 #[test]
 fn a_single_column_request_is_widened_to_what_the_engine_can_represent() {
     let geometry = PtyGeometry::new(1, 1, 1, 1);
@@ -73,7 +71,7 @@ fn a_single_column_request_is_widened_to_what_the_engine_can_represent() {
         MIN_COLUMNS
     );
 
-    // Drive the real thing. Without the clamp, these writes panic.
+    // Drive the real thing. Without the clamp, these print blanks.
     let (mut term, mut processor) = harness(geometry.columns, geometry.rows);
     feed(&mut term, &mut processor, "\u{754c}".as_bytes());
     feed(&mut term, &mut processor, "\u{1f680}".as_bytes());
@@ -2802,9 +2800,13 @@ fn grapheme_copy_search_and_reflow_preserve_the_complete_cluster() {
     feed(&mut term, &mut parser, b"BCDE");
     let matches = crate::search::search(&term, cluster);
     assert_eq!(matches.len(), 1);
+    // The wide cluster's match ends on its spacer cell, as the find bar's does.
     assert_eq!(
-        (matches[0].line, matches[0].start_col, matches[0].end_col),
-        (0, 1, 1)
+        (matches[0].start, matches[0].end),
+        (
+            crate::search::SearchPoint::new(0, 1),
+            crate::search::SearchPoint::new(0, 2)
+        )
     );
     let mut selection = Selection::new(
         SelectionType::Simple,
@@ -2825,7 +2827,7 @@ fn grapheme_copy_search_and_reflow_preserve_the_complete_cluster() {
     });
     let matches = crate::search::search(&term, cluster);
     assert_eq!(matches.len(), 1);
-    let cell = &term.grid()[Line(matches[0].line)][Column(matches[0].start_col)];
+    let cell = &term.grid()[Line(matches[0].start.line)][Column(matches[0].start.column)];
     assert_eq!(cell.c, '\u{1f469}');
     assert!(cell.flags.contains(Flags::WIDE_CHAR | Flags::GRAPHEME));
     assert_eq!(cell.zerowidth(), Some(&['\u{200d}', '\u{1f4bb}'][..]));
@@ -3333,7 +3335,7 @@ fn grapheme_resized_script_and_vs15_cells_keep_copy_search_and_reflow_columns() 
         assert_eq!(term.grid()[Line(0)][Column(following)].c, 'B');
         let matches = crate::search::search(&term, "B");
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].start_col, following);
+        assert_eq!(matches[0].start.column, following);
         let mut selection = Selection::new(
             SelectionType::Simple,
             Point::new(Line(0), Column(1)),
@@ -3354,10 +3356,11 @@ fn grapheme_resized_script_and_vs15_cells_keep_copy_search_and_reflow_columns() 
         });
         let matches = crate::search::search(&term, cluster);
         assert_eq!(matches.len(), 1);
-        let cell = &term.grid()[Line(matches[0].line)][Column(matches[0].start_col)];
+        let cell = &term.grid()[Line(matches[0].start.line)][Column(matches[0].start.column)];
         assert_eq!(cell.flags.contains(Flags::WIDE_CHAR), width == 2);
         assert!(cell.flags.contains(Flags::GRAPHEME));
-        let next = &term.grid()[Line(matches[0].line)][Column(matches[0].start_col + width)];
+        let next =
+            &term.grid()[Line(matches[0].start.line)][Column(matches[0].start.column + width)];
         assert_eq!(next.c, 'B');
     }
 }
@@ -3580,7 +3583,7 @@ fn grapheme_saturated_positive_prefix_keeps_base_selection_search_and_resets() {
         );
         let matches = crate::search::search(&term, "(");
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].start_col, 0);
+        assert_eq!(matches[0].start.column, 0);
         let mut selection = Selection::new(
             SelectionType::Simple,
             Point::new(Line(0), Column(0)),
@@ -3603,7 +3606,8 @@ fn grapheme_saturated_positive_prefix_keeps_base_selection_search_and_resets() {
         let matches = crate::search::search(&term, "(");
         assert_eq!(matches.len(), 1);
         assert_eq!(
-            term.grid()[Line(matches[0].line)][Column(matches[0].start_col)].semantic_char(),
+            term.grid()[Line(matches[0].start.line)][Column(matches[0].start.column)]
+                .semantic_char(),
             '('
         );
         // A cursor action commits the old cluster; bulk ASCII must reset the base state.

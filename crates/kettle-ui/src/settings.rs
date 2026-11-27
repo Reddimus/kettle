@@ -2148,7 +2148,20 @@ pub(crate) fn page_target(applies: &[bool], current: usize, delta: isize) -> usi
     } else {
         None
     };
-    found.unwrap_or(current)
+    // A focus that no longer applies (a live reload turned it off) moves on
+    // even at the end of the list: to the nearest row that applies, back the
+    // other way.
+    found
+        .or_else(|| {
+            if applies[current] {
+                None
+            } else if delta >= 0 {
+                (0..current).rev().find(|&index| applies[index])
+            } else {
+                (current + 1..=last).find(|&index| applies[index])
+            }
+        })
+        .unwrap_or(current)
 }
 
 /// The row nearest `target` that is not [`field_disabled`], looking first

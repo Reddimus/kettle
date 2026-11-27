@@ -2189,6 +2189,15 @@ fn parsed_screen(wire: &str) -> kettle_core::term::SharedTerm {
     std::sync::Arc::new(std::sync::Mutex::new(term))
 }
 
+/// Stable rows `start..end` of output that fills its last row.
+fn whole_rows(start: u64, end: u64) -> kettle_core::term::CommandOutput {
+    kettle_core::term::CommandOutput {
+        start,
+        end,
+        end_column: None,
+    }
+}
+
 /// The selected text and the text of the top row of the view.
 fn selected_and_top_row(term: &kettle_core::term::SharedTerm) -> (Option<String>, String) {
     use kettle_core::Dimensions as _;
@@ -2209,7 +2218,7 @@ fn selected_and_top_row(term: &kettle_core::term::SharedTerm) -> (Option<String>
 #[test]
 fn select_command_output_selects_exactly_the_output_lines() {
     let term = parsed_screen(OUTPUT_WIRE);
-    assert!(super::select_output_rows(&term, (1, 3)));
+    assert!(super::select_output_rows(&term, whole_rows(1, 3)));
     assert_eq!(
         selected_and_top_row(&term),
         (Some("out1\nout2".into()), "$ cmd".into())
@@ -2227,6 +2236,32 @@ fn select_command_output_selects_exactly_the_output_lines() {
     assert_eq!(t.grid().display_offset(), 0);
 }
 
+/// Output with no final newline shares its last row with the next prompt, as
+/// bash writes it: the selection stops at the column D found the cursor at,
+/// and copies no prompt.
+#[test]
+fn select_command_output_stops_where_the_next_prompt_starts_on_its_last_row() {
+    let term = parsed_screen(
+        "\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07out1\r\nout2\x1b]133;D;0\x07\x1b]133;A\x07$ ",
+    );
+    let output = kettle_core::term::CommandOutput {
+        start: 1,
+        end: 3,
+        end_column: Some(4),
+    };
+    assert!(super::select_output_rows(&term, output));
+    assert_eq!(selected_and_top_row(&term).0.as_deref(), Some("out1\nout2"));
+    let t = term.lock().unwrap();
+    let range = t.selection.as_ref().and_then(|s| s.to_range(&t)).unwrap();
+    assert_eq!(
+        (range.start, range.end),
+        (
+            kettle_core::Point::new(kettle_core::Line(1), kettle_core::Column(0)),
+            kettle_core::Point::new(kettle_core::Line(2), kettle_core::Column(3)),
+        )
+    );
+}
+
 /// A first output row off screen is scrolled to the top of the view, one on
 /// screen is not, and rows that are not retained select nothing.
 #[test]
@@ -2238,12 +2273,12 @@ fn select_command_output_scrolls_its_first_row_into_view() {
         "{OUTPUT_WIRE}big\x1b]133;C\x07\r\n{lines}\x1b]133;D;0\x07\x1b]133;A\x07$ "
     ));
     let expected: Vec<String> = (0..40).map(|n| format!("line{n}")).collect();
-    assert!(super::select_output_rows(&term, (4, 44)));
+    assert!(super::select_output_rows(&term, whole_rows(4, 44)));
     assert_eq!(
         selected_and_top_row(&term),
         (Some(expected.join("\n")), "line0".into())
     );
-    assert!(super::select_output_rows(&term, (1, 3)));
+    assert!(super::select_output_rows(&term, whole_rows(1, 3)));
     assert_eq!(
         selected_and_top_row(&term),
         (Some("out1\nout2".into()), "out1".into())
@@ -2251,10 +2286,10 @@ fn select_command_output_scrolls_its_first_row_into_view() {
     term.lock()
         .unwrap()
         .scroll_display(kettle_core::Scroll::Delta(1));
-    assert!(super::select_output_rows(&term, (1, 3)));
+    assert!(super::select_output_rows(&term, whole_rows(1, 3)));
     assert_eq!(selected_and_top_row(&term).1, "$ cmd", "already on screen");
-    assert!(!super::select_output_rows(&term, (45, 50)), "past the grid");
-    assert!(!super::select_output_rows(&term, (3, 3)), "an empty span");
+    assert!(!super::select_output_rows(&term, whole_rows(45, 50)), "past the grid");
+    assert!(!super::select_output_rows(&term, whole_rows(3, 3)), "an empty span");
 }
 
 /// The terminal menu's Select Command Output row is enabled only over a
@@ -2309,13 +2344,13 @@ fn select_command_output_keeps_the_rows_scrollback_still_holds() {
     assert_eq!(engine.grid().history_origin(), 7);
     let term = std::sync::Arc::new(std::sync::Mutex::new(engine));
     let expected: Vec<String> = (7..20).map(|n| format!("line{n}")).collect();
-    assert!(super::select_output_rows(&term, (3, 20)));
+    assert!(super::select_output_rows(&term, whole_rows(3, 20)));
     assert_eq!(
         selected_and_top_row(&term),
         (Some(expected.join("\n")), "line7".into())
     );
     term.lock().unwrap().selection = None;
-    assert!(!super::select_output_rows(&term, (0, 7)), "all gone");
+    assert!(!super::select_output_rows(&term, whole_rows(0, 7)), "all gone");
     assert_eq!(selected_and_top_row(&term).0, None);
 }
 
@@ -2365,6 +2400,133 @@ fn the_menu_names_the_output_row_under_the_pointer_in_scrolled_back_history() {
         selected_and_top_row(&term.term),
         (Some("out1\nout2".into()), "$ cmd".into())
     );
+}
+
+/// A real interactive Bash at `SEL> `, running Kettle's shipped hooks after
+/// the user's `prompt_command`, or `None` where no Bash is installed. The
+/// directory holds its rcfile and lives as long as the pane.
+#[cfg(unix)]
+fn integrated_bash(
+    prompt_command: &str,
+) -> Option<(WindowState, u64, kettle_test_support::PrivateTempDir)> {
+    let Some(bash) = ["/opt/homebrew/bin/bash", "/usr/local/bin/bash", "/usr/bin/bash", "/bin/bash"]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).is_file())
+    else {
+        eprintln!("bash not installed; real-shell output selection skipped");
+        return None;
+    };
+    let quoted = |path: &str| format!("'{}'", path.replace('\'', "'\\''"));
+    let hooks = quoted(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../shell-integration/kettle.bash"
+    ));
+    // Debian and Ubuntu Bash read /etc/bash.bashrc before the --rcfile, even
+    // with --noprofile, and it sets PS1 and may set PROMPT_COMMAND. Set them in
+    // the rcfile, after it, and only then source the hooks, as a user's
+    // ~/.bashrc would.
+    let dir = crate::test_tempdir();
+    let rcfile = dir.path().join("bashrc");
+    std::fs::write(
+        &rcfile,
+        format!(
+            "PS1='SEL> '\nPROMPT_COMMAND={prompt_command}\nHISTFILE=/dev/null\nsource {hooks}\n"
+        ),
+    )
+    .unwrap();
+    let rcfile = quoted(rcfile.to_str().unwrap());
+    let (ws, pane) = shell_window(
+        &format!("INPUTRC=/dev/null exec {bash} --noprofile --rcfile {rcfile} -i"),
+        |term| bash_at_prompt(term, 0),
+    );
+    Some((ws, pane, dir))
+}
+
+/// The `SEL> ` prompt is on the cursor's row and the shell is at it, after
+/// `commands` commands have finished.
+#[cfg(unix)]
+fn bash_at_prompt(term: &kettle_core::Terminal, commands: usize) -> bool {
+    use kettle_core::Dimensions as _;
+    if !term.shell_at_prompt() || term.command_marks().len() != commands {
+        return false;
+    }
+    let t = term.term.lock().unwrap();
+    let row = t.grid().cursor.point.line;
+    (0..t.grid().columns())
+        .map(|col| t.grid()[row][kettle_core::Column(col)].c)
+        .collect::<String>()
+        .trim_end()
+        .ends_with("SEL>")
+}
+
+/// Type `command` and wait for the prompt after it, the `commands`th.
+#[cfg(unix)]
+fn run_in_bash(term: &kettle_core::Terminal, command: &str, commands: usize) {
+    term.write(format!("{command}\r").as_bytes());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !bash_at_prompt(term, commands) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{command}: no prompt; screen {:?}",
+            term.screen_text(0).map(|screen| screen.text)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// What Select Command Output copies for the command holding row `at`, or
+/// the newest.
+#[cfg(unix)]
+fn copied_output(term: &kettle_core::Terminal, at: Option<u64>) -> Option<String> {
+    term.term.lock().unwrap().selection = None;
+    assert!(super::select_command_output(term, at), "{at:?}");
+    selected_and_top_row(&term.term).0
+}
+
+/// A real interactive Bash running Kettle's hooks: output with no final
+/// newline leaves the next prompt on its last row, with nothing between them
+/// on the wire. Select Command Output copies the output without that prompt,
+/// for the newest command and, by row, for an older one whose last row also
+/// holds the next command line; ordinary output still copies whole rows.
+#[cfg(unix)]
+#[test]
+fn select_command_output_leaves_out_the_bash_prompt_after_an_unterminated_line() {
+    let Some((ws, pane, _rcfile)) = integrated_bash("") else {
+        return;
+    };
+    let term = &ws.mux.panes[&pane].term;
+    run_in_bash(term, "printf 'unterminated-output'", 1);
+    assert_eq!(copied_output(term, None).as_deref(), Some("unterminated-output"));
+    let first = term.command_output_rows(None).unwrap();
+    assert!(first.end_column.is_some(), "the prompt shares the row: {first:?}");
+    // The next command is typed on that shared row.
+    run_in_bash(term, "printf 'first\\nsecond'", 2);
+    assert_eq!(copied_output(term, None).as_deref(), Some("first\nsecond"));
+    assert_eq!(
+        copied_output(term, Some(first.end - 1)).as_deref(),
+        Some("unterminated-output"),
+        "the older output, by its row"
+    );
+    run_in_bash(term, "printf 'ordinary-output\\n'", 3);
+    assert_eq!(copied_output(term, None).as_deref(), Some("ordinary-output"));
+    assert_eq!(term.command_output_rows(None).unwrap().end_column, None);
+    term.write(b"exit\r");
+}
+
+/// A real interactive Bash whose own prompt hook starts the prompt on a new
+/// row after Kettle's D and A marks: output that left the cursor partway
+/// along its last row keeps the cells right of the cursor, since no prompt
+/// was written over them.
+#[cfg(unix)]
+#[test]
+fn select_command_output_keeps_output_right_of_the_cursor_when_the_prompt_starts_below() {
+    let Some((ws, pane, _rcfile)) = integrated_bash("echo") else {
+        return;
+    };
+    let term = &ws.mux.panes[&pane].term;
+    run_in_bash(term, "printf 'abcdef\\033[3D'", 1);
+    assert_eq!(copied_output(term, None).as_deref(), Some("abcdef"));
+    term.write(b"exit\r");
 }
 
 /// The menu row acts on the row the menu was opened over, captured as a

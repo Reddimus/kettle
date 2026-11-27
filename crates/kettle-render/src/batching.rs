@@ -645,6 +645,8 @@ pub(crate) trait GlyphSource {
 
     /// The emit placed one run of a grid cell's glyphs as `instances` of its
     /// output. Arabic join shifts move them again before the emit returns.
+    /// A glyph without cell metadata is reported one column wide, at the
+    /// column its text starts in; an emoji cluster without it is not.
     fn drew(&mut self, _column: usize, _width: usize, _instances: std::ops::Range<usize>) {}
 }
 
@@ -820,7 +822,8 @@ impl GlyphSource for &mut PlacedGlyphs<'_> {
 /// The pixel x span the grid emit draws each cell of buffer `line` over,
 /// as `(column, width, left, right)`, one entry per run of a cell's glyphs.
 /// A glyph wider than its cell reaches past the cell's edges: an Arabic
-/// final or isolated letter, after its join shift.
+/// final or isolated letter, after its join shift, or an Arabic ligature
+/// such as U+FDFD, drawn many cells wide in a row without a bidi layout.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn drawn_cell_spans(
     buf: &TextBuffer,
@@ -1223,10 +1226,18 @@ pub(crate) fn emit_positioned_glyphs(
                     instances: start..out.len(),
                 });
             }
-            if let Some(cell) = cell
-                && out.len() > start
-            {
-                glyph_source.drew(cell.column, cell.width, start..out.len());
+            if out.len() > start {
+                match cell {
+                    Some(cell) => glyph_source.drew(cell.column, cell.width, start..out.len()),
+                    // Outside an emoji cluster each glyph is its own run, and
+                    // `active_cell` holds the column its text starts in.
+                    None if cluster.is_none() => {
+                        if let Some(column) = active_cell {
+                            glyph_source.drew(column, 1, start..out.len());
+                        }
+                    }
+                    None => {}
+                }
             }
         }
         if let Some(joined) = joined {

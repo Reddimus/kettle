@@ -664,6 +664,34 @@ moves a key into the main table without changing its parser arm.
 | `hide-from-taskbar` | Suppress from OS taskbar | winit Windows-only natively; cross-platform requires per-platform extensions |
 | `title-font` / `title-use-system-font` / `use-system-font` / `use-theme-colors` | Per-pane titlebar font + theme-color overrides | Multi-cycle per-pane font system |
 
+### Link detection
+
+Kettle underlines the URLs and file paths it finds in a pane's text, and the
+underline and the destination pill show exactly what a click opens. Quotes are
+read as a shell reads them: a string closes at the next quote of its kind (a
+backslash escapes a `"` inside double quotes), whitespace and the separators
+`;`, `&`, `|`, `<` and `>` outside strings separate words, and an apostrophe
+after a letter or digit (`can't`) opens nothing unless a later `'` closes it as
+a shell would (`prefix'a b'`). A path opens only when its word holds no quote
+(`src/main.rs`, `--out=/tmp/x.png`, `src/main.rs` in `echo "hello " src/main.rs`,
+`/tmp/c.txt` in `key="a/b";other=/tmp/c.txt`); when it is the whole text of a
+quoted string (`{"file":"/tmp/c.txt"}`); or when it starts from a root at the
+start of a word (`/tmp/x.log` in `/tmp/x.log"`). A closed string glued to more
+of its word keeps the word quoted, so nothing opens in
+`cat pre"fix"=/tmp/report.pdf`, which a shell reads as `prefix=/tmp/report.pdf`. Inside quoted prose, a path from a root that
+ends the string opens too (`"see /tmp/report.pdf"`). Any other piece of a
+quoted string, or of a word that holds a quote, is not underlined and quick
+select only copies it: `/tmp/report.pdf` in `prefix'docs/a*b=/tmp/report.pdf'`,
+`b/notes.txt` in `"a b/notes.txt"`. Text between such an apostrophe and the `'`
+that closes it may or may not be quoted, and opens only a path from a root at
+the start of a word. A stray quote can shift every string on its line, so a line
+where one may have done so is uncertain as a whole: one holding a quote that
+never closes, an apostrophe that could close a string (`users'`) with no `'`
+closing it, or a string that runs on into more of its word after it closes
+(`"a"b`, `"$src"/a.txt`). On such a line only a path from a root at the start of
+a word opens, and relative and quoted paths are copied: nothing opens in
+`x 'tis A='/Users/me/a b/notes/my dir.txt'`.
+
 ### Selection and history controls
 
 Theme and default selection colours resolve their fill and text together to
@@ -1212,7 +1240,10 @@ type a label to open a URL or copy anything else, or hold Shift while typing it
 to copy a URL or open a path in the default app, resolved from that pane's
 directory. A path is copied instead when it names another machine's file (a
 detected ssh, mosh or container session), when the label marks only part of a
-name, such as `out/report` in `out/report#1.pdf`, or when it climbs with `..`.
+name, such as `out/report` in `out/report#1.pdf` or a relative path after a
+space inside quotes (`b/notes.txt` in `"a b/notes.txt"`, which may be a quoted
+name's end), when it holds a character
+that hides text, such as a zero-width joiner, or when it climbs with `..`.
 Behind tmux, screen or zellij a path opens as it would locally; one that is
 not on this computer, as when an ssh inside tmux printed it, gets a notice.
 Kettle does

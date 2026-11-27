@@ -51,6 +51,11 @@ pub enum UpdateError {
     UnmanagedInstall(String),
     #[error("another kettle update is already running")]
     UpdateLocked,
+    /// A directory the update writes into lets someone else replace what is
+    /// in it, so the update's own writes would refuse it part-way through.
+    /// Found before anything is downloaded or changed.
+    #[error("kettle cannot update this install safely: {0}")]
+    UnsafeInstallDirectory(String),
     #[error(
         "downloaded artifact did not match its signed size (expected {expected}, got {actual})"
     )]

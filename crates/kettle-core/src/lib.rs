@@ -82,7 +82,7 @@ pub use links::{Link, links, links_with_cwd};
 pub use search::{
     CaseSensitivity, CompiledSearch, MAX_SEARCH_LOGICAL_LINE_CONTEXT, MAX_SEARCH_MATCHES,
     MAX_SEARCH_MATERIALIZED_BYTES, MAX_SEARCH_MATERIALIZED_CELLS, MAX_SEARCH_OPERATION_BYTES,
-    MAX_SEARCH_OPERATION_CELLS, MAX_SEARCH_OPERATION_HAYSTACKS, MAX_SEARCH_QUERY_BYTES, Match,
+    MAX_SEARCH_OPERATION_CELLS, MAX_SEARCH_OPERATION_HAYSTACKS, MAX_SEARCH_QUERY_BYTES,
     SearchBatch, SearchBounds, SearchCompileError, SearchDirection, SearchLayout, SearchOutcome,
     SearchPoint, SearchScanToken, SearchSpan, search, search_with,
 };

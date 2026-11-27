@@ -3,7 +3,7 @@
 
 mod command_correlation;
 mod command_marks;
-pub use command_marks::CommandMark;
+pub use command_marks::{CommandMark, CommandOutput};
 mod local_echo;
 pub use command_correlation::CommandCorrelationCapability;
 pub use local_echo::LocalEcho;
@@ -1333,10 +1333,9 @@ impl PtyGeometry {
     ///
     /// Columns clamp to [`MIN_COLUMNS`], not to 1. The engine declares that
     /// minimum and then never enforces it, and a one-column grid is not merely
-    /// cramped: writing any double-width character to it indexes past the end
-    /// of the row and panics on the PTY reader thread. The release profile sets
-    /// `panic = "abort"`, so that takes down every pane in every window, and a
-    /// CJK filename in `ls` output is enough to trigger it.
+    /// cramped: no row there has room for a double-width character, so the
+    /// engine prints a blank in its place, and a CJK filename in `ls` output
+    /// comes out empty.
     ///
     /// `kettle exec --cols 1`, a split narrow enough to leave one cell after
     /// padding, and the `(1, 1, 1, 1)` fallbacks for an unresolved geometry all
@@ -3333,7 +3332,7 @@ pub struct TermSize {
 impl TermSize {
     /// Build a size the engine can actually represent.
     ///
-    /// The second guard on the one-column crash. [`PtyGeometry::new`] clamps
+    /// The second guard against a one-column grid. [`PtyGeometry::new`] clamps
     /// too, but its fields are public and the type is re-exported, so a caller
     /// can build `PtyGeometry { columns: 1, .. }` and never pass through it.
     /// The engine consumes this type directly, so clamping here holds however
@@ -3370,6 +3369,7 @@ fn commit_local_geometry(
         geometry,
         None,
         None,
+        None,
         desired,
         grid_options,
         usize::MAX,
@@ -3379,11 +3379,13 @@ fn commit_local_geometry(
 /// Returns how many rows the resize pushed off the primary screen into its
 /// history, measured under the `Term` lock so no output is counted, or `None`
 /// when the columns changed and reflow makes the rows incomparable.
+#[allow(clippy::too_many_arguments)]
 fn commit_local_geometry_inner(
     term: &SharedTerm,
     geometry: &Arc<Mutex<VersionedPtyGeometry>>,
     prompts: Option<&Mutex<std::collections::VecDeque<u64>>>,
     correlation: Option<&Mutex<command_correlation::CommandCorrelation>>,
+    excluded_output_end: Option<&mut Option<u64>>,
     desired: PtyGeometry,
     grid_options: Option<TermConfig>,
     history_pull: usize,
@@ -3414,9 +3416,18 @@ fn commit_local_geometry_inner(
         stable_grid_line_id(grid.history_origin(), grid.history_size(), 0)
     };
     let top_before = primary_top(&term);
+    let columns_reflow = grid_options.is_some() && old_columns != desired.columns;
+    // A reflow renumbers the rows; carry the boundary across by lines.
+    let excluded = excluded_output_end.and_then(|end| {
+        let before = (*end).filter(|_| columns_reflow)?;
+        Some((end, crate::restore::boundary_before_reflow(&term, before)))
+    });
     if let Some(options) = grid_options {
         term.set_options_preserving_history(options);
         term.resize_pulling_history(TermSize::new(desired.columns, desired.rows), history_pull);
+    }
+    if let Some((end, before)) = excluded {
+        *end = Some(crate::restore::reflowed_boundary(&term, before));
     }
     let history_pushed = (old_columns == desired.columns).then(|| {
         usize::try_from(primary_top(&term).saturating_sub(top_before)).unwrap_or(usize::MAX)
@@ -3792,6 +3803,9 @@ pub struct Terminal {
     /// What the last resize pushed off the primary screen into its history;
     /// see [`Terminal::history_rows_pushed_by_last_resize`].
     history_pushed_by_last_resize: Option<usize>,
+    /// See [`Terminal::excluded_output_end`]. Changed only on this thread, by
+    /// [`Terminal::exclude_output_so_far`] and by a column reflow.
+    excluded_output_end: Option<u64>,
     /// Per-pane output wake publication gate. Paint scheduling stays quiescent
     /// while a window is hidden/minimized, but the UI deliberately leaves this
     /// transport wake enabled when a recorder or Lua output sidechannel must
@@ -7342,6 +7356,7 @@ impl Terminal {
             geometry: shared_geometry,
             applied_pty_geometry: geometry,
             history_pushed_by_last_resize: Some(0),
+            excluded_output_end: None,
             output_wake,
             latched,
             osc52_copy_allowed,
@@ -8158,11 +8173,12 @@ impl Terminal {
     }
 
     /// Stable row ids `start..end` of one completed command's output (the
-    /// rows from its OSC 133 C to its D): the newest command whose output holds row
-    /// `at`, or with `None`, the newest command. `None` when that command
-    /// printed nothing, its rows are gone, or the alternate screen is up.
-    /// Locks as [`Self::command_marks`] does.
-    pub fn command_output_rows(&self, at: Option<u64>) -> Option<(u64, u64)> {
+    /// rows from its OSC 133 C to its D), and the column its last row's
+    /// output stops at when the next prompt shares that row: the newest
+    /// command whose output holds row `at`, or with `None`, the newest
+    /// command. `None` when that command printed nothing, its rows are gone,
+    /// or the alternate screen is up. Locks as [`Self::command_marks`] does.
+    pub fn command_output_rows(&self, at: Option<u64>) -> Option<CommandOutput> {
         let _graphics_guard = self
             .graphics_gate
             .lock()
@@ -8707,6 +8723,30 @@ impl Terminal {
         self.history_pushed_by_last_resize
     }
 
+    /// Keep everything the primary grid holds now out of saved output: what
+    /// a remote session wrote before it ended, for one. See
+    /// [`Terminal::excluded_output_end`].
+    pub fn exclude_output_so_far(&mut self) {
+        let end = crate::restore::primary_end_row(
+            &self
+                .term
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        self.excluded_output_end =
+            Some(self.excluded_output_end.map_or(end, |known| known.max(end)));
+    }
+
+    /// The document row (see [`crate::restore::primary_end_row`]) before
+    /// which the primary grid may still hold output kept out of saved output,
+    /// from [`Terminal::exclude_output_so_far`]. It never moves back over that
+    /// output. A width change rewraps rows, and the resize moves the boundary
+    /// with them: by whole lines when it is above the cursor's line,
+    /// otherwise to the end of the grid. Read it without the terminal lock.
+    pub fn excluded_output_end(&self) -> Option<u64> {
+        self.excluded_output_end
+    }
+
     /// Resize as [`Terminal::try_resize_geometry`] does, except that rows
     /// added to the primary screen take at most `history_pull` rows back from
     /// its history and the rest come in blank below the screen's content. A
@@ -8755,6 +8795,7 @@ impl Terminal {
             &self.geometry,
             Some(&self.prompts),
             Some(&self.command_correlation),
+            Some(&mut self.excluded_output_end),
             desired,
             grid_options,
             history_pull,

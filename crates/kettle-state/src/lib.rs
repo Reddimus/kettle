@@ -35,8 +35,8 @@ pub use private::{
 };
 #[cfg(unix)]
 pub use tree::{
-    TreeRemovalLimits, directory_is_empty, open_directory_for_tree_removal_at,
-    remove_directory_tree_at, remove_owned_readonly_tree_at,
+    TreeRemovalLimits, directory_entry_names, directory_is_empty,
+    open_directory_for_tree_removal_at, remove_directory_tree_at, remove_owned_readonly_tree_at,
 };
 
 /// Whether `path` still names the native file held by `file`.
@@ -702,6 +702,16 @@ fn schedule_stale_staged_reap(destination: &Path) {
 #[cfg(target_os = "macos")]
 pub fn clear_inherited_acl(file: &File) -> io::Result<()> {
     private::unix::macos_acl::clear_extended_acl(file)
+}
+
+/// Whether an open file or directory carries any extended ACL entry.
+///
+/// The read-only counterpart to [`clear_inherited_acl`], for a caller that has
+/// to refuse an object someone else may have been granted access to, rather
+/// than repair it. Clearing an entry does not undo what it already allowed.
+#[cfg(target_os = "macos")]
+pub fn has_extended_acl(file: &File) -> io::Result<bool> {
+    private::unix::macos_acl::has_any_extended_acl(file)
 }
 
 /// Why an atomic exchange did not fully succeed.
@@ -1909,5 +1919,29 @@ mod tests {
                 .to_string_lossy()
                 .contains(".tmp.")
         }));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reports_an_extended_acl_without_changing_it() {
+        let root = test_tempdir();
+        let directory = root.path().join("acl");
+        fs::create_dir(&directory).unwrap();
+        let held = File::open(&directory).unwrap();
+        assert!(!has_extended_acl(&held).unwrap());
+        let applied = std::process::Command::new("/bin/chmod")
+            .arg("+a")
+            .arg("everyone allow list,search")
+            .arg(&directory)
+            .status()
+            .unwrap();
+        assert!(applied.success(), "could not set up the ACL");
+        assert!(has_extended_acl(&held).unwrap());
+        assert!(
+            has_extended_acl(&held).unwrap(),
+            "the check left the entry alone"
+        );
+        clear_inherited_acl(&held).unwrap();
+        assert!(!has_extended_acl(&held).unwrap());
     }
 }

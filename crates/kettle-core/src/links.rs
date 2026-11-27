@@ -26,14 +26,148 @@ pub struct Link {
     pub explicit: bool,
 }
 
+/// The pattern for detected URLs, shared with quick select. A scheme is
+/// case-insensitive (RFC 3986), as `www.` is to a reader, in ASCII only: a
+/// Unicode fold would read `httpſ://` (U+017F) as `https://`, a scheme the
+/// opener refuses. A scheme starts a URL wherever it is, but a `www.` only
+/// where no name runs into it, judged by Unicode classes: not in
+/// `docs/www.example.com.txt` or `me@www.example.com`. The pattern has no
+/// look-behind, so it takes the character before such a `www.` into the
+/// match, and [`url_match`] drops it; one pass stays linear.
+pub(crate) const URL_PATTERN: &str = r#"(?:(?i-u:https?://|ftp://|file://)|(?:^|[^\w\p{N}/\\.\-@%+~])(?i-u:www\.))[^\s\x00-\x1f<>"]+"#;
+
 fn url_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r#"(https?://|ftp://|file://|www\.)[^\s\x00-\x1f<>"]+"#).unwrap())
+    RE.get_or_init(|| Regex::new(URL_PATTERN).unwrap())
 }
 
-/// Normalize a detected URL for opening, leaving its displayed text alone.
+/// Text shaped like a URL of any scheme, Kettle's or not (`vscode://x`,
+/// `httpſ://x`): no piece of it is a local path, as its query is not
+/// (`vscode://open?file=/tmp/a.pdf`).
+pub(crate) fn url_shaped_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"\p{L}[\p{L}\p{N}+.\-]*://[^\s\x00-\x1f<>"]*"#).unwrap())
+}
+
+/// A [`URL_PATTERN`] match's start and text in `line`, without the
+/// character before a `www.` that the pattern takes to check it. A URL
+/// starts with a letter, and that character is never a letter or a number.
+/// `None` when the character before the URL is an invisible one, which
+/// does not end a word (`a\u{200b}www.x.test` reads as one token), or a
+/// control; Unicode whitespace shows as a space and does.
+pub(crate) fn url_match<'a>(line: &str, m: &regex::Match<'a>) -> Option<(usize, &'a str)> {
+    let text = m.as_str();
+    let taken = text
+        .chars()
+        .next()
+        .filter(|c| !c.is_alphabetic())
+        .map_or(0, char::len_utf8);
+    let start = m.start() + taken;
+    let before = line[..start].chars().next_back();
+    if before.is_some_and(|c| hides_text(c) && (c.is_control() || !c.is_whitespace())) {
+        return None;
+    }
+    Some((start, &text[taken..]))
+}
+
+/// Whether a detected URL, trimmed of trailing punctuation, still names
+/// something to open: a host after `scheme://` or `www.`, or a path after
+/// `file://`. `see https://...` trims to a bare `https://`, and
+/// `see www...` to `www`.
+pub(crate) fn names_a_target(url: &str) -> bool {
+    if let Some(rest) = url
+        .get(..4)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("www."))
+        .map(|_| &url[4..])
+    {
+        // Opened as `https://` and the text, so its host is what follows
+        // any user info (`www.example@/x` has none).
+        return rest.starts_with(char::is_alphanumeric) && authority_has_host(url);
+    }
+    match url.split_once(':') {
+        // A path before any query: not `file://?q=/x` or `file://localhost`.
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("file") => rest
+            .strip_prefix("//")
+            .is_some_and(|rest| rest[..rest.find(['?', '#']).unwrap_or(rest.len())].contains('/')),
+        Some((_, rest)) => names_a_host(rest),
+        None => false,
+    }
+}
+
+/// Whether trimming dots off the detected URL `raw` (to `trimmed`, with
+/// `rest` the line after it) would change what it opens rather than drop
+/// prose. For a `file://` link: a dot run, which may be its file's
+/// (`file:///tmp/a..`), or a dot taken off a name that decodes to end in a
+/// dot, which makes one with an escape (`file:///tmp/a%2e.` is `/tmp/a..`,
+/// and `file:///tmp/%2e.` is `/tmp/..`, trimmed `/tmp/.`).
+/// For a bare host whose last label is a number, the dots ending the host
+/// itself: a dot run, as the trimmed host reads as an IPv4 address and the
+/// written one does not (`http://127.1..`, trimmed to loopback); after a
+/// port they end no host (`http://127.0.0.1:8080...`). Otherwise dots after a web URL
+/// end a sentence (#927): after its path they are not the host, and after
+/// a named host they are its empty labels or the root of DNS, so the same
+/// host answers.
+pub(crate) fn url_loses_a_dot_run(raw: &str, trimmed: &str, rest: &str) -> bool {
+    let tail = &raw[trimmed.len()..];
+    let run = crate::url_trim::dot_run_after(tail, rest).is_some();
+    if trimmed
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file://"))
+    {
+        // A dot trimmed off a name that decodes to end in one leaves a run
+        // of them spelled with an escape (`a%2e.` is `a..`).
+        let ends_in_a_dot =
+            || decoded_file_url_path(trimmed).is_some_and(|path| path.ends_with('.'));
+        return run || (tail.starts_with('.') && ends_in_a_dot());
+    }
+    let after = trimmed.split_once("://").map_or(trimmed, |(_, rest)| rest);
+    if !run || after.contains(['/', '?', '#']) {
+        return false;
+    }
+    let host = after.rsplit_once('@').map_or(after, |(_, host)| host);
+    // Dots after a port, or after an IPv6 literal's bracket, end no host.
+    if host.contains([':', ']']) {
+        return false;
+    }
+    let label = host.trim_end_matches('.').rsplit('.').next().unwrap_or("");
+    let hex = label
+        .get(..2)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("0x"));
+    !label.is_empty()
+        && if hex {
+            label[2..].bytes().all(|b| b.is_ascii_hexdigit())
+        } else {
+            label.bytes().all(|b| b.is_ascii_digit())
+        }
+}
+
+/// Whether the text after a URL's `scheme:` is `//` and an authority with
+/// a host, past any user info and port: not `//`, `///x`, `//?q`, `//#f`
+/// or `//:8080/x`.
+fn names_a_host(rest: &str) -> bool {
+    rest.strip_prefix("//").is_some_and(authority_has_host)
+}
+
+/// Whether the authority that starts `rest` names a host.
+fn authority_has_host(rest: &str) -> bool {
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = match host.strip_prefix('[') {
+        Some(literal) => literal.split_once(']').map_or("", |(address, _)| address),
+        None => host.split_once(':').map_or(host, |(name, _)| name),
+    };
+    !host.is_empty()
+}
+
+/// Normalize a detected URL for opening, leaving its displayed text alone:
+/// `www.x.test` and `WWW.x.test` open as `https://` and the text as shown.
 pub fn normalize_url(text: &str) -> String {
-    if text.starts_with("www.") {
+    if text
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("www."))
+    {
         format!("https://{text}")
     } else {
         text.to_string()
@@ -70,10 +204,27 @@ fn diagnostic_prefix_re() -> &'static Regex {
 /// The path matches in one row's text that can become links, as (start byte,
 /// end byte before trimming, text): trimmed of trailing punctuation, and not
 /// starting inside a longer token. `/bar.png` in `foo(1)/bar.png` would name an unrelated file.
-fn path_candidates(text: &str) -> impl Iterator<Item = (usize, usize, &str)> {
-    let runs = crate::hints::quoted_runs(text).collect::<Vec<_>>();
+fn path_candidates<'t: 'q, 'q>(
+    text: &'t str,
+    quotes: &'q crate::hints::Quotes,
+) -> impl Iterator<Item = (usize, usize, &'t str)> + 'q {
     path_re().find_iter(text).filter_map(move |m| {
-        let matched = crate::url_trim::trim_path_trailing(m.as_str());
+        let raw = m.as_str();
+        let mut matched = crate::url_trim::trim_path_trailing(raw);
+        // Two or more dots ending it may belong to the name (`/tmp/a..`) or
+        // trail off a sentence, and the shorter path names another file. A
+        // quote right after them marks them as the name's; otherwise the
+        // path is no link.
+        if let Some(run) = crate::url_trim::dot_run_after(&raw[matched.len()..], &text[m.end()..]) {
+            if run > 0
+                && matched.len() + run == raw.len()
+                && quotes.closes_at(text, m.start(), m.end())
+            {
+                matched = raw;
+            } else {
+                return None;
+            }
+        }
         let before = text[..m.start()].chars().next_back();
         let after_host = text[..m.start()].strip_suffix(':').is_some_and(|prefix| {
             let previous = prefix
@@ -95,7 +246,7 @@ fn path_candidates(text: &str) -> impl Iterator<Item = (usize, usize, &str)> {
             && !after_host
             && crate::hints::path_may_start_after(before)
             && (grep_separator || crate::hints::match_has_end(before, rest))
-            && crate::hints::path_reaches_quote(text, &runs, m.start(), m.end()))
+            && quotes.lets_open(text, m.start(), m.end()))
         .then_some((m.start(), m.end(), matched))
     })
 }
@@ -249,38 +400,67 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
                 }
                 group += 1;
             };
+        // Take a refused match's cells, so no piece of it links either.
+        // An explicit link over some of its cells keeps them.
+        let cover = |start: usize, len: usize, covered: &mut Vec<crate::hints::Taken>| {
+            for (row, s, e) in row_segments(&pos_of_byte, start, len) {
+                covered[row].fill(s, e + 1);
+            }
+        };
         for m in url_re().find_iter(&text) {
-            let matched = crate::url_trim::trim_trailing(m.as_str());
-            if matched.is_empty() || fragment(m.start(), m.end()) {
+            // A URL an invisible character joins to the word before it is
+            // part of that word, and no piece of it links.
+            let Some((start, raw)) = url_match(&text, &m) else {
+                cover(m.start(), m.len(), &mut covered);
+                continue;
+            };
+            let matched = crate::url_trim::trim_trailing(raw);
+            if fragment(start, m.end()) {
+                continue;
+            }
+            // A scheme with nothing after it is no link, and its query is
+            // not a local path (`https://?q=/etc/hosts`). Nor is a file link
+            // that trimming would cut a dot run off.
+            if !names_a_target(matched) || url_loses_a_dot_run(raw, matched, &text[m.end()..]) {
+                cover(start, raw.len(), &mut covered);
                 continue;
             }
             let uri = normalize_url(matched);
-            push(m.start(), matched.len(), uri, &mut covered);
+            push(start, matched.len(), uri, &mut covered);
+        }
+        // Text shaped like a URL of another scheme links nothing, and no
+        // piece of it is a local path either.
+        for m in url_shaped_re().find_iter(&text) {
+            cover(m.start(), m.len(), &mut covered);
         }
         // A quoted path goes before bare ones, so they cannot take a piece
         // of it; its link covers a location suffix as a bare path's does.
-        for (start, _, close) in crate::hints::quoted_paths(&text) {
+        let quotes = crate::hints::Quotes::read(&text);
+        for (start, end, close) in quotes.quoted_paths(&text) {
             if fragment(start - 1, close + 1) {
                 continue;
             }
+            // On a line with a quote that never closes, the string may be
+            // read out of step: it links nothing, nor does a piece of it.
+            if !quotes.certain() {
+                cover(start, close - start, &mut covered);
+                continue;
+            }
+            // The link covers a location suffix (`:12`), not the dot that
+            // ends a sentence.
+            let close = if text[end..close].starts_with(':') {
+                close
+            } else {
+                end
+            };
             match path_match_to_file_uri(&text[start..close], cwd) {
                 Some(uri) => push(start, close - start, uri, &mut covered),
                 // Refused (a climb, no directory to resolve against): no
                 // piece of it may link either.
-                None => {
-                    let segments = row_segments(&pos_of_byte, start, close - start);
-                    if segments
-                        .iter()
-                        .all(|&(row, s, e)| !covered[row].overlaps(s, e + 1))
-                    {
-                        for (row, s, e) in segments {
-                            covered[row].insert(s, e + 1);
-                        }
-                    }
-                }
+                None => cover(start, close - start, &mut covered),
             }
         }
-        for (start, end, matched) in path_candidates(&text) {
+        for (start, end, matched) in path_candidates(&text, &quotes) {
             if fragment(start, end) {
                 continue;
             }
@@ -333,19 +513,16 @@ fn path_match_to_file_uri_with_home(
     home: impl FnOnce() -> Option<String>,
 ) -> Option<String> {
     let path = strip_location_suffix(raw);
-    // Only a quoted path holds a space (see `hints::quoted_paths`); the
-    // URL encodes it.
-    if path.is_empty()
-        || path
-            .chars()
-            .any(|c| c.is_control() || (c.is_whitespace() && c != ' '))
-    {
+    // Only a quoted path holds a space (see `hints::Quotes::quoted_paths`); the
+    // URL encodes it. Encoded, a character that hides text would pass the
+    // URL's own check, so it is refused here, as `is_safe_url` refuses it.
+    if path.is_empty() || path.chars().any(|c| c != ' ' && hides_text(c)) {
         return None;
     }
     let normalized = path.replace('\\', "/");
     if normalized.starts_with("//")
         || has_parent_component(&normalized)
-        || normalized.to_ascii_lowercase().contains("%2e")
+        || climbs_once_decoded(&normalized)
     {
         return None;
     }
@@ -431,8 +608,37 @@ fn is_windows_drive_colon(path: &str, pos: usize) -> bool {
     pos == 1 && b.len() >= 3 && b[0].is_ascii_alphabetic() && (b[2] == b'/' || b[2] == b'\\')
 }
 
+/// Whether a detected path has a segment that names a parent only once its
+/// escapes are decoded (`%2e%2e`, `.%2E`, `..%20`). A `%` in it is encoded in
+/// its URL, so `100%2e.pdf` stays that name, but a handler that decodes
+/// twice would climb, so such a path is not opened.
+pub(crate) fn climbs_once_decoded(path: &str) -> bool {
+    path.split(['/', '\\']).any(|segment| {
+        let lowered = segment.to_ascii_lowercase();
+        segment.contains('%') && climbs(&lowered.replace("%2e", ".").replace("%20", " "))
+    })
+}
+
 fn has_parent_component(path: &str) -> bool {
-    path.split('/').any(|part| part == "..")
+    path.split('/').any(climbs)
+}
+
+/// Whether a path segment names the parent folder, as Kettle's file link
+/// checks read it: `..`, or `..` and trailing spaces and dots, which
+/// Windows drops from the end of a name (`.. `). A name holding dots, such
+/// as `a..b` or `...`, does not.
+pub fn names_parent(segment: &str) -> bool {
+    climbs(segment)
+}
+
+/// Whether a path segment names the parent directory: `..`, or `..` and
+/// trailing spaces and dots, which Windows drops from the end of a name
+/// (`.. `). A segment of dots alone stays a name there, so `...` and
+/// `a..b` do not climb.
+fn climbs(segment: &str) -> bool {
+    segment.starts_with("..")
+        && segment.bytes().all(|b| b == b'.' || b == b' ')
+        && (segment == ".." || segment.contains(' '))
 }
 
 fn encode_file_path(path: &str) -> String {
@@ -451,28 +657,126 @@ fn encode_file_path(path: &str) -> String {
     out
 }
 
+/// Whether `c` is a space that shows as blank space: the ASCII space and
+/// the other Unicode space separators, such as the no-break space, the
+/// narrow no-break space macOS writes before AM and PM in a screenshot's
+/// name, and the figure, en, em and ideographic spaces. It reads as a
+/// space, so it hides nothing, though like any space it is no part of a
+/// URI as written.
+pub(crate) fn visible_space(c: char) -> bool {
+    matches!(
+        c,
+        ' ' | '\u{00A0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}'
+    )
+}
+
+/// Whether `c` hides or reorders text instead of showing as itself: a
+/// control, whitespace that is no visible space (the line and paragraph
+/// separators), a format character (zero-width spaces and joiners,
+/// bidirectional controls, the byte order mark, tags), another
+/// default-ignorable code point (variation selectors, Hangul fillers), or
+/// the blank Braille pattern. Text holding one does not read as what it
+/// names, so a link holding one does not open.
+pub(crate) fn hides_text(c: char) -> bool {
+    c.is_control()
+        || (c.is_whitespace() && !visible_space(c))
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{034F}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061C}'
+                | '\u{06DD}'
+                | '\u{070F}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08E2}'
+                | '\u{115F}'..='\u{1160}'
+                | '\u{17B4}'..='\u{17B5}'
+                | '\u{180B}'..='\u{180F}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{2800}'
+                | '\u{3164}'
+                | '\u{FE00}'..='\u{FE0F}'
+                | '\u{FEFF}'
+                | '\u{FFA0}'
+                | '\u{FFF0}'..='\u{FFFB}'
+                | '\u{110BD}'
+                | '\u{110CD}'
+                | '\u{13430}'..='\u{1343F}'
+                | '\u{1BCA0}'..='\u{1BCA3}'
+                | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0000}'..='\u{E0FFF}'
+        )
+}
+
 /// Whether a URI from terminal output is safe to hand to the OS opener.
 /// Terminal output is untrusted: an OSC 8 hyperlink (or a crafted line)
 /// can carry an arbitrary URI, and custom schemes (`vscode:`, `ms-…`,
 /// `javascript:`, app handlers that exec) are a known abuse/RCE vector.
 /// We allow only a conservative scheme allowlist and reject controls,
-/// whitespace, and absurd lengths. Pure — fully unit tested.
+/// whitespace, characters that hide or reorder text (see `hides_text`),
+/// and absurd lengths, so the URI a user reads is the one that opens. Pure
+/// — fully unit tested.
 pub fn is_safe_url(uri: &str) -> bool {
     if uri.is_empty() || uri.len() > MAX_URL_BYTES {
         return false;
     }
-    if uri.chars().any(|c| c.is_control() || c == ' ') {
+    if uri.chars().any(|c| visible_space(c) || hides_text(c)) {
         return false;
     }
     let Some((scheme, rest)) = uri.split_once(':') else {
         return false; // no scheme → not opened
     };
     match scheme.to_ascii_lowercase().as_str() {
-        "http" | "https" | "ftp" | "ftps" | "mailto" => !rest.is_empty(),
+        "http" | "https" | "ftp" | "ftps" => names_a_host(rest) && decodes_visibly(rest),
+        "mailto" => !rest.is_empty() && decodes_visibly(rest),
         // Allow LOCAL files only — never a remote authority.
         "file" => is_local_file_url(uri),
         _ => false,
     }
+}
+
+/// Whether the text after a URL's scheme still reads as itself once its
+/// percent escapes are decoded, as a browser or mail client shows and uses
+/// its host, path and query: no decoded character that hides text (see
+/// `hides_text`). An encoded space and visible non-ASCII text are fine
+/// anywhere, an encoded tab or line break only in the query or fragment, as
+/// in a form's text (`body=a%0Ab`), and an escape that does not decode
+/// stays text.
+fn decodes_visibly(rest: &str) -> bool {
+    let text_at = rest.find(['?', '#']).unwrap_or(rest.len());
+    decodes_to(&rest[..text_at], |c| c == ' ')
+        && decodes_to(&rest[text_at..], |c| c.is_ascii_whitespace())
+}
+
+/// Whether `part` decodes to no character that hides text but those
+/// `allowed`.
+fn decodes_to(part: &str, allowed: impl Fn(char) -> bool) -> bool {
+    let bytes = part.as_bytes();
+    if !bytes.contains(&b'%') {
+        return true;
+    }
+    let hex = |byte: Option<&u8>| byte.and_then(|&b| char::from(b).to_digit(16));
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        match (bytes[at], hex(bytes.get(at + 1)), hex(bytes.get(at + 2))) {
+            (b'%', Some(high), Some(low)) => {
+                decoded.push((high * 16 + low) as u8);
+                at += 3;
+            }
+            (byte, ..) => {
+                decoded.push(byte);
+                at += 1;
+            }
+        }
+    }
+    !String::from_utf8_lossy(&decoded)
+        .chars()
+        .any(|c| hides_text(c) && !allowed(c))
 }
 
 /// The local path a `file://` URI names, decoded: `file:///a%20b` is `/a b`.
@@ -530,9 +834,11 @@ fn decoded_file_url_path(uri: &str) -> Option<String> {
         }
     }
     let decoded = String::from_utf8(bytes).ok()?;
-    let clean = !decoded.chars().any(char::is_control)
+    // The opener gets this path, so what it decodes to must read as itself
+    // too: `a%E2%80%8Bb` is `a` and `b` around a zero-width space.
+    let clean = !decoded.chars().any(|c| c != ' ' && hides_text(c))
         && !decoded.starts_with("//")
-        && !decoded.split(['/', '\\']).any(|segment| segment == "..");
+        && !decoded.split(['/', '\\']).any(climbs);
     clean.then_some(decoded)
 }
 
@@ -706,8 +1012,9 @@ const PROGRAM_FILES: &[&str] = &[
 ///
 /// The name is read as Windows reads it, whatever the platform: trailing
 /// dots and spaces are dropped (`payload.exe.` runs `payload.exe`), and an
-/// alternate data stream (`a.exe::$DATA`, `a.txt:b.exe`) is checked both
-/// before and after its colon.
+/// alternate data stream, `file:stream:type`, is checked by its file name
+/// and by its stream name (`a.exe::$DATA`, `a.txt:b.exe`,
+/// `a.txt:b.exe::$DATA`).
 pub fn names_program_or_shortcut(path: &std::path::Path, is_dir: bool) -> bool {
     let Some(name) = path.file_name() else {
         return false;
@@ -723,10 +1030,9 @@ pub fn names_program_or_shortcut(path: &std::path::Path, is_dir: bool) -> bool {
         };
         listed(PROGRAM_BUNDLES) || (!is_dir && listed(PROGRAM_FILES))
     };
-    known(&name)
-        || name
-            .split_once(':')
-            .is_some_and(|(stream_of, _)| known(stream_of))
+    // Each part on its own: the last `.` of the whole name may belong to
+    // neither, as in `a.txt:b.exe::$DATA`.
+    name.split(':').any(known)
 }
 
 /// Whether a `file://` URI points at the local machine with no traversal.
@@ -737,20 +1043,19 @@ pub fn names_program_or_shortcut(path: &std::path::Path, is_dir: bool) -> bool {
 /// authentication / pass-the-hash) plus SSRF to an arbitrary host, all reachable
 /// from untrusted PTY output (autodetected link or OSC 8). Accept only an empty
 /// authority (`file:///path`) or an explicit loopback host, and reject any
-/// backslash / `file:////` / percent-encoded traversal that could smuggle an
-/// authority back in.
+/// backslash / `file:////` / percent-encoded separator that could smuggle an
+/// authority back in. Traversal is judged on the decoded path's segments, so a
+/// name holding dots (`a..b`, `...`) or a query mentioning them stays local.
 fn is_local_file_url(uri: &str) -> bool {
     // is_safe_url lowercases the scheme before the `file` arm, so accept
-    // `FILE://` / `File://` here too. The authority and traversal checks below
+    // `FILE://` / `File://` here too. The authority and separator checks below
     // already use a lowercased copy.
     let rest = match uri.get(..7) {
         Some(p) if p.eq_ignore_ascii_case("file://") => &uri[7..],
         _ => return false,
     };
     let lowered = uri.to_ascii_lowercase();
-    if uri.contains("..")
-        || lowered.contains("%2e%2e")
-        || uri.contains('\\')
+    if uri.contains('\\')
         || lowered.contains("%5c")
         // `file:////host/...` leaves an empty authority but a `//host` path that
         // some openers still treat as a UNC share — reject the double slash.
@@ -944,7 +1249,9 @@ mod tests {
     #[test]
     fn a_path_link_cannot_start_inside_a_token() {
         fn found(line: &str) -> Vec<&str> {
-            path_candidates(line).map(|(_, _, text)| text).collect()
+            path_candidates(line, &crate::hints::Quotes::read(line))
+                .map(|(_, _, text)| text)
+                .collect()
         }
         assert!(
             found("foo(1)/bar.png").is_empty(),
@@ -957,6 +1264,598 @@ mod tests {
         assert_eq!(found("--out=/tmp/x.png"), ["/tmp/x.png"]);
         assert_eq!(found("cmd >/tmp/out.log"), ["/tmp/out.log"]);
         assert_eq!(found("see src/main.rs:12"), ["src/main.rs:12"]);
+    }
+
+    /// Dots ending a detected URL end a sentence or trail off, as Ghostty,
+    /// WezTerm and GNOME Terminal read them, so they are not part of the
+    /// link; dots inside it are, before a query or fragment too.
+    #[test]
+    fn trailing_dots_after_a_url_are_prose() {
+        for (line, uri) in [
+            (
+                "see https://example.com/docs...",
+                "https://example.com/docs",
+            ),
+            ("see https://example.com/a.", "https://example.com/a"),
+            (
+                "curl https://example.com/a.. -o out",
+                "https://example.com/a",
+            ),
+            (
+                "get https://example.com/files/report..csv",
+                "https://example.com/files/report..csv",
+            ),
+            (
+                "get https://example.com/a..?q=1",
+                "https://example.com/a..?q=1",
+            ),
+            (
+                "get https://example.com/a..#frag",
+                "https://example.com/a..#frag",
+            ),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links(&term);
+            assert_eq!(found.len(), 1, "{line}: {found:?}");
+            assert_eq!(found[0].uri, uri, "{line}");
+        }
+    }
+
+    /// A path ending in two or more dots never links a shorter path or its
+    /// folder: the name may end in those dots. A closing quote right after
+    /// them makes them the name's; a single dot ends a sentence.
+    #[test]
+    fn a_path_ending_in_a_dot_run_links_only_its_exact_name() {
+        let found = |line: &str| {
+            let term = term_with(line.len(), &[line], &[]);
+            links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>()
+        };
+        for line in [
+            "ls /tmp/a..",
+            "ls /tmp/a.. now",
+            "open /tmp/...",
+            "see /tmp/notes...",
+            "(see /tmp/a..).",
+            "/tmp/....",
+            "see /tmp/report.pdf,..",
+            "see /tmp/report.pdf?..",
+        ] {
+            assert!(found(line).is_empty(), "{line}: {:?}", found(line));
+        }
+        for (line, uri) in [
+            ("ls \"/tmp/a..\"", "file:///tmp/a.."),
+            ("ls '/tmp/...' now", "file:///tmp/..."),
+            ("ls \"docs/report.pdf..\"", "file:///work/docs/report.pdf.."),
+            (
+                "open \"/tmp/my report.pdf..\" now",
+                "file:///tmp/my%20report.pdf..",
+            ),
+            ("see /tmp/a.", "file:///tmp/a"),
+            ("see /tmp/a.b..c", "file:///tmp/a.b..c"),
+            // A location after the dots ends the name, as a quote does.
+            ("ls /tmp/a..:3", "file:///tmp/a.."),
+            // One dot ends a sentence, inside quotes too.
+            ("cat \"/tmp/report.pdf.\"", "file:///tmp/report.pdf"),
+            ("Saved to '/tmp/report.pdf.'", "file:///tmp/report.pdf"),
+            (
+                "Saved to \"src/report.pdf.\"",
+                "file:///work/src/report.pdf",
+            ),
+            ("see \"/tmp/a.b.\"", "file:///tmp/a.b"),
+            (
+                "Saved to \"/tmp/my report.pdf.\"",
+                "file:///tmp/my%20report.pdf",
+            ),
+        ] {
+            assert_eq!(found(line), [uri], "{line}");
+        }
+    }
+
+    /// Trimming a URL's end never changes which host it opens. A path,
+    /// query or fragment after the host stops the trim before it. A bare
+    /// host loses only dots, which leave its labels as they were (a last dot
+    /// names the root of DNS, and more are empty labels), or a character no
+    /// host ends in. A `file://` link losing a dot run is no link: the dots
+    /// may be its file's.
+    #[test]
+    fn trimming_a_url_never_changes_its_host() {
+        let host_of = |url: &str| {
+            let rest = &url[url.find("//").unwrap() + 2..];
+            rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())].to_string()
+        };
+        for host in [
+            "example.com",
+            "example.com.",
+            "a.b.c",
+            "[::1]",
+            "例え.テスト",
+        ] {
+            let name = host.strip_suffix('.').unwrap_or(host);
+            for tail in [
+                ".", "..", "...", ",", ").", ":", ";", "'", "\"", "*", "`", "..).", "]..",
+            ] {
+                for after in ["/a..", "/?q=a..", "/#f..", ":8080/x.."] {
+                    let url = format!("https://{host}{after}{tail}");
+                    let trimmed = crate::url_trim::trim_trailing(&url);
+                    assert_eq!(host_of(trimmed), host_of(&url), "{url}");
+                }
+                let url = format!("https://{host}{tail}");
+                let trimmed = crate::url_trim::trim_trailing(&url);
+                assert_eq!(host_of(trimmed), name, "{url}");
+            }
+        }
+        let found = |line: &str| {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>()
+        };
+        for line in [
+            "see file:///tmp/a..",
+            "see file:///tmp/...",
+            "see file:///tmp/a,..",
+            // `%2e.` decodes to `..`; trimmed, `%2e` would name `/tmp`.
+            "see file:///tmp/%2e.",
+            "see file:///tmp/a%2e.",
+            "see file:///tmp/a%2E.",
+            // Trimmed, these read as IPv4 loopback; as written, they do not.
+            "see http://127.1..",
+            "see http://0x7f.1...",
+        ] {
+            assert!(found(line).is_empty(), "{line}: {:?}", found(line));
+        }
+        for (line, uri) in [
+            ("see https://example.test.", "https://example.test"),
+            ("see https://example.test..", "https://example.test"),
+            ("see www.example.test...", "https://www.example.test"),
+            (
+                "see https://example.test/docs...",
+                "https://example.test/docs",
+            ),
+            ("see file:///tmp/a.", "file:///tmp/a"),
+            ("see http://127.1.", "http://127.1"),
+            ("see http://127.0.0.1/x...", "http://127.0.0.1/x"),
+            // Dots after a port end no host.
+            (
+                "Listening on http://127.0.0.1:8080...",
+                "http://127.0.0.1:8080",
+            ),
+            (
+                "Waiting for http://192.168.1.10:3000...",
+                "http://192.168.1.10:3000",
+            ),
+            ("Waiting for http://[::1]:8080...", "http://[::1]:8080"),
+        ] {
+            assert_eq!(found(line), [uri], "{line}");
+        }
+    }
+
+    /// Mainstream terminal output links exactly as it did before the 6.0
+    /// link fixes (main at f776689b6), except where a line says why not:
+    /// cargo and ESLint JSON, compiler
+    /// locations, Markdown and prose URLs, IPv6 hosts and ports before an
+    /// ellipsis, quoted prose holding a path, and macOS screenshot names. A
+    /// change to link detection that moves any of them, by a link, a column
+    /// or whether quick select may open it, shows here.
+    #[test]
+    fn mainstream_lines_link_as_they_did() {
+        use crate::hints::Kind;
+        type Case = (
+            &'static str,
+            &'static [(&'static str, usize, usize)],
+            &'static [(Kind, &'static str, bool)],
+        );
+        let corpus: &[Case] = &[
+            (
+                "{\"reason\":\"compiler-artifact\",\"package_id\":\"x 0.1.0\",\"manifest_path\":\"/Users/me/p/Cargo.toml\",\"target\":{\"kind\":[\"lib\"],\"src_path\":\"/Users/me/p/src/lib.rs\"},\"filenames\":[\"/Users/me/p/target/debug/libx.rlib\"]}",
+                &[("file:///Users/me/p/target/debug/libx.rlib", 170, 203)],
+                &[
+                    (Kind::Path, "/Users/me/p/Cargo.toml", false),
+                    (Kind::Path, "/Users/me/p/src/lib.rs", false),
+                    (Kind::Path, "/Users/me/p/target/debug/libx.rlib", true),
+                ],
+            ),
+            (
+                "{\"reason\":\"compiler-message\",\"message\":{\"rendered\":\"warning: unused\",\"spans\":[{\"file_name\":\"src/main.rs\",\"line_start\":3}]}}",
+                &[],
+                &[(Kind::Path, "src/main.rs", false)],
+            ),
+            (
+                "[{\"filePath\":\"/Users/me/p/a.ts\",\"messages\":[],\"errorCount\":0},{\"filePath\":\"/Users/me/p/b.ts\",\"messages\":[]}]",
+                &[],
+                &[
+                    (Kind::Path, "/Users/me/p/a.ts", false),
+                    (Kind::Path, "/Users/me/p/b.ts", false),
+                ],
+            ),
+            (
+                "{\"cwd\":\"/work\",\"file\":\"/Users/me/x.py\"}",
+                &[("file:///Users/me/x.py", 23, 36)],
+                &[
+                    (Kind::Path, "/work", false),
+                    (Kind::Path, "/Users/me/x.py", true),
+                ],
+            ),
+            (
+                "{\"url\":\"https://x.test/a\",\"path\":\"/tmp/c.txt\"}",
+                &[("https://x.test/a", 8, 23), ("file:///tmp/c.txt", 34, 43)],
+                &[
+                    (Kind::Url, "https://x.test/a", false),
+                    (Kind::Path, "/tmp/c.txt", true),
+                ],
+            ),
+            (
+                "{\"type\":\"application/json\",\"file\":\"/tmp/c.txt\"}",
+                &[("file:///tmp/c.txt", 35, 44)],
+                &[
+                    (Kind::Path, "application/json", false),
+                    (Kind::Path, "/tmp/c.txt", true),
+                ],
+            ),
+            (
+                "{\"date\":\"2026/11/26\",\"file\":\"/tmp/c.txt\"}",
+                &[("file:///tmp/c.txt", 29, 38)],
+                &[(Kind::Path, "/tmp/c.txt", true)],
+            ),
+            (
+                "key=\"a/b\";other=/tmp/c.txt",
+                &[("file:///tmp/c.txt", 16, 25)],
+                &[(Kind::Path, "/tmp/c.txt", true)],
+            ),
+            (
+                "  --> src/main.rs:12:5",
+                &[("file:///work/src/main.rs", 6, 21)],
+                &[(Kind::Path, "src/main.rs", true)],
+            ),
+            (
+                "src/main.c:12:5: error: expected ';' before '}' token",
+                &[("file:///work/src/main.c", 0, 14)],
+                &[(Kind::Path, "src/main.c", true)],
+            ),
+            (
+                "crates/a/src/lib.rs:7:9: warning: unused variable",
+                &[("file:///work/crates/a/src/lib.rs", 0, 22)],
+                &[(Kind::Path, "crates/a/src/lib.rs", true)],
+            ),
+            ("main.go:3:2: undefined: x", &[], &[]),
+            (
+                "See [the docs](https://example.com/docs).",
+                &[("https://example.com/docs", 15, 38)],
+                &[(Kind::Url, "https://example.com/docs", true)],
+            ),
+            (
+                "Read https://example.com/a, then https://example.com/b.",
+                &[
+                    ("https://example.com/a", 5, 25),
+                    ("https://example.com/b", 33, 53),
+                ],
+                &[
+                    (Kind::Url, "https://example.com/a", true),
+                    (Kind::Url, "https://example.com/b", true),
+                ],
+            ),
+            (
+                "(see https://rust-lang.org).",
+                &[("https://rust-lang.org", 5, 25)],
+                &[(Kind::Url, "https://rust-lang.org", true)],
+            ),
+            (
+                "https://en.wikipedia.org/wiki/Foo_(bar),",
+                &[("https://en.wikipedia.org/wiki/Foo_(bar)", 0, 38)],
+                &[(Kind::Url, "https://en.wikipedia.org/wiki/Foo_(bar)", true)],
+            ),
+            (
+                "<https://example.com/x>",
+                &[("https://example.com/x", 1, 21)],
+                &[(Kind::Url, "https://example.com/x", true)],
+            ),
+            (
+                "**https://example.com/bold** and `https://example.com/code`",
+                &[
+                    ("https://example.com/bold", 2, 25),
+                    ("https://example.com/code", 34, 57),
+                ],
+                &[
+                    (Kind::Url, "https://example.com/bold", false),
+                    (Kind::Url, "https://example.com/code", false),
+                ],
+            ),
+            (
+                "curl http://[::1]:8080/health",
+                &[("http://[::1]:8080/health", 5, 28)],
+                &[(Kind::Url, "http://[::1]:8080/health", true)],
+            ),
+            (
+                "open http://[2001:db8::1]/a.",
+                &[("http://[2001:db8::1]/a", 5, 26)],
+                &[(Kind::Url, "http://[2001:db8::1]/a", true)],
+            ),
+            (
+                "Listening on http://127.0.0.1:8080...",
+                &[("http://127.0.0.1:8080", 13, 33)],
+                &[(Kind::Url, "http://127.0.0.1:8080", true)],
+            ),
+            (
+                "Waiting for http://localhost:3000...",
+                &[("http://localhost:3000", 12, 32)],
+                &[(Kind::Url, "http://localhost:3000", true)],
+            ),
+            (
+                "Waiting for http://192.168.1.10:3000...",
+                &[("http://192.168.1.10:3000", 12, 35)],
+                &[(Kind::Url, "http://192.168.1.10:3000", true)],
+            ),
+            (
+                "msg=\"./build.sh failed, see /tmp/build.log\"",
+                &[("file:///tmp/build.log", 28, 41)],
+                &[
+                    (Kind::Path, "./build.sh", false),
+                    (Kind::Path, "/tmp/build.log", true),
+                ],
+            ),
+            (
+                "\"see /tmp/report.pdf\"",
+                &[("file:///tmp/report.pdf", 5, 19)],
+                &[(Kind::Path, "/tmp/report.pdf", true)],
+            ),
+            (
+                "\"src/a.rs: cannot open /tmp/b.txt\"",
+                &[("file:///tmp/b.txt", 23, 32)],
+                &[
+                    (Kind::Path, "src/a.rs", false),
+                    (Kind::Path, "/tmp/b.txt", true),
+                ],
+            ),
+            (
+                "\"src/a.rs uses /tmp/b.txt\"",
+                &[("file:///tmp/b.txt", 15, 24)],
+                &[
+                    (Kind::Path, "src/a.rs", false),
+                    (Kind::Path, "/tmp/b.txt", true),
+                ],
+            ),
+            (
+                "echo \"src/main.rs is fine but /tmp/b.txt is not\"",
+                &[],
+                &[
+                    (Kind::Path, "src/main.rs", false),
+                    (Kind::Path, "/tmp/b.txt", false),
+                ],
+            ),
+            (
+                "cat \"/tmp/report.pdf.\"",
+                &[("file:///tmp/report.pdf", 5, 19)],
+                &[(Kind::Path, "/tmp/report.pdf", true)],
+            ),
+            (
+                "Saved to '/tmp/report.pdf.'",
+                &[("file:///tmp/report.pdf", 10, 24)],
+                &[(Kind::Path, "/tmp/report.pdf", true)],
+            ),
+            (
+                "open \"/Users/me/Desktop/Screenshot 2026-11-26 at 10.00.00\u{202f}AM.png\"",
+                &[(
+                    "file:///Users/me/Desktop/Screenshot%202026-11-26%20at%2010.00.00%E2%80%AFAM.png",
+                    6,
+                    63,
+                )],
+                &[(
+                    Kind::Path,
+                    "/Users/me/Desktop/Screenshot 2026-11-26 at 10.00.00\u{202f}AM.png",
+                    true,
+                )],
+            ),
+            (
+                "[{\"filePath\":\"/Users/me/p/a.ts\"},{\"filePath\":\"/Users/me/p/b.ts\"}]",
+                &[("file:///Users/me/p/b.ts", 46, 61)],
+                &[
+                    (Kind::Path, "/Users/me/p/a.ts", false),
+                    (Kind::Path, "/Users/me/p/b.ts", true),
+                ],
+            ),
+            (
+                "{\"a\":\"x/y\",\"b\":\"/tmp/c.txt\"}",
+                &[("file:///tmp/c.txt", 16, 25)],
+                &[(Kind::Path, "/tmp/c.txt", true)],
+            ),
+            (
+                "{\"msg\":\"a/b\",\"path\":\"/tmp/c.txt\"}",
+                &[("file:///tmp/c.txt", 21, 30)],
+                &[(Kind::Path, "/tmp/c.txt", true)],
+            ),
+            (
+                "{\"reason\":\"compiler-artifact\",\"manifest_path\":\"/Users/me/p/Cargo.toml\",\"src_path\":\"/Users/me/p/src/lib.rs\"}",
+                &[("file:///Users/me/p/src/lib.rs", 83, 104)],
+                &[
+                    (Kind::Path, "/Users/me/p/Cargo.toml", false),
+                    (Kind::Path, "/Users/me/p/src/lib.rs", true),
+                ],
+            ),
+            (
+                "{\"level\":\"info\",\"msg\":\"wrote /tmp/out.pdf\",\"ts\":1}",
+                &[],
+                &[(Kind::Path, "/tmp/out.pdf", false)],
+            ),
+            (
+                "{\"level\":\"info\",\"msg\":\"saved\",\"file\":\"/tmp/out.pdf\"}",
+                &[("file:///tmp/out.pdf", 38, 49)],
+                &[(Kind::Path, "/tmp/out.pdf", true)],
+            ),
+            (
+                "ok src/a.rs,'x' /tmp/c.txt",
+                &[("file:///tmp/c.txt", 16, 25)],
+                &[
+                    (Kind::Path, "src/a.rs", false),
+                    (Kind::Path, "/tmp/c.txt", true),
+                ],
+            ),
+            (
+                "['a/b','c/d.txt']",
+                &[("file:///work/c/d.txt", 8, 14)],
+                &[(Kind::Path, "c/d.txt", true)],
+            ),
+            (
+                "[\"a/b\",\"c/d.txt\"]",
+                &[("file:///work/c/d.txt", 8, 14)],
+                &[(Kind::Path, "c/d.txt", true)],
+            ),
+            (
+                "(\"a/b\",\"c/d.txt\")",
+                &[("file:///work/c/d.txt", 8, 14)],
+                &[(Kind::Path, "c/d.txt", true)],
+            ),
+            (
+                "--include='src/*' /tmp/c.txt",
+                &[("file:///tmp/c.txt", 18, 27)],
+                &[(Kind::Path, "/tmp/c.txt", true)],
+            ),
+            // One shell word, `--include=src/*,/tmp/c.txt`, with a quote in
+            // it: no piece of it opens (main linked /tmp/c.txt).
+            (
+                "--include='src/*',/tmp/c.txt",
+                &[],
+                &[(Kind::Path, "/tmp/c.txt", false)],
+            ),
+            (
+                "x='a/b'&&cat /tmp/c.txt",
+                &[("file:///tmp/c.txt", 13, 22)],
+                &[(Kind::Path, "/tmp/c.txt", true)],
+            ),
+            (
+                "see https://example.com/a...",
+                &[("https://example.com/a", 4, 24)],
+                &[(Kind::Url, "https://example.com/a", true)],
+            ),
+            (
+                "see www.example.com.",
+                &[("https://www.example.com", 4, 18)],
+                &[(Kind::Url, "www.example.com", true)],
+            ),
+            (
+                "src/lib.rs:10:5: note: here",
+                &[("file:///work/src/lib.rs", 0, 14)],
+                &[(Kind::Path, "src/lib.rs", true)],
+            ),
+            // A backslash-escaped quote stays inside its string: the end of
+            // this value is no file of its own (main linked /tmp/report.pdf,
+            // which is not the file the JSON names), while a value after a
+            // string holding escaped quotes still links.
+            (
+                r#"{"file":"docs/a\"b=/tmp/report.pdf"}"#,
+                &[],
+                &[
+                    (Kind::Path, "docs/a", false),
+                    (Kind::Path, "/tmp/report.pdf", false),
+                ],
+            ),
+            (
+                r#"{"msg":"say \"hi\"","file":"/tmp/c.txt"}"#,
+                &[("file:///tmp/c.txt", 28, 37)],
+                &[(Kind::Path, "/tmp/c.txt", true)],
+            ),
+            // Inside a shell's single quotes a backslash is a backslash, so
+            // the `'` after it closes the string, and the later path links.
+            // The string names no drive, which Windows alone would link
+            // (see `a_single_quote_closes_after_a_backslash`), so the line
+            // links the same everywhere.
+            (
+                r#"export A='a\work\';B=/tmp/c.txt"#,
+                &[("file:///tmp/c.txt", 21, 30)],
+                &[(Kind::Path, "/tmp/c.txt", true)],
+            ),
+            // Glued to more text, a `\'` inside single quotes is an escape,
+            // as JavaScript and Python write one, so the string goes on and
+            // its end is no file of its own (main linked /tmp/report.pdf).
+            (
+                r#"{'file':'docs/a\'b=/tmp/report.pdf'}"#,
+                &[],
+                &[
+                    (Kind::Path, "docs/a", false),
+                    (Kind::Path, "/tmp/report.pdf", false),
+                ],
+            ),
+            // A shell-escaped backtick or quote opens no string.
+            (
+                r#"echo \`date\` /tmp/x.log"#,
+                &[("file:///tmp/x.log", 14, 23)],
+                &[(Kind::Path, "/tmp/x.log", true)],
+            ),
+            (
+                r#"x=\'a/b;y=/tmp/x.log"#,
+                &[("file:///tmp/x.log", 10, 19)],
+                &[(Kind::Path, "/tmp/x.log", true)],
+            ),
+            // A quote may start inside a word, as a shell allows, and then
+            // no piece of that word opens (main linked /tmp/report.pdf).
+            (
+                r#"cat prefix'docs/a*b=/tmp/report.pdf'"#,
+                &[],
+                &[
+                    (Kind::Path, "docs/a", false),
+                    (Kind::Path, "/tmp/report.pdf", false),
+                ],
+            ),
+            // A closed string affects nothing after it, even one that closes
+            // right after a space.
+            (
+                r#"echo "hello " src/main.rs"#,
+                &[("file:///work/src/main.rs", 14, 24)],
+                &[(Kind::Path, "src/main.rs", true)],
+            ),
+        ];
+        for &(line, links, hints) in corpus {
+            let term = term_fed(240, 1, line.as_bytes());
+            let found = links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| (link.uri, link.start_col, link.end_col))
+                .collect::<Vec<_>>();
+            let want = links
+                .iter()
+                .map(|&(uri, start, end)| (uri.to_string(), start, end))
+                .collect::<Vec<_>>();
+            assert_eq!(found, want, "links in {line:?}");
+            let spans = crate::hints::detect_rows(term.grid(), &[0], 240)
+                .into_iter()
+                .map(|span| (span.kind, span.text, span.bounded))
+                .collect::<Vec<_>>();
+            let want = hints
+                .iter()
+                .map(|&(kind, text, bounded)| (kind, text.to_string(), bounded))
+                .collect::<Vec<_>>();
+            assert_eq!(spans, want, "hints in {line:?}");
+        }
+        // A macOS screenshot name, with the narrow no-break space before
+        // AM: its file URL, as Preview copied file and ls --hyperlink use
+        // it, and a web link spelling it.
+        let name = "/Users/me/Desktop/Screenshot 2026-11-26 at 10.00.00\u{202f}AM.png";
+        let url = "file:///Users/me/Desktop/Screenshot%202026-11-26%20at%2010.00.00%E2%80%AFAM.png";
+        assert_eq!(
+            super::file_url_for_path(std::path::Path::new(name)).as_deref(),
+            Some(url)
+        );
+        assert!(is_safe_url(url));
+        #[cfg(unix)]
+        assert_eq!(
+            super::local_file_path(url),
+            Some(std::path::PathBuf::from(name))
+        );
+        assert!(is_safe_url(
+            "https://x.test/Screenshot%2010.00.00%E2%80%AFAM.png"
+        ));
+    }
+
+    /// A closing bracket that pairs with an open before it ends the link,
+    /// whatever stray close came earlier in the query.
+    #[test]
+    fn a_paired_closing_bracket_stays_in_the_link() {
+        let term = term_with(30, &["see https://x.test/a)b(c) end"], &[]);
+        let found = links(&term);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].uri, "https://x.test/a)b(c)");
     }
 
     #[test]
@@ -1078,10 +1977,14 @@ mod tests {
             let term = term_with(80, &[line], &[]);
             assert!(links_with_cwd(&term, Some("/work")).is_empty(), "{line}");
         }
+        // A relative path after a space inside quotes may be a piece of a
+        // quoted name, so it links nothing; one from a root links.
         let term = term_with(80, &["\"see src/main.rs\""], &[]);
+        assert!(links_with_cwd(&term, Some("/work")).is_empty());
+        let term = term_with(80, &["\"see /tmp/main.rs\""], &[]);
         let found = links_with_cwd(&term, Some("/work"));
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].uri, "file:///work/src/main.rs");
+        assert_eq!(found[0].uri, "file:///tmp/main.rs");
     }
 
     #[test]
@@ -1167,6 +2070,16 @@ mod tests {
             "payload.exe::$DATA",
             "notes.txt:payload.exe",
             ".exe",
+            // A program stream, typed or not.
+            "notes.txt:payload.exe::$DATA",
+            "notes.txt:payload.bat::$DATA",
+            "report.pdf:setup.msi::$DATA",
+            "notes.txt:PAYLOAD.EXE::$DATA",
+            "notes.txt:tool.ps1::$DATA",
+            "a.txt:b.exe::$DATA",
+            "notes.txt:payload.exe.::$DATA",
+            "notes.txt:payload.exe::$DATA ",
+            "notes.txt:payload.lnk:$DATA",
         ] {
             assert!(program(name), "{name}");
         }
@@ -1180,6 +2093,10 @@ mod tests {
             "archive.tar.gz",
             "exe",
             "notes:2.txt",
+            "notes.txt:Zone.Identifier",
+            "notes.txt:Zone.Identifier:$DATA",
+            "photo.jpg:payload.txt::$DATA",
+            "notes.txt::$DATA",
         ] {
             assert!(!program(name), "{name}");
         }
@@ -1291,14 +2208,909 @@ mod tests {
             "{:?}",
             found("scp \"h:/srv/my report.pdf\" .")
         );
-        assert_eq!(
-            found("\"see src/main.rs\""),
-            [(5, 15, "file:///home/me/proj/src/main.rs".to_string())]
-        );
+        // A relative path after a space inside quotes may be a piece of a
+        // quoted name holding a space, so it links nothing.
+        assert!(found("\"see src/main.rs\"").is_empty());
         // A climb stays refused inside quotes too, and no piece of the
         // refused path links on its own.
         assert!(found("\"../up here/a.txt\"").is_empty());
         assert!(found("\"../my dir/etc/hosts.txt\"").is_empty());
+    }
+
+    /// A dotfile's name is its extension: a quoted path ending in one links
+    /// whole, and a two-part relative path to one links like `src/main.rs`.
+    #[test]
+    fn a_path_ending_in_a_dotfile_is_a_link() {
+        for (line, uri) in [
+            (
+                "open \"docs/my dir/.env\" now",
+                "file:///work/docs/my%20dir/.env",
+            ),
+            (
+                "open \"docs/annual report/.gitignore\" now",
+                "file:///work/docs/annual%20report/.gitignore",
+            ),
+            ("see docs/.env ok", "file:///work/docs/.env"),
+            ("see x/.a ok", "file:///work/x/.a"),
+            ("see a/b/.env ok", "file:///work/a/b/.env"),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert_eq!(found.len(), 1, "{line}: {found:?}");
+            assert_eq!(found[0].uri, uri, "{line}");
+        }
+        for line in ["see docs/. ok", "see docs/.. ok", "see and/.5 ok"] {
+            assert_eq!(
+                path_candidates(line, &crate::hints::Quotes::read(line)).count(),
+                0,
+                "{line}"
+            );
+        }
+    }
+
+    /// A segment naming a parent once decoded in another word of quoted
+    /// text leaves a later path whole; joined to the path, or with a hidden
+    /// character anywhere in the quoted text, no piece links.
+    #[test]
+    fn quoted_text_decides_whether_a_later_path_links() {
+        let found = |line: &str| {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>()
+        };
+        let line = "\"Compare docs/%2e%2e/old.txt with /tmp/report.pdf\"";
+        assert_eq!(found(line), ["file:///tmp/report.pdf"], "{line}");
+        for line in [
+            "\"docs/%2e%2e/a?=/tmp/report.pdf\"",
+            "\"Compare docs/a\u{200b}b.txt with /tmp/report.pdf\"",
+        ] {
+            assert!(found(line).is_empty(), "{line}: {:?}", found(line));
+        }
+        // A visible space is a space: the quoted name links whole.
+        assert_eq!(
+            found("\"docs/old\u{a0}dir name/x.txt\""),
+            ["file:///work/docs/old%C2%A0dir%20name/x.txt"]
+        );
+    }
+
+    /// Inside quotes, every visible space is a space: the quoted path links
+    /// whole, as with an ASCII space, and a rooted tail of it does not.
+    #[test]
+    fn a_quoted_path_with_a_visible_space_links_whole() {
+        let found = |line: &str| {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| (link.uri, link.start_col, link.end_col))
+                .collect::<Vec<_>>()
+        };
+        // The line with `c` for each space inside its quotes.
+        let inside = |line: &str, c: char| {
+            let (open, close) = (line.find('"').unwrap(), line.rfind('"').unwrap());
+            let quoted = line[open..close].replace(' ', &c.to_string());
+            format!("{}{quoted}{}", &line[..open], &line[close..])
+        };
+        for (c, escaped) in [
+            ('\u{a0}', "%C2%A0"),
+            ('\u{202f}', "%E2%80%AF"),
+            ('\u{3000}', "%E3%80%80"),
+        ] {
+            for line in [
+                "open \"/tmp/a b.png\" now",
+                "\"docs/a b=/tmp/report.pdf\"",
+                "open \"/tmp/my dir/report.pdf.\" now",
+            ] {
+                let visible = inside(line, c);
+                let ascii = found(line);
+                let links = found(&visible)
+                    .into_iter()
+                    .map(|(uri, start, end)| (uri.replace(escaped, "%20"), start, end))
+                    .collect::<Vec<_>>();
+                assert_eq!(links, ascii, "U+{:04X} in {visible:?}", u32::from(c));
+            }
+        }
+        assert_eq!(
+            found("\"docs/a\u{a0}b=/tmp/report.pdf\""),
+            [(
+                "file:///work/docs/a%C2%A0b%3D/tmp/report.pdf".to_string(),
+                1,
+                24
+            )]
+        );
+    }
+
+    /// Quoted prose that starts with a path still links a later path from a
+    /// root; a relative piece of a quoted name does not.
+    #[test]
+    fn quoted_prose_starting_with_a_path_links_a_rooted_one() {
+        for (line, uri) in [
+            (
+                "msg=\"./build.sh failed, see /tmp/build.log\"",
+                "file:///tmp/build.log",
+            ),
+            ("\"src/a.rs uses /tmp/b.txt\"", "file:///tmp/b.txt"),
+            ("\"src/a.rs: cannot open /tmp/b.txt\"", "file:///tmp/b.txt"),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>();
+            assert_eq!(found, [uri], "{line}");
+        }
+    }
+
+    /// A backslash-escaped quote is text inside its string: the end of a
+    /// JSON value holding one is no file of its own, and a value after a
+    /// string that holds one still links.
+    #[test]
+    fn an_escaped_quote_stays_inside_its_string() {
+        let found = |line: &str| {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>()
+        };
+        for line in [
+            r#"{"file":"docs/a\"b=/tmp/report.pdf"}"#,
+            r#""docs/a\"b=/tmp/report.pdf""#,
+        ] {
+            assert!(found(line).is_empty(), "{line}: {:?}", found(line));
+        }
+        for line in [
+            r#"{"msg":"say \"hi\"","file":"/tmp/c.txt"}"#,
+            r#"{"msg":"a\\","file":"/tmp/c.txt"}"#,
+        ] {
+            assert_eq!(found(line), ["file:///tmp/c.txt"], "{line}");
+        }
+    }
+
+    /// Inside a shell's single quotes a backslash is a backslash, so the
+    /// next `'` closes the string and a later path on the line links. Only
+    /// Windows reads `C:\work\` as a drive's folder, which links there; on
+    /// any other system a backslash is part of a name and no separator.
+    #[test]
+    fn a_single_quote_closes_after_a_backslash() {
+        let drive: &[&str] = if cfg!(windows) {
+            &["file:///C:/work/", "file:///tmp/c.txt"]
+        } else {
+            &["file:///tmp/c.txt"]
+        };
+        for (line, want) in [
+            (r#"export A='C:\work\';B=/tmp/c.txt"#, drive),
+            (r#"export A='a\work\';B=/tmp/c.txt"#, &["file:///tmp/c.txt"]),
+            (r#"x='a\';y=/tmp/c.txt"#, &["file:///tmp/c.txt"]),
+        ] {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>();
+            assert_eq!(found, want, "{line}");
+        }
+    }
+
+    /// A `\'` inside single quotes closes them only at a shell token
+    /// boundary; glued to more text it is an escape and the string goes on,
+    /// so its end is no file of its own. An escaped quote outside a string
+    /// opens none.
+    #[test]
+    fn an_escaped_single_quote_closes_only_at_a_shell_boundary() {
+        let found = |line: &str| {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>()
+        };
+        for line in [
+            r#"{'file':'docs/a\'b=/tmp/report.pdf'}"#,
+            r#"x='docs/a\'b=/tmp/report.pdf'"#,
+            r#"x='a\'/tmp/report.pdf'"#,
+        ] {
+            assert!(found(line).is_empty(), "{line}: {:?}", found(line));
+        }
+        for (line, uri) in [
+            (
+                r#"{'msg':'it\'s','file':'/tmp/c.txt'}"#,
+                "file:///tmp/c.txt",
+            ),
+            (r#"x=\'a/b;y=/tmp/x.log"#, "file:///tmp/x.log"),
+            (r#"x=\`a/b;y=/tmp/x.log"#, "file:///tmp/x.log"),
+            (r#"echo \`date\` /tmp/x.log"#, "file:///tmp/x.log"),
+        ] {
+            assert_eq!(found(line), [uri], "{line}");
+        }
+    }
+
+    /// An apostrophe inside a word (`can't`, `it's`, `users'`) opens no
+    /// quoted string, so the JSON quotes after it are read as they are: the
+    /// tail of a quoted name with a space is no file of its own.
+    #[test]
+    fn an_apostrophe_in_a_word_opens_no_quote() {
+        let found = |line: &str| {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>()
+        };
+        for line in [
+            r#"can't open {"file":"/Users/me/my app/x.py"}"#,
+            r#"it's in {"file":"/Users/me/my app/x.py"}"#,
+            r#"the users' {"file":"/Users/me/my app/x.py"}"#,
+            r#"don't 7'x {"file":"docs/my dir/a/b"}"#,
+        ] {
+            assert!(found(line).is_empty(), "{line}: {:?}", found(line));
+        }
+        for (line, uri) in [
+            (
+                r#"can't open {"file":"/Users/me/x.py"}"#,
+                "file:///Users/me/x.py",
+            ),
+            (r#"it's at '/tmp/x.log'"#, "file:///tmp/x.log"),
+        ] {
+            assert_eq!(found(line), [uri], "{line}");
+        }
+    }
+
+    /// A relative path with a quote after it in its word, one after a quote
+    /// no quote closes, or a piece of a string (another kind of quote or an
+    /// escaped one inside it is its text) links nothing. A path from a root
+    /// that starts its word still links, and one after a closed string is
+    /// its own.
+    #[test]
+    fn an_uncertain_quote_leaves_only_rooted_tokens_openable() {
+        let found = |line: &str| {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>()
+        };
+        for line in [
+            r#"a "b "c/d x/y.txt" e"#,
+            r#"it 'oops {"file":"docs/my dir/a/b"}"#,
+            r#"x="a\"b c/d.txt""#,
+            r#"x='a"b c/d.txt'"#,
+        ] {
+            assert!(found(line).is_empty(), "{line}: {:?}", found(line));
+        }
+        for (line, uri) in [
+            (r#"x='a"b /tmp/x.log'"#, "file:///tmp/x.log"),
+            (r#"a "b "c/d /tmp/x.log" e"#, "file:///tmp/x.log"),
+            (r#"echo "a b" c/d.txt "x""#, "file:///work/c/d.txt"),
+            (r#"see src/x.rs, it's fine"#, "file:///work/src/x.rs"),
+        ] {
+            assert_eq!(found(line), [uri], "{line}");
+        }
+    }
+
+    /// A quote that never closes may put every string on its line out of
+    /// step, before it as after it, so the whole line is uncertain: only a
+    /// path from a root that starts its word opens, and a relative path or a
+    /// quoted one is copied. An apostrophe that could close a string
+    /// (`users'`) that no later `'` closes at a token's end counts as one,
+    /// while one inside a word (`can't`) does not, and so does a string that
+    /// runs on into its word after it closes, as two strays make one.
+    #[test]
+    fn a_quote_that_never_closes_leaves_the_whole_line_uncertain() {
+        let none: &[&str] = &[];
+        for (line, links, hints) in [
+            // A stray quote before the path pairs with the string's opening
+            // quote and leaves its closing one open.
+            (r#"x 'tis A='/Users/me/a b/notes/my dir.txt'"#, none, none),
+            (r#"the "quoted x="~/Q3 final/a b/notes""#, none, none),
+            (
+                r#"x 'tis {'file':'docs/my app/x.py'} src/ok.rs:3"#,
+                none,
+                none,
+            ),
+            // Two stray quotes, or one and an apostrophe, pair up and leave
+            // no quote open, but the string they make runs on into its word.
+            (
+                r#"the "quoted x="~/Q3 final/a b/notes" the "quoted"#,
+                none,
+                none,
+            ),
+            (r#"x 'tis don't A='./a b/c d.pdf'"#, none, none),
+            (r#"cp "$src"/a.txt src/ok.rs:3"#, none, none),
+            (
+                r#"cp "$src"/a.txt /tmp/ok.log"#,
+                &["file:///tmp/ok.log"][..],
+                &["/tmp/ok.log"][..],
+            ),
+            // A stray quote after the path makes it uncertain too.
+            (r#"src/ok.rs:3 x="a b" it 'oops"#, none, none),
+            (r#"open "docs/my file.txt" the "quoted"#, none, none),
+            (
+                r#"/tmp/ok.log x="a b" it 'oops"#,
+                &["file:///tmp/ok.log"][..],
+                &["/tmp/ok.log"][..],
+            ),
+            (
+                r#"x 'tis (/tmp/ok.log)"#,
+                &["file:///tmp/ok.log"][..],
+                &["/tmp/ok.log"][..],
+            ),
+            (r#"the users' copy of src/ok.rs"#, none, none),
+            (
+                r#"the users' copy of /tmp/ok.log"#,
+                &["file:///tmp/ok.log"][..],
+                &["/tmp/ok.log"][..],
+            ),
+            (
+                r#"can't open src/ok.rs"#,
+                &["file:///work/src/ok.rs"][..],
+                &["src/ok.rs"][..],
+            ),
+        ] {
+            let (found, offered) = opened(line);
+            assert_eq!(found, links, "links in {line}");
+            assert_eq!(offered, hints, "hints in {line}");
+        }
+    }
+
+    /// A quoted message listing many paths is read in linear time: what a
+    /// path needs to know about its string is found once per line, not
+    /// once per path in it.
+    #[test]
+    fn a_long_quoted_list_of_paths_is_read_once() {
+        let mut line = String::from("echo \"");
+        for _ in 0..2000 {
+            line.push_str("/tmp/a.txt ");
+        }
+        line.push_str("/tmp/b.txt\"");
+        crate::hints::HIDES_SCANNED.with(|scanned| scanned.set(0));
+        let term = term_with(line.len(), &[line.as_str()], &[]);
+        let found = links_with_cwd(&term, Some("/work"));
+        let spans = crate::hints::detect(&[line.as_str()]);
+        let scanned = crate::hints::HIDES_SCANNED.with(std::cell::Cell::get);
+        // Each of the two reads searches the string once.
+        assert!(
+            scanned <= 2 * line.len(),
+            "searched {scanned} bytes of a {}-byte line",
+            line.len()
+        );
+        assert_eq!(
+            found
+                .iter()
+                .map(|link| link.uri.as_str())
+                .collect::<Vec<_>>(),
+            ["file:///tmp/b.txt"]
+        );
+        assert_eq!(spans.iter().filter(|span| span.bounded).count(), 1);
+    }
+
+    /// The links on `line`, resolved against `/work`, and the paths quick
+    /// select may open there.
+    fn opened(line: &str) -> (Vec<String>, Vec<String>) {
+        let term = term_with(line.chars().count(), &[line], &[]);
+        let links = links_with_cwd(&term, Some("/work"))
+            .into_iter()
+            .map(|link| link.uri)
+            .collect();
+        let hints = crate::hints::detect(&[line])
+            .into_iter()
+            .filter(|span| span.bounded)
+            .map(|span| span.text)
+            .collect();
+        (links, hints)
+    }
+
+    /// A relative path after a space inside a quoted string may be a piece
+    /// of a quoted name holding a space, which quoted prose cannot be told
+    /// from, so neither a link nor quick select opens it. A path outside the
+    /// string, or one from a root that ends it, still opens, and an
+    /// apostrophe inside a word pairs with nothing.
+    #[test]
+    fn a_quoted_name_holding_a_space_opens_no_piece() {
+        let none: &[&str] = &[];
+        for (line, links, hints) in [
+            (
+                r#"export Z="a b/notes.txt" src/ok.rs:3"#,
+                &["file:///work/src/ok.rs"][..],
+                &["src/ok.rs"][..],
+            ),
+            (r#"{'msg':'x','file':'Q3 final/Q3 final.pdf'}"#, none, none),
+            (
+                r#"msg="failed to read /etc/app.toml""#,
+                &["file:///etc/app.toml"][..],
+                &["/etc/app.toml"][..],
+            ),
+            // An apostrophe inside a word pairs with no quote after it, but
+            // a quote that never closes leaves the whole line uncertain.
+            (r#"it's in src/a.rs 'cause"#, none, none),
+            (
+                r#"it's in /tmp/a.rs 'cause"#,
+                &["file:///tmp/a.rs"][..],
+                &["/tmp/a.rs"][..],
+            ),
+            (
+                r#"I've updated 'foo' in src/a.rs, and it's done"#,
+                &["file:///work/src/a.rs"][..],
+                &["src/a.rs"][..],
+            ),
+        ] {
+            let (found, offered) = opened(line);
+            assert_eq!(found, links, "links in {line}");
+            assert_eq!(offered, hints, "hints in {line}");
+        }
+    }
+
+    /// Quotes are read as a shell reads them. A quote that starts inside a
+    /// word, as a shell allows, makes every piece of that word copy-only:
+    /// the word names one file, and a shell joins the quoted text to the
+    /// rest (`prefix"a.txt"` is `prefixa.txt`). A string that closed, even
+    /// right after a space or a colon, affects nothing after it.
+    #[test]
+    fn a_shell_word_decides_what_opens() {
+        let none: &[&str] = &[];
+        for (line, links, hints) in [
+            (r#"cat prefix'docs/a*b=/tmp/report.pdf'"#, none, none),
+            (r#"cat prefix'./my app/annual report.py'"#, none, none),
+            (r#"cp a"docs/a.txt"b ."#, none, none),
+            (r#"x=pre"/tmp/a b/c.txt""#, none, none),
+            (r#"x=pre"docs/a.txt""#, none, none),
+            (r#"cat "a b"x/y.txt"#, none, none),
+            // A closed string glued to more of its word keeps the word quoted:
+            // a shell reads `prefix=/tmp/report.pdf`, so nothing opens.
+            (r#"cat pre"fix"=/tmp/report.pdf"#, none, none),
+            (r#"x"y":/tmp/r.pdf"#, none, none),
+            (r#"cat "fix",src/lib.rs"#, none, none),
+            (r#"cat pre'docs/my app/a b.py':./x.txt"#, none, none),
+            (
+                r#"cat pre'docs/my app/a b.py':./x.txt the users' copy"#,
+                none,
+                none,
+            ),
+            // A contraction pairs with no quote a word runs on from, nor
+            // with the next string's opening one.
+            (
+                r#"don't touch src/ok.rs; cat prefix'./my app/a.txt'"#,
+                &["file:///work/src/ok.rs"][..],
+                &["src/ok.rs"][..],
+            ),
+            (
+                r#"it's printf '%s\n' src/ok.rs"#,
+                &["file:///work/src/ok.rs"][..],
+                &["src/ok.rs"][..],
+            ),
+            // A `(` glued to a closed string keeps the word quoted too.
+            (r#"a'b'(/tmp/r.pdf"#, none, none),
+            (r#"a"b"(/tmp/r.pdf)"#, none, none),
+            // A shell's separator ends the word, so what follows it is a word
+            // of its own.
+            (
+                r#"key="a/b";other=/tmp/c.txt"#,
+                &["file:///tmp/c.txt"][..],
+                &["/tmp/c.txt"][..],
+            ),
+            (
+                r#"export A='a\work\';B=/tmp/c.txt"#,
+                &["file:///tmp/c.txt"][..],
+                &["/tmp/c.txt"][..],
+            ),
+            (
+                r#"x="a b"|cat /tmp/r.pdf"#,
+                &["file:///tmp/r.pdf"][..],
+                &["/tmp/r.pdf"][..],
+            ),
+            (
+                r#"echo "hello " src/main.rs"#,
+                &["file:///work/src/main.rs"][..],
+                &["src/main.rs"][..],
+            ),
+            (
+                r#"x='a b' /tmp/ok.log"#,
+                &["file:///tmp/ok.log"][..],
+                &["/tmp/ok.log"][..],
+            ),
+            (
+                r#"{"msg":"failed: "} ./run.sh"#,
+                &["file:///work/run.sh"][..],
+                &["./run.sh"][..],
+            ),
+            (
+                r#"{"msg":"saved: ","file":"/tmp/c.txt"}"#,
+                &["file:///tmp/c.txt"][..],
+                &["/tmp/c.txt"][..],
+            ),
+            (
+                r#"rg 'foo ' src/main.rs"#,
+                &["file:///work/src/main.rs"][..],
+                &["src/main.rs"][..],
+            ),
+            (
+                r#"rg foo' ' /abs/src/main.rs"#,
+                &["file:///abs/src/main.rs"][..],
+                &["/abs/src/main.rs"][..],
+            ),
+            // Text between an apostrophe and a later `'` a shell would close
+            // it at may be quoted or not: a path from a root starting a word
+            // still opens there.
+            (
+                r#"can't open {"msg":"failed: "} /tmp/ok.log 5' tall"#,
+                &["file:///tmp/ok.log"][..],
+                &["/tmp/ok.log"][..],
+            ),
+        ] {
+            let (found, offered) = opened(line);
+            assert_eq!(found, links, "links in {line}");
+            assert_eq!(offered, hints, "hints in {line}");
+        }
+    }
+
+    /// Lines composed at random from prose with apostrophes, compact JSON
+    /// in double or single quotes whose values hold spaces, folders, escaped
+    /// quotes and paths after them, shell assignments in either quote, words
+    /// a shell quote starts inside (`prefix'…'`, `a"…"b`) or a closed string
+    /// is glued into (`pre"fix"=/tmp/r.pdf`), paths standing
+    /// alone after closed strings, and stray quotes anywhere. No link, nor
+    /// any hint quick select may open, lies inside a quoted value unless it
+    /// is the whole value, or inside a word a quote starts in. On a line
+    /// holding a quote that never closes, as a lone stray quote at its end
+    /// always leaves, only a path from a root that starts its word opens. On
+    /// a line with no stray quote, no apostrophe ending a word and no string
+    /// running on into its word (`a"…"b`), every path standing on its own
+    /// links and may be opened. Seeded, so a failure repeats.
+    #[test]
+    fn quoted_values_and_words_open_whole_or_not_at_all() {
+        struct Rng(u64);
+        impl Rng {
+            fn pick(&mut self, n: usize) -> usize {
+                self.0 ^= self.0 << 13;
+                self.0 ^= self.0 >> 7;
+                self.0 ^= self.0 << 17;
+                (self.0 % n as u64) as usize
+            }
+        }
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        let inside = [
+            "can't open",
+            "it's in",
+            "don't",
+            "Bob's",
+            "see",
+            "error:",
+            "ok",
+        ];
+        let ending = ["the users' copy", "5' tall"];
+        let unclosed = ["x 'tis", "the \"quoted"];
+        let names = [
+            "my app",
+            "annual report",
+            "a b",
+            "notes",
+            "my dir",
+            "x",
+            "src",
+            "Q3 final",
+        ];
+        let extensions = ["", ".py", ".txt", ".pdf", ".tar.gz"];
+        let roots = ["/Users/me/", "docs/", "", "~/", "./"];
+        let tails = ["/tmp/report.pdf", "src/lib.rs", "/etc/x.conf"];
+        let others = [
+            "https://x.test/a",
+            "application/json",
+            "2026/11/26",
+            "it's a/b",
+            "x 0.1.0",
+            "/work",
+        ];
+        let alone = ["/tmp/ok.log", "src/ok.rs:3", "./run.sh", "docs/notes.txt"];
+        let before_alone = [
+            "echo \"hello \"",
+            "x='a b'",
+            "{\"msg\":\"failed: \"}",
+            "printf '%s\\n' \"a b\"",
+        ];
+        // A quoted value, escaped for the quote `quote` it sits in.
+        let value = |rng: &mut Rng, quote: char, path: bool| {
+            if !path {
+                return others[rng.pick(others.len())].replace(quote, &format!("\\{quote}"));
+            }
+            let mut value = roots[rng.pick(roots.len())].to_string();
+            for part in 0..1 + rng.pick(3) {
+                if part > 0 {
+                    value.push('/');
+                }
+                value.push_str(names[rng.pick(names.len())]);
+            }
+            value.push_str(extensions[rng.pick(extensions.len())]);
+            if rng.pick(4) == 0 {
+                value.push('\\');
+                value.push(quote);
+                value.push_str("b=");
+                value.push_str(tails[rng.pick(tails.len())]);
+            }
+            value
+        };
+        for _ in 0..4000 {
+            let mut line = String::new();
+            // Stray quotes placed, and other items that may leave the line
+            // uncertain: apostrophes ending a word and run-on strings.
+            let mut strays = 0;
+            let mut muddled = 0;
+            let mut last_stray = false;
+            // Quoted values, which may open only whole; words a quote starts
+            // inside, no piece of which may open; paths on their own, which
+            // must.
+            let mut values: Vec<(usize, usize)> = Vec::new();
+            let mut words: Vec<(usize, usize)> = Vec::new();
+            let mut paths: Vec<usize> = Vec::new();
+            let record = |line: &mut String, spans: &mut Vec<(usize, usize)>, text: &str| {
+                spans.push((line.len(), line.len() + text.len()));
+                line.push_str(text);
+            };
+            for item in 0..1 + rng.pick(4) {
+                if item > 0 {
+                    line.push(' ');
+                }
+                last_stray = false;
+                match rng.pick(6) {
+                    0 if rng.pick(4) == 0 => {
+                        muddled += 1;
+                        line.push_str(ending[rng.pick(ending.len())]);
+                    }
+                    0 => line.push_str(inside[rng.pick(inside.len())]),
+                    1 => {
+                        // JSON, compact, with double or single quotes.
+                        let q = if rng.pick(3) == 0 { '\'' } else { '"' };
+                        line.push('{');
+                        for pair in 0..1 + rng.pick(3) {
+                            if pair > 0 {
+                                line.push(',');
+                            }
+                            line.push(q);
+                            line.push_str(["file", "cwd", "msg", "path"][rng.pick(4)]);
+                            line.push(q);
+                            line.push(':');
+                            line.push(q);
+                            let path = rng.pick(3) != 0;
+                            let text = value(&mut rng, q, path);
+                            record(&mut line, &mut values, &text);
+                            line.push(q);
+                        }
+                        line.push('}');
+                    }
+                    2 => {
+                        // A shell assignment or option, and maybe another
+                        // assignment after its closed string.
+                        let q = if rng.pick(2) == 0 { '\'' } else { '"' };
+                        line.push_str(["x=", "export Z=", "--out=", "A="][rng.pick(4)]);
+                        line.push(q);
+                        let text = value(&mut rng, q, true);
+                        record(&mut line, &mut values, &text);
+                        line.push(q);
+                        if rng.pick(3) == 0 {
+                            line.push_str(";B=");
+                            paths.push(line.len());
+                            line.push_str("/tmp/ok.log");
+                        }
+                    }
+                    3 if rng.pick(2) == 0 => {
+                        // A closed string glued to more of its word, then a
+                        // path: one shell word (`pre"fix"=/tmp/r.pdf`).
+                        let q = if rng.pick(3) == 0 { '\'' } else { '"' };
+                        let head = ["pre", "x", "a", ""][rng.pick(4)];
+                        let glue = ["=", ":", ","][rng.pick(3)];
+                        let path = ["/tmp/report.pdf", "src/lib.rs", "./x.txt"][rng.pick(3)];
+                        line.push_str(["cat ", "", "ls "][rng.pick(3)]);
+                        let text = value(&mut rng, q, true);
+                        let start = line.len();
+                        line.push_str(&format!("{head}{q}{text}{q}{glue}{path}"));
+                        if head.is_empty() {
+                            // At a word's start the string may be a JSON
+                            // value, whose text opens whole; what follows it
+                            // in the word may not.
+                            let text_start = start + 1;
+                            values.push((text_start, text_start + text.len()));
+                            words.push((text_start + text.len() + 1, line.len()));
+                        } else {
+                            words.push((start, line.len()));
+                        }
+                        // After a letter a `'` that a word goes on after may be
+                        // an apostrophe, which may leave the line uncertain.
+                        muddled += usize::from(q == '\'' && !head.is_empty());
+                    }
+                    3 => {
+                        // A word a quote starts inside, as a shell allows.
+                        let (command, head, q, tail) = [
+                            ("cat ", "prefix", '\'', ""),
+                            ("cp ", "a", '"', "b"),
+                            ("", "x=pre", '"', ""),
+                            ("ls ", "dir/", '\'', ""),
+                        ][rng.pick(4)];
+                        line.push_str(command);
+                        let text = format!("{head}{q}{}{q}{tail}", value(&mut rng, q, true));
+                        record(&mut line, &mut words, &text);
+                        // A string that runs on into its word leaves the line
+                        // uncertain, as a stray quote may.
+                        muddled += usize::from(!tail.is_empty());
+                    }
+                    4 => {
+                        // A path on its own after a closed string.
+                        line.push_str(before_alone[rng.pick(before_alone.len())]);
+                        line.push(' ');
+                        paths.push(line.len());
+                        line.push_str(alone[rng.pick(alone.len())]);
+                    }
+                    5 if rng.pick(3) == 0 => {
+                        strays += 1;
+                        last_stray = true;
+                        line.push_str(unclosed[rng.pick(unclosed.len())]);
+                    }
+                    _ => {
+                        paths.push(line.len());
+                        line.push_str(alone[rng.pick(alone.len())]);
+                    }
+                }
+            }
+            // Inside a value but not all of it, or anywhere inside a word a
+            // quote starts in (`end` is the last column).
+            let piece = |start: usize, end: usize| {
+                values
+                    .iter()
+                    .any(|&(vs, ve)| start >= vs && end < ve && (start, end + 1) != (vs, ve))
+                    || words.iter().any(|&(ws, we)| start >= ws && end < we)
+            };
+            let term = term_with(line.len(), &[line.as_str()], &[]);
+            let links = links_with_cwd(&term, Some("/work"));
+            for link in &links {
+                assert!(
+                    !piece(link.start_col, link.end_col),
+                    "{line:?} links a piece of a quoted value or word: {link:?}"
+                );
+            }
+            let spans = crate::hints::detect(&[line.as_str()]);
+            for span in &spans {
+                let opens = span.kind == crate::hints::Kind::Url || span.bounded;
+                assert!(
+                    !(opens && piece(span.start, span.end)),
+                    "{line:?} offers a piece of a quoted value or word to open: {span:?}"
+                );
+            }
+            let certain = crate::hints::Quotes::read(&line).certain();
+            // A lone stray quote at the end leaves it open. One earlier may
+            // pair with a later quote, as a shell would pair it.
+            assert!(
+                !(strays == 1 && last_stray) || !certain,
+                "{line:?} reads a stray quote as closed"
+            );
+            if !certain {
+                // From a root, at its word's start or after one `=`, `:`,
+                // `(`, `[` or `{` that is.
+                let clean = |start: usize| {
+                    let before = line[..start].chars().next_back();
+                    let lead = |at: usize| {
+                        line[..at]
+                            .chars()
+                            .next_back()
+                            .is_none_or(char::is_whitespace)
+                    };
+                    ["/", "~/", "./", "../"]
+                        .iter()
+                        .any(|root| line[start..].starts_with(root))
+                        && (lead(start)
+                            || (before.is_some_and(|c| "=:([{".contains(c)) && lead(start - 1)))
+                };
+                for link in links.iter().filter(|link| {
+                    link.uri.starts_with("file://") && !line[link.start_col..].starts_with("http")
+                }) {
+                    assert!(
+                        clean(link.start_col),
+                        "{line:?} leaves a quote open but links {link:?}"
+                    );
+                }
+                for span in spans
+                    .iter()
+                    .filter(|span| span.kind == crate::hints::Kind::Path && span.bounded)
+                {
+                    assert!(
+                        clean(span.start),
+                        "{line:?} leaves a quote open but offers {span:?} to open"
+                    );
+                }
+            }
+            if strays + muddled > 0 {
+                continue;
+            }
+            for &start in &paths {
+                assert!(
+                    links.iter().any(|link| link.start_col == start),
+                    "{line:?} does not link the path at {start}: {links:?}"
+                );
+                assert!(
+                    spans.iter().any(|span| span.start == start && span.bounded),
+                    "{line:?} does not offer the path at {start} to open: {spans:?}"
+                );
+            }
+        }
+    }
+
+    /// Compact JSON closes each string before the next opens, so a later
+    /// value's path links whatever an earlier value held.
+    #[test]
+    fn a_compact_json_path_links_after_any_earlier_value() {
+        for (line, uri) in [
+            (
+                "{\"cwd\":\"/work\",\"file\":\"/Users/me/x.py\"}",
+                "file:///Users/me/x.py",
+            ),
+            (
+                "{\"type\":\"application/json\",\"file\":\"/tmp/c.txt\"}",
+                "file:///tmp/c.txt",
+            ),
+            (
+                "{\"date\":\"2026/11/26\",\"file\":\"/tmp/c.txt\"}",
+                "file:///tmp/c.txt",
+            ),
+            ("key=\"a/b\";other=/tmp/c.txt", "file:///tmp/c.txt"),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>();
+            assert_eq!(found, [uri], "{line}");
+        }
+    }
+
+    /// Quotes around one path-shaped token the quoted pattern rejects leave
+    /// no piece of it linked as a file of its own; a path after a space in
+    /// quoted prose, or unquoted, still links.
+    #[test]
+    fn the_end_of_a_quoted_path_token_does_not_link() {
+        let found = |line: &str| {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>()
+        };
+        for line in [
+            "\"docs/\u{b2}www.example.com.txt#file=/tmp/report.pdf\"",
+            "\"docs/a*b=/tmp/report.pdf\"",
+            "host:\"docs/a*b=/tmp/report.pdf\"",
+            "host:\"docs/a'b*=/tmp/report.pdf\"",
+            "open \"docs/my dir/a/b\"",
+            "{\"file\":\"/Users/me/my app/x.py\"}",
+        ] {
+            assert!(found(line).is_empty(), "{line}: {:?}", found(line));
+        }
+        for line in ["file=/tmp/report.pdf", "\"see /tmp/report.pdf\""] {
+            assert_eq!(found(line), ["file:///tmp/report.pdf"], "{line}");
+        }
+    }
+
+    /// A quoted relative path with a space links whole whatever the length
+    /// of its extension.
+    #[test]
+    fn a_quoted_path_with_a_long_extension_is_one_link() {
+        for (path, uri) in [
+            (
+                "docs/annual report.swiftinterface",
+                "file:///work/docs/annual%20report.swiftinterface",
+            ),
+            (
+                "a/b/annual report.documentation",
+                "file:///work/a/b/annual%20report.documentation",
+            ),
+            (
+                "docs/my app.code-workspace",
+                "file:///work/docs/my%20app.code-workspace",
+            ),
+        ] {
+            let line = format!("open \"{path}\" now");
+            let term = term_with(line.len(), &[&line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert_eq!(found.len(), 1, "{line}: {found:?}");
+            assert_eq!(found[0].uri, uri, "{line}");
+        }
     }
 
     /// A link ending in a wide character covers both of its cells, so the
@@ -1354,6 +3166,411 @@ mod tests {
         assert!(!is_safe_url("https:"), "scheme with empty target");
     }
 
+    /// A URI holding a character that hides or reorders text does not read
+    /// as what it opens, so it is refused: every Unicode space, the format
+    /// characters (zero-width, bidirectional, byte order mark, tags) and
+    /// the other characters drawn as nothing. Visible non-ASCII stays.
+    #[test]
+    fn uris_holding_invisible_characters_are_refused() {
+        // A space of any kind is no part of a URI as written.
+        let spaces = [
+            '\u{a0}', '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}',
+            '\u{2005}', '\u{2006}', '\u{2007}', '\u{2008}', '\u{2009}', '\u{200a}', '\u{202f}',
+            '\u{205f}', '\u{3000}',
+        ];
+        for c in spaces {
+            assert!(
+                !is_safe_url(&format!("https://x.test/a{c}b")),
+                "U+{:04X}",
+                u32::from(c)
+            );
+            assert!(
+                !is_safe_url(&format!("file:///tmp/a{c}b.pdf")),
+                "U+{:04X}",
+                u32::from(c)
+            );
+        }
+        let invisible = [
+            '\u{2028}',
+            '\u{2029}',
+            '\u{200b}',
+            '\u{200c}',
+            '\u{200d}',
+            '\u{2060}',
+            '\u{feff}',
+            '\u{202e}',
+            '\u{202a}',
+            '\u{202b}',
+            '\u{202c}',
+            '\u{202d}',
+            '\u{2066}',
+            '\u{2067}',
+            '\u{2068}',
+            '\u{2069}',
+            '\u{180e}',
+            '\u{200e}',
+            '\u{200f}',
+            '\u{061c}',
+            '\u{ad}',
+            '\u{34f}',
+            '\u{fe0f}',
+            '\u{e0041}',
+            '\u{3164}',
+            '\u{115f}',
+            '\u{2800}',
+            '\u{85}',
+        ];
+        for c in invisible {
+            for uri in [
+                format!("https://x.test/a{c}b"),
+                format!("https://x{c}.test/"),
+                format!("mailto:a{c}@b.test"),
+                format!("file:///tmp/a{c}b.pdf"),
+            ] {
+                assert!(!is_safe_url(&uri), "U+{:04X} in {uri:?}", u32::from(c));
+            }
+            // Encoded, a detected path would slip past the URL's check.
+            let path = format!("/tmp/a{c}b.pdf");
+            assert_eq!(
+                path_match_to_file_uri(&path, None),
+                None,
+                "U+{:04X}",
+                u32::from(c)
+            );
+            // Quoted, no piece of the name links: not `dir/x.txt` either.
+            for line in [
+                format!("open \"docs/my a{c}b.pdf\" now"),
+                format!("open \"docs/old{c}dir/x.txt\" now"),
+            ] {
+                let term = term_with(line.chars().count(), &[&line], &[]);
+                let found = links_with_cwd(&term, Some("/work"));
+                assert!(found.is_empty(), "U+{:04X}: {found:?}", u32::from(c));
+            }
+        }
+        for uri in [
+            "https://x.test/café",
+            "https://例.test/路径",
+            "file:///tmp/caf%C3%A9",
+        ] {
+            assert!(is_safe_url(uri), "{uri}");
+        }
+        assert_eq!(
+            path_match_to_file_uri("/tmp/my café.pdf", None).as_deref(),
+            Some("file:///tmp/my%20caf%C3%A9.pdf")
+        );
+    }
+
+    /// A scheme is case-insensitive: an uppercase or mixed-case URL links
+    /// as printed, and `WWW.` gains `https://` as `www.` does.
+    #[test]
+    fn uppercase_schemes_are_links() {
+        for (line, uri) in [
+            ("see HTTPS://example.com/a", "HTTPS://example.com/a"),
+            ("see Http://example.com/a", "Http://example.com/a"),
+            ("see hTTpS://example.com/a.", "hTTpS://example.com/a"),
+            ("see FTP://host/file", "FTP://host/file"),
+            ("see FILE:///etc/hosts", "FILE:///etc/hosts"),
+            ("see WWW.example.com/a", "https://WWW.example.com/a"),
+            ("see Www.example.com/a", "https://Www.example.com/a"),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert_eq!(found.len(), 1, "{line}: {found:?}");
+            assert_eq!(found[0].uri, uri, "{line}");
+            assert!(is_safe_url(uri), "{uri}");
+        }
+        // A `www.` inside a longer name is part of it, in any case.
+        for (line, uri) in [
+            (
+                "cat docs/WWW.example.com.txt",
+                "file:///work/docs/WWW.example.com.txt",
+            ),
+            (
+                "cat docs/www.example.com.txt",
+                "file:///work/docs/www.example.com.txt",
+            ),
+            ("see (WWW.x.test)", "https://WWW.x.test"),
+            ("--url=www.x.test", "https://www.x.test"),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert_eq!(found.len(), 1, "{line}: {found:?}");
+            assert_eq!(found[0].uri, uri, "{line}");
+        }
+        for line in ["mail me@WWW.x.test", "docs/\u{b2}www.example.com.txt"] {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert!(
+                found.iter().all(|link| !link.uri.starts_with("https")),
+                "{line}: {found:?}"
+            );
+        }
+        // A name ending in `www` is a path; a scheme after a refused `www.`
+        // still starts a URL.
+        for (line, uri) in [
+            ("cat /tmp/www.,", "file:///tmp/www"),
+            (
+                "docs/www.cfg=HTTPS://example.com/a",
+                "HTTPS://example.com/a",
+            ),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>();
+            assert_eq!(found, [uri], "{line}");
+        }
+        assert_eq!(super::normalize_url("WWW.x.test"), "https://WWW.x.test");
+        assert_eq!(super::normalize_url("wwwx.test"), "wwwx.test");
+        assert_eq!(super::normalize_url("w\u{e9}"), "w\u{e9}");
+        #[cfg(unix)]
+        assert_eq!(
+            super::local_file_path("FILE:///etc/hosts"),
+            Some(std::path::PathBuf::from("/etc/hosts"))
+        );
+    }
+
+    /// Text shaped like a URL of a scheme Kettle does not open, `httpſ://`
+    /// among them, holds no local path: not its query's either.
+    #[test]
+    fn another_schemes_url_holds_no_local_path() {
+        for line in [
+            "see httpſ://example.test/?file=/tmp/report.pdf",
+            "see vscode://open?file=/tmp/report.pdf",
+            "see x-app://h/a=/tmp/report.pdf",
+        ] {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert!(found.is_empty(), "{line}: {found:?}");
+        }
+        let term = term_with(30, &["see file=/tmp/report.pdf here"], &[]);
+        assert_eq!(
+            links_with_cwd(&term, Some("/work"))[0].uri,
+            "file:///tmp/report.pdf"
+        );
+    }
+
+    /// A scheme matches in any ASCII case only: `ſ` (U+017F) folds to `s`
+    /// in Unicode, but `httpſ://` is no scheme the opener takes.
+    #[test]
+    fn a_scheme_matches_ascii_case_only() {
+        for line in ["see httpſ://example.test/ok", "see HTTPſ://example.test/ok"] {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert!(found.is_empty(), "{line}: {found:?}");
+        }
+        for (line, uri) in [
+            ("see hTTpS://example.test/ok", "hTTpS://example.test/ok"),
+            ("see wWw.example.test/ok", "https://wWw.example.test/ok"),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert_eq!(found.len(), 1, "{line}: {found:?}");
+            assert_eq!(found[0].uri, uri);
+        }
+    }
+
+    /// An invisible character does not end a word, so a scheme or `www.`
+    /// after one is part of that word: no link, and no piece of it links.
+    /// A no-break space shows as a space and still ends one.
+    #[test]
+    fn an_invisible_character_does_not_start_a_url() {
+        for c in ['\u{200b}', '\u{2060}', '\u{ad}', '\u{feff}', '\u{200e}'] {
+            for line in [
+                format!("file docs/a{c}WWW.example.test/path.txt"),
+                format!("see a{c}https://x.test/p.txt"),
+                format!("see {c}www.x.test/a"),
+            ] {
+                let term = term_with(line.chars().count(), &[&line], &[]);
+                let found = links_with_cwd(&term, Some("/work"));
+                assert!(found.is_empty(), "U+{:04X}: {found:?}", u32::from(c));
+            }
+        }
+        let term = term_with(20, &["see a\u{a0}www.x.test"], &[]);
+        let found = links_with_cwd(&term, Some("/work"));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].uri, "https://www.x.test");
+    }
+
+    /// A web or FTP URL names a host: a scheme with nothing after it, or
+    /// with only a path, query, fragment or port, opens nothing.
+    #[test]
+    fn web_urls_without_a_host_are_refused() {
+        for uri in [
+            "https://",
+            "https:///",
+            "https:///etc/passwd",
+            "https://?q=1",
+            "https://#frag",
+            "https://:8080/x",
+            "https://user@/x",
+            "https://[]/x",
+            "https:example.com",
+            "http:/example.com",
+            "ftp://",
+        ] {
+            assert!(!is_safe_url(uri), "{uri}");
+        }
+        for uri in [
+            "https://a",
+            "https://me@x.test:8080/a",
+            "http://[::1]:8080/x",
+            "ftp://host/file",
+            "https://www./",
+        ] {
+            assert!(is_safe_url(uri), "{uri}");
+        }
+    }
+
+    /// Trailing prose can leave a bare scheme or `www` once trimmed: no
+    /// link, and no piece of it links as a path.
+    #[test]
+    fn a_bare_scheme_is_no_link() {
+        for line in [
+            "see www...",
+            "see www.,",
+            "see www./",
+            "see https://...",
+            "see https:///",
+            "see https://?q=1",
+            "see https://#frag",
+            "see https://:8080/x",
+            "see ftp://...",
+            "see file://...",
+            "see https://?q=/etc/hosts",
+            "see https:///etc/hosts",
+            "see file://?q=/etc/hosts",
+            "see file://localhost",
+            "see file://localhost?q=/etc/hosts",
+            "see www.example@/etc/hosts",
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert!(found.is_empty(), "{line}: {found:?}");
+        }
+        for (line, uri) in [
+            ("see https://a", "https://a"),
+            ("see www.example.com...", "https://www.example.com"),
+            (
+                "see www.example.com@x.test/",
+                "https://www.example.com@x.test/",
+            ),
+            ("see file:///etc/hosts.", "file:///etc/hosts"),
+            (
+                "see file://localhost/etc/hosts",
+                "file://localhost/etc/hosts",
+            ),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert_eq!(found.len(), 1, "{line}: {found:?}");
+            assert_eq!(found[0].uri, uri, "{line}");
+        }
+        // An explicit link over part of a refused URL keeps its cells, and
+        // the rest of the URL is not a path either.
+        let term = term_fed(
+            40,
+            1,
+            b"\x1b]8;;https://e.test/\x1b\\https\x1b]8;;\x1b\\://?q=docs/.env end",
+        );
+        let found = links_with_cwd(&term, Some("/work"))
+            .into_iter()
+            .map(|link| link.uri)
+            .collect::<Vec<_>>();
+        assert_eq!(found, ["https://e.test/"]);
+    }
+
+    /// A visible space is a space, as macOS writes one before AM and PM in
+    /// every default screenshot name: a file holding one has its file URL,
+    /// and that link, as `ls --hyperlink` and eza print it, opens.
+    #[test]
+    fn a_visible_space_in_a_name_is_a_space() {
+        use super::file_url_for_path;
+        use std::path::Path;
+        let name = "/Users/me/Desktop/Screenshot 2026-11-26 at 10.00.00\u{202f}AM.png";
+        let url = "file:///Users/me/Desktop/Screenshot%202026-11-26%20at%2010.00.00%E2%80%AFAM.png";
+        assert_eq!(file_url_for_path(Path::new(name)).as_deref(), Some(url));
+        assert!(is_safe_url(url));
+        #[cfg(unix)]
+        assert_eq!(
+            super::local_file_path(url),
+            Some(std::path::PathBuf::from(name))
+        );
+        for uri in [
+            "https://x.test/Screenshot%2010.00.00%E2%80%AFAM.png",
+            "file:///tmp/a%C2%A0b.pdf",
+            "file:///tmp/a%E2%80%87b.pdf",
+            "file:///tmp/a%E3%80%80b.pdf",
+        ] {
+            assert!(is_safe_url(uri), "{uri}");
+        }
+        assert_eq!(
+            path_match_to_file_uri("/tmp/a\u{202f}b.pdf", None).as_deref(),
+            Some("file:///tmp/a%E2%80%AFb.pdf")
+        );
+        // Zero-width and line-separating characters still hide text.
+        for uri in [
+            "file:///tmp/a%E2%80%8Bb.pdf",
+            "file:///tmp/a%E2%80%A8b.pdf",
+            "https://x.test/a%E2%80%8Bb",
+        ] {
+            assert!(!is_safe_url(uri), "{uri}");
+        }
+    }
+
+    /// Percent-encoded, a character that hides text reads the same once the
+    /// opener decodes it: a file link's path, and a web link's host, path or
+    /// query, holding one is refused. An encoded space, line break or
+    /// visible non-ASCII text is not.
+    #[test]
+    fn percent_encoded_invisible_characters_are_refused() {
+        for uri in [
+            "file:///tmp/a%E2%80%8Bb.pdf",
+            "file:///tmp/a%E2%80%AEb.pdf",
+            "file:///tmp/a..%E2%80%8Bb.pdf",
+            "file:///tmp/a%E2%80%A9b.pdf",
+            "file://localhost/tmp/a%EF%BB%BFb.pdf",
+            "file:///tmp/a%C2%85b.pdf",
+            "https://x.test/a%E2%80%8Bb",
+            "https://ex%E2%80%8Bample.test/",
+            "https://x.test/?q=%E2%80%AE",
+            "https://x.test/#%E2%81%A6",
+            "ftp://host/a%E2%80%8Db",
+            "mailto:a%E2%80%8B@x.test",
+            // A tab or line break is a form's text only in a query.
+            "https://x.test/a%09b",
+            "https://x%0A.test/",
+            "mailto:a%0Ab@x.test",
+        ] {
+            assert!(!is_safe_url(uri), "{uri}");
+            assert_eq!(super::local_file_path(uri), None, "{uri}");
+        }
+        for uri in [
+            "file:///tmp/a%20b.pdf",
+            "file:///tmp/caf%C3%A9.pdf",
+            "file:///tmp/a..b.pdf",
+            "https://x.test/a%20b",
+            "https://x.test/caf%C3%A9",
+            "https://x.test/issues/new?body=a%0Ab%09c",
+            "https://x.test/a#line%0Atwo",
+            "https://x.test/a%zz",
+            "mailto:a@x.test?body=hi%20there%0A",
+        ] {
+            assert!(is_safe_url(uri), "{uri}");
+        }
+        #[cfg(unix)]
+        assert_eq!(
+            super::local_file_path("file:///tmp/a%20b.pdf"),
+            Some(std::path::PathBuf::from("/tmp/a b.pdf"))
+        );
+        // A path holding one has no file URL to hand a handler either.
+        assert_eq!(
+            super::file_url_for_path(std::path::Path::new("/tmp/a\u{200b}b.pdf")),
+            None
+        );
+    }
+
     /// Drift guard: `file://` must be local-only — a remote
     /// authority is a Windows NTLM-hash leak / SSRF vector from PTY output.
     #[test]
@@ -1407,6 +3624,60 @@ mod tests {
         }
     }
 
+    /// Only a segment that names the parent climbs: dots inside a name, a
+    /// name of three or more dots, and dots in a query or fragment are
+    /// local file URLs like any other.
+    #[test]
+    fn dots_inside_a_file_url_name_are_not_traversal() {
+        use super::file_url_for_path;
+        use std::path::Path;
+        for uri in [
+            "file:///foo..bar/x",
+            "file:///.../x",
+            "file:///tmp/...",
+            "file:///..hidden/x",
+            "file:///tmp/a..b.pdf",
+            "file:///tmp/a%2e%2eb.pdf",
+            "file:///tmp/x.pdf?note=a..b",
+            "file:///tmp/x#frag..ment",
+            "file://localhost/tmp/v1..v2/report.pdf",
+        ] {
+            assert!(is_safe_url(uri), "{uri}");
+        }
+        for uri in [
+            "file:///tmp/../etc/passwd",
+            "file:///tmp/..",
+            "file:///tmp/.%2e/x",
+            "file:///tmp/%2e%2e/x",
+            "file:///tmp/%2E./x",
+            "file://../../etc/passwd",
+            "file://localhost/../etc/passwd",
+            // Windows drops trailing spaces and dots from a name.
+            "file:///C:/Users/me/..%20/secret.txt",
+            "file:///C:/Users/me/..%20./secret.txt",
+        ] {
+            assert!(!is_safe_url(uri), "{uri}");
+        }
+        assert_eq!(
+            file_url_for_path(Path::new("/tmp/foo..bar/baz.rs")).as_deref(),
+            Some("file:///tmp/foo..bar/baz.rs")
+        );
+        assert_eq!(
+            file_url_for_path(Path::new("/tmp/...")).as_deref(),
+            Some("file:///tmp/...")
+        );
+        assert_eq!(file_url_for_path(Path::new("/tmp/../etc")), None);
+        for (line, uri) in [
+            ("see /tmp/a..b.pdf here", "file:///tmp/a..b.pdf"),
+            ("ls /tmp/.../x.txt now", "file:///tmp/.../x.txt"),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert_eq!(found.len(), 1, "{line}: {found:?}");
+            assert_eq!(found[0].uri, uri, "{line}");
+        }
+    }
+
     #[test]
     fn osc8_and_detected_links_keep_their_source_and_counters_stay_plain() {
         let term = term_fed(100, 1, b"\x1b]8;;https://explicit.test\x1b\\caption\x1b]8;;\x1b\\ https://detected.test 158/158 N/N 1/2 a/b");
@@ -1451,7 +3722,11 @@ mod tests {
             "Save/restore",
             "ICH/DCH",
         ] {
-            assert_eq!(path_candidates(text).count(), 0, "{text}");
+            assert_eq!(
+                path_candidates(text, &crate::hints::Quotes::read(text)).count(),
+                0,
+                "{text}"
+            );
         }
         for text in [
             "src/main.rs",
@@ -1460,7 +3735,11 @@ mod tests {
             "/usr/bin/env",
             "crates/a/b.rs:12:4",
         ] {
-            assert_eq!(path_candidates(text).count(), 1, "{text}");
+            assert_eq!(
+                path_candidates(text, &crate::hints::Quotes::read(text)).count(),
+                1,
+                "{text}"
+            );
         }
     }
 
@@ -1502,6 +3781,43 @@ mod tests {
         assert!(path_match_to_file_uri("../secret/file.txt", Some("/home/me/kettle")).is_none());
         assert!(path_match_to_file_uri("//evil/share/file.txt", None).is_none());
         assert!(path_match_to_file_uri("src/%2e%2e/secret.txt", Some("/home/me/kettle")).is_none());
+        assert!(path_match_to_file_uri("src/.%2E/secret.txt", Some("/home/me/kettle")).is_none());
+        assert!(path_match_to_file_uri("src/%2E./secret.txt", Some("/home/me/kettle")).is_none());
+        assert!(path_match_to_file_uri("src/..%20/secret.txt", Some("/home/me/kettle")).is_none());
         assert!(path_match_to_file_uri("src/main.rs", Some("//evil/share")).is_none());
+    }
+
+    /// A detected name holding a literal `%2e` links to that name, encoded
+    /// so it reads back the same: the converter agrees with
+    /// `file_url_for_path` about the file.
+    #[test]
+    fn a_literal_percent_2e_in_a_name_is_text() {
+        use super::file_url_for_path;
+        use std::path::Path;
+        for (path, uri) in [
+            ("/tmp/100%2e.pdf", "file:///tmp/100%252e.pdf"),
+            ("/tmp/a%2E/b.txt", "file:///tmp/a%252E/b.txt"),
+            ("/tmp/%2e/x.txt", "file:///tmp/%252e/x.txt"),
+        ] {
+            assert_eq!(
+                path_match_to_file_uri(path, Some("/work")).as_deref(),
+                Some(uri),
+                "{path}"
+            );
+            assert_eq!(
+                file_url_for_path(Path::new(path)).as_deref(),
+                Some(uri),
+                "{path}"
+            );
+            #[cfg(unix)]
+            assert_eq!(
+                super::local_file_path(uri),
+                Some(std::path::PathBuf::from(path))
+            );
+        }
+        let term = term_with(24, &["see /tmp/100%2e.pdf here"], &[]);
+        let found = links_with_cwd(&term, Some("/work"));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].uri, "file:///tmp/100%252e.pdf");
     }
 }

@@ -2198,7 +2198,10 @@ fn clone_into_session(
 }
 
 /// Whether a clone failed only because this file system, or this pair of
-/// volumes, cannot make one, so bytes will do.
+/// volumes, cannot or will not make one, so bytes will do. Some refuse it
+/// with `EPERM`: tmpfs and overlayfs answer `FICLONE` so in some sandboxes.
+/// The byte copy writes the same new private file from the same open
+/// source, so a real permission problem still fails there.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn clone_unsupported(error: &io::Error) -> bool {
     // ENOTSUP and EOPNOTSUPP are one number on Linux and two on macOS.
@@ -2210,6 +2213,7 @@ fn clone_unsupported(error: &io::Error) -> bool {
             libc::EINVAL,
             libc::ENOTTY,
             libc::ENOSYS,
+            libc::EPERM,
         ]
         .contains(&code)
     })
@@ -3587,6 +3591,32 @@ mod tests {
             copies.cleanup();
             assert!(!dir.exists(), "{how:?} {mode:o}");
         }
+    }
+
+    /// A clone the file system cannot or will not make is copied as bytes,
+    /// which runs every check a copy has: `EPERM` among them, as tmpfs and
+    /// overlayfs answer `FICLONE` in some sandboxes. A clone that fails for
+    /// want of room or permission, or of the disk, is not.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_clone_the_file_system_declines_is_copied_as_bytes() {
+        for code in [
+            libc::EXDEV,
+            libc::ENOTSUP,
+            libc::EOPNOTSUPP,
+            libc::EINVAL,
+            libc::ENOTTY,
+            libc::ENOSYS,
+            libc::EPERM,
+        ] {
+            let error = io::Error::from_raw_os_error(code);
+            assert!(clone_unsupported(&error), "{error}");
+        }
+        for code in [libc::ENOSPC, libc::EDQUOT, libc::EACCES, libc::EIO] {
+            let error = io::Error::from_raw_os_error(code);
+            assert!(!clone_unsupported(&error), "{error}");
+        }
+        assert!(!clone_unsupported(&io::Error::other("no code")));
     }
 
     /// A byte copy stops between chunks when asked, or once its deadline

@@ -1105,6 +1105,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A one-column terminal grid shows a wide character as a blank instead of
+  crashing, and narrowing a grid to one column no longer hangs.
+
+- A restored row no longer paints its background across the empty rest of the
+  row when it follows a wrapped line or a narrower pane wraps it.
+
+- A restored line keeps its soft wrap when the row it wraps onto holds only
+  blanks, so copying it adds no line break.
+
+- Restored output keeps the text after a tab in its column.
+
+- Restored output keeps blinking text's blink attribute.
+
+- Restored output keeps the colors of the blank a wide character leaves at the
+  end of a row it did not fit, and the row after it keeps its columns.
+
+- With `restore-scrollback-remote` off, changing a pane's width no longer saves
+  the output of a remote session that has ended.
+
 - Screen readers can highlight a command palette or picker result by pressing
   or focusing it, and act on the highlighted result with the picker's Choose
   button. Selecting a result never runs it. Pressing a quick-select label acts
@@ -1254,7 +1273,17 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   text nearly vanished. The highlight now extends as far as the
   letters are drawn, for the current and other matches and for focused and
   unfocused selections, and its outline follows. Nothing changes with
-  `bidi = false` or in lines without right-to-left text.
+  `bidi = false` or in lines without Arabic or right-to-left text.
+
+- Selections and search matches now cover all of the ligature ﷽ (U+FDFD),
+  which Arabic fonts draw many cells wide.
+
+- Arabic text highlighted and drawn across another search match no longer
+  leaves its ink past that match unhighlighted.
+
+- Select Command Output no longer copies the next Bash prompt after output with no final newline, such as `printf done`; it stops where the output ends.
+
+- A recording to a file can start right after the previous recording to it stops, even if a pane was opening at that moment; it no longer reports the file as in use.
 
 - Closing the search bar no longer moves the text. When the prompt was above
   the bottom of the window, as after `clear`, closing it pulled lines from
@@ -1270,12 +1299,24 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   drawn only when a theme makes that colour too close in brightness to the
   other matches' to tell them apart, as about one bundled theme in five does.
 
+- Kettle's whole-scrollback search function, used by its tests and fuzzing, now finds exactly what the find bar finds: matches across a soft wrap, `^`, `$` and `\b` only at real line edges, one match per accented cell, and both cells of a wide character.
+
 - On Linux machines with many processors, about 12 or more, ffmpeg drew no
   video poster, video frame or HEIC/AVIF photo. Left to choose, it started
   filter and encoder threads for every processor, and their stacks and
   allocator arenas outgrew the media worker's 1 GiB address space before it
   wrote a picture. These one-shot decodes now run one filter thread and one
   encoder thread, as playback already did.
+
+- A Mermaid diagram previewed from a Codex reply could come out changed: a
+  space where Codex broke a word after a `/`, as in `/very/long`, or a line
+  of its own where Codex wrapped before `-->`. Kettle now asks for `/copy`
+  when the rows could be read either way.
+
+- Pasting a video or document failed with "Operation not permitted" on a
+  Linux file system that refuses a copy-on-write clone that way, as some
+  sandboxes' tmpfs and overlayfs mounts do. Kettle now copies the bytes, as
+  it already did where a file system makes no clones.
 
 - The one-character form of the bracketed-paste end marker (U+009B followed
   by `201~`) opened the Confirm paste dialog and was then sent on by Paste
@@ -1404,6 +1445,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   suites and smokes set it, and the `kettle` crate's unit tests no longer
   look for a running Kettle at all.
 
+- `run_command` output cut at its 512 KiB cap no longer ends with the spaces that came just before the cut.
+
+- `run_command` no longer reports its output truncated when all that lay past the 512 KiB cap was blank space.
+
 - On macOS, title-bar buttons no longer drag the window. AppKit moved the
   window with any press in the title bar, so a press on the Settings gear,
   `▾`, `+` or a tab's close button that was dragged off came back over the
@@ -1466,6 +1511,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   released, a selected link keeps its hint and hand cursor, and its underline
   comes back when the selection is cleared. ⌘-click and Ctrl+click still open
   it.
+
+- Double-clicking a URL or path that wraps onto the next row selects all of it, from either row, instead of nothing.
 
 - Starting a recording into a directory could fail with "resource
   temporarily unavailable" when a new pane opened at the same moment as
@@ -1644,6 +1691,21 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Links and openers: a clicked link is checked against the pane it came from
   before opening, custom URL handlers are bounded while their children run,
   and the file manager's executable identity is verified.
+- A detected link keeps a closing bracket that closes one opened in it, even after a stray closing bracket earlier in the link.
+- A detected path ending in two or more dots, such as `/tmp/a..` or `/tmp/...`, no longer links a shorter path such as `/tmp/a`, `/tmp/` or the parent folder `/tmp/..`: quick select copies it, and a closing quote right after the dots, as in `"/tmp/a.."`, links that exact name. A `file://` link ending in two or more dots is no link either.
+- Local file links whose names hold two dots in a row, such as `a..b.pdf` or a folder named `...`, open; only a `..` that names the parent folder is refused.
+- A path on screen whose name holds a literal `%2e`, such as `/tmp/100%2e.pdf`, is a link. Quick select copies, rather than opens, a quoted path whose `%2e%2e` would name the parent folder if decoded again, as a clicked link refuses it.
+- A link holding an invisible character, such as a zero-width space or a control that reverses text, is refused, also when it is percent-encoded in a file link or in a web link's host, path or query, and quick select copies such a path rather than opening it.
+- Text that trails off after a bare scheme, such as `see https://...` or `see www...`, is no longer offered as a link or a quick-select URL, and a web link with no host is refused.
+- URLs printed with an uppercase scheme, such as `HTTPS://`, `FILE://` or `WWW.`, are detected as links and quick-select URLs.
+- A file name holding `www.`, such as `docs/www.example.com.txt`, links the file rather than a web address.
+- The end of a quoted path that Kettle cannot read whole, such as `/tmp/report.pdf` in `"docs/a*b=/tmp/report.pdf"` or in `prefix'docs/a*b=/tmp/report.pdf'` and `pre"fix"=/tmp/report.pdf`, where a shell quote sits inside a word, is no longer offered as a file of its own. Paths are read against a line's quotes as a shell reads them, so a path after a closed string still links, as `src/main.rs` does in `echo "hello " src/main.rs`, while on a line a stray quote may have shifted, such as `x 'tis A='/Users/me/a b/notes/my dir.txt'`, only a path from a root at the start of a word links.
+- A relative path after a space inside quotes, such as `b/notes.txt` in `"a b/notes.txt"`, is no longer a link, since it may be the end of a quoted name: quick select copies it. A path from a root, as in `"see /tmp/report.pdf"`, still links.
+- A path inside text shaped like a link Kettle does not open, such as `/tmp/a.pdf` in `vscode://open?file=/tmp/a.pdf`, is no longer a link of its own.
+- On Windows, a file link whose name ends in a dot or a space is refused rather than opening the file Windows reads it as, such as `report.pdf` for `report.pdf..`.
+- A path ending in a dotfile, such as `docs/.env` or a quoted `"docs/my dir/.env"`, is a link, and quick select no longer offers only the part after the space.
+- A quoted path with a space whose extension is long or hyphenated, such as `"docs/annual report.swiftinterface"` or `"docs/my app.code-workspace"`, is a link.
+- A file link naming a program in a Windows alternate data stream, such as `notes.txt:payload.exe::$DATA`, is refused like the program itself.
 - Sessions: session files are checked for trust before restoring commands,
   sessions that restore would reject are not autosaved, and repeated restore
   failures no longer turn off saving.
@@ -1756,6 +1818,20 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   the pointer.
 - A tab dragged onto a tab-strip overflow arrow and held there scrolls the
   strip, so it can be moved past the tabs shown.
+
+- macOS: `kettle --version`, `--help` and `kettle ctl` no longer warn about
+  update leftovers. The app and `kettle update` remove bundles that earlier
+  official updates provably displaced, and name any other leftover once,
+  saying it is safe to delete (#951).
+- Linux: an update that would have to write into a directory its group or
+  other users can write, such as a `~/.local/share/doc/kettle` left `0775` by
+  umask `002`, now stops before downloading anything and names the directories
+  and the `chmod go-w` that fixes them, instead of failing part-way (#847).
+- Linux: a self-update rollback that cannot restore one file still restores
+  all the others, and `install.sh` can install over a rollback an older
+  release left unfinished instead of refusing its installer files. A rollback
+  waiting on a directory permission fix no longer makes every kettle command
+  fail; the app and `kettle update` name the directory and its `chmod` (#846).
 
 ## Older releases
 

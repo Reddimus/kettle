@@ -63,7 +63,8 @@ tabs and panes in layout order, retaining the newest rows within each pane.
 The snapshot is saved as [When Kettle saves](#when-kettle-saves) describes.
 It is a bounded recent snapshot, not a complete log or a running process.
 
-Restored output keeps colors, bold, italic, underline and wide/combined text.
+Restored output keeps colors, bold, italic, underline, blink and wide/combined
+text. A tab comes back as spaces, so the text after it keeps its column.
 It appears faint, followed by **Restored · YYYY-MM-DD HH:MM:SS** in the UI language
 and local time, then a fresh shell prompt. Search, selection and copy use the
 ordinary terminal scrollback. Normal scrollback memory/line limits still apply,
@@ -104,6 +105,9 @@ excluded after `ssh` exits: what the remote session wrote, and anything on
 screen when it ended, stays out of the saved output until all of it has left
 the pane, scrolled out of the scrollback limit, cleared with Clear Scrollback
 once it is off screen, or reset. Output written after that is saved as usual.
+Resizing the pane keeps it out. If the pane's width changes while the cursor
+is still on a row that was on screen when the session ended, everything then
+in the pane stays out.
 Turning the option off also prevents replaying output previously marked remote.
 
 Output lives next to `session.json` in `session.content` (or `NAME.content` next

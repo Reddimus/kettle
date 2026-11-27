@@ -780,6 +780,474 @@ module._uninstall(arguments)
         self.assertEqual(removed.returncode, 0, removed.stderr)
         self.assertFalse((self.prefix / path).exists())
 
+    def interrupted_self_update(self, phase="rolling_back", files=None):
+        """Leave the prefix as a self-update that failed part-way and could not
+        finish rolling back leaves it (#846): the installer scripts it replaced
+        first, one file it had only backed up, its journal and its backups."""
+        manifest = json.loads(
+            (self.prefix / "share/kettle/install-files.json").read_text()
+        )
+        records = {record["path"]: record for record in manifest["files"]}
+        transaction = "4242-1793827181830941000"
+        backup = self.prefix / f".kettle-update-backup-{transaction}"
+        backup.mkdir()
+        backup.chmod(0o700)
+        marker = backup / ".kettle-update-backup.json"
+        marker.write_text(json.dumps(
+            {"schema": 2, "product": "kettle", "transaction_id": transaction}
+        ))
+        marker.chmod(0o600)
+        entries = []
+        for relative, replacement, state in files or (
+            ("share/kettle/install.sh", b"#!/bin/sh\n# 9.9.9 installer\n", "installed"),
+            ("share/kettle/install-unix.py", b"# 9.9.9 helper\n", "installed"),
+            ("bin/kettle-media-worker", b"9.9.9 worker", "prepared"),
+        ):
+            path = self.prefix / relative
+            record = records[relative]
+            copy = backup / relative
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            for directory in (copy.parent, copy.parent.parent):
+                if directory != backup:
+                    directory.chmod(0o755)
+            copy.write_bytes(path.read_bytes())
+            copy.chmod(0o600)
+            if state == "installed":
+                staged = path.with_name(path.name + ".staged")
+                staged.write_bytes(replacement)
+                staged.chmod(record["mode"])
+                os.replace(staged, path)
+            entries.append({
+                "relative": relative,
+                "existed": True,
+                "previous_unix_mode": record["mode"],
+                "previous_size": record["size"],
+                "previous_sha256": record["sha256"],
+                "replacement_size": len(replacement),
+                "replacement_sha256": hashlib.sha256(replacement).hexdigest(),
+                "state": state,
+            })
+        journal = self.prefix / ".kettle-update-journal.json"
+        journal.write_text(json.dumps({
+            "schema": 2,
+            "transaction_id": transaction,
+            "target_version": "9.9.9",
+            "phase": phase,
+            "backup_dir": backup.name,
+            "entries": entries,
+        }))
+        journal.chmod(0o600)
+        return journal, backup
+
+    def test_an_interrupted_self_update_is_adopted_and_retired(self):
+        installed = self.run_installer()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        journal, backup = self.interrupted_self_update()
+
+        repaired = self.run_installer()
+
+        self.assertEqual(repaired.returncode, 0, repaired.stderr)
+        for name in ("install.sh", "install-unix.py"):
+            self.assertEqual(
+                (self.prefix / "share/kettle" / name).read_bytes(),
+                (self.package / name).read_bytes(),
+            )
+        self.assertFalse(journal.exists(), "kettle would roll back over the install")
+        self.assertFalse(backup.exists(), "the retired update's backups were kept")
+        self.assertFalse((self.prefix / "share/kettle/install-pending.json").exists())
+        again = self.run_installer()
+        self.assertEqual(again.returncode, 0, again.stderr)
+        removed = self.run_installer("--uninstall")
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertFalse((self.prefix / "share/kettle").exists())
+
+    def test_a_duplicated_journal_key_stops_the_install(self):
+        installed = self.run_installer()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        journal, _backup = self.interrupted_self_update()
+        text = journal.read_text()
+        journal.write_text(text[:-1] + ', "phase": "committed"}')
+        refused = self.run_installer()
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("not one Kettle's self-updater wrote", refused.stderr)
+        self.assertTrue(journal.exists())
+
+    def test_an_interrupted_self_update_is_retired_before_the_install_writes(self):
+        installed = self.helper()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        journal, backup = self.interrupted_self_update(files=(
+            ("share/kettle/install.sh", b"#!/bin/sh\n# 9.9.9\n", "installed"),
+            ("bin/kettle", b"9.9.9 kettle", "prepared"),
+        ))
+
+        # Killed right after the first file this install publishes.
+        cut = self.helper(kill_at=1)
+
+        self.assertEqual(cut.returncode, 9, cut.stderr)
+        self.assertFalse(journal.exists(), "kettle would roll back over this install")
+        self.assertFalse(backup.exists())
+        retried = self.helper()
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        self.assertEqual((self.prefix / "share/kettle/install.sh").read_bytes(), b"install.sh")
+
+    def test_a_write_the_journal_says_never_happened_is_not_adopted(self):
+        installed = self.run_installer()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        replacement = b"#!/bin/sh\n# 9.9.9 installer\n"
+        journal, _backup = self.interrupted_self_update(
+            phase="applying",
+            files=(("share/kettle/install.sh", replacement, "backing_up"),),
+        )
+        # The update was still backing this file up, so it never wrote these
+        # bytes; whoever did is not the update.
+        script = self.prefix / "share/kettle/install.sh"
+        staged = script.with_name("install.sh.staged")
+        staged.write_bytes(replacement)
+        staged.chmod(script.stat().st_mode & 0o777)
+        os.replace(staged, script)
+
+        refused = self.run_installer()
+
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("share/kettle/install.sh changed after an interrupted", refused.stderr)
+        self.assertEqual(script.read_bytes(), replacement)
+        self.assertTrue(journal.exists())
+
+    def test_a_changed_journaled_install_record_is_refused(self):
+        installed = self.run_installer()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        manifest = self.prefix / "share/kettle/install-files.json"
+        journal, _backup = self.interrupted_self_update()
+        document = json.loads(journal.read_text())
+        current = manifest.read_bytes()
+        document["entries"].append({
+            "relative": "share/kettle/install-files.json",
+            "existed": True,
+            "previous_unix_mode": 0o644,
+            "previous_size": len(current),
+            "previous_sha256": hashlib.sha256(current).hexdigest(),
+            "replacement_size": 2,
+            "replacement_sha256": hashlib.sha256(b"{}").hexdigest(),
+            "state": "installed",
+        })
+        journal.write_text(json.dumps(document))
+        manifest.write_bytes(current + b"\n")
+
+        refused = self.run_installer()
+
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("install-files.json changed after an interrupted", refused.stderr)
+        self.assertEqual(manifest.read_bytes(), current + b"\n")
+
+    def test_a_record_listing_a_file_the_rollback_removed_is_repaired(self):
+        installed = self.run_installer()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        added = b"a file only the newer release ships"
+        journal, backup = self.interrupted_self_update()
+        document = json.loads(journal.read_text())
+        document["entries"].append({
+            "relative": "share/kettle/added-by-update",
+            "existed": False,
+            "previous_size": None,
+            "previous_sha256": None,
+            "replacement_size": len(added),
+            "replacement_sha256": hashlib.sha256(added).hexdigest(),
+            "state": "restored",
+        })
+        journal.write_text(json.dumps(document))
+        # The update's own record survived and still lists what rollback removed.
+        manifest_path = self.prefix / "share/kettle/install-files.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["files"].append({
+            "path": "share/kettle/added-by-update",
+            "size": len(added),
+            "sha256": hashlib.sha256(added).hexdigest(),
+            "mode": 0o644,
+        })
+        manifest["files"].sort(key=lambda record: record["path"])
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        manifest_path.chmod(0o644)
+
+        repaired = self.run_installer()
+
+        self.assertEqual(repaired.returncode, 0, repaired.stderr)
+        recorded = {
+            record["path"]
+            for record in json.loads(manifest_path.read_text())["files"]
+        }
+        self.assertNotIn("share/kettle/added-by-update", recorded)
+        self.assertFalse(journal.exists() or backup.exists())
+
+    def test_files_only_the_updater_writes_are_adopted_from_a_first_update(self):
+        # install.sh never installs the license notices or the changelog
+        # archives; the first self-update journals them with no record yet.
+        for state in ("installed", "restored"):
+            with self.subTest(state=state):
+                if self.prefix.exists():
+                    shutil.rmtree(self.prefix)
+                installed = self.run_installer()
+                self.assertEqual(installed.returncode, 0, installed.stderr)
+                manifest_path = self.prefix / "share/kettle/install-files.json"
+                recorded = {r["path"] for r in json.loads(manifest_path.read_text())["files"]}
+                self.assertNotIn("share/doc/kettle/LICENSE", recorded)
+                journal, backup = self.interrupted_self_update()
+                document = json.loads(journal.read_text())
+                written = {
+                    "share/doc/kettle/LICENSE": b"license from the update",
+                    "share/doc/kettle/docs/changelog/CHANGELOG-4.x.md": b"4.x",
+                }
+                for relative, data in written.items():
+                    document["entries"].insert(0, {
+                        "relative": relative,
+                        "existed": False,
+                        "previous_size": None,
+                        "previous_sha256": None,
+                        "replacement_size": len(data),
+                        "replacement_sha256": hashlib.sha256(data).hexdigest(),
+                        "state": state,
+                    })
+                    if state == "installed":
+                        path = self.prefix / relative
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        for directory in (path.parent, *path.parent.parents):
+                            if directory == self.prefix:
+                                break
+                            directory.chmod(0o755)
+                        path.write_bytes(data)
+                        path.chmod(0o644)
+                if state == "restored":
+                    document["phase"] = "rolling_back"
+                journal.write_text(json.dumps(document))
+
+                repaired = self.run_installer()
+
+                self.assertEqual(repaired.returncode, 0, repaired.stderr)
+                self.assertFalse(journal.exists() or backup.exists())
+                recorded = {r["path"] for r in json.loads(manifest_path.read_text())["files"]}
+                for relative in written:
+                    self.assertEqual(relative in recorded, state == "installed", relative)
+
+    def leave_update_record(self, journal, files=(), directories=()):
+        """Make the prefix look as an update that wrote its own install record
+        and then rolled back everything else leaves it: the record still lists
+        the files and directories the update added, which the rollback removed,
+        and the journal shows the record could not be restored."""
+        manifest_path = self.prefix / "share/kettle/install-files.json"
+        previous = manifest_path.read_bytes()
+        manifest = json.loads(previous)
+        document = json.loads(journal.read_text())
+        for relative in files:
+            data = b"added by the update: " + relative.encode()
+            manifest["files"].append({
+                "path": relative,
+                "size": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "mode": 0o644,
+            })
+            document["entries"].insert(0, {
+                "relative": relative,
+                "existed": False,
+                "previous_size": None,
+                "previous_sha256": None,
+                "replacement_size": len(data),
+                "replacement_sha256": hashlib.sha256(data).hexdigest(),
+                "state": "restored",
+            })
+        for relative in directories:
+            manifest["directories"].append({"path": relative, "mode": 0o755})
+            document.setdefault("created_directories", {})[relative] = 0o755
+        manifest["files"].sort(key=lambda record: record["path"])
+        manifest["directories"].sort(key=lambda record: record["path"])
+        replacement = (json.dumps(manifest, indent=2) + "\n").encode()
+        manifest_path.write_bytes(replacement)
+        manifest_path.chmod(0o644)
+        document["entries"].append({
+            "relative": "share/kettle/install-files.json",
+            "existed": True,
+            "previous_unix_mode": 0o644,
+            "previous_size": len(previous),
+            "previous_sha256": hashlib.sha256(previous).hexdigest(),
+            "replacement_size": len(replacement),
+            "replacement_sha256": hashlib.sha256(replacement).hexdigest(),
+            "state": "installed",
+        })
+        journal.write_text(json.dumps(document))
+        return manifest_path
+
+    def test_a_record_listing_a_directory_the_rollback_removed_is_repaired(self):
+        installed = self.run_installer()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        journal, backup = self.interrupted_self_update()
+        added = "share/kettle/added-by-update"
+        manifest_path = self.leave_update_record(
+            journal, files=(f"{added}/file",), directories=(added,)
+        )
+        self.assertFalse((self.prefix / added).exists())
+
+        repaired = self.run_installer()
+
+        self.assertEqual(repaired.returncode, 0, repaired.stderr)
+        manifest = json.loads(manifest_path.read_text())
+        self.assertNotIn(added, {record["path"] for record in manifest["directories"]})
+        self.assertFalse(journal.exists() or backup.exists())
+
+    def test_a_repair_interrupted_after_retiring_the_journal_still_finishes(self):
+        installed = self.helper()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        journal, _backup = self.interrupted_self_update(files=(
+            ("share/kettle/install.sh", b"#!/bin/sh\n# 9.9.9\n", "installed"),
+            ("bin/kettle", b"9.9.9 kettle", "prepared"),
+        ))
+        added = "share/kettle/added-by-update"
+        manifest_path = self.leave_update_record(
+            journal, files=(f"{added}/file", "share/kettle/added-file"), directories=(added,)
+        )
+
+        # Killed right after the first file the repair publishes, once the
+        # journal that recorded the removals is gone.
+        cut = self.helper(kill_at=1)
+
+        self.assertEqual(cut.returncode, 9, cut.stderr)
+        self.assertFalse(journal.exists())
+        retried = self.helper()
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        manifest = json.loads(manifest_path.read_text())
+        recorded = {record["path"] for record in manifest["files"]}
+        self.assertFalse({f"{added}/file", "share/kettle/added-file"} & recorded)
+        self.assertNotIn(added, {record["path"] for record in manifest["directories"]})
+
+    def test_a_journal_naming_a_path_kettle_does_not_own_is_refused(self):
+        installed = self.run_installer()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        other = self.prefix / "bin/othertool"
+        other.write_bytes(b"someone else's tool")
+        other.chmod(0o755)
+        journal, _backup = self.interrupted_self_update()
+        document = json.loads(journal.read_text())
+        document["entries"].append({
+            "relative": "bin/othertool",
+            "existed": True,
+            "previous_unix_mode": 0o755,
+            "previous_size": other.stat().st_size,
+            "previous_sha256": hashlib.sha256(other.read_bytes()).hexdigest(),
+            "replacement_size": 1,
+            "replacement_sha256": hashlib.sha256(b"x").hexdigest(),
+            "state": "installed",
+        })
+        journal.write_text(json.dumps(document))
+
+        refused = self.run_installer()
+
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("names bin/othertool", refused.stderr)
+        recorded = {
+            record["path"]
+            for record in json.loads(
+                (self.prefix / "share/kettle/install-files.json").read_text()
+            )["files"]
+        }
+        self.assertNotIn("bin/othertool", recorded)
+        self.assertEqual(other.read_bytes(), b"someone else's tool")
+        self.assertTrue(journal.exists())
+
+    def test_a_backup_that_keeps_a_copy_stays_marked(self):
+        installed = self.run_installer()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        journal, backup = self.interrupted_self_update(
+            phase="applying",
+            files=(
+                ("share/kettle/install.sh", b"#!/bin/sh\n# 9.9.9\n", "installed"),
+                ("bin/kettle-media-worker", b"9.9.9 worker", "backing_up"),
+            ),
+        )
+        # The update stopped part-way through copying this backup.
+        partial = backup / "bin/kettle-media-worker"
+        partial.write_bytes(partial.read_bytes()[:2])
+
+        repaired = self.run_installer()
+
+        self.assertEqual(repaired.returncode, 0, repaired.stderr)
+        self.assertFalse(journal.exists())
+        self.assertFalse((backup / "share/kettle/install.sh").exists())
+        self.assertTrue(partial.exists(), "a copy that does not match was removed")
+        self.assertTrue(
+            (backup / ".kettle-update-backup.json").exists(),
+            "a backup that still holds a copy lost its marker",
+        )
+
+    def test_a_file_changed_after_an_interrupted_self_update_is_refused(self):
+        installed = self.run_installer()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        journal, backup = self.interrupted_self_update()
+        script = self.prefix / "share/kettle/install.sh"
+        script.write_bytes(b"#!/bin/sh\n# edited by hand\n")
+
+        refused = self.run_installer()
+
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("share/kettle/install.sh changed after an interrupted", refused.stderr)
+        self.assertEqual(script.read_bytes(), b"#!/bin/sh\n# edited by hand\n")
+        self.assertTrue(journal.exists() and backup.exists())
+
+    def test_a_committed_self_update_journal_is_left_to_kettle(self):
+        installed = self.run_installer()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        journal, backup = self.interrupted_self_update(phase="committed")
+        # A committed update also wrote the record that describes its files.
+        manifest_path = self.prefix / "share/kettle/install-files.json"
+        manifest = json.loads(manifest_path.read_text())
+        written = {entry["relative"]: entry for entry in json.loads(journal.read_text())["entries"]}
+        for record in manifest["files"]:
+            entry = written.get(record["path"])
+            if entry and entry["state"] == "installed":
+                record["size"] = entry["replacement_size"]
+                record["sha256"] = entry["replacement_sha256"]
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+        manifest_path.chmod(0o644)
+
+        result = self.run_installer()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(journal.exists(), "kettle confirms and removes a committed journal")
+        self.assertTrue(backup.exists())
+
+    def test_an_unreadable_self_update_journal_stops_the_install(self):
+        installed = self.run_installer()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        script = self.prefix / "share/kettle/install.sh"
+        before = script.read_bytes()
+        journal, _backup = self.interrupted_self_update()
+        valid = json.loads(journal.read_text())
+        script.write_bytes(before)
+        script.chmod(0o755)
+        wrong_type = json.loads(json.dumps(valid))
+        wrong_type["entries"][0]["previous_unix_mode"] = "0755"
+        for document, mode, message in (
+            ({"schema": 1, "backup_dir": ".kettle-update-backup-1", "entries": []},
+             0o600, "start the installed kettle once"),
+            (dict(valid, schema=2.0), 0o600, "start the installed kettle once"),
+            ({"schema": 2}, 0o600, "not one Kettle's self-updater wrote"),
+            (dict(valid, extra=1), 0o600, "not one Kettle's self-updater wrote"),
+            (dict(valid, entries=valid["entries"] + valid["entries"][:1]), 0o600,
+             "not one Kettle's self-updater wrote"),
+            (dict(valid, phase=["rolling_back"]), 0o600, "not one Kettle's self-updater wrote"),
+            (dict(valid, target_version="nine"), 0o600, "not one Kettle's self-updater wrote"),
+            (dict(valid, phase="prepared", entries=[
+                dict(valid["entries"][0], state="restored")]), 0o600,
+             "not one Kettle's self-updater wrote"),
+            (dict(valid, backup_dir=".kettle-update-backup-1-1"), 0o600,
+             "not one Kettle's self-updater wrote"),
+            (wrong_type, 0o600, "not one Kettle's self-updater wrote"),
+            (valid, 0o644, "not an owned bounded regular file"),
+        ):
+            with self.subTest(document=document, mode=oct(mode)):
+                journal.write_text(json.dumps(document))
+                journal.chmod(mode)
+                refused = self.run_installer()
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertIn(message, refused.stderr)
+                self.assertEqual(script.read_bytes(), before)
+
     def test_equal_bytes_alone_never_adopt_a_file(self):
         files = [("share/kettle/a", b"a")]
         # Someone else's file with exactly the bytes and mode Kettle would write.

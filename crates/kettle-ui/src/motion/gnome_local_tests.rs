@@ -46,43 +46,86 @@ fn started(starts: &std::io::PipeReader) -> bool {
     matches!(reader.read(&mut [0; 1]), Ok(1))
 }
 
+/// A read's time that no load on the machine uses up, for the tests that
+/// are not about the deadline.
+const LONG: Duration = Duration::from_secs(30);
+
+/// Wait for `ready`, failing with `message` only if it never comes.
 fn wait_for(message: &str, mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(6);
+    let deadline = Instant::now() + LONG;
     while !ready() {
         assert!(Instant::now() < deadline, "{message}");
         std::thread::sleep(Duration::from_millis(5));
     }
 }
 
-/// A test child that publishes its PID in a file, then sleeps; killed on
-/// drop if a test fails before the code under test reaps it.
+/// A test child that sleeps. It publishes its PID from a pre-exec hook,
+/// before it runs anything, and `spawn` returns only after that hook, so the
+/// PID is known once the code under test has started it, however loaded the
+/// machine and however soon the child is killed. (A PID the child's shell
+/// wrote could be missing or empty when a busy machine killed it first.)
+/// Killed on drop if a test fails before the code under test reaps it.
 struct Sleeper {
-    _dir: kettle_test_support::PrivateTempDir,
-    pid_file: PathBuf,
+    pids: std::io::PipeReader,
+    writer: std::os::fd::OwnedFd,
+    pid: std::sync::Mutex<Option<libc::pid_t>>,
 }
 
 impl Sleeper {
     fn new() -> Self {
-        let dir = kettle_test_support::private_tempdir("kettle-gnome-motion-");
-        let pid_file = dir.path().join("pid");
+        let (pids, writer) = std::io::pipe().expect("a pipe");
         Self {
-            _dir: dir,
-            pid_file,
+            pids,
+            writer: writer.into(),
+            pid: std::sync::Mutex::new(None),
         }
     }
 
     fn command(&self) -> Command {
-        let mut command = sh("echo $$ > \"$1\"; exec sleep 30");
-        command.arg("sleeper").arg(&self.pid_file);
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::process::CommandExt as _;
+        let mut command = sh("exec sleep 30");
+        let writer = self.writer.try_clone().expect("a descriptor");
+        // SAFETY: the hook runs in the forked child before exec and only
+        // calls getpid(2) and write(2), which are async-signal-safe, on a
+        // descriptor the closure keeps open.
+        unsafe {
+            command.pre_exec(move || {
+                let pid = libc::getpid();
+                libc::write(
+                    writer.as_raw_fd(),
+                    std::ptr::from_ref(&pid).cast(),
+                    std::mem::size_of::<libc::pid_t>(),
+                );
+                Ok(())
+            });
+        }
         command
     }
 
+    /// The child's PID, once it has been started.
     fn pid(&self) -> Option<libc::pid_t> {
-        std::fs::read_to_string(&self.pid_file)
-            .ok()?
-            .trim()
-            .parse()
-            .ok()
+        use std::io::Read as _;
+        use std::os::fd::AsRawFd as _;
+        let mut pid = self.pid.lock().unwrap();
+        if pid.is_none() {
+            let mut poll = libc::pollfd {
+                fd: self.pids.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: poll is writable storage for one pollfd on a live
+            // descriptor.
+            if unsafe { libc::poll(&mut poll, 1, 0) } > 0 {
+                let mut bytes = [0; std::mem::size_of::<libc::pid_t>()];
+                let mut reader = &self.pids;
+                // The write end stays open here, so a ready pipe holds the
+                // whole PID, written in one write(2).
+                reader.read_exact(&mut bytes).expect("a whole PID");
+                *pid = Some(libc::pid_t::from_ne_bytes(bytes));
+            }
+        }
+        *pid
     }
 
     /// Whether the child is gone: killed and reaped, not left a zombie.
@@ -219,7 +262,7 @@ fn a_gsettings_this_process_may_not_run_does_not_hide_a_working_one() {
         move || gsettings_candidates(Some(&path)).map(|file| file.map(gsettings_get)),
         Arc::new(|| {}),
         Duration::from_millis(20),
-        TIMEOUT,
+        LONG,
     );
     wait_for("the working gsettings's answer", || {
         watch.reading() == Reading::Value(false)
@@ -229,7 +272,7 @@ fn a_gsettings_this_process_may_not_run_does_not_hide_a_working_one() {
 #[test]
 fn a_read_takes_true_or_false_from_a_successful_run_and_nothing_else() {
     let (_open, stop) = mpsc::channel();
-    let soon = || Instant::now() + Duration::from_secs(5);
+    let soon = || Instant::now() + LONG;
     let read = |script: &str| read(&mut sh(script), soon(), &stop);
     assert_eq!(read("printf 'true\\n'"), Read::Ran(Some(true)));
     assert_eq!(read("printf 'false\\n'"), Read::Ran(Some(false)));
@@ -263,17 +306,26 @@ fn a_read_takes_true_or_false_from_a_successful_run_and_nothing_else() {
 #[test]
 fn an_overrunning_read_is_killed_and_reaped() {
     let sleeper = Sleeper::new();
+    let mut command = sleeper.command();
     let (_open, stop) = mpsc::channel();
     let since = Instant::now();
-    assert_eq!(
-        read(
-            &mut sleeper.command(),
+    // A machine busy enough to pass the deadline before the start gets a
+    // `Late`, which starts nothing; try again until the child starts.
+    let read = loop {
+        match read(
+            &mut command,
             Instant::now() + Duration::from_millis(300),
-            &stop
-        ),
-        Read::Ran(None)
+            &stop,
+        ) {
+            Read::Late => continue,
+            read => break read,
+        }
+    };
+    assert_eq!(read, Read::Ran(None));
+    assert!(
+        since.elapsed() < Duration::from_secs(20),
+        "the read waited for its 30-second child"
     );
-    assert!(since.elapsed() < Duration::from_secs(3));
     assert!(sleeper.reaped(), "the overrunning child was left behind");
 }
 
@@ -281,24 +333,22 @@ fn an_overrunning_read_is_killed_and_reaped() {
 /// timeout.
 #[test]
 fn a_stopped_read_is_killed_and_reaped_at_once() {
-    let sleeper = Sleeper::new();
+    let sleeper = &Sleeper::new();
     let (stop, stopped) = mpsc::channel::<()>();
-    let pid_file = sleeper.pid_file.clone();
-    let stopper = std::thread::spawn(move || {
-        wait_for("the child started", || pid_file.exists());
-        drop(stop);
-    });
     let since = Instant::now();
-    assert_eq!(
-        read(
-            &mut sleeper.command(),
-            Instant::now() + Duration::from_secs(30),
-            &stopped
-        ),
-        Read::Ran(None)
+    let read = std::thread::scope(|scope| {
+        // Stop once the child has started, which its published PID shows.
+        scope.spawn(move || {
+            wait_for("the child started", || sleeper.pid().is_some());
+            drop(stop);
+        });
+        read(&mut sleeper.command(), Instant::now() + LONG, &stopped)
+    });
+    assert_eq!(read, Read::Ran(None));
+    assert!(
+        since.elapsed() < Duration::from_secs(20),
+        "the stopped read waited for its 30-second child"
     );
-    stopper.join().unwrap();
-    assert!(since.elapsed() < Duration::from_secs(5));
     assert!(sleeper.reaped(), "the stopped child was left behind");
 }
 
@@ -310,19 +360,19 @@ fn the_watch_follows_gnomes_switch_and_keeps_its_last_answer() {
     let value = dir.path().join("value");
     std::fs::write(&value, "false\n").unwrap();
     let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let counted = wakes.clone();
-    let file = value.clone();
+    let woken = wakes.clone();
+    let mut cat = sh("cat \"$1\"");
+    cat.arg("stub").arg(&value);
+    let (cat, starts) = counted(cat);
+    // The first read runs it and keeps it, so every read starts this one.
+    let mut cat = Some(cat);
     let watch = LocalWatch::start_with(
-        move || {
-            let mut command = sh("cat \"$1\"");
-            command.arg("stub").arg(&file);
-            Some(command)
-        },
+        move || cat.take(),
         Arc::new(move || {
-            counted.fetch_add(1, Ordering::AcqRel);
+            woken.fetch_add(1, Ordering::AcqRel);
         }),
         Duration::from_millis(20),
-        TIMEOUT,
+        LONG,
     );
     wait_for("GNOME's switch off", || {
         watch.reading() == Reading::Value(false)
@@ -332,7 +382,12 @@ fn the_watch_follows_gnomes_switch_and_keeps_its_last_answer() {
         watch.reading() == Reading::Value(true)
     });
     std::fs::write(&value, "garbage\n").unwrap();
-    std::thread::sleep(Duration::from_millis(200));
+    // Reads are one at a time: past the reads already started, the second
+    // new one began after the write, and the third only once it was done.
+    while started(&starts) {}
+    for _ in 0..3 {
+        wait_for("another read", || started(&starts));
+    }
     assert_eq!(watch.reading(), Reading::Value(true));
     assert_eq!(wakes.load(Ordering::Acquire), 2);
     drop(watch);
@@ -351,12 +406,14 @@ fn the_watch_follows_gnomes_switch_and_keeps_its_last_answer() {
 fn dropping_the_watch_mid_read_leaves_no_child_or_thread() {
     let sleeper = Sleeper::new();
     let mut command = Some(sleeper.command());
-    let watch = LocalWatch::start(move || command.take(), Arc::new(|| {}));
+    let wake: kettle_core::Waker = Arc::new(|| {});
+    let worker = Arc::downgrade(&wake);
+    let watch = LocalWatch::start_with(move || command.take(), wake, REFRESH, LONG);
     wait_for("the child started", || sleeper.pid().is_some());
     assert_eq!(watch.reading(), Reading::Pending);
-    let since = Instant::now();
     drop(watch);
-    assert!(since.elapsed() < Duration::from_secs(2));
+    // The thread reaps its child before it ends.
+    wait_for("the watch's thread ended", || worker.upgrade().is_none());
     assert!(sleeper.reaped(), "the watch's child outlived it");
 }
 
@@ -365,8 +422,15 @@ fn dropping_the_watch_mid_read_leaves_no_child_or_thread() {
 /// answer still comes first, and with no answer anywhere motion is allowed.
 #[test]
 fn a_gnome_switch_only_gnome_itself_reports_holds_motion_back() {
-    let watch = LocalWatch::start(|| Some(sh("printf 'false\\n'")), Arc::new(|| {}));
-    wait_for("GNOME's own answer", || watch.reading() != Reading::Pending);
+    let watch = LocalWatch::start_with(
+        || Some(sh("printf 'false\\n'")),
+        Arc::new(|| {}),
+        REFRESH,
+        LONG,
+    );
+    wait_for("GNOME's own answer", || {
+        watch.reading() == Reading::Value(false)
+    });
     let unavailable = || Reading::Unavailable;
     let preference = Preference::linux(Reading::Unavailable, unavailable, || watch.reading());
     assert_eq!(preference, Preference::Reduced);
@@ -403,29 +467,30 @@ fn dropping_the_watch_during_a_held_lookup_returns_at_once() {
     let (entered, looking) = mpsc::channel::<()>();
     let wake: kettle_core::Waker = Arc::new(|| {});
     let worker = Arc::downgrade(&wake);
+    let returned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let lookup_returned = returned.clone();
     let watch = LocalWatch::start(
         move || {
             let _ = entered.send(());
-            let _ = held.recv_timeout(Duration::from_secs(20));
+            let _ = held.recv_timeout(Duration::from_secs(60));
+            lookup_returned.store(true, Ordering::Release);
             command.take()
         },
         wake,
     );
-    looking
-        .recv_timeout(Duration::from_secs(6))
-        .expect("the lookup started");
+    looking.recv_timeout(LONG).expect("the lookup started");
+    // The lookup is released once the drop has returned, or after a while
+    // if it never does, as a drop that joined the thread would not.
+    let (dropped, drop_returned) = mpsc::channel::<()>();
     let releaser = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(3));
+        let _ = drop_returned.recv_timeout(Duration::from_secs(10));
         let _ = release.send(());
     });
-    let since = Instant::now();
     drop(watch);
-    let waited = since.elapsed();
+    let held_through_the_drop = !returned.load(Ordering::Acquire);
+    let _ = dropped.send(());
     releaser.join().unwrap();
-    assert!(
-        waited < Duration::from_secs(2),
-        "the drop waited {waited:?} for the lookup"
-    );
+    assert!(held_through_the_drop, "the drop waited for the lookup");
     wait_for("the thread ended after its lookup", || {
         worker.upgrade().is_none()
     });
@@ -441,21 +506,28 @@ fn a_held_lookup_counts_against_the_first_answers_time() {
     let (command, starts) = counted(sleeper.command());
     let mut command = Some(command);
     let (release, held) = mpsc::channel::<()>();
+    let time = Duration::from_millis(300);
+    let since = Instant::now();
     let watch = LocalWatch::start_with(
         move || {
-            let _ = held.recv_timeout(Duration::from_secs(20));
+            let _ = held.recv_timeout(Duration::from_secs(60));
             command.take()
         },
         Arc::new(|| {}),
         Duration::from_secs(30),
-        Duration::from_millis(300),
+        time,
     );
-    assert_eq!(watch.reading(), Reading::Pending);
-    std::thread::sleep(Duration::from_millis(400));
+    let early = watch.reading();
+    if since.elapsed() < time {
+        assert_eq!(early, Reading::Pending);
+    }
+    wait_for("the wait for a first answer outlasted its time", || {
+        watch.reading() == Reading::Unavailable
+    });
     assert_eq!(
-        watch.reading(),
-        Reading::Unavailable,
-        "the wait for a first answer outlasted its time"
+        watch.state.load(Ordering::Acquire),
+        PENDING,
+        "the lookup is still held"
     );
     release.send(()).unwrap();
     wait_for("the read after the lookup gave up", || {
@@ -514,7 +586,7 @@ fn a_gsettings_that_cannot_start_does_not_hide_a_working_one() {
         move || gsettings_candidates(Some(&path)).map(|file| file.map(gsettings_get)),
         Arc::new(|| {}),
         Duration::from_millis(20),
-        TIMEOUT,
+        LONG,
     );
     wait_for("the working gsettings's answer", || {
         watch.reading() == Reading::Value(false)
@@ -535,7 +607,7 @@ fn the_search_runs_again_rather_than_keeping_what_cannot_start() {
         move || gsettings_candidates(Some(&path)).map(|file| file.map(gsettings_get)),
         Arc::new(|| {}),
         Duration::from_millis(20),
-        TIMEOUT,
+        LONG,
     );
     wait_for("nothing starts", || {
         watch.state.load(Ordering::Acquire) == UNAVAILABLE
@@ -557,25 +629,38 @@ fn the_search_runs_again_rather_than_keeping_what_cannot_start() {
 /// started.
 #[test]
 fn the_deadline_and_the_stop_hold_across_the_whole_search() {
-    let slow_search = |command: Command, delay: Duration| {
+    // A search whose first candidate cannot start and whose second is
+    // reached only after `pause`.
+    fn slow_search(
+        command: Command,
+        pause: Box<dyn FnOnce() + Send>,
+    ) -> impl FnMut() -> Box<dyn Iterator<Item = Command>> + Send + 'static {
         let mut command = Some(command);
+        let mut pause = Some(pause);
         move || {
             let mut slow = command.take();
+            let mut pause = pause.take();
             let mut first = true;
-            std::iter::from_fn(move || {
+            Box::new(std::iter::from_fn(move || {
                 if std::mem::take(&mut first) {
                     return Some(Command::new("/nonexistent/gsettings"));
                 }
                 let command = slow.take()?;
-                std::thread::sleep(delay);
+                if let Some(pause) = pause.take() {
+                    pause();
+                }
                 Some(command)
-            })
+            }))
         }
-    };
+    }
     let sleeper = Sleeper::new();
     let (command, starts) = counted(sleeper.command());
+    // At least 400 ms, past the 200 ms deadline however busy the machine.
     let watch = LocalWatch::start_with(
-        slow_search(command, Duration::from_millis(400)),
+        slow_search(
+            command,
+            Box::new(|| std::thread::sleep(Duration::from_millis(400))),
+        ),
         Arc::new(|| {}),
         Duration::from_secs(30),
         Duration::from_millis(200),
@@ -591,14 +676,26 @@ fn the_deadline_and_the_stop_hold_across_the_whole_search() {
     let (command, starts) = counted(sleeper.command());
     let wake: kettle_core::Waker = Arc::new(|| {});
     let worker = Arc::downgrade(&wake);
+    // Held until the watch has been dropped.
+    let (entered, holding) = mpsc::channel::<()>();
+    let (release, held) = mpsc::channel::<()>();
     let watch = LocalWatch::start_with(
-        slow_search(command, Duration::from_millis(1500)),
+        slow_search(
+            command,
+            Box::new(move || {
+                let _ = entered.send(());
+                let _ = held.recv_timeout(Duration::from_secs(60));
+            }),
+        ),
         wake,
         Duration::from_secs(30),
-        Duration::from_secs(30),
+        LONG,
     );
-    std::thread::sleep(Duration::from_millis(200));
+    holding
+        .recv_timeout(LONG)
+        .expect("the search reached its second candidate");
     drop(watch);
+    let _ = release.send(());
     wait_for("the thread ended after its search", || {
         worker.upgrade().is_none()
     });
