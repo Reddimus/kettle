@@ -41,12 +41,20 @@ fn url_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(URL_PATTERN).unwrap())
 }
 
+/// Text shaped like a URL of any scheme, Kettle's or not (`vscode://x`,
+/// `httpſ://x`): no piece of it is a local path, as its query is not
+/// (`vscode://open?file=/tmp/a.pdf`).
+pub(crate) fn url_shaped_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"\p{L}[\p{L}\p{N}+.\-]*://[^\s\x00-\x1f<>"]*"#).unwrap())
+}
+
 /// A [`URL_PATTERN`] match's start and text in `line`, without the
 /// character before a `www.` that the pattern takes to check it. A URL
 /// starts with a letter, and that character is never a letter or a number.
 /// `None` when the character before the URL is an invisible one, which
-/// does not end a word (`a\u{200b}www.x.test` reads as one token); Unicode
-/// whitespace shows as a space and does.
+/// does not end a word (`a\u{200b}www.x.test` reads as one token), or a
+/// control; Unicode whitespace shows as a space and does.
 pub(crate) fn url_match<'a>(line: &str, m: &regex::Match<'a>) -> Option<(usize, &'a str)> {
     let text = m.as_str();
     let taken = text
@@ -56,7 +64,7 @@ pub(crate) fn url_match<'a>(line: &str, m: &regex::Match<'a>) -> Option<(usize, 
         .map_or(0, char::len_utf8);
     let start = m.start() + taken;
     let before = line[..start].chars().next_back();
-    if before.is_some_and(|c| hides_text(c) && !c.is_whitespace()) {
+    if before.is_some_and(|c| hides_text(c) && (c.is_control() || !c.is_whitespace())) {
         return None;
     }
     Some((start, &text[taken..]))
@@ -367,6 +375,11 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
             }
             let uri = normalize_url(matched);
             push(start, matched.len(), uri, &mut covered);
+        }
+        // Text shaped like a URL of another scheme links nothing, and no
+        // piece of it is a local path either.
+        for m in url_shaped_re().find_iter(&text) {
+            cover(m.start(), m.len(), &mut covered);
         }
         // A quoted path goes before bare ones, so they cannot take a piece
         // of it; its link covers a location suffix as a bare path's does.
@@ -1947,6 +1960,26 @@ mod tests {
         assert_eq!(
             super::local_file_path("FILE:///etc/hosts"),
             Some(std::path::PathBuf::from("/etc/hosts"))
+        );
+    }
+
+    /// Text shaped like a URL of a scheme Kettle does not open, `httpſ://`
+    /// among them, holds no local path: not its query's either.
+    #[test]
+    fn another_schemes_url_holds_no_local_path() {
+        for line in [
+            "see httpſ://example.test/?file=/tmp/report.pdf",
+            "see vscode://open?file=/tmp/report.pdf",
+            "see x-app://h/a=/tmp/report.pdf",
+        ] {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert!(found.is_empty(), "{line}: {found:?}");
+        }
+        let term = term_with(30, &["see file=/tmp/report.pdf here"], &[]);
+        assert_eq!(
+            links_with_cwd(&term, Some("/work"))[0].uri,
+            "file:///tmp/report.pdf"
         );
     }
 

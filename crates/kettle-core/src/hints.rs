@@ -540,13 +540,19 @@ fn detect_line(
 ) {
     let mut taken = Taken::default();
     let runs = quoted_runs(line).collect::<Vec<_>>();
+    // Text shaped like a URL of any scheme holds no path, though an address
+    // or hash in it may still be copied.
+    let mut url_shaped = Taken::default();
+    for m in crate::links::url_shaped_re().find_iter(line) {
+        url_shaped.insert(m.start(), m.end());
+    }
     for (kind, re) in res() {
         if *kind == Kind::Path {
             // A quoted path is whole by construction; it goes first so the
             // bare pattern cannot take a piece of it.
             for (bs, be, close) in quoted_paths(line) {
                 let fragment = (cut.0 && bs == 1) || (cut.1 && close + 1 == line.len());
-                if fragment || taken.overlaps(bs, be) {
+                if fragment || taken.overlaps(bs, be) || url_shaped.overlaps(bs, be) {
                     continue;
                 }
                 taken.insert(bs, be);
@@ -619,7 +625,7 @@ fn detect_line(
                     || (path_reaches_quote(line, &runs, m_start, m.end())
                         && !path_misleads(trimmed)));
             let (bs, be) = (m_start, m_start + trimmed.len());
-            if taken.overlaps(bs, be) {
+            if taken.overlaps(bs, be) || (*kind == Kind::Path && url_shaped.overlaps(bs, be)) {
                 continue;
             }
             taken.insert(bs, be);
@@ -1716,9 +1722,29 @@ mod tests {
                 "{line}: {spans:?}"
             );
         }
-        // A scheme matches in ASCII case only: `ſ` is no `s` here.
-        let spans = detect(&["see httpſ://example.test/ok"]);
+        // A scheme matches in ASCII case only: `ſ` is no `s` here, and no
+        // piece of the text shaped like a URL is a path.
+        for line in [
+            "see httpſ://example.test/ok",
+            "see httpſ://example.test/?file=/tmp/report.pdf",
+            "see vscode://open?file=/tmp/report.pdf",
+        ] {
+            let spans = detect(&[line]);
+            assert!(
+                spans.iter().all(|span| span.kind != Kind::Url),
+                "{line}: {spans:?}"
+            );
+            assert!(spans.iter().all(|span| !span.bounded), "{line}: {spans:?}");
+        }
+        // A control before `www.` starts no URL either.
+        let spans = detect(&["docs/a\u{85}WWW.example.test/path.txt"]);
         assert!(spans.iter().all(|span| span.kind != Kind::Url), "{spans:?}");
+        // An address in such text is still a hint to copy.
+        assert!(
+            detect(&["ssh://10.0.0.1/x"])
+                .iter()
+                .any(|span| span.kind == Kind::Ip && span.text == "10.0.0.1")
+        );
         // Nor does an invisible character end the word before a URL.
         for line in [
             "file docs/a\u{200b}WWW.example.test/path.txt",
