@@ -1282,6 +1282,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   of its own where Codex wrapped before `-->`. Kettle now asks for `/copy`
   when the rows could be read either way.
 
+- Pasting a video or document failed with "Operation not permitted" on a
+  Linux file system that refuses a copy-on-write clone that way, as some
+  sandboxes' tmpfs and overlayfs mounts do. Kettle now copies the bytes, as
+  it already did where a file system makes no clones.
+
 - The one-character form of the bracketed-paste end marker (U+009B followed
   by `201~`) opened the Confirm paste dialog and was then sent on by Paste
   and by Paste as one line. Both markers are now removed in that form too, in
