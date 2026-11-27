@@ -1,0 +1,4 @@
+streams.stream.0.codec_name="hevc"
+streams.stream.0.codec_type="video"
+streams.stream.0.width=640
+streams.stream.0.height=480

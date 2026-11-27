@@ -1699,10 +1699,12 @@ hard wraps are joined back by inverting the harness's greedy word wrap: a
 row indented less than the body that no wrapper of that harness, or of
 either when it is unknown, could have kept on the row above is a
 continuation, joined with the space it took: one, however many the wrapper
-dropped, which Mermaid draws the same as a run. A row ending in a hyphen or
-slash before one that starts with a word (Codex may have broken a word or
-wrapped at a space after it), a full row a too-long word could have been cut
-at, a row that would have fit (wrapped at another width), and unindented
+dropped, which Mermaid draws the same as a run. A row ending where Codex may
+break inside a word (after a hyphen between letters or digits, or after a
+slash whatever comes before it, unless a digit or a closing mark follows: it
+may have broken a word or wrapped at a space after it), a full row a
+too-long word could have been cut at, a row that would have fit (wrapped at
+another width), and unindented
 text are refused, never guessed; without a width, so is any row that some width the
 rows fit in could have wrapped, by its shape or anywhere in an unindented
 body, and in an unindented body with a width too, since the pane may have
