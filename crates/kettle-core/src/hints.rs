@@ -42,10 +42,7 @@ fn res() -> &'static [(Kind, Regex)] {
     static RE: OnceLock<Vec<(Kind, Regex)>> = OnceLock::new();
     RE.get_or_init(|| {
         vec![
-            (
-                Kind::Url,
-                Regex::new(r#"(?i:https?://|ftp://|file://|www\.)[^\s\x00-\x1f<>"]+"#).unwrap(),
-            ),
+            (Kind::Url, Regex::new(crate::links::URL_PATTERN).unwrap()),
             (
                 Kind::Path,
                 // A path with at least one separator, anchored at its first
@@ -543,23 +540,22 @@ fn detect_line(
             }
         }
         for m in re.find_iter(line) {
-            let raw = m.as_str();
+            let (m_start, raw) = if *kind == Kind::Url {
+                crate::links::url_match(&m)
+            } else {
+                (m.start(), m.as_str())
+            };
             let trimmed = if *kind == Kind::Path {
                 crate::url_trim::trim_path_trailing(raw)
             } else {
                 trim_trailing(raw)
             };
-            let before = line[..m.start()].chars().next_back();
-            let fragment = (cut.0 && m.start() == 0) || (cut.1 && m.end() == line.len());
-            // A `www.` inside a longer name is part of that name, which the
-            // path pattern may take.
-            if *kind == Kind::Url && !crate::links::url_may_start_after(raw, before) {
-                continue;
-            }
+            let before = line[..m_start].chars().next_back();
+            let fragment = (cut.0 && m_start == 0) || (cut.1 && m.end() == line.len());
             // A scheme with nothing after it (`see https://...`) is no URL,
             // and no piece of it is a path either.
             if *kind == Kind::Url && !fragment && !crate::links::names_a_target(trimmed) {
-                taken.fill(m.start(), m.end());
+                taken.fill(m_start, m.end());
                 continue;
             }
             if trimmed.is_empty()
@@ -576,9 +572,9 @@ fn detect_line(
             // `'My Files/a b.txt'`.
             let bounded = is_bounded(before, &line[m.end()..])
                 && (*kind != Kind::Path
-                    || (path_reaches_quote(line, &runs, m.start(), m.end())
+                    || (path_reaches_quote(line, &runs, m_start, m.end())
                         && !path_misleads(trimmed)));
-            let (bs, be) = (m.start(), m.start() + trimmed.len());
+            let (bs, be) = (m_start, m_start + trimmed.len());
             if taken.overlaps(bs, be) {
                 continue;
             }
@@ -1615,6 +1611,27 @@ mod tests {
             assert_eq!(spans.len(), 1, "{path}: {spans:?}");
             assert_eq!((spans[0].kind, spans[0].text.as_str()), (Kind::Path, path));
         }
+        // A scheme after a refused `www.` still starts a URL.
+        let spans = detect(&["docs/www.cfg=HTTPS://example.com/a"]);
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.kind == Kind::Url && span.text == "HTTPS://example.com/a"),
+            "{spans:?}"
+        );
+        // One pass, however many `www.` a token runs into.
+        let line = "xwww.".repeat(20_000);
+        let started = std::time::Instant::now();
+        assert!(
+            detect(&[line.as_str()])
+                .iter()
+                .all(|span| span.kind != Kind::Url)
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(1500),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     /// A URL trimmed down to a bare scheme or `www` names nothing: no hint

@@ -26,21 +26,31 @@ pub struct Link {
     pub explicit: bool,
 }
 
+/// The pattern for detected URLs, shared with quick select. A scheme is
+/// case-insensitive (RFC 3986), as `www.` is to a reader. A scheme starts a
+/// URL wherever it is, but a `www.` only where no name runs into it: not in
+/// `docs/www.example.com.txt` or `me@www.example.com`. The pattern has no
+/// look-behind, so it takes the character before such a `www.` into the
+/// match, and [`url_match`] drops it; one pass stays linear.
+pub(crate) const URL_PATTERN: &str =
+    r#"(?i:https?://|ftp://|file://|(?:^|[^\w/\\.\-@%+~])www\.)[^\s\x00-\x1f<>"]+"#;
+
 fn url_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    // A scheme is case-insensitive (RFC 3986), as `www.` is to a reader.
-    RE.get_or_init(|| {
-        Regex::new(r#"(?i:https?://|ftp://|file://|www\.)[^\s\x00-\x1f<>"]+"#).unwrap()
-    })
+    RE.get_or_init(|| Regex::new(URL_PATTERN).unwrap())
 }
 
-/// Whether a URL match may start after `before`. A scheme says where a URL
-/// starts, but a `www.` inside a longer name is part of that name: the file
-/// `docs/www.example.com.txt`, the address `me@www.example.com`.
-pub(crate) fn url_may_start_after(url: &str, before: Option<char>) -> bool {
-    !url.get(..4)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("www."))
-        || before.is_none_or(|c| !(c.is_alphanumeric() || "/\\.-_@%+~".contains(c)))
+/// A [`URL_PATTERN`] match's start and text, without the character before
+/// a `www.` that the pattern takes to check it. A URL starts with a letter,
+/// and that character is never one.
+pub(crate) fn url_match<'a>(m: &regex::Match<'a>) -> (usize, &'a str) {
+    let text = m.as_str();
+    let taken = text
+        .chars()
+        .next()
+        .filter(|c| !c.is_alphabetic())
+        .map_or(0, char::len_utf8);
+    (m.start() + taken, &text[taken..])
 }
 
 /// Whether a detected URL, trimmed of trailing punctuation, still names
@@ -317,19 +327,19 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
             }
         };
         for m in url_re().find_iter(&text) {
-            let matched = crate::url_trim::trim_trailing(m.as_str());
-            let before = text[..m.start()].chars().next_back();
-            if fragment(m.start(), m.end()) || !url_may_start_after(matched, before) {
+            let (start, raw) = url_match(&m);
+            let matched = crate::url_trim::trim_trailing(raw);
+            if fragment(start, m.end()) {
                 continue;
             }
             // A scheme with nothing after it is no link, and its query is
             // not a local path (`https://?q=/etc/hosts`).
             if !names_a_target(matched) {
-                cover(m.start(), m.len(), &mut covered);
+                cover(start, raw.len(), &mut covered);
                 continue;
             }
             let uri = normalize_url(matched);
-            push(m.start(), matched.len(), uri, &mut covered);
+            push(start, matched.len(), uri, &mut covered);
         }
         // A quoted path goes before bare ones, so they cannot take a piece
         // of it; its link covers a location suffix as a bare path's does.
@@ -1743,6 +1753,22 @@ mod tests {
         }
         let term = term_with(20, &["mail me@WWW.x.test"], &[]);
         assert!(links_with_cwd(&term, Some("/work")).is_empty());
+        // A name ending in `www` is a path; a scheme after a refused `www.`
+        // still starts a URL.
+        for (line, uri) in [
+            ("cat /tmp/www...", "file:///tmp/www"),
+            (
+                "docs/www.cfg=HTTPS://example.com/a",
+                "HTTPS://example.com/a",
+            ),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>();
+            assert_eq!(found, [uri], "{line}");
+        }
         assert_eq!(super::normalize_url("WWW.x.test"), "https://WWW.x.test");
         assert_eq!(super::normalize_url("wwwx.test"), "wwwx.test");
         assert_eq!(super::normalize_url("w\u{e9}"), "w\u{e9}");
