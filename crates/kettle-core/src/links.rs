@@ -641,11 +641,20 @@ pub fn is_safe_url(uri: &str) -> bool {
 /// Whether the text after a URL's scheme still reads as itself once its
 /// percent escapes are decoded, as a browser or mail client shows and uses
 /// its host, path and query: no decoded character that hides text (see
-/// `hides_text`). An encoded space, tab or line break, as in a form's text
-/// (`body=a%0Ab`), and visible non-ASCII text are fine, and an escape that
-/// does not decode stays text.
+/// `hides_text`). An encoded space and visible non-ASCII text are fine
+/// anywhere, an encoded tab or line break only in the query or fragment, as
+/// in a form's text (`body=a%0Ab`), and an escape that does not decode
+/// stays text.
 fn decodes_visibly(rest: &str) -> bool {
-    let bytes = rest.as_bytes();
+    let text_at = rest.find(['?', '#']).unwrap_or(rest.len());
+    decodes_to(&rest[..text_at], |c| c == ' ')
+        && decodes_to(&rest[text_at..], |c| c.is_ascii_whitespace())
+}
+
+/// Whether `part` decodes to no character that hides text but those
+/// `allowed`.
+fn decodes_to(part: &str, allowed: impl Fn(char) -> bool) -> bool {
+    let bytes = part.as_bytes();
     if !bytes.contains(&b'%') {
         return true;
     }
@@ -666,7 +675,7 @@ fn decodes_visibly(rest: &str) -> bool {
     }
     !String::from_utf8_lossy(&decoded)
         .chars()
-        .any(|c| hides_text(c) && !c.is_ascii_whitespace())
+        .any(|c| hides_text(c) && !allowed(c))
 }
 
 /// The local path a `file://` URI names, decoded: `file:///a%20b` is `/a b`.
@@ -2090,6 +2099,10 @@ mod tests {
             "https://x.test/#%E2%81%A6",
             "ftp://host/a%E2%80%8Db",
             "mailto:a%E2%80%8B@x.test",
+            // A tab or line break is a form's text only in a query.
+            "https://x.test/a%09b",
+            "https://x%0A.test/",
+            "mailto:a%0Ab@x.test",
         ] {
             assert!(!is_safe_url(uri), "{uri}");
             assert_eq!(super::local_file_path(uri), None, "{uri}");
@@ -2101,6 +2114,7 @@ mod tests {
             "https://x.test/a%20b",
             "https://x.test/caf%C3%A9",
             "https://x.test/issues/new?body=a%0Ab%09c",
+            "https://x.test/a#line%0Atwo",
             "https://x.test/a%zz",
             "mailto:a@x.test?body=hi%20there%0A",
         ] {
