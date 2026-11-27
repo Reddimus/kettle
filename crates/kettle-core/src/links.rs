@@ -27,13 +27,14 @@ pub struct Link {
 }
 
 /// The pattern for detected URLs, shared with quick select. A scheme is
-/// case-insensitive (RFC 3986), as `www.` is to a reader. A scheme starts a
-/// URL wherever it is, but a `www.` only where no name runs into it: not in
+/// case-insensitive (RFC 3986), as `www.` is to a reader, in ASCII only: a
+/// Unicode fold would read `httpſ://` (U+017F) as `https://`, a scheme the
+/// opener refuses. A scheme starts a URL wherever it is, but a `www.` only
+/// where no name runs into it, judged by Unicode classes: not in
 /// `docs/www.example.com.txt` or `me@www.example.com`. The pattern has no
 /// look-behind, so it takes the character before such a `www.` into the
 /// match, and [`url_match`] drops it; one pass stays linear.
-pub(crate) const URL_PATTERN: &str =
-    r#"(?i:https?://|ftp://|file://|(?:^|[^\w\p{N}/\\.\-@%+~])www\.)[^\s\x00-\x1f<>"]+"#;
+pub(crate) const URL_PATTERN: &str = r#"(?:(?i-u:https?://|ftp://|file://)|(?:^|[^\w\p{N}/\\.\-@%+~])(?i-u:www\.))[^\s\x00-\x1f<>"]+"#;
 
 fn url_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -1938,6 +1939,26 @@ mod tests {
             super::local_file_path("FILE:///etc/hosts"),
             Some(std::path::PathBuf::from("/etc/hosts"))
         );
+    }
+
+    /// A scheme matches in any ASCII case only: `ſ` (U+017F) folds to `s`
+    /// in Unicode, but `httpſ://` is no scheme the opener takes.
+    #[test]
+    fn a_scheme_matches_ascii_case_only() {
+        for line in ["see httpſ://example.test/ok", "see HTTPſ://example.test/ok"] {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert!(found.is_empty(), "{line}: {found:?}");
+        }
+        for (line, uri) in [
+            ("see hTTpS://example.test/ok", "hTTpS://example.test/ok"),
+            ("see wWw.example.test/ok", "https://wWw.example.test/ok"),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert_eq!(found.len(), 1, "{line}: {found:?}");
+            assert_eq!(found[0].uri, uri);
+        }
     }
 
     /// An invisible character does not end a word, so a scheme or `www.`

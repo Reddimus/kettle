@@ -1716,6 +1716,9 @@ mod tests {
                 "{line}: {spans:?}"
             );
         }
+        // A scheme matches in ASCII case only: `ſ` is no `s` here.
+        let spans = detect(&["see httpſ://example.test/ok"]);
+        assert!(spans.iter().all(|span| span.kind != Kind::Url), "{spans:?}");
         // Nor does an invisible character end the word before a URL.
         for line in [
             "file docs/a\u{200b}WWW.example.test/path.txt",
