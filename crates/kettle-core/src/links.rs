@@ -2409,6 +2409,38 @@ mod tests {
         }
     }
 
+    /// Where the quoting around a path is uncertain, a relative piece, or
+    /// one glued to the text before it, links nothing: an unmatched quote
+    /// before it hides no later pair, and another or an escaped quote inside
+    /// the string makes its reading uncertain. A path from a root that is a
+    /// whole token after whitespace still links.
+    #[test]
+    fn an_uncertain_quote_leaves_only_rooted_tokens_openable() {
+        let found = |line: &str| {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>()
+        };
+        for line in [
+            r#"a "b "c/d x/y.txt" e"#,
+            r#"it 'oops {"file":"docs/my dir/a/b"}"#,
+            r#"x="a\"b c/d.txt""#,
+            r#"x='a"b c/d.txt'"#,
+        ] {
+            assert!(found(line).is_empty(), "{line}: {:?}", found(line));
+        }
+        for (line, uri) in [
+            (r#"x='a"b /tmp/x.log'"#, "file:///tmp/x.log"),
+            (r#"a "b "c/d /tmp/x.log" e"#, "file:///tmp/x.log"),
+            (r#"echo "a b" c/d.txt "x""#, "file:///work/c/d.txt"),
+            (r#"see src/x.rs, it's fine"#, "file:///work/src/x.rs"),
+        ] {
+            assert_eq!(found(line), [uri], "{line}");
+        }
+    }
+
     /// Compact JSON closes each string before the next opens, so a later
     /// value's path links whatever an earlier value held.
     #[test]
