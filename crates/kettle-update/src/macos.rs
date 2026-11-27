@@ -1075,20 +1075,30 @@ fn tidy_locked(
         &[]
     };
     let proof_root = lock_path.with_extension("proof");
+    // A process that died during a proof left its bundle in quarantine: put
+    // it back first, so a fresh proof decides what happens to it.
+    let stranded = recover_quarantined(&proof_root)
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
     let (remaining, refused) = reclaim_leftovers(parent, &proof_root, verifier, running, refused);
     // A notice is due only for a leftover no earlier notice named. One the user
     // deleted just drops out of the record.
     let unreported = remaining
         .iter()
-        .any(|leftover| !reported.leftovers.contains(leftover));
+        .any(|leftover| !reported.leftovers.contains(leftover))
+        || stranded
+            .iter()
+            .any(|path| !reported.stranded.contains(path));
     if (remaining != reported.leftovers
         || refused != reported.refused
+        || stranded != reported.stranded
         || reported.checked_by != running_text)
-        && let Err(error) = store_reported(&record, &running_text, &remaining, &refused)
+        && let Err(error) = store_reported(&record, &running_text, &remaining, &refused, &stranded)
     {
         log::debug!("could not record the update leftover notice: {error}");
     }
-    unreported.then(|| leftover_notice(parent, &remaining))
+    unreported.then(|| leftover_notice(parent, &remaining, &stranded))
 }
 
 /// Every update leftover beside the bundle that is still there after trying to
@@ -1157,6 +1167,7 @@ fn reclaim_leftovers(
             refused.push(leftover.clone());
         } else {
             match remove_provably_earlier_bundle(
+                parent,
                 &parent_dir,
                 name,
                 &candidate,
@@ -1213,6 +1224,7 @@ fn reclaim_leftovers(
 /// owned, not anyone's data. Everything else stays where it is, and the caller
 /// names it instead.
 fn remove_provably_earlier_bundle(
+    parent_path: &Path,
     parent_dir: &File,
     name: &str,
     candidate: &File,
@@ -1249,7 +1261,8 @@ fn remove_provably_earlier_bundle(
     if !bundle_metadata.is_dir() || bundle_metadata.uid() != euid {
         return Ok(false);
     }
-    let Some(quarantine) = quarantine_bundle(candidate, &bundle, proof_root)? else {
+    let origin = parent_path.join(name);
+    let Some(quarantine) = quarantine_bundle(candidate, &bundle, proof_root, &origin)? else {
         return Ok(false);
     };
     let proven = (|| -> Result<bool, UpdateError> {
@@ -1313,6 +1326,19 @@ struct Quarantine {
     directory: File,
 }
 
+/// Where a quarantined bundle came from, written beside it before it moves,
+/// so a later pass can put back a bundle a process that died left there.
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct Origin {
+    folder: String,
+    device: u64,
+    inode: u64,
+}
+
+const ORIGIN_RECORD: &str = "origin.json";
+const MAX_ORIGIN_BYTES: u64 = 4096;
+
 impl Quarantine {
     /// Put the bundle back in the folder it came from, and drop the directory.
     fn restore(self, candidate: &File, bundle_name: &std::ffi::CStr) -> Result<(), UpdateError> {
@@ -1321,34 +1347,147 @@ impl Quarantine {
         Ok(())
     }
 
-    /// Remove the directory, which only succeeds once it is empty.
+    /// Put the bundle back in the folder its origin record names, but only
+    /// into that same folder, still this user's private, empty `0700` one.
+    fn return_to_origin(self) -> Result<(), UpdateError> {
+        let file = kettle_state::open_trusted_file_read(&self.path.join(ORIGIN_RECORD))?;
+        let metadata = file.metadata()?;
+        // SAFETY: geteuid has no preconditions.
+        let euid = unsafe { libc::geteuid() };
+        if metadata.uid() != euid
+            || metadata.mode() & 0o7777 != 0o600
+            || metadata.len() > MAX_ORIGIN_BYTES
+        {
+            return Err(UpdateError::Transaction(
+                "invalid quarantine origin record".into(),
+            ));
+        }
+        let mut bytes = Vec::new();
+        (&file).take(MAX_ORIGIN_BYTES).read_to_end(&mut bytes)?;
+        let origin: Origin = serde_json::from_slice(&bytes)?;
+        let folder = Path::new(&origin.folder);
+        let (Some(parent), Some(name)) = (folder.parent(), folder.file_name()) else {
+            return Err(UpdateError::Transaction(
+                "invalid quarantine origin record".into(),
+            ));
+        };
+        if !folder.is_absolute() || !name.to_str().is_some_and(is_previous_name) {
+            return Err(UpdateError::Transaction(
+                "invalid quarantine origin record".into(),
+            ));
+        }
+        let parent = open_directory(parent)?;
+        let leftover = open_directory_at(&parent, &c_name(name)?)?;
+        let held = leftover.metadata()?;
+        if (held.dev(), held.ino()) != (origin.device, origin.inode)
+            || held.uid() != euid
+            || held.mode() & 0o7777 != 0o700
+            || kettle_state::has_extended_acl(&leftover)?
+            || !kettle_state::directory_is_empty(&leftover)?
+        {
+            return Err(UpdateError::Transaction(format!(
+                "{} is no longer the folder the bundle came from",
+                folder.display()
+            )));
+        }
+        let bundle_name = c_name(std::ffi::OsStr::new(ARCHIVE_ROOT))?;
+        rename_between(&self.directory, &bundle_name, &leftover, &bundle_name)?;
+        self.discard();
+        Ok(())
+    }
+
+    /// Remove the directory and its origin record, which only succeeds once
+    /// nothing else is left in it.
     fn discard(self) {
+        let record = c"origin.json";
+        // SAFETY: the held directory and the NUL-terminated name are valid.
+        unsafe { libc::unlinkat(self.directory.as_raw_fd(), record.as_ptr(), 0) };
         let name = std::ffi::OsStr::from_bytes(self.name.as_bytes());
         let _ =
             kettle_state::remove_directory_tree_at(&self.root, name, &self.directory, EMPTY_ONLY);
     }
 }
 
+/// Put back the bundles quarantine still holds, which only a process that
+/// died, or a restore that failed, leaves there, and remove empty quarantine
+/// directories. Returns where each bundle that could not go back now is, for
+/// the notice; nothing in quarantine is ever deleted without a fresh proof.
+fn recover_quarantined(proof_root: &Path) -> Vec<PathBuf> {
+    let mut stranded = Vec::new();
+    let Ok(root) = open_directory(proof_root) else {
+        return stranded;
+    };
+    let Ok(names) = kettle_state::directory_entry_names(&root, MAX_REPORTED_LEFTOVERS) else {
+        return stranded;
+    };
+    for name in names {
+        let Ok(c_entry) = c_name(&name) else { continue };
+        let (Ok(directory), Ok(root)) = (open_directory_at(&root, &c_entry), root.try_clone())
+        else {
+            continue;
+        };
+        if !staging_is_ours(&directory).unwrap_or(false) {
+            continue;
+        }
+        let quarantine = Quarantine {
+            root,
+            name: c_entry,
+            path: proof_root.join(&name),
+            directory,
+        };
+        let entries =
+            kettle_state::directory_entry_names(&quarantine.directory, 4).unwrap_or_default();
+        if !entries.iter().any(|entry| entry == ARCHIVE_ROOT) {
+            if entries.iter().all(|entry| entry == ORIGIN_RECORD) {
+                quarantine.discard();
+            } else {
+                stranded.push(quarantine.path.clone());
+            }
+            continue;
+        }
+        let bundle = quarantine.path.join(ARCHIVE_ROOT);
+        if let Err(error) = quarantine.return_to_origin() {
+            log::debug!("cannot return {} to its folder: {error}", bundle.display());
+            stranded.push(bundle);
+        }
+    }
+    stranded.sort();
+    stranded
+}
+
 /// Move `bundle`, held inside `candidate`, into a fresh private directory under
-/// `proof_root`, or `None` when that cannot be done safely: the state root is
-/// on another volume, or a directory on its path is one someone else can
-/// write. Nothing moves in either case.
+/// `proof_root`, recording `origin` beside it first, or `None` when that cannot
+/// be done safely: the state root is on another volume, or a directory on its
+/// path is one someone else can write. Nothing moves in either case.
 fn quarantine_bundle(
     candidate: &File,
     bundle: &File,
     proof_root: &Path,
+    origin: &Path,
 ) -> Result<Option<Quarantine>, UpdateError> {
     kettle_state::create_private_dirs(proof_root)?;
     let root = open_directory(proof_root)?;
-    if root.metadata()?.dev() != candidate.metadata()?.dev() {
+    let candidate_metadata = candidate.metadata()?;
+    if root.metadata()?.dev() != candidate_metadata.dev() {
         return Ok(None);
     }
+    let Some(folder) = origin.to_str() else {
+        return Ok(None);
+    };
     let name = c_name(std::ffi::OsStr::new(&unique_suffix()))?;
     // SAFETY: `root` stays open and `name` is NUL-terminated for mkdirat.
     if unsafe { libc::mkdirat(root.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
         return Err(UpdateError::Io(std::io::Error::last_os_error()));
     }
-    let directory = open_directory_at(&root, &name)?;
+    let directory = match open_directory_at(&root, &name) {
+        Ok(directory) => directory,
+        Err(error) => {
+            // SAFETY: `root` stays open and `name` is NUL-terminated; this
+            // removes only the empty directory just made.
+            unsafe { libc::unlinkat(root.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) };
+            return Err(error);
+        }
+    };
     let path = proof_root.join(std::ffi::OsStr::from_bytes(name.as_bytes()));
     let quarantine = Quarantine {
         root,
@@ -1359,11 +1498,33 @@ fn quarantine_bundle(
     // Every directory from `/` to this one must be this user's or root's and
     // writable by nobody else, or the paths below are no safer than the
     // shared parent's.
-    if !staging_is_ours(&quarantine.directory)?
-        || kettle_state::validate_trusted_directory(&quarantine.path).is_err()
-    {
-        quarantine.discard();
-        return Ok(None);
+    let private = staging_is_ours(&quarantine.directory)
+        .map(|ours| ours && kettle_state::validate_trusted_directory(&quarantine.path).is_ok());
+    let recorded = private.and_then(|private| {
+        if !private {
+            return Ok(false);
+        }
+        let record = serde_json::to_vec(&Origin {
+            folder: folder.to_string(),
+            device: candidate_metadata.dev(),
+            inode: candidate_metadata.ino(),
+        })?;
+        Ok(kettle_state::atomic_create_new(
+            &quarantine.path.join(ORIGIN_RECORD),
+            &record,
+            kettle_state::AtomicWriteOptions::PRIVATE,
+        )?)
+    });
+    match recorded {
+        Ok(true) => {}
+        Ok(false) => {
+            quarantine.discard();
+            return Ok(None);
+        }
+        Err(error) => {
+            quarantine.discard();
+            return Err(error);
+        }
     }
     let bundle_name = c_name(std::ffi::OsStr::new(ARCHIVE_ROOT))?;
     if let Err(error) = rename_between(candidate, &bundle_name, &quarantine.directory, &bundle_name)
@@ -1421,7 +1582,7 @@ fn rename_between(
 
 /// The notice for leftovers kettle will not remove: where they are, and that
 /// deleting them by hand is safe.
-fn leftover_notice(parent: &Path, leftovers: &[Leftover]) -> String {
+fn leftover_notice(parent: &Path, leftovers: &[Leftover], stranded: &[String]) -> String {
     // The notice goes to a terminal. Anyone who can write the parent chose the
     // names, so show them with everything but printable ASCII escaped. The
     // parent is the user's own install path and may hold any letter, so it only
@@ -1459,12 +1620,28 @@ fn leftover_notice(parent: &Path, leftovers: &[Leftover]) -> String {
             leftovers.len() - MAX_NOTICE_NAMES,
         ));
     }
-    format!(
-        "Kettle left these folders from earlier updates beside the app because it cannot \
-         prove they hold only its own old builds: {named}. Kettle does not use them. \
-         Unless you put something there yourself, they are safe to delete by hand. This \
-         notice appears once."
-    )
+    let mut notice = String::new();
+    if !leftovers.is_empty() {
+        notice.push_str(&format!(
+            "Kettle left these folders from earlier updates beside the app because it \
+             cannot prove they hold only its own old builds: {named}. Kettle does not use \
+             them. Unless you put something there yourself, they are safe to delete by hand. "
+        ));
+    }
+    if !stranded.is_empty() {
+        let held = stranded
+            .iter()
+            .take(MAX_NOTICE_NAMES)
+            .map(|path| escaped(path, &letters))
+            .collect::<Vec<_>>()
+            .join(", ");
+        notice.push_str(&format!(
+            "Kettle moved these bundles aside to check them and could not put them back: \
+             {held}. It has not deleted them; move them back or delete them by hand. "
+        ));
+    }
+    notice.push_str("This notice appears once.");
+    notice
 }
 
 fn require_live_bundle_upgrade(
@@ -3585,6 +3762,141 @@ mod tests {
         assert!(notice.is_some_and(|notice| notice.contains(&leftover.display().to_string())));
     }
 
+    /// Dies where codesign would run, as a force quit or a crash would.
+    struct DyingSeal;
+
+    impl SealVerifier for DyingSeal {
+        fn identity(
+            &self,
+            _bundle: &Path,
+            _directory: Option<&File>,
+        ) -> Result<SignedIdentity, UpdateError> {
+            panic!("the process died during the proof");
+        }
+
+        fn notarized(&self, _bundle: &Path, _directory: Option<&File>) -> Result<(), UpdateError> {
+            Ok(())
+        }
+    }
+
+    /// Run a pass whose verifier dies, leaving the bundle in quarantine.
+    fn die_during_proof(executable: &Path, state_root: &Path) {
+        let died = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tidy_leftovers_beside_with(executable, state_root, &DyingSeal, &RUNNING)
+        }));
+        assert!(died.is_err());
+    }
+
+    /// The bundles quarantine holds, wherever a pass left them.
+    fn quarantined_bundles(state_root: &Path) -> Vec<PathBuf> {
+        let mut bundles = Vec::new();
+        for entry in std::fs::read_dir(state_root.join("kettle")).unwrap() {
+            let proof = entry.unwrap().path();
+            if proof
+                .extension()
+                .is_some_and(|extension| extension == "proof")
+            {
+                for held in std::fs::read_dir(&proof).unwrap() {
+                    let bundle = held.unwrap().path().join(ARCHIVE_ROOT);
+                    if bundle.exists() {
+                        bundles.push(bundle);
+                    }
+                }
+            }
+        }
+        bundles
+    }
+
+    /// A process that dies during the proof leaves the bundle in quarantine.
+    /// The next pass puts it back, and a fresh proof decides: an official older
+    /// build is removed, anything else is back in its folder and named there.
+    #[test]
+    fn a_bundle_a_dead_process_left_in_quarantine_goes_back_to_its_folder() {
+        for proven in [true, false] {
+            let temp = kettle_test_support::private_tempdir("kettle-macos-died-");
+            let root = temp.path();
+            let executable = seed_bundle(root, "kettle.app");
+            let state_root = root.join("state");
+            let leftover = seed_displaced(root, ".kettle-update-previous-4-4", "5.6.0");
+
+            die_during_proof(&executable, &state_root);
+            assert_eq!(quarantined_bundles(&state_root).len(), 1);
+            assert!(!leftover.join(ARCHIVE_ROOT).exists());
+
+            let seal = if proven {
+                StubSeal::official()
+            } else {
+                StubSeal::signed_by(BUNDLE_IDENTIFIER, "not set")
+            };
+            let notice = tidy_leftovers_beside_with(&executable, &state_root, &seal, &RUNNING);
+
+            assert_no_quarantined_bundles(&state_root);
+            if proven {
+                assert!(!leftover.exists(), "the fresh proof did not remove it");
+                assert_eq!(notice, None);
+            } else {
+                assert_eq!(
+                    std::fs::read_to_string(leftover.join("kettle.app/Contents/Info.plist"))
+                        .unwrap(),
+                    info_plist("5.6.0"),
+                    "the bundle did not go back to its folder"
+                );
+                assert!(
+                    notice.is_some_and(|notice| notice.contains(&leftover.display().to_string()))
+                );
+            }
+        }
+    }
+
+    /// A bundle whose folder is gone stays in quarantine, undeleted, and the
+    /// notice says where it is, once.
+    #[test]
+    fn a_quarantined_bundle_that_cannot_go_back_is_named_and_kept() {
+        let temp = kettle_test_support::private_tempdir("kettle-macos-stranded-");
+        let root = temp.path();
+        let executable = seed_bundle(root, "kettle.app");
+        let state_root = root.join("state");
+        let leftover = seed_displaced(root, ".kettle-update-previous-5-5", "5.6.0");
+        die_during_proof(&executable, &state_root);
+        // Someone who can write the parent removed the emptied folder.
+        std::fs::remove_dir(&leftover).unwrap();
+        let [bundle] = quarantined_bundles(&state_root).try_into().unwrap();
+
+        let notice =
+            tidy_leftovers_beside_with(&executable, &state_root, &StubSeal::official(), &RUNNING)
+                .expect("a stranded bundle is named");
+
+        assert!(notice.contains(&bundle.display().to_string()), "{notice}");
+        assert!(
+            bundle.join("Contents/Info.plist").exists(),
+            "it was deleted without a proof"
+        );
+        assert_eq!(
+            tidy_leftovers_beside_with(&executable, &state_root, &StubSeal::official(), &RUNNING),
+            None,
+            "the same stranded bundle is named once"
+        );
+        assert!(bundle.exists());
+    }
+
+    #[test]
+    fn empty_quarantine_directories_are_removed() {
+        let temp = kettle_test_support::private_tempdir("kettle-macos-emptyproof-");
+        let root = temp.path();
+        let executable = seed_bundle(root, "kettle.app");
+        let state_root = root.join("state");
+        let bundle = bundle_of(&executable.canonicalize().unwrap()).unwrap();
+        let proof = update_lock_path(&bundle, &state_root)
+            .unwrap()
+            .with_extension("proof");
+        let early = proof.join("1-1");
+        kettle_state::create_private_dirs(&early).unwrap();
+
+        tidy_leftovers_beside_with(&executable, &state_root, &StubSeal::official(), &RUNNING);
+
+        assert!(!early.exists(), "an empty quarantine directory was kept");
+    }
+
     /// Fails the first check as a tool that cannot start would, then works.
     struct FlakySeal {
         failed: std::cell::Cell<bool>,
@@ -3821,7 +4133,7 @@ mod tests {
         std::fs::create_dir(parent.join(name)).unwrap();
         let leftover = Leftover::of(name, &std::fs::metadata(parent.join(name)).unwrap());
 
-        let notice = leftover_notice(&parent, &[leftover]);
+        let notice = leftover_notice(&parent, &[leftover], &[]);
 
         assert!(!notice.contains(['\u{1b}', '\u{202e}']), "{notice:?}");
         assert!(

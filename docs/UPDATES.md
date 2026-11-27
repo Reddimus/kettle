@@ -483,6 +483,13 @@ bundle that fails a check goes back into its folder. When the state directory
 is on another volume, or is not private, nothing moves and the folder is named
 instead.
 
+The folder a bundle came from is recorded beside it before it moves. If the
+process dies during the check, the next pass puts the bundle back into that
+same folder, still this user's, private and empty, and a fresh check decides
+what happens to it. A bundle whose folder is gone or has changed stays in the
+state directory, is never deleted without a check, and the notice names where
+it is. Empty quarantine directories are removed.
+
 The most a wrong answer can cost is an obsolete official kettle the user owned.
 Anything else stays where it is. The app names what is left once, in a log line
 and a desktop notification, and so does `kettle update` on stderr: the full
