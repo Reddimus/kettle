@@ -3408,12 +3408,16 @@ master is empty, the pump releases it and EOF follows, or the bounded wait
 below covers a descendant that keeps its own slave open. While it is held, an
 exiting child waits for its unread output without limit, and SIGKILL does not
 end that wait, so a child whose output is stopped (Ctrl+S, `tcflow`) stays in
-its exit until output resumes. The descriptor sits in a slot the pane shares
-with the pump from before the pump first runs: closing the pane releases it
-from the teardown thread, `kettle exec` releases it before it signals the
-process tree, and the child's own close then ends the child. Linux keeps unread
-output across the last close, so it releases the descriptor at the first read
-as before, and a child that closes its terminal still hangs the master up.
+its exit until output resumes; a keypress resumes it under the default
+`ixany`. A session leader with stopped output waits the same way while a
+descendant holds the slave, even with no descriptor of Kettle's open. The
+descriptor sits in a slot the pane shares with the pump from before the pump
+first runs. Closing the pane, on the teardown thread, and `kettle exec`, before
+it signals the process tree, restart the stopped output from the master
+(`tcflow(TCOON)`) and then close the descriptor; the pump, draining, takes the
+output and the child's exit completes. Linux keeps unread output across the
+last close, so it releases the descriptor at the first read as before, and a
+child that closes its terminal still hangs the master up.
 Linux waits on the master and a pidfd in one `poll`; macOS registers
 master readability and `NOTE_EXIT` in one kqueue. Other Unix targets use a
 bounded exponential `poll` plus non-reaping `waitid(WNOWAIT)` fallback. The

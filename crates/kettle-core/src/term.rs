@@ -831,9 +831,9 @@ enum UnixStartupWake {
 /// EVFILT_PROC. Both can wait alongside master readability without a timer.
 /// The same watcher tells the pump when the direct child has exited, so it
 /// can release Kettle's retained slave once the master is drained, and then
-/// bounds a descendant that keeps its own slave open. Other Unix targets retain a bounded, exponentially
-/// backed-off fallback so portability does not turn a quiet pane into a 20 Hz
-/// wakeup loop.
+/// bounds a descendant that keeps its own slave open. Other Unix targets
+/// retain a bounded, exponentially backed-off fallback so portability does not
+/// turn a quiet pane into a 20 Hz wakeup loop.
 #[cfg(unix)]
 struct UnixPtyWatcher {
     pid: u32,
@@ -1137,6 +1137,25 @@ fn release_slave(slave: &RetainedSlave) {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .take();
     drop(released);
+}
+
+/// Restart terminal output that XOFF or `tcflow` stopped, from the master
+/// side. On macOS an exiting session leader drains its unread output before
+/// it can finish, with no limit and no signal able to end that wait, and a
+/// stopped queue never drains. Releasing Kettle's slave is not enough when a
+/// descendant still holds one, so teardown restarts output first; the pump,
+/// draining, then takes it, and the exit completes at once rather than after
+/// the last close's drain timeout.
+#[cfg(unix)]
+fn resume_stopped_output(master_fd: Option<RawFd>) {
+    #[cfg(target_os = "macos")]
+    if let Some(fd) = master_fd {
+        // SAFETY: tcflow takes a descriptor and an action; the master is open
+        // for as long as its owner holds it.
+        unsafe { libc::tcflow(fd, libc::TCOON) };
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = master_fd;
 }
 
 /// Whether the master has output to read right now. A failed poll counts as
@@ -6197,10 +6216,12 @@ impl Terminal {
         // spawned reader thread gets its first timeslice. Most PTY backends
         // retain that tail, but macOS discards it if no read is pending. The
         // readiness channel alone cannot prove that a thread was not
-        // descheduled between its send and its first read, so Unix also hands
-        // Kettle's slave descriptor to the pump after spawning. The pump keeps
-        // that descriptor alive until it reads the first bytes, or observes a
-        // silent direct child exit, making the tail durable across that gap.
+        // descheduled between its send and its first read, so on Unix Kettle's
+        // slave descriptor goes into a slot the pump and the Terminal share
+        // once the child is spawned, and the pump gets the child's lifecycle
+        // watcher. On macOS the pump keeps the descriptor until the child has
+        // exited and the master is empty; elsewhere until its first read or a
+        // silent direct child exit (see `RETAIN_SLAVE_UNTIL_DRAINED`).
         let (reader_ready_tx, reader_ready_rx) =
             crossbeam_channel::bounded::<Result<(), String>>(1);
         #[cfg(unix)]
@@ -6292,9 +6313,10 @@ impl Terminal {
                             .name("kettle-pty-pump".into())
                             .spawn(move || {
                                 // This proves the worker can receive the Unix
-                                // startup guard. It deliberately does not claim
-                                // a read is pending: the guard below is what
-                                // preserves output across that scheduling gap.
+                                // lifecycle watcher. It deliberately does not
+                                // claim a read is pending: the retained slave
+                                // is what preserves output across that
+                                // scheduling gap.
                                 if pump_ready_tx.send(Ok(())).is_err() {
                                     return;
                                 }
@@ -9124,15 +9146,18 @@ impl Terminal {
             .is_some()
     }
 
-    /// Close Kettle's own descriptor for the PTY slave, which on macOS the
-    /// pump keeps until the child's output is read. Callers tearing a child
-    /// down use this first: while it is open, an exiting child whose output
-    /// cannot drain (stopped by XOFF or `tcflow`) waits in its exit, and no
-    /// signal ends that wait. The close can wait briefly for the kernel's own
-    /// drain, so it belongs off the UI thread.
+    /// Restart any stopped output, then close Kettle's own descriptor for the
+    /// PTY slave, which on macOS the pump keeps until the child's output is
+    /// read. Callers tearing a child down use this first: an exiting child
+    /// whose output is stopped (XOFF or `tcflow`) otherwise waits in its exit,
+    /// and no signal ends that wait. The close can wait briefly for the
+    /// kernel's own drain, so it belongs off the UI thread.
     pub fn release_retained_slave(&self) {
         #[cfg(unix)]
-        release_slave(&self.retained_slave);
+        {
+            resume_stopped_output(self.master.as_ref().and_then(|master| master.as_raw_fd()));
+            release_slave(&self.retained_slave);
+        }
     }
 
     /// Kill the child immediately.
@@ -9523,13 +9548,17 @@ impl Drop for Terminal {
                 let Some((child, master)) = teardown else {
                     return;
                 };
-                // A pump holding Kettle's slave keeps an exiting child waiting
-                // for its unread output, which never drains while the child's
-                // output is stopped (XOFF or `tcflow`). The pane is going, so
-                // let the child's own close end it. Closing here, not in Drop,
-                // keeps any wait inside that close off the UI thread.
+                // An exiting child waits for its unread output, which never
+                // drains while its output is stopped (XOFF or `tcflow`), and a
+                // descendant may hold the slave too. The pane is going: restart
+                // output, which the pump in drain mode takes, and close
+                // Kettle's slave. Doing this here, not in Drop, keeps any wait
+                // inside that close off the UI thread.
                 #[cfg(unix)]
-                release_slave(&reaper_slave);
+                {
+                    resume_stopped_output(master.as_ref().and_then(|master| master.as_raw_fd()));
+                    release_slave(&reaper_slave);
+                }
                 if let Ok(mut child) = child.lock() {
                     #[cfg(unix)]
                     let result = terminate_unreaped_child(child.as_mut());

@@ -42,6 +42,23 @@ fn pty_tail_child() {
     std::process::exit(0);
 }
 
+/// Set for a child run of [`pty_stop_output_child`].
+#[cfg(target_os = "macos")]
+const STOP_OUTPUT_ONLY: &str = "KETTLE_TEST_PTY_STOP_OUTPUT";
+
+/// The child half that only suspends its terminal's output, as Ctrl+S
+/// does, and exits, leaving output stopped for the shell that ran it.
+#[cfg(target_os = "macos")]
+#[test]
+fn pty_stop_output_child() {
+    if std::env::var_os(STOP_OUTPUT_ONLY).is_none() {
+        return;
+    }
+    // SAFETY: tcflow takes a descriptor and an action; stdout is open.
+    assert_eq!(unsafe { libc::tcflow(1, libc::TCOOFF) }, 0);
+    std::process::exit(0);
+}
+
 /// A pane running [`pty_tail_child`], its pump behind `gate` when given, and
 /// the receiver of every byte the pump reads.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -50,26 +67,38 @@ fn tail_pane(
     stops_output: bool,
     gate: Option<crossbeam_channel::Receiver<()>>,
 ) -> (super::Terminal, crossbeam_channel::Receiver<Vec<u8>>) {
+    let mut environment: Vec<(String, String)> =
+        vec![(CHILD_MARKER.into(), marker.to_str().unwrap().into())];
+    if stops_output {
+        environment.push((CHILD_STOPS_OUTPUT.into(), "1".into()));
+    }
+    let argv = [
+        std::env::current_exe().unwrap().to_str().unwrap().into(),
+        "--exact".into(),
+        "term::pty_tail_tests::pty_tail_child".into(),
+        "--nocapture".into(),
+        "--quiet".into(),
+    ];
+    pane_running(&argv, &environment, gate)
+}
+
+/// A pane running `argv` with `environment`, its pump behind `gate` when
+/// given, and the receiver of every byte the pump reads.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn pane_running(
+    argv: &[String],
+    environment: &[(String, String)],
+    gate: Option<crossbeam_channel::Receiver<()>>,
+) -> (super::Terminal, crossbeam_channel::Receiver<Vec<u8>>) {
     use super::{
         CursorShape, LaunchOverrides, PtyGeometry, PtyOutputSender, Terminal, TerminalCapabilities,
         WorkingDirectoryPolicy,
     };
     let (tx, _events) = crossbeam_channel::unbounded();
     let (output_tx, output_rx) = crossbeam_channel::unbounded::<Vec<u8>>();
-    let mut environment: Vec<(String, String)> =
-        vec![(CHILD_MARKER.into(), marker.to_str().unwrap().into())];
-    if stops_output {
-        environment.push((CHILD_STOPS_OUTPUT.into(), "1".into()));
-    }
     let pane = super::test_pump_gate::with_gate(gate, || {
         Terminal::new_with_launch_environment(
-            &[
-                std::env::current_exe().unwrap().to_str().unwrap().into(),
-                "--exact".into(),
-                "term::pty_tail_tests::pty_tail_child".into(),
-                "--nocapture".into(),
-                "--quiet".into(),
-            ],
+            argv,
             None,
             0,
             0,
@@ -79,7 +108,7 @@ fn tail_pane(
             None,
             "xterm-256color",
             "truecolor",
-            &environment,
+            environment,
             &LaunchOverrides::default(),
             false,
             false,
@@ -220,6 +249,54 @@ fn closing_a_pane_ends_a_child_whose_stopped_output_cannot_drain() {
     });
     drop(pane);
     wait_until("the closed pane left its child running", || {
+        process_state(pid).is_none()
+    });
+}
+
+/// The same, when a background process that ignores SIGHUP also holds the
+/// slave: the shell stops its output, writes, and exits, and waits in its
+/// exit to drain output nothing can take. Closing Kettle's slave is then not
+/// the last close, so closing the pane must restart the stopped output too.
+#[cfg(target_os = "macos")]
+#[test]
+fn closing_a_pane_ends_a_stopped_exit_while_a_descendant_holds_the_slave() {
+    let dir = kettle_test_support::private_tempdir("kettle-pty-held-");
+    let marker = dir.path().join("tail-written");
+    let holder_pid = dir.path().join("holder-pid");
+    let script = r#"(trap '' HUP; exec sleep 30) & echo $! > "$3"
+"$1" --exact term::pty_tail_tests::pty_stop_output_child --quiet
+echo tail; : > "$2"; exit 0"#;
+    let argv = [
+        "/bin/sh".to_string(),
+        "-c".into(),
+        script.into(),
+        "sh".into(),
+        std::env::current_exe().unwrap().to_str().unwrap().into(),
+        marker.to_str().unwrap().into(),
+        holder_pid.to_str().unwrap().into(),
+    ];
+    let (pane, _output) = pane_running(&argv, &[(STOP_OUTPUT_ONLY.into(), "1".into())], None);
+    let pid = pane.child_pid().expect("child pid");
+    wait_until("the shell never wrote its tail", || marker.exists());
+    let holder: libc::pid_t = std::fs::read_to_string(&holder_pid)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    struct Reap(libc::pid_t);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            // SAFETY: kill takes a pid and a signal; this pid is the background
+            // holder the test's own shell started and recorded.
+            unsafe { libc::kill(self.0, libc::SIGKILL) };
+        }
+    }
+    let _reap = Reap(holder);
+    wait_until("the shell never began to exit", || {
+        process_state(pid).is_some_and(|stat| stat.contains('E'))
+    });
+    drop(pane);
+    wait_until("the closed pane left its stopped shell in its exit", || {
         process_state(pid).is_none()
     });
 }
