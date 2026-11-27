@@ -1754,6 +1754,7 @@ mod tests {
         for line in [
             "\"docs/\u{b2}www.example.com.txt#file=/tmp/report.pdf\"",
             "\"docs/a*b=/tmp/report.pdf\"",
+            "host:\"docs/a*b=/tmp/report.pdf\"",
         ] {
             assert!(found(line).is_empty(), "{line}: {:?}", found(line));
         }

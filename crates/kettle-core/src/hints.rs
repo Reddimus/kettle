@@ -259,6 +259,9 @@ pub(crate) fn path_reaches_quote(
     start: usize,
     end: usize,
 ) -> bool {
+    if continues_a_quoted_token(line, start) {
+        return false;
+    }
     // Runs are ordered and do not overlap.
     let holder = runs.partition_point(|&(open, _)| open < start);
     runs[..holder]
@@ -279,6 +282,22 @@ pub(crate) fn path_reaches_quote(
                     !word.contains(['/', '\\'])
                 }
         })
+}
+
+/// Whether a path starting at `start` continues a path-shaped token that a
+/// quote opens without making a quoted run, as one after a colon does
+/// (`host:"docs/a*b=/tmp/report.pdf"`): its word, from the last space
+/// before it, holds a quote with a separator after it. That token's end is
+/// not a file of its own. The word is read at most [`MAX_QUOTED_PATH`]
+/// bytes back, so the check stays linear.
+fn continues_a_quoted_token(line: &str, start: usize) -> bool {
+    let from = (start.saturating_sub(MAX_QUOTED_PATH)..=start)
+        .find(|&at| line.is_char_boundary(at))
+        .unwrap_or(start);
+    let window = &line[from..start];
+    let word = window.rsplit(char::is_whitespace).next().unwrap_or(window);
+    word.rfind(['"', '\'', '`'])
+        .is_some_and(|at| word[at + 1..].contains(['/', '\\']))
 }
 
 /// Whether the quoted run holding a bare path closes right at its `end`,
@@ -1515,6 +1534,9 @@ mod tests {
             "\"docs/\u{b2}www.example.com.txt#file=/tmp/report.pdf\"",
             "\"docs/a*b=/tmp/report.pdf\"",
             "\"docs/%2e%2e/a?=/tmp/report.pdf\"",
+            // A quote after a colon opens no quoted run, but still one token.
+            "host:\"docs/a*b=/tmp/report.pdf\"",
+            "x='docs/a*b=/tmp/report.pdf'",
         ] {
             let spans = detect(&[line]);
             assert!(spans.iter().all(|span| !span.bounded), "{line}: {spans:?}");
