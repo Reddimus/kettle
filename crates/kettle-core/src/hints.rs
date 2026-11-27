@@ -279,23 +279,25 @@ pub(crate) fn path_reaches_quote(
                     .any(|c| c != ' ' && crate::links::hides_text(c))
                 && {
                     // The quoted text before the path: a path-shaped word
-                    // glued to it, or one starting the quotes (a quoted path
-                    // with a space the pattern refused, `"docs/my dir/x"`),
-                    // makes it a piece of that path. Quoted prose starts
-                    // with a word.
+                    // glued to it, or, for a relative path, one starting the
+                    // quotes (a quoted path with a space the pattern refused,
+                    // `"docs/my dir/x"`), makes it a piece of that path. A
+                    // path from a root starts its own, as in quoted prose
+                    // (`"./build.sh failed, see /tmp/build.log"`).
                     let lead = &line[open + 1..start];
                     let glued = lead.rsplit(char::is_whitespace).next().unwrap_or(lead);
                     let first = lead.split(char::is_whitespace).next().unwrap_or(lead);
-                    !glued.contains(['/', '\\']) && !first.contains(['/', '\\'])
+                    !glued.contains(['/', '\\'])
+                        && (starts_its_own_path(&line[start..]) || !first.contains(['/', '\\']))
                 }
         })
 }
 
 /// Whether a path starting at `start` continues a path-shaped token that a
 /// quote opens without making a quoted run, as one after a colon does
-/// (`host:"docs/a*b=/tmp/report.pdf"`): its word, from the last space
-/// before it, holds a quote with a separator after the first quote, so an
-/// apostrophe inside the token (`"docs/a'b=`) does not hide it; or the text
+/// (`host:"docs/a*b=/tmp/report.pdf"`): in its word, from the last space
+/// before it, the quote opening the string it is in has a separator after
+/// it; or the text
 /// after such a quote starts with a path-shaped word, as a quoted path with
 /// a space does (`{"file":"/Users/me/my app/x.py"}`). Its end is not a file
 /// of its own. The text is read at most [`MAX_QUOTED_PATH`] bytes back, so
@@ -307,19 +309,52 @@ fn continues_a_quoted_token(line: &str, start: usize) -> bool {
     let window = &line[from..start];
     let word = window.rsplit(char::is_whitespace).next().unwrap_or(window);
     let path_shaped = |text: &str| text.contains(['/', '\\']);
-    if word
-        .find(['"', '\'', '`'])
-        .is_some_and(|at| path_shaped(&word[at + 1..]))
-    {
+    // The quote that opens the string the path is in: strings the word
+    // opens and closes before it (compact JSON's `"cwd":"/work",`) are not
+    // it, and another kind of quote inside it is text (`"docs/a'b=`).
+    let mut open: Option<(char, usize)> = None;
+    for (at, c) in word.char_indices() {
+        if matches!(c, '"' | '\'' | '`') {
+            match open {
+                Some((quote, _)) if quote == c => open = None,
+                Some(_) => {}
+                None => open = Some((c, at)),
+            }
+        }
+    }
+    if open.is_some_and(|(_, at)| path_shaped(&word[at + 1..])) {
         return true;
     }
     // The last quote before the path, if a colon kept it from opening a
-    // run and nothing closed it since.
-    window
-        .rfind(['"', '\'', '`'])
-        .filter(|&at| window[..at].ends_with(':'))
-        .and_then(|at| window[at + 1..].split(char::is_whitespace).next())
-        .is_some_and(|first| !first.is_empty() && path_shaped(first))
+    // run and nothing closed it since; a path from a root starts its own.
+    !starts_its_own_path(&line[start..])
+        && window
+            .rfind(['"', '\'', '`'])
+            .filter(|&at| window[..at].ends_with(':'))
+            .and_then(|at| window[at + 1..].split(char::is_whitespace).next())
+            .is_some_and(|first| !first.is_empty() && path_shaped(first))
+}
+
+/// Whether `path` starts from a root, `~/`, `./`, `../` or a drive, so it
+/// cannot continue a name before it in quoted text.
+fn starts_its_own_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    path.starts_with(['/', '\\'])
+        || ["~/", "./", "../"]
+            .iter()
+            .any(|root| path.starts_with(root))
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'))
+}
+
+/// Whether a location (`:12`, `:12:5`) follows a match at `rest`, which
+/// ends the name before it as a closing quote does: `/tmp/a..:3` names
+/// `a..`, as the link pattern, which takes the location, reads it.
+fn location_follows(rest: &str) -> bool {
+    rest.strip_prefix(':')
+        .is_some_and(|after| after.starts_with(|c: char| c.is_ascii_digit()))
 }
 
 /// Whether the quoted run holding a bare path closes right at its `end`,
@@ -402,10 +437,18 @@ fn quoted_path_len(body: &str, quote: char) -> Option<usize> {
     }
     let name = segments[last];
     let directory = name.is_empty();
-    // The closing quote marks where the name ends, so dots after it are the
-    // name's and leave its extension and last character as they were
-    // (`"/tmp/my report.pdf.."`). A name of dots alone has neither.
-    let named = name.trim_end_matches('.');
+    // One dot after a name ends a sentence, inside quotes as after a bare
+    // path (`"/tmp/report.pdf."`), so it is no part of the path. Two or
+    // more, which trimming would turn into another file's name, the closing
+    // quote marks as the name's, and they leave its extension and last
+    // character as they were (`"/tmp/my report.pdf.."`). A name of dots
+    // alone has neither.
+    let sentence_dot = name.len() > 1 && name.ends_with('.') && !name.ends_with("..");
+    let named = if sentence_dot {
+        &name[..name.len() - 1]
+    } else {
+        name.trim_end_matches('.')
+    };
     // An extension of any length (`.swiftinterface`): ASCII letters and
     // digits, in words joined by `-` or `_` (`.code-workspace`).
     let extension = named.rsplit_once('.').is_some_and(|(_, extension)| {
@@ -421,7 +464,7 @@ fn quoted_path_len(body: &str, quote: char) -> Option<usize> {
         && NAME_END
             .get_or_init(|| Regex::new(r"[\w)\]]$").unwrap())
             .is_match(named);
-    (directory || extension || deep).then_some(path.len())
+    (directory || extension || deep).then_some(path.len() - usize::from(sentence_dot))
 }
 
 /// Whether a path does not open as the name it spells: it holds a
@@ -637,7 +680,8 @@ fn detect_line(
                     Some(run)
                         if run > 0
                             && trimmed.len() + run == raw.len()
-                            && quote_closes_at(line, &runs, m_start, m.end()) =>
+                            && (quote_closes_at(line, &runs, m_start, m.end())
+                                || location_follows(&line[m.end()..])) =>
                     {
                         raw
                     }
@@ -1006,6 +1050,7 @@ mod tests {
             assert!(!spans[0].bounded, "{line}");
         }
         for (line, text) in [
+            ("ls /tmp/a..:3", "/tmp/a.."),
             ("ls \"/tmp/a..\"", "/tmp/a.."),
             ("'/tmp/...'", "/tmp/..."),
             ("open \"/tmp/my report.pdf..\" now", "/tmp/my report.pdf.."),
@@ -1027,6 +1072,7 @@ mod tests {
         for line in [
             "see file:///tmp/a..",
             "see file:///tmp/%2e.",
+            "see file:///tmp/a%2e.",
             "see http://127.1..",
         ] {
             let spans = detect(&[line]);
@@ -1044,7 +1090,21 @@ mod tests {
         ] {
             assert_eq!(detect(&[line])[0].text, url, "{line}");
         }
-        // One dot ends a sentence.
+        // One dot ends a sentence, inside quotes too.
+        for (line, text) in [
+            ("cat \"/tmp/report.pdf.\"", "/tmp/report.pdf"),
+            ("Saved to '/tmp/report.pdf.'", "/tmp/report.pdf"),
+            ("Saved to `/tmp/report.pdf.`", "/tmp/report.pdf"),
+            ("Saved to \"/tmp/my report.pdf.\"", "/tmp/my report.pdf"),
+        ] {
+            let spans = detect(&[line]);
+            assert_eq!(spans.len(), 1, "{line}: {spans:?}");
+            assert_eq!(
+                (spans[0].text.as_str(), spans[0].bounded),
+                (text, true),
+                "{line}"
+            );
+        }
         let spans = detect(&["see /tmp/a."]);
         assert_eq!((spans[0].text.as_str(), spans[0].bounded), ("/tmp/a", true));
     }
@@ -1576,7 +1636,7 @@ mod tests {
         for line in [
             "open \"docs/old\u{a0}dir/x.txt\" now",
             "open \"docs/old\u{2007}dir/.env\" now",
-            "\"see\u{a0}src/main.rs\"",
+            "\"see\u{200d}src/main.rs\"",
         ] {
             let spans = detect(&[line]);
             assert!(!spans.is_empty(), "{line}");
@@ -1612,10 +1672,13 @@ mod tests {
             let spans = detect(&[line]);
             assert!(spans.iter().all(|span| !span.bounded), "{line}: {spans:?}");
         }
-        // Without one, a bare path ending at the quote is whole, as before.
-        let spans = detect(&["\"see src/main.rs\""]);
-        assert_eq!(spans.len(), 1);
-        assert!(spans[0].bounded);
+        // Without one, a bare path ending at the quote is whole, as before;
+        // a no-break space is a space.
+        for line in ["\"see src/main.rs\"", "\"see\u{a0}src/main.rs\""] {
+            let spans = detect(&[line]);
+            assert_eq!(spans.len(), 1, "{line}: {spans:?}");
+            assert!(spans[0].bounded, "{line}");
+        }
     }
 
     /// A dotfile's name is its extension, so a quoted path ending in one is
@@ -1682,6 +1745,64 @@ mod tests {
             assert!(
                 spans.iter().all(|span| !span.text.contains(' ')),
                 "{body}: {spans:?}"
+            );
+        }
+    }
+
+    /// Quoted prose that starts with a path keeps a later path from a root
+    /// whole; only a relative piece can continue the quoted name.
+    #[test]
+    fn quoted_prose_starting_with_a_path_keeps_a_rooted_one_whole() {
+        for (line, path) in [
+            (
+                "msg=\"./build.sh failed, see /tmp/build.log\"",
+                "/tmp/build.log",
+            ),
+            ("\"src/a.rs uses /tmp/b.txt\"", "/tmp/b.txt"),
+            ("\"src/a.rs: cannot open /tmp/b.txt\"", "/tmp/b.txt"),
+            ("{\"msg\":\"./a.sh failed, see /tmp/b.log\"}", "/tmp/b.log"),
+        ] {
+            let spans = detect(&[line]);
+            assert!(
+                spans.iter().any(|span| span.text == path && span.bounded),
+                "{line}: {spans:?}"
+            );
+        }
+        let spans = detect(&["open \"docs/my dir/a/b\" now"]);
+        assert!(spans.iter().all(|span| !span.bounded), "{spans:?}");
+    }
+
+    /// Compact JSON closes each string before the next opens, so a later
+    /// value's path is its own token, whatever an earlier value held.
+    #[test]
+    fn a_compact_json_path_is_whole_after_any_earlier_value() {
+        for (line, path) in [
+            (
+                "{\"cwd\":\"/work\",\"file\":\"/Users/me/x.py\"}",
+                "/Users/me/x.py",
+            ),
+            (
+                "{\"url\":\"https://x.test/a\",\"path\":\"/tmp/c.txt\"}",
+                "/tmp/c.txt",
+            ),
+            (
+                "{\"type\":\"application/json\",\"file\":\"/tmp/c.txt\"}",
+                "/tmp/c.txt",
+            ),
+            (
+                "{\"date\":\"2026/11/26\",\"file\":\"/tmp/c.txt\"}",
+                "/tmp/c.txt",
+            ),
+            (
+                "{\"msg\":\"it's a/b\",\"file\":\"/tmp/c.txt\"}",
+                "/tmp/c.txt",
+            ),
+            ("key=\"a/b\";other=/tmp/c.txt", "/tmp/c.txt"),
+        ] {
+            let spans = detect(&[line]);
+            assert!(
+                spans.iter().any(|span| span.text == path && span.bounded),
+                "{line}: {spans:?}"
             );
         }
     }

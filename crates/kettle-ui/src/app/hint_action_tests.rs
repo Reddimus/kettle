@@ -58,6 +58,24 @@ fn a_copied_file_previews_the_first_a_lane_can_show() {
     );
 }
 
+/// A macOS screenshot copied in Finder previews: its default name holds
+/// the narrow no-break space macOS writes before AM and PM, a space, as
+/// its OSC 8 link from `ls --hyperlink` does too.
+#[test]
+fn a_copied_macos_screenshot_previews() {
+    let root = tempfile::tempdir().unwrap();
+    let shot = root
+        .path()
+        .join("Screenshot 2026-11-26 at 10.00.00\u{202f}AM.png");
+    assert_eq!(
+        copied_preview(std::slice::from_ref(&shot), None, None, None),
+        Some(CopiedPreview::File(shot.clone()))
+    );
+    let url = kettle_core::links::file_url_for_path(&shot).expect("a file URL");
+    assert!(url.contains("%E2%80%AFAM.png"), "{url}");
+    assert!(kettle_core::links::is_safe_url(&url));
+}
+
 /// Copied text previews when it is one path or `file://` link to a file a
 /// lane can show; quotes or a shell's escapes around a path are undone.
 #[cfg(unix)]

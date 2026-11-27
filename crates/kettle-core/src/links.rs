@@ -97,11 +97,13 @@ pub(crate) fn names_a_target(url: &str) -> bool {
 /// Whether trimming dots off the detected URL `raw` (to `trimmed`, with
 /// `rest` the line after it) would change what it opens rather than drop
 /// prose. For a `file://` link: a dot run, which may be its file's
-/// (`file:///tmp/a..`), or a dot taken off a name made only of dots, which
-/// names another folder (`file:///tmp/%2e.` is `/tmp/..`, trimmed `/tmp/.`).
-/// For a bare host whose last label is a number: a dot run, as the trimmed
-/// host reads as an IPv4 address and the written one does not
-/// (`http://127.1..`, trimmed to loopback). Otherwise dots after a web URL
+/// (`file:///tmp/a..`), or a dot taken off a name that decodes to end in a
+/// dot, which makes one with an escape (`file:///tmp/a%2e.` is `/tmp/a..`,
+/// and `file:///tmp/%2e.` is `/tmp/..`, trimmed `/tmp/.`).
+/// For a bare host whose last label is a number, the dots ending the host
+/// itself: a dot run, as the trimmed host reads as an IPv4 address and the
+/// written one does not (`http://127.1..`, trimmed to loopback); after a
+/// port they end no host (`http://127.0.0.1:8080...`). Otherwise dots after a web URL
 /// end a sentence (#927): after its path they are not the host, and after
 /// a named host they are its empty labels or the root of DNS, so the same
 /// host answers.
@@ -112,20 +114,21 @@ pub(crate) fn url_loses_a_dot_run(raw: &str, trimmed: &str, rest: &str) -> bool 
         .get(..7)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file://"))
     {
-        let dot_name = || {
-            decoded_file_url_path(trimmed).is_some_and(|path| {
-                let name = path.rsplit('/').next().unwrap_or("");
-                !name.is_empty() && name.bytes().all(|b| b == b'.')
-            })
-        };
-        return run || (tail.starts_with('.') && dot_name());
+        // A dot trimmed off a name that decodes to end in one leaves a run
+        // of them spelled with an escape (`a%2e.` is `a..`).
+        let ends_in_a_dot =
+            || decoded_file_url_path(trimmed).is_some_and(|path| path.ends_with('.'));
+        return run || (tail.starts_with('.') && ends_in_a_dot());
     }
     let after = trimmed.split_once("://").map_or(trimmed, |(_, rest)| rest);
     if !run || after.contains(['/', '?', '#']) {
         return false;
     }
     let host = after.rsplit_once('@').map_or(after, |(_, host)| host);
-    let host = host.split_once(':').map_or(host, |(name, _)| name);
+    // Dots after a port, or after an IPv6 literal's bracket, end no host.
+    if host.contains([':', ']']) {
+        return false;
+    }
     let label = host.trim_end_matches('.').rsplit('.').next().unwrap_or("");
     let hex = label
         .get(..2)
@@ -430,10 +433,17 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
         }
         // A quoted path goes before bare ones, so they cannot take a piece
         // of it; its link covers a location suffix as a bare path's does.
-        for (start, _, close) in crate::hints::quoted_paths(&text) {
+        for (start, end, close) in crate::hints::quoted_paths(&text) {
             if fragment(start - 1, close + 1) {
                 continue;
             }
+            // The link covers a location suffix (`:12`), not the dot that
+            // ends a sentence.
+            let close = if text[end..close].starts_with(':') {
+                close
+            } else {
+                end
+            };
             match path_match_to_file_uri(&text[start..close], cwd) {
                 Some(uri) => push(start, close - start, uri, &mut covered),
                 // Refused (a climb, no directory to resolve against): no
@@ -638,16 +648,30 @@ fn encode_file_path(path: &str) -> String {
     out
 }
 
+/// Whether `c` is a space that shows as blank space: the ASCII space and
+/// the other Unicode space separators, such as the no-break space, the
+/// narrow no-break space macOS writes before AM and PM in a screenshot's
+/// name, and the figure, en, em and ideographic spaces. It reads as a
+/// space, so it hides nothing, though like any space it is no part of a
+/// URI as written.
+pub(crate) fn visible_space(c: char) -> bool {
+    matches!(
+        c,
+        ' ' | '\u{00A0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}'
+    )
+}
+
 /// Whether `c` hides or reorders text instead of showing as itself: a
-/// control, Unicode whitespace (the no-break and ideographic spaces, line
-/// and paragraph separators), a format character (zero-width spaces and
-/// joiners, bidirectional controls, the byte order mark, tags), another
+/// control, whitespace that is no visible space (the line and paragraph
+/// separators), a format character (zero-width spaces and joiners,
+/// bidirectional controls, the byte order mark, tags), another
 /// default-ignorable code point (variation selectors, Hangul fillers), or
 /// the blank Braille pattern. Text holding one does not read as what it
 /// names, so a link holding one does not open.
 pub(crate) fn hides_text(c: char) -> bool {
     c.is_control()
-        || c.is_whitespace()
+        || (c.is_whitespace() && !visible_space(c))
         || matches!(
             c,
             '\u{00AD}'
@@ -691,7 +715,7 @@ pub fn is_safe_url(uri: &str) -> bool {
     if uri.is_empty() || uri.len() > MAX_URL_BYTES {
         return false;
     }
-    if uri.chars().any(hides_text) {
+    if uri.chars().any(|c| visible_space(c) || hides_text(c)) {
         return false;
     }
     let Some((scheme, rest)) = uri.split_once(':') else {
@@ -1300,6 +1324,20 @@ mod tests {
             ),
             ("see /tmp/a.", "file:///tmp/a"),
             ("see /tmp/a.b..c", "file:///tmp/a.b..c"),
+            // A location after the dots ends the name, as a quote does.
+            ("ls /tmp/a..:3", "file:///tmp/a.."),
+            // One dot ends a sentence, inside quotes too.
+            ("cat \"/tmp/report.pdf.\"", "file:///tmp/report.pdf"),
+            ("Saved to '/tmp/report.pdf.'", "file:///tmp/report.pdf"),
+            (
+                "Saved to \"src/report.pdf.\"",
+                "file:///work/src/report.pdf",
+            ),
+            ("see \"/tmp/a.b.\"", "file:///tmp/a.b"),
+            (
+                "Saved to \"/tmp/my report.pdf.\"",
+                "file:///tmp/my%20report.pdf",
+            ),
         ] {
             assert_eq!(found(line), [uri], "{line}");
         }
@@ -1351,6 +1389,8 @@ mod tests {
             "see file:///tmp/a,..",
             // `%2e.` decodes to `..`; trimmed, `%2e` would name `/tmp`.
             "see file:///tmp/%2e.",
+            "see file:///tmp/a%2e.",
+            "see file:///tmp/a%2E.",
             // Trimmed, these read as IPv4 loopback; as written, they do not.
             "see http://127.1..",
             "see http://0x7f.1...",
@@ -1368,9 +1408,356 @@ mod tests {
             ("see file:///tmp/a.", "file:///tmp/a"),
             ("see http://127.1.", "http://127.1"),
             ("see http://127.0.0.1/x...", "http://127.0.0.1/x"),
+            // Dots after a port end no host.
+            (
+                "Listening on http://127.0.0.1:8080...",
+                "http://127.0.0.1:8080",
+            ),
+            (
+                "Waiting for http://192.168.1.10:3000...",
+                "http://192.168.1.10:3000",
+            ),
+            ("Waiting for http://[::1]:8080...", "http://[::1]:8080"),
         ] {
             assert_eq!(found(line), [uri], "{line}");
         }
+    }
+
+    /// Mainstream terminal output links exactly as it did before the 6.0
+    /// link fixes (main at f776689b6): cargo and ESLint JSON, compiler
+    /// locations, Markdown and prose URLs, IPv6 hosts and ports before an
+    /// ellipsis, quoted prose holding a path, and macOS screenshot names. A
+    /// change to link detection that moves any of them, by a link, a column
+    /// or whether quick select may open it, shows here.
+    #[test]
+    fn mainstream_lines_link_as_they_did() {
+        use crate::hints::Kind;
+        type Case = (
+            &'static str,
+            &'static [(&'static str, usize, usize)],
+            &'static [(Kind, &'static str, bool)],
+        );
+        let corpus: &[Case] = &[
+            (
+                "{\"reason\":\"compiler-artifact\",\"package_id\":\"x 0.1.0\",\"manifest_path\":\"/Users/me/p/Cargo.toml\",\"target\":{\"kind\":[\"lib\"],\"src_path\":\"/Users/me/p/src/lib.rs\"},\"filenames\":[\"/Users/me/p/target/debug/libx.rlib\"]}",
+                &[("file:///Users/me/p/target/debug/libx.rlib", 170, 203)],
+                &[
+                    (Kind::Path, "/Users/me/p/Cargo.toml", false),
+                    (Kind::Path, "/Users/me/p/src/lib.rs", false),
+                    (Kind::Path, "/Users/me/p/target/debug/libx.rlib", true),
+                ],
+            ),
+            (
+                "{\"reason\":\"compiler-message\",\"message\":{\"rendered\":\"warning: unused\",\"spans\":[{\"file_name\":\"src/main.rs\",\"line_start\":3}]}}",
+                &[],
+                &[(Kind::Path, "src/main.rs", false)],
+            ),
+            (
+                "[{\"filePath\":\"/Users/me/p/a.ts\",\"messages\":[],\"errorCount\":0},{\"filePath\":\"/Users/me/p/b.ts\",\"messages\":[]}]",
+                &[],
+                &[
+                    (Kind::Path, "/Users/me/p/a.ts", false),
+                    (Kind::Path, "/Users/me/p/b.ts", false),
+                ],
+            ),
+            (
+                "{\"cwd\":\"/work\",\"file\":\"/Users/me/x.py\"}",
+                &[("file:///Users/me/x.py", 23, 36)],
+                &[
+                    (Kind::Path, "/work", false),
+                    (Kind::Path, "/Users/me/x.py", true),
+                ],
+            ),
+            (
+                "{\"url\":\"https://x.test/a\",\"path\":\"/tmp/c.txt\"}",
+                &[("https://x.test/a", 8, 23), ("file:///tmp/c.txt", 34, 43)],
+                &[
+                    (Kind::Url, "https://x.test/a", false),
+                    (Kind::Path, "/tmp/c.txt", true),
+                ],
+            ),
+            (
+                "{\"type\":\"application/json\",\"file\":\"/tmp/c.txt\"}",
+                &[("file:///tmp/c.txt", 35, 44)],
+                &[
+                    (Kind::Path, "application/json", false),
+                    (Kind::Path, "/tmp/c.txt", true),
+                ],
+            ),
+            (
+                "{\"date\":\"2026/11/26\",\"file\":\"/tmp/c.txt\"}",
+                &[("file:///tmp/c.txt", 29, 38)],
+                &[(Kind::Path, "/tmp/c.txt", true)],
+            ),
+            (
+                "key=\"a/b\";other=/tmp/c.txt",
+                &[("file:///tmp/c.txt", 16, 25)],
+                &[(Kind::Path, "/tmp/c.txt", true)],
+            ),
+            (
+                "  --> src/main.rs:12:5",
+                &[("file:///work/src/main.rs", 6, 21)],
+                &[(Kind::Path, "src/main.rs", true)],
+            ),
+            (
+                "src/main.c:12:5: error: expected ';' before '}' token",
+                &[("file:///work/src/main.c", 0, 14)],
+                &[(Kind::Path, "src/main.c", true)],
+            ),
+            (
+                "crates/a/src/lib.rs:7:9: warning: unused variable",
+                &[("file:///work/crates/a/src/lib.rs", 0, 22)],
+                &[(Kind::Path, "crates/a/src/lib.rs", true)],
+            ),
+            ("main.go:3:2: undefined: x", &[], &[]),
+            (
+                "See [the docs](https://example.com/docs).",
+                &[("https://example.com/docs", 15, 38)],
+                &[(Kind::Url, "https://example.com/docs", true)],
+            ),
+            (
+                "Read https://example.com/a, then https://example.com/b.",
+                &[
+                    ("https://example.com/a", 5, 25),
+                    ("https://example.com/b", 33, 53),
+                ],
+                &[
+                    (Kind::Url, "https://example.com/a", true),
+                    (Kind::Url, "https://example.com/b", true),
+                ],
+            ),
+            (
+                "(see https://rust-lang.org).",
+                &[("https://rust-lang.org", 5, 25)],
+                &[(Kind::Url, "https://rust-lang.org", true)],
+            ),
+            (
+                "https://en.wikipedia.org/wiki/Foo_(bar),",
+                &[("https://en.wikipedia.org/wiki/Foo_(bar)", 0, 38)],
+                &[(Kind::Url, "https://en.wikipedia.org/wiki/Foo_(bar)", true)],
+            ),
+            (
+                "<https://example.com/x>",
+                &[("https://example.com/x", 1, 21)],
+                &[(Kind::Url, "https://example.com/x", true)],
+            ),
+            (
+                "**https://example.com/bold** and `https://example.com/code`",
+                &[
+                    ("https://example.com/bold", 2, 25),
+                    ("https://example.com/code", 34, 57),
+                ],
+                &[
+                    (Kind::Url, "https://example.com/bold", false),
+                    (Kind::Url, "https://example.com/code", false),
+                ],
+            ),
+            (
+                "curl http://[::1]:8080/health",
+                &[("http://[::1]:8080/health", 5, 28)],
+                &[(Kind::Url, "http://[::1]:8080/health", true)],
+            ),
+            (
+                "open http://[2001:db8::1]/a.",
+                &[("http://[2001:db8::1]/a", 5, 26)],
+                &[(Kind::Url, "http://[2001:db8::1]/a", true)],
+            ),
+            (
+                "Listening on http://127.0.0.1:8080...",
+                &[("http://127.0.0.1:8080", 13, 33)],
+                &[(Kind::Url, "http://127.0.0.1:8080", true)],
+            ),
+            (
+                "Waiting for http://localhost:3000...",
+                &[("http://localhost:3000", 12, 32)],
+                &[(Kind::Url, "http://localhost:3000", true)],
+            ),
+            (
+                "Waiting for http://192.168.1.10:3000...",
+                &[("http://192.168.1.10:3000", 12, 35)],
+                &[(Kind::Url, "http://192.168.1.10:3000", true)],
+            ),
+            (
+                "msg=\"./build.sh failed, see /tmp/build.log\"",
+                &[("file:///tmp/build.log", 28, 41)],
+                &[
+                    (Kind::Path, "./build.sh", false),
+                    (Kind::Path, "/tmp/build.log", true),
+                ],
+            ),
+            (
+                "\"see /tmp/report.pdf\"",
+                &[("file:///tmp/report.pdf", 5, 19)],
+                &[(Kind::Path, "/tmp/report.pdf", true)],
+            ),
+            (
+                "\"src/a.rs: cannot open /tmp/b.txt\"",
+                &[("file:///tmp/b.txt", 23, 32)],
+                &[
+                    (Kind::Path, "src/a.rs", false),
+                    (Kind::Path, "/tmp/b.txt", true),
+                ],
+            ),
+            (
+                "\"src/a.rs uses /tmp/b.txt\"",
+                &[("file:///tmp/b.txt", 15, 24)],
+                &[
+                    (Kind::Path, "src/a.rs", false),
+                    (Kind::Path, "/tmp/b.txt", true),
+                ],
+            ),
+            (
+                "echo \"src/main.rs is fine but /tmp/b.txt is not\"",
+                &[],
+                &[
+                    (Kind::Path, "src/main.rs", false),
+                    (Kind::Path, "/tmp/b.txt", false),
+                ],
+            ),
+            (
+                "cat \"/tmp/report.pdf.\"",
+                &[("file:///tmp/report.pdf", 5, 19)],
+                &[(Kind::Path, "/tmp/report.pdf", true)],
+            ),
+            (
+                "Saved to '/tmp/report.pdf.'",
+                &[("file:///tmp/report.pdf", 10, 24)],
+                &[(Kind::Path, "/tmp/report.pdf", true)],
+            ),
+            (
+                "open \"/Users/me/Desktop/Screenshot 2026-11-26 at 10.00.00\u{202f}AM.png\"",
+                &[],
+                &[(Kind::Path, "/Users/me/Desktop/Screenshot", false)],
+            ),
+            (
+                "[{\"filePath\":\"/Users/me/p/a.ts\"},{\"filePath\":\"/Users/me/p/b.ts\"}]",
+                &[("file:///Users/me/p/b.ts", 46, 61)],
+                &[
+                    (Kind::Path, "/Users/me/p/a.ts", false),
+                    (Kind::Path, "/Users/me/p/b.ts", true),
+                ],
+            ),
+            (
+                "{\"a\":\"x/y\",\"b\":\"/tmp/c.txt\"}",
+                &[("file:///tmp/c.txt", 16, 25)],
+                &[(Kind::Path, "/tmp/c.txt", true)],
+            ),
+            (
+                "{\"msg\":\"a/b\",\"path\":\"/tmp/c.txt\"}",
+                &[("file:///tmp/c.txt", 21, 30)],
+                &[(Kind::Path, "/tmp/c.txt", true)],
+            ),
+            (
+                "{\"reason\":\"compiler-artifact\",\"manifest_path\":\"/Users/me/p/Cargo.toml\",\"src_path\":\"/Users/me/p/src/lib.rs\"}",
+                &[("file:///Users/me/p/src/lib.rs", 83, 104)],
+                &[
+                    (Kind::Path, "/Users/me/p/Cargo.toml", false),
+                    (Kind::Path, "/Users/me/p/src/lib.rs", true),
+                ],
+            ),
+            (
+                "{\"level\":\"info\",\"msg\":\"wrote /tmp/out.pdf\",\"ts\":1}",
+                &[],
+                &[(Kind::Path, "/tmp/out.pdf", false)],
+            ),
+            (
+                "{\"level\":\"info\",\"msg\":\"saved\",\"file\":\"/tmp/out.pdf\"}",
+                &[("file:///tmp/out.pdf", 38, 49)],
+                &[(Kind::Path, "/tmp/out.pdf", true)],
+            ),
+            (
+                "ok src/a.rs,'x' /tmp/c.txt",
+                &[("file:///tmp/c.txt", 16, 25)],
+                &[
+                    (Kind::Path, "src/a.rs", false),
+                    (Kind::Path, "/tmp/c.txt", true),
+                ],
+            ),
+            (
+                "['a/b','c/d.txt']",
+                &[("file:///work/c/d.txt", 8, 14)],
+                &[(Kind::Path, "c/d.txt", true)],
+            ),
+            (
+                "[\"a/b\",\"c/d.txt\"]",
+                &[("file:///work/c/d.txt", 8, 14)],
+                &[(Kind::Path, "c/d.txt", true)],
+            ),
+            (
+                "(\"a/b\",\"c/d.txt\")",
+                &[("file:///work/c/d.txt", 8, 14)],
+                &[(Kind::Path, "c/d.txt", true)],
+            ),
+            (
+                "--include='src/*' /tmp/c.txt",
+                &[("file:///tmp/c.txt", 18, 27)],
+                &[(Kind::Path, "/tmp/c.txt", true)],
+            ),
+            (
+                "--include='src/*',/tmp/c.txt",
+                &[("file:///tmp/c.txt", 18, 27)],
+                &[(Kind::Path, "/tmp/c.txt", false)],
+            ),
+            (
+                "x='a/b'&&cat /tmp/c.txt",
+                &[("file:///tmp/c.txt", 13, 22)],
+                &[(Kind::Path, "/tmp/c.txt", true)],
+            ),
+            (
+                "see https://example.com/a...",
+                &[("https://example.com/a", 4, 24)],
+                &[(Kind::Url, "https://example.com/a", true)],
+            ),
+            (
+                "see www.example.com.",
+                &[("https://www.example.com", 4, 18)],
+                &[(Kind::Url, "www.example.com", true)],
+            ),
+            (
+                "src/lib.rs:10:5: note: here",
+                &[("file:///work/src/lib.rs", 0, 14)],
+                &[(Kind::Path, "src/lib.rs", true)],
+            ),
+        ];
+        for &(line, links, hints) in corpus {
+            let term = term_fed(240, 1, line.as_bytes());
+            let found = links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| (link.uri, link.start_col, link.end_col))
+                .collect::<Vec<_>>();
+            let want = links
+                .iter()
+                .map(|&(uri, start, end)| (uri.to_string(), start, end))
+                .collect::<Vec<_>>();
+            assert_eq!(found, want, "links in {line:?}");
+            let spans = crate::hints::detect_rows(term.grid(), &[0], 240)
+                .into_iter()
+                .map(|span| (span.kind, span.text, span.bounded))
+                .collect::<Vec<_>>();
+            let want = hints
+                .iter()
+                .map(|&(kind, text, bounded)| (kind, text.to_string(), bounded))
+                .collect::<Vec<_>>();
+            assert_eq!(spans, want, "hints in {line:?}");
+        }
+        // A macOS screenshot name, with the narrow no-break space before
+        // AM: its file URL, as Preview copied file and ls --hyperlink use
+        // it, and a web link spelling it.
+        let name = "/Users/me/Desktop/Screenshot 2026-11-26 at 10.00.00\u{202f}AM.png";
+        let url = "file:///Users/me/Desktop/Screenshot%202026-11-26%20at%2010.00.00%E2%80%AFAM.png";
+        assert_eq!(
+            super::file_url_for_path(std::path::Path::new(name)).as_deref(),
+            Some(url)
+        );
+        assert!(is_safe_url(url));
+        #[cfg(unix)]
+        assert_eq!(
+            super::local_file_path(url),
+            Some(std::path::PathBuf::from(name))
+        );
+        assert!(is_safe_url(
+            "https://x.test/Screenshot%2010.00.00%E2%80%AFAM.png"
+        ));
     }
 
     /// A closing bracket that pairs with an open before it ends the link,
@@ -1789,6 +2176,55 @@ mod tests {
         }
     }
 
+    /// Quoted prose that starts with a path still links a later path from a
+    /// root; a relative piece of a quoted name does not.
+    #[test]
+    fn quoted_prose_starting_with_a_path_links_a_rooted_one() {
+        for (line, uri) in [
+            (
+                "msg=\"./build.sh failed, see /tmp/build.log\"",
+                "file:///tmp/build.log",
+            ),
+            ("\"src/a.rs uses /tmp/b.txt\"", "file:///tmp/b.txt"),
+            ("\"src/a.rs: cannot open /tmp/b.txt\"", "file:///tmp/b.txt"),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>();
+            assert_eq!(found, [uri], "{line}");
+        }
+    }
+
+    /// Compact JSON closes each string before the next opens, so a later
+    /// value's path links whatever an earlier value held.
+    #[test]
+    fn a_compact_json_path_links_after_any_earlier_value() {
+        for (line, uri) in [
+            (
+                "{\"cwd\":\"/work\",\"file\":\"/Users/me/x.py\"}",
+                "file:///Users/me/x.py",
+            ),
+            (
+                "{\"type\":\"application/json\",\"file\":\"/tmp/c.txt\"}",
+                "file:///tmp/c.txt",
+            ),
+            (
+                "{\"date\":\"2026/11/26\",\"file\":\"/tmp/c.txt\"}",
+                "file:///tmp/c.txt",
+            ),
+            ("key=\"a/b\";other=/tmp/c.txt", "file:///tmp/c.txt"),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>();
+            assert_eq!(found, [uri], "{line}");
+        }
+    }
+
     /// Quotes around one path-shaped token the quoted pattern rejects leave
     /// no piece of it linked as a file of its own; a path after a space in
     /// quoted prose, or unquoted, still links.
@@ -1901,25 +2337,27 @@ mod tests {
     /// the other characters drawn as nothing. Visible non-ASCII stays.
     #[test]
     fn uris_holding_invisible_characters_are_refused() {
+        // A space of any kind is no part of a URI as written.
+        let spaces = [
+            '\u{a0}', '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}',
+            '\u{2005}', '\u{2006}', '\u{2007}', '\u{2008}', '\u{2009}', '\u{200a}', '\u{202f}',
+            '\u{205f}', '\u{3000}',
+        ];
+        for c in spaces {
+            assert!(
+                !is_safe_url(&format!("https://x.test/a{c}b")),
+                "U+{:04X}",
+                u32::from(c)
+            );
+            assert!(
+                !is_safe_url(&format!("file:///tmp/a{c}b.pdf")),
+                "U+{:04X}",
+                u32::from(c)
+            );
+        }
         let invisible = [
-            '\u{a0}',
-            '\u{1680}',
-            '\u{2000}',
-            '\u{2001}',
-            '\u{2002}',
-            '\u{2003}',
-            '\u{2004}',
-            '\u{2005}',
-            '\u{2006}',
-            '\u{2007}',
-            '\u{2008}',
-            '\u{2009}',
-            '\u{200a}',
             '\u{2028}',
             '\u{2029}',
-            '\u{202f}',
-            '\u{205f}',
-            '\u{3000}',
             '\u{200b}',
             '\u{200c}',
             '\u{200d}',
@@ -2208,6 +2646,41 @@ mod tests {
         assert_eq!(found, ["https://e.test/"]);
     }
 
+    /// A visible space is a space, as macOS writes one before AM and PM in
+    /// every default screenshot name: a file holding one has its file URL,
+    /// and that link, as `ls --hyperlink` and eza print it, opens.
+    #[test]
+    fn a_visible_space_in_a_name_is_a_space() {
+        use super::{file_url_for_path, local_file_path};
+        use std::path::Path;
+        let name = "/Users/me/Desktop/Screenshot 2026-11-26 at 10.00.00\u{202f}AM.png";
+        let url = "file:///Users/me/Desktop/Screenshot%202026-11-26%20at%2010.00.00%E2%80%AFAM.png";
+        assert_eq!(file_url_for_path(Path::new(name)).as_deref(), Some(url));
+        assert!(is_safe_url(url));
+        #[cfg(unix)]
+        assert_eq!(local_file_path(url), Some(std::path::PathBuf::from(name)));
+        for uri in [
+            "https://x.test/Screenshot%2010.00.00%E2%80%AFAM.png",
+            "file:///tmp/a%C2%A0b.pdf",
+            "file:///tmp/a%E2%80%87b.pdf",
+            "file:///tmp/a%E3%80%80b.pdf",
+        ] {
+            assert!(is_safe_url(uri), "{uri}");
+        }
+        assert_eq!(
+            path_match_to_file_uri("/tmp/a\u{202f}b.pdf", None).as_deref(),
+            Some("file:///tmp/a%E2%80%AFb.pdf")
+        );
+        // Zero-width and line-separating characters still hide text.
+        for uri in [
+            "file:///tmp/a%E2%80%8Bb.pdf",
+            "file:///tmp/a%E2%80%A8b.pdf",
+            "https://x.test/a%E2%80%8Bb",
+        ] {
+            assert!(!is_safe_url(uri), "{uri}");
+        }
+    }
+
     /// Percent-encoded, a character that hides text reads the same once the
     /// opener decodes it: a file link's path, and a web link's host, path or
     /// query, holding one is refused. An encoded space, line break or
@@ -2218,7 +2691,7 @@ mod tests {
             "file:///tmp/a%E2%80%8Bb.pdf",
             "file:///tmp/a%E2%80%AEb.pdf",
             "file:///tmp/a..%E2%80%8Bb.pdf",
-            "file:///tmp/a%C2%A0b.pdf",
+            "file:///tmp/a%E2%80%A9b.pdf",
             "file://localhost/tmp/a%EF%BB%BFb.pdf",
             "file:///tmp/a%C2%85b.pdf",
             "https://x.test/a%E2%80%8Bb",
