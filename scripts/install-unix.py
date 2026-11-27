@@ -47,6 +47,44 @@ UPDATE_JOURNAL_PHASES = frozenset({"prepared", "applying", "rolling_back", "comm
 UPDATE_JOURNAL_STATES = frozenset(
     {"backing_up", "prepared", "installed", "restored", "backup_discarded"}
 )
+# Every file a genuine self-update writes, in this release or an earlier one:
+# the updater's install map (`LINUX_STATIC_INSTALL_MAP` in
+# crates/kettle-update/src/install.rs), both binaries, its marker and record.
+# Many of these, such as the license notices, this installer never installs, so
+# the first self-update after an install journals them before any record lists
+# them. A Rust test keeps this list a superset of the updater's map; keep an
+# entry here after the updater drops it, since an old journal may name it.
+UPDATER_FILES = frozenset(
+    {
+        "bin/kettle",
+        "bin/kettle-media-worker",
+        "share/applications/kettle.desktop",
+        "share/doc/kettle/CHANGELOG.md",
+        "share/doc/kettle/LICENSE",
+        "share/doc/kettle/NOTICE",
+        "share/doc/kettle/README.md",
+        "share/doc/kettle/docs/licenses/tokyonight.nvim/LICENSE",
+        "share/doc/kettle/docs/licenses/tokyonight.nvim/README.md",
+        "share/icons/hicolor/128x128/apps/kettle.png",
+        "share/icons/hicolor/16x16/apps/kettle.png",
+        "share/icons/hicolor/24x24/apps/kettle.png",
+        "share/icons/hicolor/256x256/apps/kettle.png",
+        "share/icons/hicolor/32x32/apps/kettle.png",
+        "share/icons/hicolor/48x48/apps/kettle.png",
+        "share/icons/hicolor/64x64/apps/kettle.png",
+        "share/icons/hicolor/scalable/apps/kettle.svg",
+        "share/kettle/install-files.json",
+        "share/kettle/install-unix.py",
+        "share/kettle/install.json",
+        "share/kettle/install.sh",
+        "share/man/man1/kettle.1",
+    }
+)
+# The updater also writes the changelog archives the release carries, one file
+# per major version, and everything under shell-integration, which since 4.9
+# includes the media worker capsule.
+UPDATER_CHANGELOG_DIRECTORY = "share/doc/kettle/docs/changelog"
+UPDATER_SHELL_DIRECTORY = "share/kettle/shell-integration"
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 FILE_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 
@@ -406,6 +444,17 @@ SEMVER = re.compile(
 )
 
 
+def _updater_writes(path: str) -> bool:
+    """Whether a genuine self-update can write `path`, a validated relative
+    path, by the updater's own destination rules."""
+    if path in UPDATER_FILES:
+        return True
+    if path.startswith(UPDATER_CHANGELOG_DIRECTORY + "/"):
+        changelog = path[len(UPDATER_CHANGELOG_DIRECTORY) + 1 :]
+        return re.fullmatch(r"CHANGELOG-(0|[1-9][0-9]*)\.x\.md", changelog) is not None
+    return path.startswith(UPDATER_SHELL_DIRECTORY + "/")
+
+
 def _not_from_updater() -> NoReturn:
     _fail("the update journal is not one Kettle's self-updater wrote")
 
@@ -599,19 +648,20 @@ def _adopt_interrupted_update(
     installer's own record is checked the same way but never adopted, since
     the installer rewrites it.
 
-    Only paths in `owned`, the files this install writes or its record already
-    lists, can be adopted. The updater writes nothing else, so a journal that
-    names another path did not come from it, whatever bytes it matches."""
+    Only a path the updater's own destination rules allow, or one in `owned`
+    (the files this install writes or its record already lists), can be
+    adopted. The updater writes nothing else, so a journal that names another
+    path did not come from it, whatever bytes it matches."""
     adopted: Dict[str, Dict[str, Any]] = {}
     gone = set()
     for entry in journal["entries"]:
         path = entry["relative"]
         if path in (PENDING_RELATIVE, UNINSTALL_RELATIVE):
             _not_from_updater()
-        if path != MANIFEST_RELATIVE and path not in owned:
+        if path not in owned and not _updater_writes(path):
             _fail(
-                f"the update journal names {path}, which this installer neither "
-                "installs nor recorded, so it will not adopt it"
+                f"the update journal names {path}, which neither this installer "
+                "nor Kettle's self-updater writes, so it will not adopt it"
             )
         fingerprints, may_be_absent = _journaled_fingerprints(entry)
         current = _current_record(root_fd, path)

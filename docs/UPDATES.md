@@ -332,9 +332,10 @@ too, and refuses to update until the rollback has finished.
 If the bundled `install.sh` or the online installer runs while a rollback is
 still pending, it reads the updater's journal as the receipt it is, after the
 same validation the updater applies to it. A file at a journaled path is
-treated as one the interrupted install wrote only when the path is one this
-installer installs or its record lists, and its bytes are what the journal
-shows the update left there in that entry's state: the file it found, before
+treated as one the interrupted install wrote only when the path is one the
+updater writes, by its own destination rules, or one this installer installs or
+its record lists, and its bytes are what the journal shows the update left
+there in that entry's state: the file it found, before
 publication or once restored, or either file in between. A journal that names
 any other path did not come from the updater and stops the install. The
 installer then lays the whole release over the prefix. Before writing anything

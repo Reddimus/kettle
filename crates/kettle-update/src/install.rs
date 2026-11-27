@@ -3401,7 +3401,7 @@ fn apply_staged_update(
 #[cfg(target_os = "linux")]
 const LINUX_CHANGELOG_DIRECTORY: &str = "docs/changelog";
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 const LINUX_CHANGELOG_DESTINATION: &str = "share/doc/kettle/docs/changelog";
 
 #[cfg(any(target_os = "linux", test))]
@@ -9278,6 +9278,44 @@ mod tests {
             }
         }
         tree
+    }
+
+    /// The installer adopts an interrupted update's files by the updater's own
+    /// destination rules (#846). A file the updater installs that is missing
+    /// from the installer's list makes a first self-update's journal look
+    /// forged, and the installer refuses the way out of it.
+    #[test]
+    fn the_installer_knows_every_file_the_linux_updater_writes() {
+        let installer = include_str!("../../../scripts/install-unix.py");
+        let listed = installer
+            .split("UPDATER_FILES = frozenset(")
+            .nth(1)
+            .and_then(|rest| rest.split(")\n").next())
+            .expect("install-unix.py lists UPDATER_FILES");
+        let listed = listed
+            .split('"')
+            .skip(1)
+            .step_by(2)
+            .collect::<std::collections::BTreeSet<_>>();
+        let written = LINUX_STATIC_INSTALL_MAP
+            .iter()
+            .map(|(_, destination, _)| *destination)
+            .chain([
+                "bin/kettle",
+                "bin/kettle-media-worker",
+                "share/kettle/install.json",
+                UNIX_INSTALL_PROVENANCE_FILE,
+            ]);
+        for path in written {
+            assert!(
+                listed.contains(path),
+                "install-unix.py UPDATER_FILES lacks {path}"
+            );
+        }
+        assert!(installer.contains(&format!(
+            "UPDATER_CHANGELOG_DIRECTORY = \"{LINUX_CHANGELOG_DESTINATION}\""
+        )));
+        assert!(installer.contains("UPDATER_SHELL_DIRECTORY = \"share/kettle/shell-integration\""));
     }
 
     /// #847: the directory an update would refuse is named with its mode and
