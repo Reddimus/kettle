@@ -245,10 +245,11 @@ fn quote_has_end(line: &str, close: usize) -> bool {
     grep || ends_a_match(tail) || tail.starts_with([',', ';', ':', ')', ']', '}', '>'])
 }
 
-/// Whether a bare path reaches the end of any quoted run holding it. A run
-/// holding a character that hides text (`"docs/old\u{a0}dir/x.txt"`) does
-/// not read as the name it spells, so no piece of it is whole. Only a path
-/// that ends at the close reaches the body check, so it is read once.
+/// Whether a bare path reaches the end of any quoted run holding it. A path
+/// joined to the text before it by a character that hides text
+/// (`"docs/old\u{a0}dir/x.txt"`) is a piece of a longer quoted name, so it
+/// is not whole; text after a space before it is another word. Only a path
+/// that ends at the close reaches that check, so it is read once.
 pub(crate) fn path_reaches_quote(
     line: &str,
     runs: &[(usize, usize)],
@@ -266,7 +267,11 @@ pub(crate) fn path_reaches_quote(
                     .0
                     .trim_start_matches(|c| ",;:?!.".contains(c))
                     .is_empty()
-                && !path_misleads(&line[open + 1..close])
+                && {
+                    let lead = &line[open + 1..start];
+                    let word = lead.rsplit(' ').next().unwrap_or(lead);
+                    !word.chars().any(crate::links::hides_text)
+                }
         })
 }
 
@@ -1317,6 +1322,19 @@ mod tests {
         }
         let spans = detect(&["x \"docs/100%2e/my report.pdf\" y"]);
         assert!(spans[0].bounded);
+        // Such a name elsewhere in quoted text leaves a later path whole.
+        for line in [
+            "\"Compare docs/%2e%2e/old.txt with /tmp/report.pdf\"",
+            "\"Compare docs/a\u{200b}b.txt with /tmp/report.pdf\"",
+        ] {
+            let spans = detect(&[line]);
+            assert!(
+                spans
+                    .iter()
+                    .any(|span| span.text == "/tmp/report.pdf" && span.bounded),
+                "{line}: {spans:?}"
+            );
+        }
         // Without one, a bare path ending at the quote is whole, as before.
         let spans = detect(&["\"see src/main.rs\""]);
         assert_eq!(spans.len(), 1);

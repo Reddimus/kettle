@@ -1512,6 +1512,26 @@ mod tests {
         }
     }
 
+    /// A hidden character in another word of quoted text leaves a later
+    /// path whole, as the path's own text is all that opens.
+    #[test]
+    fn a_hidden_character_elsewhere_in_quotes_keeps_a_later_path() {
+        for line in [
+            "\"Compare docs/%2e%2e/old.txt with /tmp/report.pdf\"",
+            "\"Compare docs/a\u{200b}b.txt with /tmp/report.pdf\"",
+        ] {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>();
+            assert!(
+                found.iter().any(|uri| uri == "file:///tmp/report.pdf"),
+                "{line}: {found:?}"
+            );
+        }
+    }
+
     /// A quoted relative path with a space links whole whatever the length
     /// of its extension.
     #[test]
