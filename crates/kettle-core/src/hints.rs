@@ -471,6 +471,30 @@ impl Taken {
         debug_assert!(!self.overlaps(start, end));
         self.0.insert(start, end);
     }
+
+    /// Take whatever of `start..end` is not taken yet, around the ranges
+    /// already taken inside it.
+    pub(crate) fn fill(&mut self, start: usize, end: usize) {
+        // Only the last range starting before `start` can reach into it.
+        let mut at = self
+            .0
+            .range(..start)
+            .next_back()
+            .map_or(start, |(_, &taken_end)| taken_end.max(start));
+        let mut gaps = Vec::new();
+        for (&taken_start, &taken_end) in self.0.range(start..end) {
+            if taken_start > at {
+                gaps.push((at, taken_start));
+            }
+            at = at.max(taken_end);
+        }
+        if at < end {
+            gaps.push((at, end));
+        }
+        for (gap_start, gap_end) in gaps {
+            self.0.insert(gap_start, gap_end);
+        }
+    }
 }
 
 /// Detect hint targets in one row's `line`, using `col_of_byte` to map byte
@@ -526,9 +550,7 @@ fn detect_line(
             // A scheme with nothing after it (`see https://...`) is no URL,
             // and no piece of it is a path either.
             if *kind == Kind::Url && !fragment && !crate::links::names_a_target(trimmed) {
-                if !taken.overlaps(m.start(), m.end()) {
-                    taken.insert(m.start(), m.end());
-                }
+                taken.fill(m.start(), m.end());
                 continue;
             }
             if trimmed.is_empty()
@@ -1421,6 +1443,22 @@ mod tests {
         }
     }
 
+    /// Filling takes only the gaps around ranges already taken.
+    #[test]
+    fn filling_takes_only_what_is_free() {
+        let mut taken = Taken::default();
+        taken.insert(0, 4);
+        taken.insert(6, 8);
+        taken.insert(20, 22);
+        taken.fill(2, 12);
+        let ranges = taken.0.iter().map(|(&s, &e)| (s, e)).collect::<Vec<_>>();
+        assert_eq!(ranges, [(0, 4), (4, 6), (6, 8), (8, 12), (20, 22)]);
+        taken.fill(0, 30);
+        assert!((0..30).all(|at| taken.overlaps(at, at + 1)));
+        taken.fill(5, 7);
+        assert_eq!(taken.0.len(), 7);
+    }
+
     /// Checking a line's matches stays linear however it repeats quotes and
     /// punctuation: the boundary check reads a bounded distance ahead.
     #[test]
@@ -1554,6 +1592,8 @@ mod tests {
             "see ftp://***",
             "see file://...",
             "see https://?q=/etc/hosts",
+            "see file://?q=/etc/hosts",
+            "see www.example@/etc/hosts",
         ] {
             let spans = detect(&[line]);
             assert!(spans.is_empty(), "{line}: {spans:?}");

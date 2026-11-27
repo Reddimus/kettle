@@ -53,10 +53,15 @@ pub(crate) fn names_a_target(url: &str) -> bool {
         .filter(|prefix| prefix.eq_ignore_ascii_case("www."))
         .map(|_| &url[4..])
     {
-        return rest.starts_with(char::is_alphanumeric);
+        // Opened as `https://` and the text, so its host is what follows
+        // any user info (`www.example@/x` has none).
+        return rest.starts_with(char::is_alphanumeric) && authority_has_host(url);
     }
     match url.split_once(':') {
-        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("file") => rest.len() > "//".len(),
+        // An authority or a path before any query: not `file://?q=/x`.
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("file") => rest
+            .strip_prefix("//")
+            .is_some_and(|rest| !rest.starts_with(['?', '#']) && !rest.is_empty()),
         Some((_, rest)) => names_a_host(rest),
         None => false,
     }
@@ -66,9 +71,11 @@ pub(crate) fn names_a_target(url: &str) -> bool {
 /// a host, past any user info and port: not `//`, `///x`, `//?q`, `//#f`
 /// or `//:8080/x`.
 fn names_a_host(rest: &str) -> bool {
-    let Some(rest) = rest.strip_prefix("//") else {
-        return false;
-    };
+    rest.strip_prefix("//").is_some_and(authority_has_host)
+}
+
+/// Whether the authority that starts `rest` names a host.
+fn authority_has_host(rest: &str) -> bool {
     let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
     let host = authority
         .rsplit_once('@')
@@ -303,15 +310,10 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
                 group += 1;
             };
         // Take a refused match's cells, so no piece of it links either.
+        // An explicit link over some of its cells keeps them.
         let cover = |start: usize, len: usize, covered: &mut Vec<crate::hints::Taken>| {
-            let segments = row_segments(&pos_of_byte, start, len);
-            if segments
-                .iter()
-                .all(|&(row, s, e)| !covered[row].overlaps(s, e + 1))
-            {
-                for (row, s, e) in segments {
-                    covered[row].insert(s, e + 1);
-                }
+            for (row, s, e) in row_segments(&pos_of_byte, start, len) {
+                covered[row].fill(s, e + 1);
             }
         };
         for m in url_re().find_iter(&text) {
@@ -1774,6 +1776,8 @@ mod tests {
             "see file://...",
             "see https://?q=/etc/hosts",
             "see https:///etc/hosts",
+            "see file://?q=/etc/hosts",
+            "see www.example@/etc/hosts",
         ] {
             let term = term_with(line.len(), &[line], &[]);
             let found = links_with_cwd(&term, Some("/work"));
@@ -1782,6 +1786,10 @@ mod tests {
         for (line, uri) in [
             ("see https://a", "https://a"),
             ("see www.example.com...", "https://www.example.com"),
+            (
+                "see www.example.com@x.test/",
+                "https://www.example.com@x.test/",
+            ),
             ("see file:///etc/hosts.", "file:///etc/hosts"),
         ] {
             let term = term_with(line.len(), &[line], &[]);
@@ -1789,6 +1797,18 @@ mod tests {
             assert_eq!(found.len(), 1, "{line}: {found:?}");
             assert_eq!(found[0].uri, uri, "{line}");
         }
+        // An explicit link over part of a refused URL keeps its cells, and
+        // the rest of the URL is not a path either.
+        let term = term_fed(
+            40,
+            1,
+            b"\x1b]8;;https://e.test/\x1b\\https\x1b]8;;\x1b\\://?q=docs/.env end",
+        );
+        let found = links_with_cwd(&term, Some("/work"))
+            .into_iter()
+            .map(|link| link.uri)
+            .collect::<Vec<_>>();
+        assert_eq!(found, ["https://e.test/"]);
     }
 
     /// Drift guard: `file://` must be local-only — a remote
