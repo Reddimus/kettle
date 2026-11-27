@@ -1212,7 +1212,8 @@ type a label to open a URL or copy anything else, or hold Shift while typing it
 to copy a URL or open a path in the default app, resolved from that pane's
 directory. A path is copied instead when it names another machine's file (a
 detected ssh, mosh or container session), when the label marks only part of a
-name, such as `out/report` in `out/report#1.pdf`, or when it climbs with `..`.
+name, such as `out/report` in `out/report#1.pdf`, when it holds a character
+that hides text, such as a zero-width joiner, or when it climbs with `..`.
 Behind tmux, screen or zellij a path opens as it would locally; one that is
 not on this computer, as when an ssh inside tmux printed it, gets a notice.
 Kettle does
