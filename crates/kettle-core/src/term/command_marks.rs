@@ -605,20 +605,21 @@ mod tests {
 
     const FIXTURE_ENV: &str = "KETTLE_TEST_COMMAND_MARK_WIRE";
 
+    /// How long a fixture waits for its reader or child before calling it
+    /// hung. Every wait ends on its condition first; this only stops a hang.
+    const FIXTURE_HANG: std::time::Duration = std::time::Duration::from_secs(60);
+
     #[test]
     fn command_mark_wire_child() {
         let Ok(wire) = std::env::var(FIXTURE_ENV) else {
             return;
         };
         if wire == "REPLY_FIXTURE" {
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let mut reply = String::new();
-                std::io::stdin().read_line(&mut reply).unwrap();
-                let _ = tx.send(reply);
-            });
-            let received = rx.recv_timeout(std::time::Duration::from_secs(2)).ok();
-            std::process::exit(if received.as_deref().map(str::trim) == Some("REPLY") {
+            // Block until the reply's line arrives, however long the parent
+            // takes to forward it; the parent's hang bound ends a lost one.
+            let mut reply = String::new();
+            let read = std::io::stdin().read_line(&mut reply);
+            std::process::exit(if read.is_ok() && reply.trim() == "REPLY" {
                 0
             } else {
                 7
@@ -690,6 +691,8 @@ mod tests {
         use std::time::{Duration, Instant};
         let (tx, rx) = crossbeam_channel::unbounded();
         let (input_tx, input_rx) = crossbeam_channel::bounded(1);
+        // Drained while the fixture waits, so a native wire read in many
+        // chunks never blocks the reader on this sender.
         let (output_tx, output_rx) = crossbeam_channel::bounded(2);
         if wire == "REPLY_FIXTURE" {
             tx.send(super::super::TermEvent::PtyWrite("REPLY\r\n".into()))
@@ -734,14 +737,16 @@ mod tests {
                         WorkingDirectoryPolicy::FallbackToHome,
                         tx.clone(),
                         waker.clone(),
-                        raw.then(|| PtyOutputSender::lossless(output_tx.clone())),
+                        Some(PtyOutputSender::lossless(output_tx.clone())),
                     )
                 });
             match created {
-                Err(error) if retries < 4 && format!("{error:#}").contains("failed to openpty") => {
+                // Other processes opening pseudoterminals cause the failure,
+                // so back off rather than count on a quiet machine.
+                Err(error) if retries < 8 && format!("{error:#}").contains("failed to openpty") => {
                     eprintln!("command-mark fixture: retrying after {error:#}");
+                    std::thread::sleep(Duration::from_millis(20 << retries));
                     retries += 1;
-                    std::thread::sleep(Duration::from_millis(20));
                 }
                 created => break created,
             }
@@ -761,15 +766,16 @@ mod tests {
             let bytes = [b"\x1b[H\x1b[2J".as_slice(), wire.as_bytes()].concat();
             if raw {
                 assert!(bytes.len() <= super::super::PTY_READ_BUFFER_BYTES);
-                let input = input_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                // The reader hands over its input as it starts, and holds the
+                // only other sender, so these end on its handover or its exit.
+                let input = input_rx
+                    .recv_timeout(FIXTURE_HANG)
+                    .expect("the reader never handed over its input");
                 let generation = pane.pty_read_progress.mark_chunk_read();
                 input
-                    .send_timeout(
-                        Some((generation, bytes.clone(), bytes.len())),
-                        Duration::from_secs(2),
-                    )
-                    .unwrap();
-                input.send_timeout(None, Duration::from_secs(2)).unwrap();
+                    .send(Some((generation, bytes.clone(), bytes.len())))
+                    .expect("the reader stopped before the wire");
+                input.send(None).expect("the reader stopped before EOF");
                 drop(input);
                 // Native output is drained independently. Answer ConPTY's
                 // inherited-cursor query even though its bytes bypass this parser.
@@ -777,8 +783,10 @@ mod tests {
                 pane.write(b"\x1b[1;1R");
             }
             observe(&pane, &rx);
-            let deadline = Instant::now() + Duration::from_secs(15);
+            let deadline = Instant::now() + FIXTURE_HANG;
+            let mut captured = Vec::new();
             while !pane.take_exited() {
+                captured.extend(output_rx.try_iter().flatten());
                 forward_replies(&pane, &rx);
                 #[cfg(windows)]
                 if !raw && pane.child_exit_code().is_some() {
@@ -796,14 +804,35 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(5));
             }
             assert_eq!(pane.child_exit_code(), Some(0));
+            captured.extend(output_rx.try_iter().flatten());
             if raw {
-                let captured: Vec<_> = output_rx.try_iter().flatten().collect();
                 assert_eq!(captured, bytes, "raw fixture changed the original wire");
+            }
+            // The reader stops at EOF, after the child's last byte. Check that
+            // every byte of the wire crossed it before any test compares the
+            // grid, rather than trusting how fast the child's write arrived.
+            // The child's tty adds CR before each LF, and libtest may write a
+            // header ahead of the fixture's clear.
+            #[cfg(unix)]
+            if !raw && wire != "REPLY_FIXTURE" {
+                let mut written = Vec::with_capacity(bytes.len() * 2);
+                for &byte in &bytes {
+                    if byte == b'\n' {
+                        written.push(b'\r');
+                    }
+                    written.push(byte);
+                }
+                assert!(
+                    captured.ends_with(&written),
+                    "the native reader missed part of the wire: read {} of {} bytes",
+                    captured.len(),
+                    written.len()
+                );
             }
         }));
         if observed.is_err() && pane.child_exit_code().is_none() {
             pane.kill().expect("kill owned command-mark fixture");
-            let deadline = Instant::now() + Duration::from_secs(2);
+            let deadline = Instant::now() + FIXTURE_HANG;
             while pane.child_exit_code().is_none() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(5));
             }
@@ -1538,7 +1567,6 @@ mod tests {
     }
 
     fn sync_marks_and_text_stay_invisible_until_commit(raw: bool) {
-        use std::time::Duration;
         let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
         let (resume_tx, resume_rx) = crossbeam_channel::bounded(1);
         let armed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -1546,7 +1574,7 @@ mod tests {
         let waker = std::sync::Arc::new(move || {
             if armed_for_wake.load(std::sync::atomic::Ordering::Acquire) {
                 wake_tx.send(()).unwrap();
-                resume_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                resume_rx.recv_timeout(FIXTURE_HANG).unwrap();
             }
         });
         struct Resume(
@@ -1568,7 +1596,7 @@ mod tests {
             waker,
             |pane, rx| {
                 loop {
-                    wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                    wake_rx.recv_timeout(FIXTURE_HANG).unwrap();
                     forward_replies(pane, rx);
                     let held = pane
                         .drain_protocol_notifications()
