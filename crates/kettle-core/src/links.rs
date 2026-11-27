@@ -2554,6 +2554,37 @@ mod tests {
         }
     }
 
+    /// A quoted message listing many paths is read in linear time: what a
+    /// path needs to know about its string is found once per line, not
+    /// once per path in it.
+    #[test]
+    fn a_long_quoted_list_of_paths_is_read_once() {
+        let mut line = String::from("echo \"");
+        for _ in 0..2000 {
+            line.push_str("/tmp/a.txt ");
+        }
+        line.push_str("/tmp/b.txt\"");
+        crate::hints::HIDES_SCANNED.with(|scanned| scanned.set(0));
+        let term = term_with(line.len(), &[line.as_str()], &[]);
+        let found = links_with_cwd(&term, Some("/work"));
+        let spans = crate::hints::detect(&[line.as_str()]);
+        let scanned = crate::hints::HIDES_SCANNED.with(std::cell::Cell::get);
+        // Each of the two reads searches the string once.
+        assert!(
+            scanned <= 2 * line.len(),
+            "searched {scanned} bytes of a {}-byte line",
+            line.len()
+        );
+        assert_eq!(
+            found
+                .iter()
+                .map(|link| link.uri.as_str())
+                .collect::<Vec<_>>(),
+            ["file:///tmp/b.txt"]
+        );
+        assert_eq!(spans.iter().filter(|span| span.bounded).count(), 1);
+    }
+
     /// The links on `line`, resolved against `/work`, and the paths quick
     /// select may open there.
     fn opened(line: &str) -> (Vec<String>, Vec<String>) {

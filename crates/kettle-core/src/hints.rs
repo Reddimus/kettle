@@ -202,6 +202,9 @@ pub(crate) struct Quotes {
     /// Closed strings, as the byte offsets of their opening and closing
     /// quotes, in order.
     strings: Vec<(usize, usize)>,
+    /// Whether each of `strings` holds a character that hides text, a space
+    /// aside, found once here rather than for every path in it.
+    hiding: Vec<bool>,
     /// Unsure text, as the byte offsets of the apostrophe that starts it and
     /// of the `'` that ends it, in order.
     unsure: Vec<(usize, usize)>,
@@ -221,6 +224,7 @@ impl Quotes {
     pub(crate) fn read(line: &str) -> Self {
         let mut quotes = Self {
             strings: Vec::new(),
+            hiding: Vec::new(),
             unsure: Vec::new(),
             marks: Vec::new(),
             words: Vec::new(),
@@ -283,6 +287,7 @@ impl Quotes {
                 }
                 Some(close) if !apostrophe => {
                     quotes.strings.push((at, close));
+                    quotes.hiding.push(hides_text_in(&line[at + 1..close]));
                     quotes.marks.extend([at, close]);
                     at = close + 1;
                 }
@@ -413,9 +418,12 @@ impl Quotes {
             return rooted;
         }
         let held = self.strings.partition_point(|&(open, _)| open < start);
-        if let Some(&(open, close)) = held.checked_sub(1).map(|at| &self.strings[at])
-            && end <= close
+        if let Some(at) = held.checked_sub(1)
+            && end <= self.strings[at].1
         {
+            // Each check costs no more than this path's own length, so a
+            // string listing many paths is read in linear time.
+            let (open, close) = self.strings[at];
             let reaches = skip_location(&line[end..close])
                 .0
                 .trim_start_matches(|c| ",;:?!.".contains(c))
@@ -423,9 +431,7 @@ impl Quotes {
             let whole = start == open + 1 && starts_a_token(line, open, "=:,;([{<>|&");
             let from_a_root = line[..start].ends_with(char::is_whitespace)
                 && starts_its_own_path(&line[start..])
-                && !line[open + 1..close]
-                    .chars()
-                    .any(|c| c != ' ' && crate::links::hides_text(c));
+                && !self.hiding[at];
             return reaches && (whole || from_a_root);
         }
         let unsure = self.unsure.partition_point(|&(open, _)| open < start);
@@ -441,6 +447,21 @@ impl Quotes {
         };
         !quoted(word.0, start) && (rooted || !quoted(end, word.1))
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Bytes of string text [`hides_text_in`] has searched on this thread,
+    /// so a test can bound the work detection does.
+    pub(crate) static HIDES_SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether `text` holds a character that hides text, a space aside.
+fn hides_text_in(text: &str) -> bool {
+    #[cfg(test)]
+    HIDES_SCANNED.with(|scanned| scanned.set(scanned.get() + text.len()));
+    text.chars()
+        .any(|c| c != ' ' && crate::links::hides_text(c))
 }
 
 /// Whether `rest`, right after a string's closing quote, goes on with more
