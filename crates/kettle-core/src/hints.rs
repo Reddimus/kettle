@@ -428,10 +428,18 @@ fn quoted_path_len(body: &str, quote: char) -> Option<usize> {
     }
     let name = segments[last];
     let directory = name.is_empty();
-    // The closing quote marks where the name ends, so dots after it are the
-    // name's and leave its extension and last character as they were
-    // (`"/tmp/my report.pdf.."`). A name of dots alone has neither.
-    let named = name.trim_end_matches('.');
+    // One dot after a name ends a sentence, inside quotes as after a bare
+    // path (`"/tmp/report.pdf."`), so it is no part of the path. Two or
+    // more, which trimming would turn into another file's name, the closing
+    // quote marks as the name's, and they leave its extension and last
+    // character as they were (`"/tmp/my report.pdf.."`). A name of dots
+    // alone has neither.
+    let sentence_dot = name.len() > 1 && name.ends_with('.') && !name.ends_with("..");
+    let named = if sentence_dot {
+        &name[..name.len() - 1]
+    } else {
+        name.trim_end_matches('.')
+    };
     // An extension of any length (`.swiftinterface`): ASCII letters and
     // digits, in words joined by `-` or `_` (`.code-workspace`).
     let extension = named.rsplit_once('.').is_some_and(|(_, extension)| {
@@ -447,7 +455,7 @@ fn quoted_path_len(body: &str, quote: char) -> Option<usize> {
         && NAME_END
             .get_or_init(|| Regex::new(r"[\w)\]]$").unwrap())
             .is_match(named);
-    (directory || extension || deep).then_some(path.len())
+    (directory || extension || deep).then_some(path.len() - usize::from(sentence_dot))
 }
 
 /// Whether a path does not open as the name it spells: it holds a
@@ -1009,7 +1017,21 @@ mod tests {
         ] {
             assert_eq!(detect(&[line])[0].text, url, "{line}");
         }
-        // One dot ends a sentence.
+        // One dot ends a sentence, inside quotes too.
+        for (line, text) in [
+            ("cat \"/tmp/report.pdf.\"", "/tmp/report.pdf"),
+            ("Saved to '/tmp/report.pdf.'", "/tmp/report.pdf"),
+            ("Saved to `/tmp/report.pdf.`", "/tmp/report.pdf"),
+            ("Saved to \"/tmp/my report.pdf.\"", "/tmp/my report.pdf"),
+        ] {
+            let spans = detect(&[line]);
+            assert_eq!(spans.len(), 1, "{line}: {spans:?}");
+            assert_eq!(
+                (spans[0].text.as_str(), spans[0].bounded),
+                (text, true),
+                "{line}"
+            );
+        }
         let spans = detect(&["see /tmp/a."]);
         assert_eq!((spans[0].text.as_str(), spans[0].bounded), ("/tmp/a", true));
     }

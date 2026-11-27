@@ -430,10 +430,17 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
         }
         // A quoted path goes before bare ones, so they cannot take a piece
         // of it; its link covers a location suffix as a bare path's does.
-        for (start, _, close) in crate::hints::quoted_paths(&text) {
+        for (start, end, close) in crate::hints::quoted_paths(&text) {
             if fragment(start - 1, close + 1) {
                 continue;
             }
+            // The link covers a location suffix (`:12`), not the dot that
+            // ends a sentence.
+            let close = if text[end..close].starts_with(':') {
+                close
+            } else {
+                end
+            };
             match path_match_to_file_uri(&text[start..close], cwd) {
                 Some(uri) => push(start, close - start, uri, &mut covered),
                 // Refused (a climb, no directory to resolve against): no
@@ -1314,6 +1321,18 @@ mod tests {
             ),
             ("see /tmp/a.", "file:///tmp/a"),
             ("see /tmp/a.b..c", "file:///tmp/a.b..c"),
+            // One dot ends a sentence, inside quotes too.
+            ("cat \"/tmp/report.pdf.\"", "file:///tmp/report.pdf"),
+            ("Saved to '/tmp/report.pdf.'", "file:///tmp/report.pdf"),
+            (
+                "Saved to \"src/report.pdf.\"",
+                "file:///work/src/report.pdf",
+            ),
+            ("see \"/tmp/a.b.\"", "file:///tmp/a.b"),
+            (
+                "Saved to \"/tmp/my report.pdf.\"",
+                "file:///tmp/my%20report.pdf",
+            ),
         ] {
             assert_eq!(found(line), [uri], "{line}");
         }
