@@ -224,6 +224,9 @@ pub(crate) struct ReportedLeftovers {
     /// Only a proof that ran and said no; one that could not run is retried.
     #[serde(default)]
     pub(crate) refused: Vec<Leftover>,
+    /// Bundles a quarantine could not put back, by where they now are.
+    #[serde(default)]
+    pub(crate) stranded: Vec<String>,
 }
 
 /// The last notice's record, or an empty one when the record is missing,
@@ -250,6 +253,8 @@ pub(crate) fn load_reported(path: &Path) -> ReportedLeftovers {
             || reported.checked_by.len() > 64
             || reported.leftovers.len() > MAX_REPORTED_LEFTOVERS
             || reported.refused.len() > MAX_REPORTED_LEFTOVERS
+            || reported.stranded.len() > MAX_REPORTED_LEFTOVERS
+            || reported.stranded.iter().any(|path| path.len() > 4096)
             || !reported
                 .leftovers
                 .iter()
@@ -278,8 +283,9 @@ pub(crate) fn store_reported(
     checked_by: &str,
     leftovers: &[Leftover],
     refused: &[Leftover],
+    stranded: &[String],
 ) -> io::Result<()> {
-    if leftovers.is_empty() {
+    if leftovers.is_empty() && stranded.is_empty() {
         return match std::fs::remove_file(path) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
             _ => Ok(()),
@@ -289,6 +295,7 @@ pub(crate) fn store_reported(
         checked_by: checked_by.to_string(),
         leftovers: leftovers[..leftovers.len().min(MAX_REPORTED_LEFTOVERS)].to_vec(),
         refused: refused[..refused.len().min(MAX_REPORTED_LEFTOVERS)].to_vec(),
+        stranded: stranded[..stranded.len().min(MAX_REPORTED_LEFTOVERS)].to_vec(),
     };
     kettle_state::atomic_replace(
         path,
@@ -396,7 +403,7 @@ mod tests {
             "the same name on another directory is another leftover"
         );
 
-        store_reported(&path, "6.0.0", std::slice::from_ref(&leftover), &[]).unwrap();
+        store_reported(&path, "6.0.0", std::slice::from_ref(&leftover), &[], &[]).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
         let loaded = load_reported(&path);
         assert_eq!(loaded.checked_by, "6.0.0");
@@ -409,14 +416,14 @@ mod tests {
                 inode: index as u64,
             })
             .collect::<Vec<_>>();
-        store_reported(&path, "6.0.0", &many, &many).unwrap();
+        store_reported(&path, "6.0.0", &many, &many, &[]).unwrap();
         let loaded = load_reported(&path);
         assert_eq!(loaded.leftovers, many[..MAX_REPORTED_LEFTOVERS]);
         assert_eq!(loaded.refused, many[..MAX_REPORTED_LEFTOVERS]);
 
         // A record someone else could have written, or one that names anything
         // but a leftover, is no record at all: the cost is one more notice.
-        store_reported(&path, "6.0.0", std::slice::from_ref(&leftover), &[]).unwrap();
+        store_reported(&path, "6.0.0", std::slice::from_ref(&leftover), &[], &[]).unwrap();
         std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o644))
             .unwrap();
         assert_eq!(load_reported(&path), ReportedLeftovers::default());
@@ -433,9 +440,9 @@ mod tests {
             assert_eq!(load_reported(&path), ReportedLeftovers::default());
         }
 
-        store_reported(&path, "6.0.0", &[], &[]).unwrap();
+        store_reported(&path, "6.0.0", &[], &[], &[]).unwrap();
         assert!(!path.exists(), "an empty set leaves no record");
-        store_reported(&path, "6.0.0", &[], &[]).unwrap();
+        store_reported(&path, "6.0.0", &[], &[], &[]).unwrap();
     }
 
     #[test]

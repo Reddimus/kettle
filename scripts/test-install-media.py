@@ -978,6 +978,55 @@ module._uninstall(arguments)
         self.assertNotIn("share/kettle/added-by-update", recorded)
         self.assertFalse(journal.exists() or backup.exists())
 
+    def test_files_only_the_updater_writes_are_adopted_from_a_first_update(self):
+        # install.sh never installs the license notices or the changelog
+        # archives; the first self-update journals them with no record yet.
+        for state in ("installed", "restored"):
+            with self.subTest(state=state):
+                if self.prefix.exists():
+                    shutil.rmtree(self.prefix)
+                installed = self.run_installer()
+                self.assertEqual(installed.returncode, 0, installed.stderr)
+                manifest_path = self.prefix / "share/kettle/install-files.json"
+                recorded = {r["path"] for r in json.loads(manifest_path.read_text())["files"]}
+                self.assertNotIn("share/doc/kettle/LICENSE", recorded)
+                journal, backup = self.interrupted_self_update()
+                document = json.loads(journal.read_text())
+                written = {
+                    "share/doc/kettle/LICENSE": b"license from the update",
+                    "share/doc/kettle/docs/changelog/CHANGELOG-4.x.md": b"4.x",
+                }
+                for relative, data in written.items():
+                    document["entries"].insert(0, {
+                        "relative": relative,
+                        "existed": False,
+                        "previous_size": None,
+                        "previous_sha256": None,
+                        "replacement_size": len(data),
+                        "replacement_sha256": hashlib.sha256(data).hexdigest(),
+                        "state": state,
+                    })
+                    if state == "installed":
+                        path = self.prefix / relative
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        for directory in (path.parent, *path.parent.parents):
+                            if directory == self.prefix:
+                                break
+                            directory.chmod(0o755)
+                        path.write_bytes(data)
+                        path.chmod(0o644)
+                if state == "restored":
+                    document["phase"] = "rolling_back"
+                journal.write_text(json.dumps(document))
+
+                repaired = self.run_installer()
+
+                self.assertEqual(repaired.returncode, 0, repaired.stderr)
+                self.assertFalse(journal.exists() or backup.exists())
+                recorded = {r["path"] for r in json.loads(manifest_path.read_text())["files"]}
+                for relative in written:
+                    self.assertEqual(relative in recorded, state == "installed", relative)
+
     def test_a_journal_naming_a_path_kettle_does_not_own_is_refused(self):
         installed = self.run_installer()
         self.assertEqual(installed.returncode, 0, installed.stderr)

@@ -319,10 +319,10 @@ checks the install record. Releases before 2.54.0 checked the record first and
 so could never resume their own rollback; the installer can recover one of
 those, as described next.
 
-Resuming a rollback runs the same directory check first, over the directories
-the rollback has to write into. An entry it can skip, such as a file the update
-never replaced, needs nothing from its directory and never blocks it. A
-directory that fails is named with its `chmod go-w`, as before an update.
+Resuming a rollback restores every file it can first, each write making its own
+directory check, and keeps the rest journaled; one untrusted directory never
+holds back the others. When what is left lies in a directory the writes refuse,
+that directory is named with its `chmod go-w`, as before an update.
 Recovery at startup is best effort: a rollback that cannot finish never stops
 kettle from starting, `--version`, `--help` and `kettle ctl` included, and
 startup prints nothing about it. The app names the reason once for each journal
@@ -332,9 +332,10 @@ too, and refuses to update until the rollback has finished.
 If the bundled `install.sh` or the online installer runs while a rollback is
 still pending, it reads the updater's journal as the receipt it is, after the
 same validation the updater applies to it. A file at a journaled path is
-treated as one the interrupted install wrote only when the path is one this
-installer installs or its record lists, and its bytes are what the journal
-shows the update left there in that entry's state: the file it found, before
+treated as one the interrupted install wrote only when the path is one the
+updater writes, by its own destination rules, or one this installer installs or
+its record lists, and its bytes are what the journal shows the update left
+there in that entry's state: the file it found, before
 publication or once restored, or either file in between. A journal that names
 any other path did not come from the updater and stops the install. The
 installer then lays the whole release over the prefix. Before writing anything
@@ -481,6 +482,13 @@ before the checks and after them, and a bundle that changed is left alone. A
 bundle that fails a check goes back into its folder. When the state directory
 is on another volume, or is not private, nothing moves and the folder is named
 instead.
+
+The folder a bundle came from is recorded beside it before it moves. If the
+process dies during the check, the next pass puts the bundle back into that
+same folder, still this user's, private and empty, and a fresh check decides
+what happens to it. A bundle whose folder is gone or has changed stays in the
+state directory, is never deleted without a check, and the notice names where
+it is. Empty quarantine directories are removed.
 
 The most a wrong answer can cost is an obsolete official kettle the user owned.
 Anything else stays where it is. The app names what is left once, in a log line
