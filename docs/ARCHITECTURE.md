@@ -1018,7 +1018,11 @@ naming every file it is about to write, and removes it once the new record is
 verified. A failed publish records what it did replace when that record would
 be complete; a retry or uninstall accepts a file that differs from its record,
 or has none, only when it matches the receipt. Equal bytes alone never adopt a
-file. Startup
+file. A self-update rollback that could not finish leaves its journal, which
+the installer reads as the same kind of receipt: files matching the bytes it
+shows the update left in each entry's state join `install-pending.json`, and
+the journal and its matching backups are retired before the installer writes
+anything. Startup
 and explicit update first authenticate the marker, layout, prefix ownership, and
 update journal under the update lock; they recover an incomplete transaction
 before checking file-content provenance, so the old record cannot strand the

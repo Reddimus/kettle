@@ -1550,6 +1550,12 @@ error statuses, oversized declared and chunked bodies, truncated bodies,
 and exact signed artifact sizes. These transport checks supplement signature
 and archive validation; they do not prove public HTTPS availability.
 
+On Linux, `cargo test -p kettle-update` also checks that a directory on an
+update's write path that its group can write is refused before the download,
+naming the directory and its `chmod`, and again before the first replacement if
+it turns writable during the download. Run these under umask `002` as well as
+`022`.
+
 | Recipe | What it protects |
 | --- | --- |
 | `just update-manifest-test` | Signed-feed bytes, trust root, sidecars, signing command wiring |

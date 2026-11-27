@@ -38,7 +38,10 @@ use crate::install::{
     ManagedInstall, unique_suffix, validate_archive_path, verify_sha256_bytes,
     zip_unix_mode_is_safe,
 };
-use crate::macos_provenance::{PREVIOUS_PREFIX, STAGED_PREFIX, Transaction};
+use crate::macos_provenance::{
+    Leftover, MAX_REPORTED_LEFTOVERS, PREVIOUS_PREFIX, STAGED_PREFIX, Transaction,
+    is_previous_name, load_reported, store_reported,
+};
 use crate::{UPDATE_PUBLIC_KEY, current_target};
 
 /// Signing identity every official build carries.
@@ -225,19 +228,7 @@ fn run(
     let mut command = Command::new(tool);
     command.args(args).arg(bundle);
     if let Some(directory) = directory {
-        use std::os::unix::process::CommandExt as _;
-        let fd = directory.as_raw_fd();
-        // SAFETY: the descriptor lives through output(), and fchdir is
-        // async-signal-safe. Only the child changes its working directory.
-        unsafe {
-            command.pre_exec(move || {
-                if libc::fchdir(fd) == 0 {
-                    Ok(())
-                } else {
-                    Err(std::io::Error::last_os_error())
-                }
-            });
-        }
+        run_in(&mut command, directory);
     }
     let output = command.output().map_err(|error| {
         UpdateError::Io(std::io::Error::other(format!(
@@ -248,6 +239,27 @@ fn run(
         status: output.status.success(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     })
+}
+
+/// Start `command` in `directory`, so it resolves relative paths against the
+/// held directory rather than against a pathname someone could rename.
+///
+/// The caller keeps `directory` open until the command has finished.
+fn run_in(command: &mut Command, directory: &File) {
+    use std::os::unix::process::CommandExt as _;
+    let fd = directory.as_raw_fd();
+    // SAFETY: the caller keeps the descriptor open through output(), and
+    // fchdir is async-signal-safe. Only the child changes its working
+    // directory.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fchdir(fd) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
 }
 
 fn first_line(text: &str) -> String {
@@ -418,6 +430,13 @@ fn writable(directory: &Path) -> bool {
     };
     // SAFETY: path is a NUL-terminated CString retained for access; W_OK is a valid mode.
     unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
+}
+
+/// [`writable`] for a held directory.
+fn writable_held(directory: &File) -> bool {
+    // SAFETY: the descriptor is open, "." is NUL-terminated, and W_OK is a
+    // valid mode.
+    unsafe { libc::faccessat(directory.as_raw_fd(), c".".as_ptr(), libc::W_OK, 0) == 0 }
 }
 
 /// Resolve the running executable to the bundle that owns it, and prove the
@@ -892,25 +911,16 @@ fn stage_verified_bundle(
 /// bundle it launched from, so the displaced copy is kept until a later run can
 /// drop it safely. A crash before the swap leaves a `.kettle-update-staged-`
 /// bundle, which was never live and is simply dropped.
+///
+/// Silent about anything it leaves. Every kettle process runs this, including
+/// `--version` and each `kettle ctl` call, so a warning here would open the
+/// stderr of every script that runs one (#951). Leftovers without a matching
+/// record are [`tidy_leftovers_beside`]'s to prove or to name.
 fn sweep_interrupted_updates(parent: &Path, records: &Path) {
     let Ok(parent_dir) = open_directory(parent) else {
         return;
     };
     let transactions = Transaction::load_all(records);
-    if let Ok(entries) = std::fs::read_dir(parent) {
-        for entry in entries.take(4096).flatten() {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else { continue };
-            if (name.starts_with(STAGED_PREFIX) || name.starts_with(PREVIOUS_PREFIX))
-                && !transactions
-                    .iter()
-                    .any(|record| record.names().iter().any(|n| n == name))
-            {
-                warn_unknown_leftover();
-                break;
-            }
-        }
-    }
     // SAFETY: geteuid has no preconditions.
     let euid = unsafe { libc::geteuid() };
     for transaction in transactions {
@@ -938,7 +948,6 @@ fn sweep_interrupted_updates(parent: &Path, records: &Path) {
             if !leftover_is_removable(metadata.is_dir(), metadata.uid(), euid)
                 || !transaction.matches(&name, &metadata)
             {
-                warn_unknown_leftover();
                 continue;
             }
             // An in-flight staging directory holds an advisory lock on itself for
@@ -961,7 +970,6 @@ fn sweep_interrupted_updates(parent: &Path, records: &Path) {
             .ok();
             let bundle_matches = transaction.bundle_matches(bundle_metadata.as_ref());
             if bundle_metadata.is_some() && !bundle_matches {
-                warn_unknown_leftover();
                 pending = true;
                 continue;
             }
@@ -993,11 +1001,290 @@ fn sweep_interrupted_updates(parent: &Path, records: &Path) {
     }
 }
 
-fn warn_unknown_leftover() {
-    static WARNED: std::sync::Once = std::sync::Once::new();
-    WARNED.call_once(|| {
-        log::warn!("leaving macOS update leftovers without matching provenance alone")
-    });
+/// Bounds a notice: a few full paths say what to look for and where.
+const MAX_NOTICE_NAMES: usize = 8;
+
+/// The most entries of the bundle's parent the tidy pass reads. An
+/// `/Applications` holds a few hundred.
+const MAX_PARENT_ENTRIES: usize = 16_384;
+
+/// Removing only a directory that is already empty.
+const EMPTY_ONLY: kettle_state::TreeRemovalLimits = kettle_state::TreeRemovalLimits {
+    max_depth: 0,
+    max_entries: 0,
+};
+
+/// Finish what the startup sweep had to leave beside the bundle, and describe
+/// what is still there once.
+///
+/// The startup sweep removes only leftovers a private transaction record names.
+/// A record can be missing for good: 5.6.0 and older wrote none, and the sweep
+/// drops a record whose directory no longer matches it. Such a leftover would
+/// otherwise stay forever, so this pass may remove a displaced bundle it can
+/// prove is an earlier official build (see [`remove_provably_earlier_bundle`]),
+/// and returns a notice naming every leftover still there that a previous
+/// notice has not already named.
+///
+/// It runs a signature check and can produce a notice, so only the app and
+/// `kettle update` call it, never the startup path every command shares.
+pub(crate) fn tidy_leftovers_beside(executable: &Path) -> Option<String> {
+    let state_root =
+        resolve_state_root(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME")).ok()?;
+    let running = semver::Version::parse(env!("CARGO_PKG_VERSION")).ok()?;
+    tidy_leftovers_beside_with(executable, &state_root, &AppleSeal, &running)
+}
+
+fn tidy_leftovers_beside_with(
+    executable: &Path,
+    state_root: &Path,
+    verifier: &dyn SealVerifier,
+    running: &semver::Version,
+) -> Option<String> {
+    // Canonical for the same reason as the startup sweep: the lock is keyed by
+    // the bundle path, and an update keys it from a canonical one.
+    let executable = executable.canonicalize().ok()?;
+    let BundleShape::Bundle(bundle) = enclosing_bundle(&executable) else {
+        return None;
+    };
+    let parent = bundle.parent()?;
+    let lock_path = update_lock_path(&bundle, state_root).ok()?;
+    // An update in flight owns everything here until it finishes.
+    let Ok(Some(_lock)) = kettle_state::ExclusiveFileLock::try_acquire(&lock_path) else {
+        return None;
+    };
+    tidy_locked(parent, &lock_path, verifier, running)
+}
+
+fn tidy_locked(
+    parent: &Path,
+    lock_path: &Path,
+    verifier: &dyn SealVerifier,
+    running: &semver::Version,
+) -> Option<String> {
+    sweep_interrupted_updates(parent, &lock_path.with_extension("transactions"));
+    let record = lock_path.with_extension("leftovers");
+    let reported = load_reported(&record);
+    let running_text = running.to_string();
+    // A leftover this build already refused is refused again, so skip the
+    // check. One an earlier build refused is checked again: this build may be
+    // newer than the bundle the earlier one found too new to remove.
+    let refused: &[Leftover] = if reported.checked_by == running_text {
+        &reported.leftovers
+    } else {
+        &[]
+    };
+    let remaining = reclaim_leftovers(parent, verifier, running, refused);
+    // A notice is due only for a leftover no earlier notice named. One the user
+    // deleted just drops out of the record.
+    let unreported = remaining
+        .iter()
+        .any(|leftover| !reported.leftovers.contains(leftover));
+    if (remaining != reported.leftovers || reported.checked_by != running_text)
+        && let Err(error) = store_reported(&record, &running_text, &remaining)
+    {
+        log::debug!("could not record the update leftover notice: {error}");
+    }
+    unreported.then(|| leftover_notice(parent, &remaining))
+}
+
+/// Every update leftover beside the bundle that is still there after trying to
+/// remove the provable ones, sorted, except an update's own staging directory
+/// while it is in use.
+fn reclaim_leftovers(
+    parent: &Path,
+    verifier: &dyn SealVerifier,
+    running: &semver::Version,
+    refused: &[Leftover],
+) -> Vec<Leftover> {
+    let mut remaining = Vec::new();
+    let Ok(parent_dir) = open_directory(parent) else {
+        return remaining;
+    };
+    // List the directory held from here on, not whatever the path names next.
+    let Ok(names) = kettle_state::directory_entry_names(&parent_dir, MAX_PARENT_ENTRIES) else {
+        return remaining;
+    };
+    for name in &names {
+        if remaining.len() == MAX_REPORTED_LEFTOVERS {
+            break;
+        }
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with(STAGED_PREFIX) && !name.starts_with(PREVIOUS_PREFIX) {
+            continue;
+        }
+        let Ok(c_entry) = c_name(std::ffi::OsStr::new(name)) else {
+            continue;
+        };
+        let candidate = match open_directory_at(&parent_dir, &c_entry) {
+            Ok(candidate) => candidate,
+            Err(UpdateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                continue;
+            }
+            // A link or a file under the name: name it, never follow or touch
+            // it. The identity only keys the notice record.
+            Err(_) => {
+                if let Ok(metadata) = std::fs::symlink_metadata(parent.join(name)) {
+                    remaining.push(Leftover::of(name, &metadata));
+                }
+                continue;
+            }
+        };
+        let Ok(metadata) = candidate.metadata() else {
+            continue;
+        };
+        // A staging directory holds this lock for as long as an update is
+        // using it, whatever lock file that update resolved. Held through
+        // removal.
+        // SAFETY: `candidate` is an open descriptor owned for this iteration.
+        if unsafe { libc::flock(candidate.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            continue;
+        }
+        let leftover = Leftover::of(name, &metadata);
+        // Proof costs a signature check. One that failed for this exact
+        // directory fails again, so do not repeat it at every launch.
+        if !refused.contains(&leftover) {
+            match remove_provably_earlier_bundle(&parent_dir, name, &candidate, verifier, running) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => log::debug!("left update leftover {name} in place: {error}"),
+            }
+        }
+        remaining.push(leftover);
+    }
+    remaining.sort();
+    remaining
+}
+
+/// Remove an unrecorded displaced bundle if it is provably an earlier official
+/// kettle, and report whether it did.
+///
+/// A name is not authority to delete (see [`leftover_is_removable`]), and
+/// without a transaction record nothing shows an update made this directory.
+/// What can be shown is what it holds, and that only someone with this user's
+/// rights could have changed it:
+///
+/// - the name is a displaced bundle's, `.kettle-update-previous-<id>`;
+/// - the directory is this user's, mode exactly `0700` and without an extended
+///   ACL, as every update since 5.6.0 creates it. Nobody else can reach inside,
+///   so nothing in it can change between the checks below and the removal,
+///   whoever renamed the directory to where it now sits;
+/// - it holds exactly one entry, a `kettle.app` directory of this user's;
+/// - that bundle's signature is intact and names kettle's bundle identifier
+///   and team, as [`locate_bundle_install`] requires of the live install;
+/// - its signed `Info.plist` records a version older than this build.
+///
+/// The worst a wrong answer can cost is an obsolete official kettle the user
+/// owned, not anyone's data. Everything else stays where it is, and the caller
+/// names it instead. The bundle is resolved through the held directory for
+/// each check, and removed through the descriptors those checks used.
+fn remove_provably_earlier_bundle(
+    parent_dir: &File,
+    name: &str,
+    candidate: &File,
+    verifier: &dyn SealVerifier,
+    running: &semver::Version,
+) -> Result<bool, UpdateError> {
+    if !is_previous_name(name) {
+        return Ok(false);
+    }
+    // The bundle goes first and the folder after it; a parent this user cannot
+    // write would keep the folder, emptied, so leave both.
+    if !writable_held(parent_dir) {
+        return Ok(false);
+    }
+    // SAFETY: geteuid has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    let metadata = candidate.metadata()?;
+    if !metadata.is_dir() || metadata.uid() != euid || metadata.mode() & 0o7777 != 0o700 {
+        return Ok(false);
+    }
+    if kettle_state::has_extended_acl(candidate)? {
+        return Ok(false);
+    }
+    match kettle_state::directory_entry_names(candidate, 1) {
+        Ok(names) if matches!(names.as_slice(), [only] if only == ARCHIVE_ROOT) => {}
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => return Ok(false),
+        Err(error) => return Err(error.into()),
+    }
+    let bundle_name = std::ffi::OsStr::new(ARCHIVE_ROOT);
+    let bundle = open_directory_at(candidate, &c_name(bundle_name)?)?;
+    let bundle_metadata = bundle.metadata()?;
+    if !bundle_metadata.is_dir() || bundle_metadata.uid() != euid {
+        return Ok(false);
+    }
+    let identity = verifier.identity(Path::new(ARCHIVE_ROOT), Some(candidate))?;
+    if identity.identifier != BUNDLE_IDENTIFIER || identity.team != TEAM_IDENTIFIER {
+        return Ok(false);
+    }
+    let version = read_bundle_version_in(
+        candidate,
+        &Path::new(ARCHIVE_ROOT).join("Contents/Info.plist"),
+    )?;
+    // Precedence, not `Ord`: build metadata does not make a release older.
+    if version.cmp_precedence(running) != std::cmp::Ordering::Less {
+        return Ok(false);
+    }
+    // Nobody else can change the name inside a private directory; this is a
+    // recheck that the checks above and the removal below see one bundle.
+    require_live_bundle_identity(&bundle, candidate, bundle_name)?;
+    kettle_state::remove_directory_tree_at(candidate, bundle_name, &bundle, CLEANUP_LIMITS)?;
+    kettle_state::remove_directory_tree_at(
+        parent_dir,
+        std::ffi::OsStr::new(name),
+        candidate,
+        EMPTY_ONLY,
+    )?;
+    parent_dir.sync_all()?;
+    Ok(true)
+}
+
+/// The notice for leftovers kettle will not remove: where they are, and that
+/// deleting them by hand is safe.
+fn leftover_notice(parent: &Path, leftovers: &[Leftover]) -> String {
+    // The notice goes to a terminal. Anyone who can write the parent chose the
+    // names, so show them with everything but printable ASCII escaped. The
+    // parent is the user's own install path and may hold any letter, so it only
+    // loses control and bidirectional formatting characters, which could
+    // carry an escape sequence or reorder the text.
+    let escaped = |text: &str, shown: &dyn Fn(char) -> bool| {
+        text.chars()
+            .flat_map(|character| {
+                let keep = shown(character);
+                let escape = (!keep).then(|| character.escape_unicode());
+                keep.then_some(character)
+                    .into_iter()
+                    .chain(escape.into_iter().flatten())
+            })
+            .collect::<String>()
+    };
+    let ascii = |character: char| character.is_ascii_graphic() || character == ' ';
+    let letters = |character: char| {
+        !character.is_control()
+            && !matches!(
+                character,
+                '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+            )
+    };
+    let parent_shown = escaped(&parent.display().to_string(), &letters);
+    let mut named = leftovers
+        .iter()
+        .take(MAX_NOTICE_NAMES)
+        .map(|leftover| format!("{parent_shown}/{}", escaped(&leftover.name, &ascii)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if leftovers.len() > MAX_NOTICE_NAMES {
+        named.push_str(&format!(
+            ", and {} more in {parent_shown}",
+            leftovers.len() - MAX_NOTICE_NAMES,
+        ));
+    }
+    format!(
+        "Kettle left these folders from earlier updates beside the app because it cannot \
+         prove they hold only its own old builds: {named}. Kettle does not use them. \
+         Unless you put something there yourself, they are safe to delete by hand. This \
+         notice appears once."
+    )
 }
 
 fn require_live_bundle_upgrade(
@@ -1065,10 +1352,30 @@ fn lock_live_bundle(parent: &File, name: &std::ffi::OsStr) -> Result<File, Updat
 
 /// The `CFBundleShortVersionString` an app bundle's `Info.plist` records.
 pub(crate) fn read_bundle_version(info_plist: &Path) -> Result<semver::Version, UpdateError> {
-    let output = Command::new("/usr/libexec/PlistBuddy")
+    plist_bundle_version(info_plist, None)
+}
+
+/// [`read_bundle_version`] for an `Info.plist` named relative to a held
+/// directory.
+fn read_bundle_version_in(
+    directory: &File,
+    info_plist: &Path,
+) -> Result<semver::Version, UpdateError> {
+    plist_bundle_version(info_plist, Some(directory))
+}
+
+fn plist_bundle_version(
+    info_plist: &Path,
+    directory: Option<&File>,
+) -> Result<semver::Version, UpdateError> {
+    let mut command = Command::new("/usr/libexec/PlistBuddy");
+    command
         .args(["-c", "Print :CFBundleShortVersionString"])
-        .arg(info_plist)
-        .output()?;
+        .arg(info_plist);
+    if let Some(directory) = directory {
+        run_in(&mut command, directory);
+    }
+    let output = command.output()?;
     if !output.status.success() {
         return Err(UpdateError::UnmanagedInstall(format!(
             "cannot read the installed bundle version: {}",
@@ -2812,5 +3119,444 @@ mod tests {
             live.join("Contents/CodeResources").exists(),
             "the stapled ticket survived extraction and the swap"
         );
+    }
+
+    fn info_plist(version: &str) -> String {
+        format!(
+            "<plist version=\"1.0\"><dict><key>CFBundleShortVersionString</key>\
+             <string>{version}</string></dict></plist>"
+        )
+    }
+
+    /// A displaced bundle as an update leaves one: a private `0700` directory
+    /// holding only `kettle.app`, here without any transaction record.
+    fn seed_displaced(root: &Path, name: &str, version: &str) -> PathBuf {
+        let leftover = root.join(name);
+        let contents = leftover.join(ARCHIVE_ROOT).join("Contents");
+        std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+        std::fs::write(contents.join("MacOS/kettle"), b"mach-o").unwrap();
+        std::fs::write(contents.join("Info.plist"), info_plist(version)).unwrap();
+        std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o700)).unwrap();
+        leftover
+    }
+
+    /// Counts signature checks, so a test can see one is not repeated, and
+    /// records what each was asked to verify: the bundle path and the
+    /// `(device, inode)` of the held directory it resolves against.
+    struct CountingSeal {
+        inner: StubSeal,
+        checks: std::cell::Cell<usize>,
+        asked: std::cell::RefCell<Vec<Asked>>,
+    }
+
+    /// A bundle path and the `(device, inode)` of the directory it was
+    /// resolved against.
+    type Asked = (PathBuf, Option<(u64, u64)>);
+
+    impl CountingSeal {
+        fn new(inner: StubSeal) -> Self {
+            Self {
+                inner,
+                checks: std::cell::Cell::new(0),
+                asked: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl SealVerifier for CountingSeal {
+        fn identity(
+            &self,
+            bundle: &Path,
+            directory: Option<&File>,
+        ) -> Result<SignedIdentity, UpdateError> {
+            self.checks.set(self.checks.get() + 1);
+            let held = directory.map(|directory| {
+                let metadata = directory.metadata().unwrap();
+                (metadata.dev(), metadata.ino())
+            });
+            self.asked.borrow_mut().push((bundle.to_path_buf(), held));
+            self.inner.identity(bundle, directory)
+        }
+
+        fn notarized(&self, bundle: &Path, directory: Option<&File>) -> Result<(), UpdateError> {
+            self.inner.notarized(bundle, directory)
+        }
+    }
+
+    const RUNNING: semver::Version = semver::Version::new(6, 0, 0);
+
+    /// #951: bundles an update displaced, whose transaction records are gone
+    /// (5.6.0 wrote none), are earlier official builds the sweep can prove
+    /// are its own, so the app removes them instead of warning forever.
+    #[test]
+    fn unrecorded_displaced_official_bundles_older_than_this_build_are_removed() {
+        let temp = kettle_test_support::private_tempdir("kettle-macos-unrecorded-");
+        let root = temp.path();
+        let executable = seed_bundle(root, "kettle.app");
+        let state_root = root.join("state");
+        let leftovers = [
+            seed_displaced(
+                root,
+                ".kettle-update-previous-39483-1793354175937283000",
+                "5.6.0",
+            ),
+            seed_displaced(
+                root,
+                ".kettle-update-previous-2818-1793827181830941000",
+                "5.8.2",
+            ),
+        ];
+
+        // The startup sweep every command runs still leaves them alone.
+        sweep_leftovers_beside_with_state_root(&executable, &state_root);
+        assert!(leftovers.iter().all(|leftover| leftover.exists()));
+        let identities = leftovers.each_ref().map(|leftover| {
+            let metadata = std::fs::metadata(leftover).unwrap();
+            (metadata.dev(), metadata.ino())
+        });
+        let seal = CountingSeal::new(StubSeal::official());
+
+        let notice = tidy_leftovers_beside_with(&executable, &state_root, &seal, &RUNNING);
+
+        for leftover in &leftovers {
+            assert!(!leftover.exists(), "{} survived", leftover.display());
+        }
+        // Each signature was checked on the bundle inside the folder that was
+        // held and then removed, never on a path re-resolved in the parent.
+        let mut asked = seal.asked.borrow().clone();
+        asked.sort();
+        let mut expected = identities
+            .map(|identity| (PathBuf::from(ARCHIVE_ROOT), Some(identity)))
+            .to_vec();
+        expected.sort();
+        assert_eq!(asked, expected);
+        assert_eq!(notice, None, "nothing is left to name");
+        assert_eq!(std::fs::read(&executable).unwrap(), b"mach-o");
+    }
+
+    /// Everything the proof cannot establish stays exactly where it is.
+    #[test]
+    fn a_leftover_that_is_not_provably_an_earlier_official_build_is_kept() {
+        let cases: [(&str, StubSeal); 9] = [
+            (
+                "another team",
+                StubSeal::signed_by(BUNDLE_IDENTIFIER, "ZZZZZZZZZZ"),
+            ),
+            ("ad-hoc", StubSeal::signed_by(BUNDLE_IDENTIFIER, "not set")),
+            (
+                "another app",
+                StubSeal::signed_by("org.example.other", TEAM_IDENTIFIER),
+            ),
+            ("same version", StubSeal::official()),
+            ("newer version", StubSeal::official()),
+            ("shared mode", StubSeal::official()),
+            ("extra entry", StubSeal::official()),
+            ("access list", StubSeal::official()),
+            ("bundle link", StubSeal::official()),
+        ];
+        for (case, seal) in cases {
+            let temp = kettle_test_support::private_tempdir("kettle-macos-unproven-");
+            let root = temp.path();
+            let executable = seed_bundle(root, "kettle.app");
+            let version = match case {
+                "same version" => "6.0.0",
+                "newer version" => "6.0.1",
+                _ => "5.6.0",
+            };
+            let leftover = seed_displaced(root, ".kettle-update-previous-1-1", version);
+            match case {
+                "shared mode" => {
+                    std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                }
+                "extra entry" => std::fs::write(leftover.join("notes.txt"), b"keep").unwrap(),
+                "access list" => assert!(
+                    Command::new("/bin/chmod")
+                        .arg("+a")
+                        .arg("everyone allow list,search")
+                        .arg(&leftover)
+                        .status()
+                        .unwrap()
+                        .success()
+                ),
+                "bundle link" => {
+                    std::fs::rename(leftover.join(ARCHIVE_ROOT), root.join("Elsewhere.app"))
+                        .unwrap();
+                    std::os::unix::fs::symlink(
+                        root.join("Elsewhere.app"),
+                        leftover.join(ARCHIVE_ROOT),
+                    )
+                    .unwrap();
+                }
+                _ => {}
+            }
+
+            let notice =
+                tidy_leftovers_beside_with(&executable, &root.join("state"), &seal, &RUNNING);
+
+            assert!(leftover.is_dir(), "{case}: the leftover was removed");
+            let plist = if case == "bundle link" {
+                root.join("Elsewhere.app/Contents/Info.plist")
+            } else {
+                leftover.join("kettle.app/Contents/Info.plist")
+            };
+            assert_eq!(
+                std::fs::read_to_string(plist).unwrap(),
+                info_plist(version),
+                "{case}: the bundle was touched"
+            );
+            if case == "extra entry" {
+                assert_eq!(std::fs::read(leftover.join("notes.txt")).unwrap(), b"keep");
+            }
+            let notice = notice.unwrap_or_else(|| panic!("{case}: nothing named the leftover"));
+            assert!(
+                notice.contains(&leftover.display().to_string()),
+                "{case}: {notice}"
+            );
+        }
+    }
+
+    /// The notice names every leftover once, says how to clear it, and comes
+    /// back only when a leftover it never named appears.
+    #[test]
+    fn leftovers_kettle_keeps_are_named_once_per_set() {
+        let temp = kettle_test_support::private_tempdir("kettle-macos-notice-");
+        let root = temp.path();
+        let executable = seed_bundle(root, "kettle.app");
+        let state_root = root.join("state");
+        let seal = CountingSeal::new(StubSeal::official());
+        let current = seed_displaced(root, ".kettle-update-previous-1-1", "6.0.0");
+        let staged = seed_displaced(root, ".kettle-update-staged-2-2", "5.6.0");
+        // Someone else's name, made to be printed to a terminal.
+        let hostile = root.join(".kettle-update-staged-\u{1b}]0;x\u{7}\u{202e}");
+        std::fs::create_dir(&hostile).unwrap();
+        std::os::unix::fs::symlink(
+            root.join("kettle.app"),
+            root.join(".kettle-update-previous-3-3"),
+        )
+        .unwrap();
+        let tidy = || tidy_leftovers_beside_with(&executable, &state_root, &seal, &RUNNING);
+
+        let notice = tidy().expect("the first pass names what it keeps");
+        for name in [
+            ".kettle-update-previous-1-1",
+            ".kettle-update-staged-2-2",
+            ".kettle-update-previous-3-3",
+        ] {
+            assert!(
+                notice.contains(&root.join(name).display().to_string()),
+                "{name} missing from: {notice}"
+            );
+        }
+        assert!(notice.contains("safe to delete"), "{notice}");
+        assert!(
+            !notice.contains(['\u{1b}', '\u{7}', '\u{202e}']),
+            "a leftover's name reached the notice raw: {notice:?}"
+        );
+        assert!(
+            notice.contains(r".kettle-update-staged-\u{1b}]0;x\u{7}\u{202e}"),
+            "{notice}"
+        );
+        std::fs::remove_dir(&hostile).unwrap();
+        assert!(current.is_dir() && staged.is_dir());
+        assert!(
+            std::fs::symlink_metadata(root.join(".kettle-update-previous-3-3"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let checks = seal.checks.get();
+        assert_eq!(
+            checks, 1,
+            "only the displaced bundle is worth a signature check"
+        );
+
+        assert_eq!(tidy(), None, "the same set is not named twice");
+        assert_eq!(
+            seal.checks.get(),
+            checks,
+            "a refused leftover is not re-verified at every launch"
+        );
+
+        let newer = seed_displaced(root, ".kettle-update-previous-4-4", "6.1.0");
+        let notice = tidy().expect("a new leftover earns a notice");
+        assert!(notice.contains(&newer.display().to_string()), "{notice}");
+        assert!(notice.contains(&current.display().to_string()), "{notice}");
+
+        std::fs::remove_dir_all(&newer).unwrap();
+        assert_eq!(tidy(), None, "deleting a leftover is not news");
+        std::fs::remove_dir_all(&current).unwrap();
+        std::fs::remove_dir_all(&staged).unwrap();
+        std::fs::remove_file(root.join(".kettle-update-previous-3-3")).unwrap();
+        assert_eq!(tidy(), None);
+        let bundle = bundle_of(&executable.canonicalize().unwrap()).unwrap();
+        let record = update_lock_path(&bundle, &state_root)
+            .unwrap()
+            .with_extension("leftovers");
+        assert!(!record.exists(), "no record outlives its leftovers");
+
+        // The same name on a new directory is a new leftover.
+        let recreated = seed_displaced(root, ".kettle-update-previous-1-1", "6.0.0");
+        assert!(tidy().is_some_and(|notice| notice.contains(&recreated.display().to_string())));
+    }
+
+    #[test]
+    fn a_leftover_an_update_is_using_is_neither_removed_nor_named() {
+        let temp = kettle_test_support::private_tempdir("kettle-macos-busy-");
+        let root = temp.path();
+        let executable = seed_bundle(root, "kettle.app");
+        let leftover = seed_displaced(root, ".kettle-update-previous-5-5", "5.6.0");
+        let held = open_directory(&leftover).unwrap();
+        // SAFETY: `held` owns a live descriptor and keeps the lock until dropped.
+        let locked = unsafe { libc::flock(held.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(locked, 0);
+
+        let notice = tidy_leftovers_beside_with(
+            &executable,
+            &root.join("state"),
+            &StubSeal::official(),
+            &RUNNING,
+        );
+
+        assert!(leftover.join("kettle.app/Contents/Info.plist").exists());
+        assert_eq!(notice, None);
+
+        // The lock alone kept it: once the update lets go, it is removed.
+        drop(held);
+        tidy_leftovers_beside_with(
+            &executable,
+            &root.join("state"),
+            &StubSeal::official(),
+            &RUNNING,
+        );
+        assert!(!leftover.exists());
+    }
+
+    #[test]
+    fn tidying_stands_down_while_the_update_lock_is_held() {
+        let temp = kettle_test_support::private_tempdir("kettle-macos-tidylock-");
+        let root = temp.path();
+        let executable = seed_bundle(root, "kettle.app");
+        let state_root = root.join("state");
+        let leftover = seed_displaced(root, ".kettle-update-previous-6-6", "5.6.0");
+        let bundle = bundle_of(&executable.canonicalize().unwrap()).unwrap();
+        let held = kettle_state::ExclusiveFileLock::try_acquire(
+            &update_lock_path(&bundle, &state_root).unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+
+        let notice =
+            tidy_leftovers_beside_with(&executable, &state_root, &StubSeal::official(), &RUNNING);
+
+        assert!(leftover.exists());
+        assert_eq!(notice, None);
+
+        drop(held);
+        tidy_leftovers_beside_with(&executable, &state_root, &StubSeal::official(), &RUNNING);
+        assert!(!leftover.exists(), "the lock alone kept it");
+    }
+
+    /// A bundle one build refused as not older is checked again by a newer
+    /// build, which can remove it. Only the build that refused it skips it.
+    #[test]
+    fn a_newer_build_checks_a_leftover_an_older_build_refused() {
+        let temp = kettle_test_support::private_tempdir("kettle-macos-recheck-");
+        let root = temp.path();
+        let executable = seed_bundle(root, "kettle.app");
+        let state_root = root.join("state");
+        let leftover = seed_displaced(root, ".kettle-update-previous-9-9", "6.0.0");
+        let seal = StubSeal::official();
+
+        assert!(tidy_leftovers_beside_with(&executable, &state_root, &seal, &RUNNING).is_some());
+        assert!(leftover.exists(), "6.0.0 is not older than 6.0.0");
+        let newer = semver::Version::new(6, 1, 0);
+
+        tidy_leftovers_beside_with(&executable, &state_root, &seal, &newer);
+
+        assert!(!leftover.exists(), "6.1.0 never checked what 6.0.0 refused");
+    }
+
+    #[test]
+    fn build_metadata_does_not_make_a_bundle_older() {
+        let temp = kettle_test_support::private_tempdir("kettle-macos-buildmeta-");
+        let root = temp.path();
+        let executable = seed_bundle(root, "kettle.app");
+        let leftover = seed_displaced(root, ".kettle-update-previous-8-8", "6.0.0");
+        let running = semver::Version::parse("6.0.0+local").unwrap();
+
+        tidy_leftovers_beside_with(
+            &executable,
+            &root.join("state"),
+            &StubSeal::official(),
+            &running,
+        );
+
+        assert!(leftover.exists());
+    }
+
+    /// The parent is the user's own path: its letters stay, but control and
+    /// bidirectional formatting characters are escaped like a name's.
+    #[test]
+    fn the_notice_escapes_control_characters_in_the_parent_path() {
+        let temp = kettle_test_support::private_tempdir("kettle-macos-parent-");
+        let parent = temp.path().join("Aplicación\u{1b}[2J\u{202e}");
+        std::fs::create_dir(&parent).unwrap();
+        let name = ".kettle-update-staged-1-1";
+        std::fs::create_dir(parent.join(name)).unwrap();
+        let leftover = Leftover::of(name, &std::fs::metadata(parent.join(name)).unwrap());
+
+        let notice = leftover_notice(&parent, &[leftover]);
+
+        assert!(!notice.contains(['\u{1b}', '\u{202e}']), "{notice:?}");
+        assert!(
+            notice.contains(r"Aplicación\u{1b}[2J\u{202e}/.kettle-update-staged-1-1"),
+            "{notice}"
+        );
+    }
+
+    /// #951: every kettle process, `--version` and each `kettle ctl` call
+    /// included, runs the startup sweep. It must not write a line or run a
+    /// signature check, however many leftovers it has to leave.
+    #[test]
+    fn the_startup_sweep_is_silent_and_never_checks_a_signature() {
+        let source = kettle_test_support::code_only(&kettle_test_support::production_source(
+            include_str!("macos.rs"),
+        ));
+        for function in [
+            "fn sweep_leftovers_beside(",
+            "fn sweep_leftovers_beside_with_state_root(",
+            "fn sweep_locked(",
+            "fn sweep_interrupted_updates(",
+        ] {
+            let body = source
+                .split(function)
+                .nth(1)
+                .and_then(|rest| rest.split("\n}\n").next())
+                .unwrap_or_else(|| panic!("{function} not found"));
+            for banned in [
+                "log::",
+                "eprint",
+                "print",
+                "warn",
+                ".identity(",
+                ".notarized(",
+                "tidy",
+                "AppleSeal",
+            ] {
+                assert!(!body.contains(banned), "{function} contains {banned:?}");
+            }
+        }
+
+        let temp = kettle_test_support::private_tempdir("kettle-macos-quiet-");
+        let root = temp.path();
+        let executable = seed_bundle(root, "kettle.app");
+        seed_displaced(root, ".kettle-update-previous-7-7", "5.6.0");
+        std::fs::create_dir(root.join(".kettle-update-staged-8-8")).unwrap();
+        let ((), lines) = kettle_test_support::lines_logged(
+            |_| true,
+            || sweep_leftovers_beside_with_state_root(&executable, &root.join("state")),
+        );
+        assert_eq!(lines, Vec::<String>::new());
     }
 }

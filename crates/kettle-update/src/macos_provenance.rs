@@ -172,13 +172,119 @@ impl Transaction {
 }
 
 fn valid_name(name: &str) -> bool {
-    name.strip_prefix(STAGED_PREFIX).is_some_and(|id| {
-        !id.is_empty()
-            && id.len() <= 128
-            && id
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-    })
+    name.strip_prefix(STAGED_PREFIX).is_some_and(valid_id)
+}
+
+fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+/// Whether `name` is a displaced bundle's directory as an update names it.
+pub(crate) fn is_previous_name(name: &str) -> bool {
+    name.strip_prefix(PREVIOUS_PREFIX).is_some_and(valid_id)
+}
+
+/// The most leftovers one notice record describes.
+pub(crate) const MAX_REPORTED_LEFTOVERS: usize = 256;
+const MAX_REPORT_BYTES: u64 = 128 * 1024;
+
+/// A leftover the sweep has already named to the user, by name and identity.
+///
+/// Identity matters as much as the name: a folder deleted and recreated under
+/// the same name is a different folder, and earns its own notice.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Leftover {
+    pub(crate) name: String,
+    device: u64,
+    inode: u64,
+}
+
+impl Leftover {
+    pub(crate) fn of(name: &str, metadata: &Metadata) -> Self {
+        Self {
+            name: name.to_string(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }
+    }
+}
+
+/// What the last notice named, and which kettle version made the checks
+/// behind it.
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReportedLeftovers {
+    pub(crate) checked_by: String,
+    pub(crate) leftovers: Vec<Leftover>,
+}
+
+/// The last notice's record, or an empty one when the record is missing,
+/// foreign, oversized or malformed. A bad record only costs a repeated notice
+/// and a repeated check; it never authorizes a removal.
+pub(crate) fn load_reported(path: &Path) -> ReportedLeftovers {
+    let read = || -> io::Result<ReportedLeftovers> {
+        let file = kettle_state::open_trusted_file_read(path)?;
+        let metadata = file.metadata()?;
+        // SAFETY: geteuid has no preconditions.
+        if metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o7777 != 0o600
+            || metadata.len() > MAX_REPORT_BYTES
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid leftover notice record metadata",
+            ));
+        }
+        let mut bytes = Vec::new();
+        (&file).take(MAX_REPORT_BYTES + 1).read_to_end(&mut bytes)?;
+        let reported: ReportedLeftovers = serde_json::from_slice(&bytes)?;
+        if bytes.len() as u64 > MAX_REPORT_BYTES
+            || reported.checked_by.len() > 64
+            || reported.leftovers.len() > MAX_REPORTED_LEFTOVERS
+            || !reported.leftovers.iter().all(|leftover| {
+                // NAME_MAX: any entry the directory listing could have produced.
+                leftover.name.len() <= 255
+                    && (leftover.name.starts_with(STAGED_PREFIX)
+                        || leftover.name.starts_with(PREVIOUS_PREFIX))
+            })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid leftover notice record",
+            ));
+        }
+        Ok(reported)
+    };
+    read().unwrap_or_default()
+}
+
+/// Record the leftovers a notice has named and the version that checked them,
+/// or forget them all when none remain.
+pub(crate) fn store_reported(
+    path: &Path,
+    checked_by: &str,
+    leftovers: &[Leftover],
+) -> io::Result<()> {
+    if leftovers.is_empty() {
+        return match std::fs::remove_file(path) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        };
+    }
+    let reported = ReportedLeftovers {
+        checked_by: checked_by.to_string(),
+        leftovers: leftovers[..leftovers.len().min(MAX_REPORTED_LEFTOVERS)].to_vec(),
+    };
+    kettle_state::atomic_replace(
+        path,
+        &serde_json::to_vec(&reported)?,
+        kettle_state::AtomicWriteOptions::PRIVATE,
+    )
 }
 
 #[cfg(test)]
@@ -241,6 +347,86 @@ mod tests {
         assert!(Transaction::create(&records, format!("{STAGED_PREFIX}overflow")).is_err());
         transaction.remove().unwrap();
         Transaction::create(&records, format!("{STAGED_PREFIX}reuse")).unwrap();
+    }
+
+    #[test]
+    fn previous_names_carry_a_bounded_plain_identifier() {
+        assert!(is_previous_name(
+            ".kettle-update-previous-39483-1793354175937283000"
+        ));
+        for name in [
+            ".kettle-update-previous-",
+            ".kettle-update-previous-../victim",
+            ".kettle-update-previous-a b",
+            ".kettle-update-staged-1-1",
+            "kettle.app",
+        ] {
+            assert!(!is_previous_name(name), "{name}");
+        }
+        assert!(!is_previous_name(&format!(
+            "{PREVIOUS_PREFIX}{}",
+            "1".repeat(129)
+        )));
+    }
+
+    #[test]
+    fn leftover_notice_records_are_private_bounded_and_identity_bound() {
+        let temp = kettle_test_support::private_tempdir("kettle-leftover-record-");
+        let path = temp.path().join("update.leftovers");
+        assert_eq!(load_reported(&path), ReportedLeftovers::default());
+        let name = format!("{PREVIOUS_PREFIX}1-1");
+        let directory = temp.path().join(&name);
+        std::fs::create_dir(&directory).unwrap();
+        let leftover = Leftover::of(&name, &std::fs::metadata(&directory).unwrap());
+        let elsewhere = temp.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        assert_ne!(
+            Leftover::of(&name, &std::fs::metadata(&elsewhere).unwrap()),
+            leftover,
+            "the same name on another directory is another leftover"
+        );
+
+        store_reported(&path, "6.0.0", std::slice::from_ref(&leftover)).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+        let loaded = load_reported(&path);
+        assert_eq!(loaded.checked_by, "6.0.0");
+        assert_eq!(loaded.leftovers, std::slice::from_ref(&leftover));
+
+        let many = (0..MAX_REPORTED_LEFTOVERS + 4)
+            .map(|index| Leftover {
+                name: format!("{STAGED_PREFIX}{index}"),
+                device: 1,
+                inode: index as u64,
+            })
+            .collect::<Vec<_>>();
+        store_reported(&path, "6.0.0", &many).unwrap();
+        assert_eq!(
+            load_reported(&path).leftovers,
+            many[..MAX_REPORTED_LEFTOVERS]
+        );
+
+        // A record someone else could have written, or one that names anything
+        // but a leftover, is no record at all: the cost is one more notice.
+        store_reported(&path, "6.0.0", std::slice::from_ref(&leftover)).unwrap();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o644))
+            .unwrap();
+        assert_eq!(load_reported(&path), ReportedLeftovers::default());
+        for bytes in [
+            b"broken".to_vec(),
+            br#"{"checked_by":"6.0.0","leftovers":[{"name":"Documents","device":1,"inode":2}]}"#
+                .to_vec(),
+            br#"{"checked_by":"6.0.0","leftovers":[],"extra":0}"#.to_vec(),
+            br#"[{"name":".kettle-update-staged-1","device":1,"inode":2}]"#.to_vec(),
+            vec![b' '; MAX_REPORT_BYTES as usize + 1],
+        ] {
+            kettle_state::atomic_replace(&path, &bytes, kettle_state::AtomicWriteOptions::PRIVATE)
+                .unwrap();
+            assert_eq!(load_reported(&path), ReportedLeftovers::default());
+        }
+
+        store_reported(&path, "6.0.0", &[]).unwrap();
+        assert!(!path.exists(), "an empty set leaves no record");
+        store_reported(&path, "6.0.0", &[]).unwrap();
     }
 
     #[test]

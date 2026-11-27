@@ -244,6 +244,20 @@ files, Windows device names, and declared/actual size mismatches are rejected.
 Updates acquire an install-prefix lock and atomically replace each destination
 on its own filesystem.
 
+Each Linux replacement refuses a directory that anyone other than this user or
+root can write, unless it is sticky above an entry one of them owns. A
+group-writable `~/.local/share/doc/kettle` is one: Ubuntu's default umask `002`
+leaves directories like that under user private groups. So that this refusal
+never stops an update part-way, the update checks every directory it will
+write into before it downloads anything: the directory of each file in the
+install map, or the deepest one that exists above it when the update will create
+the rest. Files an older release installed and this one no longer ships are
+never written, so their directories are not checked. A directory that fails is named with its mode and the `chmod go-w`
+command that fixes it, and nothing is downloaded or changed. The check runs
+again after the download, before the first destination is touched, for files
+only the archive names. It is the same rule the writes apply, run earlier; a
+group the user alone belongs to is not trusted in its place.
+
 Linux archives contain
 `kettle-package-manifest.json`. Kettle binds its product/version/target and
 every regular file to an exact relative path, size, SHA-256, and Unix mode where
@@ -276,8 +290,9 @@ stateDiagram-v2
         Restoring a destination requires its current
         size and SHA-256 to equal the journalled
         replacement fingerprint. If another writer
-        changed it, rollback stops and preserves
-        everything for manual resolution.
+        changed it, rollback leaves it, restores the
+        rest, and keeps the journal and backup for
+        manual resolution.
     end note
 ```
 
@@ -288,11 +303,34 @@ integrity, an id-bound marker, and the exact absence of unjournaled backup files
 or directories, then checkpoints every restored entry, so a second interruption
 simply resumes rollback. Before restoring or deleting a destination, recovery
 requires its current size and SHA-256 to equal the replacement fingerprint in
-the journal. If another writer changed it after the update, rollback stops with
-an explicit conflict and preserves the destination, journal, and backup for
-manual resolution. A `prepared` entry also recognizes the exact prior
-fingerprint, covering a crash before publication without treating it as a
+the journal. If another writer changed it after the update, rollback leaves it
+alone and reports an explicit conflict, preserving the destination, journal,
+and backup for manual resolution. A `prepared` entry also recognizes the exact
+prior fingerprint, covering a crash before publication without treating it as a
 conflict.
+
+One entry that cannot be restored, for a conflict or any other reason, does not
+stop the others. Rollback still restores every other destination, so a single
+stuck file never leaves the rest of the install at the new release beside the
+old binary, then keeps the journal and backups and fails, naming each file it
+could not restore. The next start or update resumes from there, before it
+checks the install record. Releases before 2.54.0 checked the record first and
+so could never resume their own rollback; the installer can recover one of
+those, as described next.
+
+If the bundled `install.sh` or the online installer runs while a rollback is
+still pending, it reads the updater's journal as the receipt it is, after the
+same validation the updater applies to it. A file at a journaled path is
+treated as one the interrupted install wrote only when its bytes are what the
+journal shows the update left there in that entry's state: the file it found,
+before publication or once restored, or either file in between. The installer
+then lays the whole release over the prefix. Before writing anything it retires
+the journal, so that kettle does not roll the update back over the new install,
+and removes the backup copies whose bytes and marker match the journal. A
+journaled path holding anything else, the installer's own record included, is
+refused rather than replaced. A committed update's journal is left for kettle to
+confirm and remove, and a journal the installer cannot read stops it with the
+advice to start kettle once first.
 
 A durable commit retains the journal and last-known-good backup. They are
 discarded only after a process running at least the target version reaches the
@@ -395,6 +433,34 @@ a staging directory holds an advisory lock on itself for as long as it exists.
 The second is the one to rely on, because two processes can disagree about
 where a lock file lives if they inherited different environments, and cannot
 disagree about the directory in front of them.
+
+A name is not authority to delete: anyone who can write `/Applications` can
+rename someone else's folder to look like a leftover. Each update therefore
+records the staging directory it creates, with its device and inode, in a
+private transaction record under the state directory, and the sweep removes
+only what such a record names. That sweep runs in every kettle process,
+`--version`, `--help` and each `kettle ctl` call included, so it says nothing
+about what it leaves.
+
+A leftover can lose its record for good. 5.6.0 and older wrote none, and the
+sweep drops a record whose directory no longer matches it. The app and
+`kettle update` therefore make one more pass. They remove a
+`.kettle-update-previous-*` folder when all of these hold:
+
+- it belongs to this user, has mode `0700` and no extended ACL, as every update
+  since 5.6.0 creates it, so nobody else can have reached inside it;
+- it holds exactly one entry, a `kettle.app` directory of this user's;
+- that bundle's signature is intact and names kettle's bundle identifier and
+  team, the same proof the live install has to give;
+- its signed `Info.plist` records a version older than the running build.
+
+The most a wrong answer can cost is an obsolete official kettle the user owned.
+Anything else stays where it is. The app names what is left once, in a log line
+and a desktop notification, and so does `kettle update` on stderr: the full
+paths, and that the folders are safe to delete by hand. A private record under
+the state directory keeps the same set from being named again, and keeps the
+build that refused a folder from checking it again; a newer build checks it once
+more. A new leftover earns a new notice.
 
 Kettle writes no lock or bookkeeping file into `/Applications`. The update lock
 lives under `$XDG_STATE_HOME/kettle` (or `~/.local/state/kettle`), one per

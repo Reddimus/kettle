@@ -775,6 +775,27 @@ pub fn prepare_process_start() -> Result<ProcessStart, UpdateError> {
     }
 }
 
+/// Clear update leftovers that startup had to leave, and describe the rest.
+///
+/// Returns a notice, at most once for a given set of leftovers, naming what is
+/// still there and saying it is safe to delete. Only macOS has leftovers that
+/// need this, the displaced bundles beside `kettle.app`; elsewhere it is `None`.
+///
+/// Unlike [`prepare_process_start`], this may run a signature check, and its
+/// notice is meant to be read. Call it from the app and from `kettle update`,
+/// never from a path every command shares, such as `--version` or `kettle ctl`.
+pub fn tidy_update_leftovers() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let executable = std::env::current_exe().ok()?;
+        crate::macos::tidy_leftovers_beside(&executable)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 /// Take the update lock for a best-effort startup recovery pass.
 ///
 /// `Busy` and `Unavailable` both mean "carry on without it", and both are
@@ -1554,8 +1575,221 @@ fn prepare_update_transaction(
     confirm_committed_transaction(&install.prefix, running_version)?;
     recover_transaction(&install.prefix)?;
     #[cfg(target_os = "linux")]
-    let _ = read_linux_install_provenance(&install.prefix)?;
+    {
+        let _ = read_linux_install_provenance(&install.prefix)?;
+        require_trusted_install_directories(
+            &install.prefix,
+            &expected_linux_destinations(),
+            NOTHING_DOWNLOADED_OR_CHANGED,
+        )?;
+    }
     Ok(lock)
+}
+
+/// Every place an update writes, as far as it is known before the archive
+/// names each file: the fixed install map and one representative file in each
+/// directory whose contents depend on the release. Files an older release
+/// installed and this one no longer ships keep their records but are never
+/// written, so they are not here.
+#[cfg(target_os = "linux")]
+fn expected_linux_destinations() -> Vec<PathBuf> {
+    LINUX_STATIC_INSTALL_MAP
+        .iter()
+        .map(|(_, destination, _)| PathBuf::from(destination))
+        .chain(
+            [
+                "bin/kettle",
+                "bin/kettle-media-worker",
+                "share/kettle/install.json",
+                UNIX_INSTALL_PROVENANCE_FILE,
+                "share/kettle/shell-integration/kettle.bash",
+            ]
+            .map(PathBuf::from),
+        )
+        .chain(std::iter::once(
+            Path::new(LINUX_CHANGELOG_DESTINATION).join("CHANGELOG-0.x.md"),
+        ))
+        .collect()
+}
+
+/// Refuse an install whose directories the update's atomic writes would
+/// refuse, before it downloads or changes anything (#847).
+///
+/// Every replacement goes through [`kettle_state::atomic_replace`], which
+/// rejects a parent chain that lets anyone other than this user or root
+/// replace an entry: a group-writable `~/.local/share/doc/kettle`, as the
+/// default umask `002` leaves under user private groups, is one. Met during
+/// publication, that refusal stops the update part-way and leaves the rollback
+/// to undo it. The same check here, over the directory each destination's
+/// write lands in, turns it into one message naming every such directory.
+/// Directories the update will create are created `0755`, so the deepest one
+/// that already exists is the one to check.
+///
+/// This is the same check, run earlier, never a weaker one: the writes still
+/// make it themselves.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn require_trusted_install_directories(
+    prefix: &Path,
+    destinations: &[PathBuf],
+    outcome: &str,
+) -> Result<(), UpdateError> {
+    let mut directories = std::collections::BTreeSet::from([prefix.to_path_buf()]);
+    let mut problems = Vec::new();
+    for destination in destinations {
+        let mut directory = destination.parent();
+        while let Some(relative) = directory {
+            let path = prefix.join(relative);
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_dir() => {
+                    directories.insert(path);
+                    break;
+                }
+                // Not a directory: the destination checks reject that with
+                // their own message.
+                Ok(_) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    directory = relative.parent();
+                }
+                Err(error) => {
+                    problems.push(format!("{} cannot be checked ({error})", path.display()));
+                    break;
+                }
+            }
+        }
+    }
+    let mut writable = std::collections::BTreeMap::new();
+    let mut foreign = std::collections::BTreeMap::new();
+    for directory in &directories {
+        let Err(error) = kettle_state::validate_trusted_directory(directory) else {
+            continue;
+        };
+        let (open, owned) = untrusted_directories_on_path(directory);
+        if open.is_empty() && owned.is_empty() {
+            problems.push(format!(
+                "{} cannot be written safely ({error})",
+                directory.display()
+            ));
+        }
+        writable.extend(open);
+        foreign.extend(owned);
+    }
+    let one = |count: usize, singular: &'static str, plural: &'static str| {
+        if count == 1 { singular } else { plural }
+    };
+    if !writable.is_empty() {
+        let listed = writable
+            .iter()
+            .map(|(path, mode)| format!("{} (mode {mode:04o})", path.display()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        problems.push(format!(
+            "{listed} {} writable by {} group or by other users",
+            one(writable.len(), "is", "are"),
+            one(writable.len(), "its", "their"),
+        ));
+    }
+    if !foreign.is_empty() {
+        let listed = foreign
+            .iter()
+            .map(|(path, uid)| format!("{} (uid {uid})", path.display()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        problems.push(format!(
+            "{listed} {} owned by another user, who could replace what the update writes \
+             there",
+            one(foreign.len(), "is", "are"),
+        ));
+    }
+    if problems.is_empty() {
+        return Ok(());
+    }
+    let mut message = format!("{}. {outcome}", problems.join("; "));
+    if !writable.is_empty() {
+        let paths = writable
+            .keys()
+            .map(|path| shell_quote(path))
+            .collect::<Vec<_>>()
+            .join(" ");
+        message.push_str(&format!(
+            " Remove that access with `chmod go-w {paths}` and update again."
+        ));
+    }
+    Err(UpdateError::UnsafeInstallDirectory(message))
+}
+
+/// What a refusal before the download leaves behind.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+const NOTHING_DOWNLOADED_OR_CHANGED: &str = "Nothing was downloaded or changed.";
+
+/// The directories from `/` down to `directory`, itself included, that let
+/// someone other than this user or root replace an entry, by the rule
+/// [`kettle_state::validate_trusted_directory`] applies: writable by group or
+/// others, unless sticky above an entry this user or root owns; or owned by
+/// another user. Returned as `(writable, mode)` and `(foreign, uid)` maps.
+///
+/// This only names directories for the message. The trust decision is
+/// `validate_trusted_directory`'s.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+#[allow(clippy::type_complexity)]
+fn untrusted_directories_on_path(
+    directory: &Path,
+) -> (
+    std::collections::BTreeMap<PathBuf, u32>,
+    std::collections::BTreeMap<PathBuf, u32>,
+) {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let mut writable = std::collections::BTreeMap::new();
+    let mut foreign = std::collections::BTreeMap::new();
+    let Ok(directory) = directory.canonicalize() else {
+        return (writable, foreign);
+    };
+    // SAFETY: geteuid has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    let trusted = |uid: u32| uid == euid || uid == 0;
+    let mut chain = directory.ancestors().collect::<Vec<_>>();
+    chain.reverse();
+    let metadata = chain
+        .iter()
+        .map(|path| fs::symlink_metadata(path).ok())
+        .collect::<Vec<_>>();
+    for (index, path) in chain.iter().enumerate() {
+        let Some(current) = &metadata[index] else {
+            continue;
+        };
+        if !trusted(current.uid()) {
+            foreign.insert(path.to_path_buf(), current.uid());
+            continue;
+        }
+        let mode = current.mode() & 0o7777;
+        if mode & 0o022 == 0 {
+            continue;
+        }
+        let sticky_above_trusted = mode & 0o1000 != 0
+            && metadata
+                .get(index + 1)
+                .and_then(Option::as_ref)
+                .is_some_and(|child| trusted(child.uid()));
+        if !sticky_above_trusted {
+            writable.insert(path.to_path_buf(), mode);
+        }
+    }
+    (writable, foreign)
+}
+
+/// `path` as one shell word, for a command the user can paste.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+fn shell_quote(path: &Path) -> String {
+    let text = path.display().to_string();
+    if !text.is_empty()
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/._-+,:@%".contains(&byte))
+    {
+        text
+    } else {
+        format!("'{}'", text.replace('\'', r"'\''"))
+    }
 }
 
 #[cfg(windows)]
@@ -3213,6 +3447,13 @@ fn apply_linux_replacements(
         .collect::<Vec<_>>();
     destinations.push(PathBuf::from(UNIX_INSTALL_PROVENANCE_FILE));
     transaction.preflight_linux_destinations(&destinations, &previous_provenance)?;
+    // `prepare_update_transaction` checked every destination it could know of
+    // before the download; this covers the ones only the archive names.
+    require_trusted_install_directories(
+        &install.prefix,
+        &destinations,
+        "No installed file was changed.",
+    )?;
     let provenance_files = replacements
         .iter()
         .map(|(destination, bytes, mode)| {
@@ -5228,27 +5469,51 @@ impl Transaction {
         self.persist_journal()
     }
 
+    /// Restore every entry that can be restored, newest first, and fail if any
+    /// could not.
+    ///
+    /// One entry that cannot be restored does not stop the others (#846). The
+    /// entries are independent files, and stopping at the first failure left
+    /// every older one at the update's bytes: the installer scripts, which an
+    /// update replaces first, beside the old binary. A failed entry keeps its
+    /// journal state, and the failure keeps the journal and backups, so the
+    /// next start or update retries exactly what is left. An entry restored
+    /// whose checkpoint could not be written is replayed then, which restoring
+    /// is safe to repeat.
     fn restore_entries(&mut self) -> Result<(), UpdateError> {
+        let mut failures = Vec::new();
         for index in (0..self.journal.entries.len()).rev() {
-            match self.journal.entries[index].state {
-                JournalEntryState::Restored | JournalEntryState::BackupDiscarded => continue,
-                JournalEntryState::BackingUp => {
-                    discard_incomplete_backup(
-                        &self.prefix,
-                        &self.backup_dir,
-                        &self.journal.entries[index],
-                    )?;
-                    self.journal.entries[index].state = JournalEntryState::BackupDiscarded;
-                    self.persist_journal()?;
-                    continue;
-                }
-                JournalEntryState::Prepared | JournalEntryState::Installed => {}
+            if let Err(error) = self.restore_entry_at(index) {
+                failures.push(format!("{}: {error}", self.journal.entries[index].relative));
             }
-            restore_entry(&self.prefix, &self.backup_dir, &self.journal.entries[index])?;
-            self.journal.entries[index].state = JournalEntryState::Restored;
-            self.persist_journal()?;
         }
-        Ok(())
+        if failures.is_empty() {
+            return Ok(());
+        }
+        Err(UpdateError::Transaction(format!(
+            "rollback restored every other file but not {}; the journal and backups are kept, \
+             and the next start or update retries",
+            failures.join("; ")
+        )))
+    }
+
+    fn restore_entry_at(&mut self, index: usize) -> Result<(), UpdateError> {
+        match self.journal.entries[index].state {
+            JournalEntryState::Restored | JournalEntryState::BackupDiscarded => return Ok(()),
+            JournalEntryState::BackingUp => {
+                discard_incomplete_backup(
+                    &self.prefix,
+                    &self.backup_dir,
+                    &self.journal.entries[index],
+                )?;
+                self.journal.entries[index].state = JournalEntryState::BackupDiscarded;
+                return self.persist_journal();
+            }
+            JournalEntryState::Prepared | JournalEntryState::Installed => {}
+        }
+        restore_entry(&self.prefix, &self.backup_dir, &self.journal.entries[index])?;
+        self.journal.entries[index].state = JournalEntryState::Restored;
+        self.persist_journal()
     }
 
     fn finish_cleanup(&mut self) -> Result<(), UpdateError> {
@@ -8785,6 +9050,351 @@ mod tests {
             }
             other => panic!("unknown case {other}"),
         }
+    }
+
+    /// Every directory and file below `prefix`, with file contents, except the
+    /// update lock an attempt creates before it can refuse anything.
+    #[cfg(target_os = "linux")]
+    fn install_tree(prefix: &Path) -> std::collections::BTreeMap<PathBuf, Option<Vec<u8>>> {
+        let mut tree = std::collections::BTreeMap::new();
+        let mut pending = vec![prefix.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(&directory).unwrap() {
+                let path = entry.unwrap().path();
+                let relative = path.strip_prefix(prefix).unwrap().to_path_buf();
+                if relative == Path::new(".kettle-update.lock") {
+                    continue;
+                }
+                if fs::symlink_metadata(&path).unwrap().is_dir() {
+                    pending.push(path);
+                    tree.insert(relative, None);
+                } else {
+                    tree.insert(relative, Some(fs::read(&path).unwrap()));
+                }
+            }
+        }
+        tree
+    }
+
+    /// #847: the directory an update would refuse is named with its mode and
+    /// the command that fixes it, and a directory the update has yet to create
+    /// is judged by the deepest one that already exists.
+    #[cfg(unix)]
+    #[test]
+    fn untrusted_install_directories_are_named_with_their_remedy() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = test_tempdir();
+        let prefix = root.path().join("install");
+        for directory in ["share/kettle", "share/doc/kettle", "bin"] {
+            fs::create_dir_all(prefix.join(directory)).unwrap();
+        }
+        for directory in [
+            "",
+            "share",
+            "share/kettle",
+            "share/doc",
+            "share/doc/kettle",
+            "bin",
+        ] {
+            fs::set_permissions(prefix.join(directory), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let destinations = [
+            "share/kettle/install.sh",
+            "share/doc/kettle/docs/changelog/CHANGELOG-0.x.md",
+            "bin/kettle",
+        ]
+        .map(PathBuf::from);
+        require_trusted_install_directories(&prefix, &destinations, NOTHING_DOWNLOADED_OR_CHANGED)
+            .unwrap();
+
+        for directory in ["share/doc", "share/doc/kettle"] {
+            fs::set_permissions(prefix.join(directory), fs::Permissions::from_mode(0o775)).unwrap();
+        }
+        let error = require_trusted_install_directories(
+            &prefix,
+            &destinations,
+            NOTHING_DOWNLOADED_OR_CHANGED,
+        )
+        .unwrap_err();
+        let UpdateError::UnsafeInstallDirectory(message) = &error else {
+            panic!("unexpected error: {error:?}");
+        };
+        let canonical = prefix.canonicalize().unwrap();
+        let (doc, kettle_doc) = (
+            canonical.join("share/doc"),
+            canonical.join("share/doc/kettle"),
+        );
+        for directory in [&doc, &kettle_doc] {
+            assert!(
+                message.contains(&format!("{} (mode 0775)", directory.display())),
+                "{message}"
+            );
+        }
+        assert!(
+            message.contains(&format!(
+                "chmod go-w {} {}",
+                shell_quote(&doc),
+                shell_quote(&kettle_doc)
+            )),
+            "{message}"
+        );
+        assert!(
+            message.contains("Nothing was downloaded or changed"),
+            "{message}"
+        );
+        assert!(!message.contains("share/kettle "), "{message}");
+
+        fs::set_permissions(&doc, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&kettle_doc, fs::Permissions::from_mode(0o755)).unwrap();
+        require_trusted_install_directories(&prefix, &destinations, NOTHING_DOWNLOADED_OR_CHANGED)
+            .unwrap();
+        assert_eq!(shell_quote(Path::new("/a b/it's")), r"'/a b/it'\''s'");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn group_writable_doc_install() -> (kettle_test_support::PrivateTempDir, ManagedInstall) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = test_tempdir();
+        let prefix = root.path().join("install");
+        create_linux_install_dir_all(&prefix, &prefix.join("share/kettle"));
+        let marker_path = prefix.join("share/kettle/install.json");
+        fs::write(&marker_path, marker_json("2.52.0").unwrap()).unwrap();
+        seed_linux_install_provenance_with(
+            &prefix,
+            &[("share/doc/kettle/LICENSE", b"old license".as_slice(), 0o644)],
+        );
+        for directory in ["share/doc", "share/doc/kettle"] {
+            fs::set_permissions(prefix.join(directory), fs::Permissions::from_mode(0o775)).unwrap();
+        }
+        let install = ManagedInstall {
+            executable: prefix.join("bin/kettle"),
+            marker_path,
+            prefix,
+        };
+        (root, install)
+    }
+
+    /// #847: Ubuntu's default umask `002` leaves `~/.local/share/doc/kettle`
+    /// group-writable under user private groups. The update used to download,
+    /// replace the installer scripts and only then meet the refusal while
+    /// publishing `LICENSE`. It now refuses before downloading anything, says
+    /// which directories and how to fix them, and has changed nothing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_update_refuses_untrusted_write_directories_before_downloading() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (_root, install) = group_writable_doc_install();
+        let prefix = install.prefix.clone();
+        let before = install_tree(&prefix);
+        let running = semver::Version::new(2, 52, 0);
+        let archive = test_linux_package_tar("99.0.0");
+        let mut update = fake_update();
+        update.asset.as_mut().unwrap().sha256 = sha256_bytes(&archive);
+
+        let error = install_linux_update_with_download(&install, &update, &running, || {
+            panic!("a directory the update would refuse must stop it before the download")
+        })
+        .unwrap_err();
+        let UpdateError::UnsafeInstallDirectory(message) = &error else {
+            panic!("unexpected error: {error}");
+        };
+        let kettle_doc = prefix.join("share/doc/kettle");
+        assert!(
+            message.contains(&kettle_doc.display().to_string()),
+            "{message}"
+        );
+        assert!(message.contains("chmod go-w"), "{message}");
+        assert_eq!(
+            install_tree(&prefix),
+            before,
+            "the refusal changed the install"
+        );
+        // `kettle update` reaches the same refusal before it asks the feed.
+        assert!(matches!(
+            prepare_update_transaction(&install, &running),
+            Err(UpdateError::UnsafeInstallDirectory(_))
+        ));
+
+        for directory in ["share/doc", "share/doc/kettle"] {
+            fs::set_permissions(prefix.join(directory), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        install_linux_update_with_download(&install, &update, &running, || Ok(archive.clone()))
+            .unwrap();
+        assert_eq!(
+            fs::read(prefix.join("share/doc/kettle/LICENSE")).unwrap(),
+            b"license"
+        );
+        read_linux_install_provenance(&prefix).unwrap();
+    }
+
+    /// A file an older release installed and this one no longer ships keeps
+    /// its record but is never written, so its directory does not stop the
+    /// update.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_update_ignores_directories_it_never_writes() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = test_tempdir();
+        let prefix = root.path().join("install");
+        create_linux_install_dir_all(&prefix, &prefix.join("share/kettle"));
+        let marker_path = prefix.join("share/kettle/install.json");
+        fs::write(&marker_path, marker_json("2.52.0").unwrap()).unwrap();
+        seed_linux_install_provenance_with(
+            &prefix,
+            &[("share/legacy/kettle/old.txt", b"old".as_slice(), 0o644)],
+        );
+        fs::set_permissions(
+            prefix.join("share/legacy/kettle"),
+            fs::Permissions::from_mode(0o775),
+        )
+        .unwrap();
+        let install = ManagedInstall {
+            prefix: prefix.clone(),
+            executable: prefix.join("bin/kettle"),
+            marker_path,
+        };
+        let archive = test_linux_package_tar("99.0.0");
+        let mut update = fake_update();
+        update.asset.as_mut().unwrap().sha256 = sha256_bytes(&archive);
+        let running = semver::Version::new(2, 52, 0);
+
+        install_linux_update_with_download(&install, &update, &running, || Ok(archive.clone()))
+            .unwrap();
+
+        assert_eq!(
+            fs::read(prefix.join("share/legacy/kettle/old.txt")).unwrap(),
+            b"old"
+        );
+        read_linux_install_provenance(&prefix).unwrap();
+    }
+
+    /// The archive can name destinations nothing recorded. A directory that
+    /// turns untrusted while the update downloads is refused before the first
+    /// destination is touched, with the same message.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_update_rechecks_write_directories_after_the_download() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (_root, install) = group_writable_doc_install();
+        let prefix = install.prefix.clone();
+        for directory in ["share/doc", "share/doc/kettle"] {
+            fs::set_permissions(prefix.join(directory), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let before = install_tree(&prefix);
+        // A rollback restores bytes through a new inode, so an unchanged inode
+        // shows the first destination was never replaced at all.
+        let first = || {
+            use std::os::unix::fs::MetadataExt as _;
+            fs::metadata(prefix.join("share/kettle/install.sh"))
+                .unwrap()
+                .ino()
+        };
+        let first_before = first();
+        let running = semver::Version::new(2, 52, 0);
+        let archive = test_linux_package_tar("99.0.0");
+        let mut update = fake_update();
+        update.asset.as_mut().unwrap().sha256 = sha256_bytes(&archive);
+
+        let error = install_linux_update_with_download(&install, &update, &running, || {
+            fs::set_permissions(
+                prefix.join("share/doc/kettle"),
+                fs::Permissions::from_mode(0o775),
+            )
+            .unwrap();
+            Ok(archive.clone())
+        })
+        .unwrap_err();
+
+        assert!(
+            matches!(&error, UpdateError::UnsafeInstallDirectory(message)
+                if message.contains("chmod go-w")
+                    && message.contains("No installed file was changed.")
+                    && !message.contains("downloaded")),
+            "unexpected error: {error}"
+        );
+        assert_eq!(first(), first_before, "a destination was replaced first");
+        let mut after = install_tree(&prefix);
+        // Only the mode changed, which the tree comparison does not see.
+        after.retain(|path, _| !path.starts_with(".kettle-update-backup-"));
+        assert_eq!(after, before, "a destination changed before the refusal");
+        assert!(!prefix.join(".kettle-update-journal.json").exists());
+    }
+
+    /// #846: a rollback restores every entry it can. One it cannot restore,
+    /// here because its directory turned group-writable after the update
+    /// published it, used to stop the rollback before the entries published
+    /// earlier, so the installer scripts an update replaces first stayed at
+    /// the new release's bytes beside the old binary. The failed entry stays
+    /// journaled, and the next update recovers it before it checks the
+    /// install record.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_rollback_restores_every_entry_it_can_and_keeps_the_rest_for_recovery() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = test_tempdir();
+        let prefix = root.path().join("install");
+        create_linux_install_dir_all(&prefix, &prefix.join("share/kettle"));
+        let marker_path = prefix.join("share/kettle/install.json");
+        fs::write(&marker_path, marker_json("2.52.0").unwrap()).unwrap();
+        seed_linux_install_provenance_with(
+            &prefix,
+            &[("share/doc/kettle/LICENSE", b"old license".as_slice(), 0o644)],
+        );
+        let install = ManagedInstall {
+            prefix: prefix.clone(),
+            executable: prefix.join("bin/kettle"),
+            marker_path,
+        };
+        let before = install_tree(&prefix);
+        let mut transaction = Transaction::begin(&prefix, "99.0.0").unwrap();
+        for (relative, bytes, mode) in [
+            (
+                "share/kettle/install.sh",
+                b"new installer".as_slice(),
+                0o755,
+            ),
+            (
+                "share/kettle/install-unix.py",
+                b"new unix installer".as_slice(),
+                0o755,
+            ),
+            ("share/doc/kettle/LICENSE", b"new license".as_slice(), 0o644),
+        ] {
+            transaction
+                .install_bytes(Path::new(relative), bytes, Some(mode))
+                .unwrap();
+        }
+        let doc = prefix.join("share/doc/kettle");
+        fs::set_permissions(&doc, fs::Permissions::from_mode(0o775)).unwrap();
+
+        let error = transaction.rollback().unwrap_err();
+
+        for relative in ["share/kettle/install.sh", "share/kettle/install-unix.py"] {
+            assert_eq!(
+                fs::read(prefix.join(relative)).unwrap(),
+                before[Path::new(relative)].clone().unwrap(),
+                "{relative} was left at the update's bytes"
+            );
+        }
+        assert!(
+            error.to_string().contains("share/doc/kettle/LICENSE"),
+            "the failure names what is left: {error}"
+        );
+        assert_eq!(fs::read(doc.join("LICENSE")).unwrap(), b"new license");
+        assert!(
+            prefix.join(".kettle-update-journal.json").is_file(),
+            "what could not be restored stays journaled"
+        );
+
+        // Once the directory is fixed, the next update finishes the rollback
+        // before it reads the install record, which still describes the old
+        // files.
+        fs::set_permissions(&doc, fs::Permissions::from_mode(0o755)).unwrap();
+        let running = semver::Version::new(2, 52, 0);
+        drop(prepare_update_transaction(&install, &running).unwrap());
+        assert!(!prefix.join(".kettle-update-journal.json").exists());
+        assert_eq!(install_tree(&prefix), before);
+        read_linux_install_provenance(&prefix).unwrap();
     }
 
     /// Under the update lock the candidate must be newer than the installed

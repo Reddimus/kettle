@@ -1795,6 +1795,18 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - A tab dragged onto a tab-strip overflow arrow and held there scrolls the
   strip, so it can be moved past the tabs shown.
 
+- macOS: `kettle --version`, `--help` and `kettle ctl` no longer warn about
+  update leftovers. The app and `kettle update` remove bundles that earlier
+  official updates provably displaced, and name any other leftover once,
+  saying it is safe to delete (#951).
+- Linux: an update that would have to write into a directory its group or
+  other users can write, such as a `~/.local/share/doc/kettle` left `0775` by
+  umask `002`, now stops before downloading anything and names the directories
+  and the `chmod go-w` that fixes them, instead of failing part-way (#847).
+- Linux: a self-update rollback that cannot restore one file still restores
+  all the others, and `install.sh` can install over a rollback an older
+  release left unfinished instead of refusing its installer files (#846).
+
 ## Older releases
 
 - [5.x](docs/changelog/CHANGELOG-5.x.md)

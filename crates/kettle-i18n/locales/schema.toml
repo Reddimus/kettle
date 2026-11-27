@@ -814,7 +814,7 @@ context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is th
 context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
 
 [messages.notify_title_update_recovery]
-context = "crates/kettle/src/main.rs queue_startup_update_recovery: desktop notification title at startup when an interrupted update was recovered. The body comes from the updater."
+context = "crates/kettle/src/main.rs queue_startup_update_recovery: desktop notification title at startup when an interrupted update was recovered, or when earlier updates left folders beside the macOS app that kettle will not delete itself. The body comes from the updater."
 
 [messages.notify_title_update_staged]
 context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
