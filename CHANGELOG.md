@@ -1113,6 +1113,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   set, so running it again without `v` plays that many passes and stops instead
   of looping forever.
 
+- `/copy` finds a fenced Mermaid diagram whose language tag is capitalized
+  (```` ```Mermaid ````, ```` ```MERMAID ````), as GitHub reads it, instead of
+  reporting no diagram.
+
 - A restored line keeps its soft wrap when the row it wraps onto holds only
   blanks, so copying it adds no line break.
 
