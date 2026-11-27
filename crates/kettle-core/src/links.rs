@@ -1713,9 +1713,11 @@ mod tests {
                 &[("file:///tmp/c.txt", 18, 27)],
                 &[(Kind::Path, "/tmp/c.txt", true)],
             ),
+            // One shell word, `--include=src/*,/tmp/c.txt`, with a quote in
+            // it: no piece of it opens (main linked /tmp/c.txt).
             (
                 "--include='src/*',/tmp/c.txt",
-                &[("file:///tmp/c.txt", 18, 27)],
+                &[],
                 &[(Kind::Path, "/tmp/c.txt", false)],
             ),
             (
@@ -2623,6 +2625,49 @@ mod tests {
             (r#"x=pre"/tmp/a b/c.txt""#, none, none),
             (r#"x=pre"docs/a.txt""#, none, none),
             (r#"cat "a b"x/y.txt"#, none, none),
+            // A closed string glued to more of its word keeps the word quoted:
+            // a shell reads `prefix=/tmp/report.pdf`, so nothing opens.
+            (r#"cat pre"fix"=/tmp/report.pdf"#, none, none),
+            (r#"x"y":/tmp/r.pdf"#, none, none),
+            (r#"cat "fix",src/lib.rs"#, none, none),
+            (r#"cat pre'docs/my app/a b.py':./x.txt"#, none, none),
+            (
+                r#"cat pre'docs/my app/a b.py':./x.txt the users' copy"#,
+                none,
+                none,
+            ),
+            // A contraction pairs with no quote a word runs on from, nor
+            // with the next string's opening one.
+            (
+                r#"don't touch src/ok.rs; cat prefix'./my app/a.txt'"#,
+                &["file:///work/src/ok.rs"][..],
+                &["src/ok.rs"][..],
+            ),
+            (
+                r#"it's printf '%s\n' src/ok.rs"#,
+                &["file:///work/src/ok.rs"][..],
+                &["src/ok.rs"][..],
+            ),
+            // A `(` glued to a closed string keeps the word quoted too.
+            (r#"a'b'(/tmp/r.pdf"#, none, none),
+            (r#"a"b"(/tmp/r.pdf)"#, none, none),
+            // A shell's separator ends the word, so what follows it is a word
+            // of its own.
+            (
+                r#"key="a/b";other=/tmp/c.txt"#,
+                &["file:///tmp/c.txt"][..],
+                &["/tmp/c.txt"][..],
+            ),
+            (
+                r#"export A='a\work\';B=/tmp/c.txt"#,
+                &["file:///tmp/c.txt"][..],
+                &["/tmp/c.txt"][..],
+            ),
+            (
+                r#"x="a b"|cat /tmp/r.pdf"#,
+                &["file:///tmp/r.pdf"][..],
+                &["/tmp/r.pdf"][..],
+            ),
             (
                 r#"echo "hello " src/main.rs"#,
                 &["file:///work/src/main.rs"][..],
@@ -2661,7 +2706,8 @@ mod tests {
     /// Lines composed at random from prose with apostrophes, compact JSON
     /// in double or single quotes whose values hold spaces, folders, escaped
     /// quotes and paths after them, shell assignments in either quote, words
-    /// a shell quote starts inside (`prefix'…'`, `a"…"b`), paths standing
+    /// a shell quote starts inside (`prefix'…'`, `a"…"b`) or a closed string
+    /// is glued into (`pre"fix"=/tmp/r.pdf`), paths standing
     /// alone after closed strings, and stray quotes anywhere. No link, nor
     /// any hint quick select may open, lies inside a quoted value unless it
     /// is the whole value, or inside a word a quote starts in. On a line
@@ -2804,6 +2850,31 @@ mod tests {
                             paths.push(line.len());
                             line.push_str("/tmp/ok.log");
                         }
+                    }
+                    3 if rng.pick(2) == 0 => {
+                        // A closed string glued to more of its word, then a
+                        // path: one shell word (`pre"fix"=/tmp/r.pdf`).
+                        let q = if rng.pick(3) == 0 { '\'' } else { '"' };
+                        let head = ["pre", "x", "a", ""][rng.pick(4)];
+                        let glue = ["=", ":", ","][rng.pick(3)];
+                        let path = ["/tmp/report.pdf", "src/lib.rs", "./x.txt"][rng.pick(3)];
+                        line.push_str(["cat ", "", "ls "][rng.pick(3)]);
+                        let text = value(&mut rng, q, true);
+                        let start = line.len();
+                        line.push_str(&format!("{head}{q}{text}{q}{glue}{path}"));
+                        if head.is_empty() {
+                            // At a word's start the string may be a JSON
+                            // value, whose text opens whole; what follows it
+                            // in the word may not.
+                            let text_start = start + 1;
+                            values.push((text_start, text_start + text.len()));
+                            words.push((text_start + text.len() + 1, line.len()));
+                        } else {
+                            words.push((start, line.len()));
+                        }
+                        // After a letter a `'` that a word goes on after may be
+                        // an apostrophe, which may leave the line uncertain.
+                        muddled += usize::from(q == '\'' && !head.is_empty());
                     }
                     3 => {
                         // A word a quote starts inside, as a shell allows.

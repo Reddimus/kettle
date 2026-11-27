@@ -55,7 +55,7 @@ and confinement, described below.
   still open locally after the pane returns to a local shell.
   A detected path is read against its line's quotes as a shell reads them,
   so a piece of a quoted name never becomes a link to another file: only a
-  path with no quote beside it in its word, a quoted string's whole text, a
+  path whose shell word holds no quote, a quoted string's whole text, a
   path from a root starting a word, or one from a root that ends quoted
   prose may open, and on a line a stray quote may have shifted, only a path
   from a root starting a word; every other piece is copied (see

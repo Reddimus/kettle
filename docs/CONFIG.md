@@ -669,14 +669,16 @@ moves a key into the main table without changing its parser arm.
 Kettle underlines the URLs and file paths it finds in a pane's text, and the
 underline and the destination pill show exactly what a click opens. Quotes are
 read as a shell reads them: a string closes at the next quote of its kind (a
-backslash escapes a `"` inside double quotes), whitespace outside strings
-separates words, and an apostrophe after a letter or digit (`can't`) opens
-nothing unless a later `'` closes it as a shell would (`prefix'a b'`). A path
-opens only when no quote stands beside it in its word, past any string that
-closed before it (`src/main.rs`, `--out=/tmp/x.png`, `src/main.rs` in
-`echo "hello " src/main.rs`); when it is the whole text of a quoted string
-(`{"file":"/tmp/c.txt"}`); or when it starts from a root at the start of a word
-(`/tmp/x.log` in `/tmp/x.log"`). Inside quoted prose, a path from a root that
+backslash escapes a `"` inside double quotes), whitespace and the separators
+`;`, `&`, `|`, `<` and `>` outside strings separate words, and an apostrophe
+after a letter or digit (`can't`) opens nothing unless a later `'` closes it as
+a shell would (`prefix'a b'`). A path opens only when its word holds no quote
+(`src/main.rs`, `--out=/tmp/x.png`, `src/main.rs` in `echo "hello " src/main.rs`,
+`/tmp/c.txt` in `key="a/b";other=/tmp/c.txt`); when it is the whole text of a
+quoted string (`{"file":"/tmp/c.txt"}`); or when it starts from a root at the
+start of a word (`/tmp/x.log` in `/tmp/x.log"`). A closed string glued to more
+of its word keeps the word quoted, so nothing opens in
+`cat pre"fix"=/tmp/report.pdf`, which a shell reads as `prefix=/tmp/report.pdf`. Inside quoted prose, a path from a root that
 ends the string opens too (`"see /tmp/report.pdf"`). Any other piece of a
 quoted string, or of a word that holds a quote, is not underlined and quick
 select only copies it: `/tmp/report.pdf` in `prefix'docs/a*b=/tmp/report.pdf'`,
