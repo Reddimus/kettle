@@ -287,7 +287,8 @@ pub(crate) fn path_reaches_quote(
 /// Whether a path starting at `start` continues a path-shaped token that a
 /// quote opens without making a quoted run, as one after a colon does
 /// (`host:"docs/a*b=/tmp/report.pdf"`): its word, from the last space
-/// before it, holds a quote with a separator after it. That token's end is
+/// before it, holds a quote with a separator after the first quote, so an
+/// apostrophe inside the token (`"docs/a'b=`) does not hide it. Its end is
 /// not a file of its own. The word is read at most [`MAX_QUOTED_PATH`]
 /// bytes back, so the check stays linear.
 fn continues_a_quoted_token(line: &str, start: usize) -> bool {
@@ -296,7 +297,7 @@ fn continues_a_quoted_token(line: &str, start: usize) -> bool {
         .unwrap_or(start);
     let window = &line[from..start];
     let word = window.rsplit(char::is_whitespace).next().unwrap_or(window);
-    word.rfind(['"', '\'', '`'])
+    word.find(['"', '\'', '`'])
         .is_some_and(|at| word[at + 1..].contains(['/', '\\']))
 }
 
@@ -1545,6 +1546,7 @@ mod tests {
             "\"docs/%2e%2e/a?=/tmp/report.pdf\"",
             // A quote after a colon opens no quoted run, but still one token.
             "host:\"docs/a*b=/tmp/report.pdf\"",
+            "host:\"docs/a'b*=/tmp/report.pdf\"",
             "x='docs/a*b=/tmp/report.pdf'",
         ] {
             let spans = detect(&[line]);
