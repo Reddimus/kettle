@@ -2638,6 +2638,11 @@ mod tests {
                 &["file:///work/run.sh"][..],
                 &["./run.sh"][..],
             ),
+            (
+                r#"{"msg":"saved: ","file":"/tmp/c.txt"}"#,
+                &["file:///tmp/c.txt"][..],
+                &["/tmp/c.txt"][..],
+            ),
             // Text between an apostrophe and a later `'` a shell would close
             // it at may be quoted or not: a path from a root starting a word
             // still opens there.
