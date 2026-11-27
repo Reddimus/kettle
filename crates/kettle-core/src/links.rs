@@ -603,12 +603,43 @@ pub fn is_safe_url(uri: &str) -> bool {
         return false; // no scheme → not opened
     };
     match scheme.to_ascii_lowercase().as_str() {
-        "http" | "https" | "ftp" | "ftps" => names_a_host(rest),
-        "mailto" => !rest.is_empty(),
+        "http" | "https" | "ftp" | "ftps" => names_a_host(rest) && decodes_visibly(rest),
+        "mailto" => !rest.is_empty() && decodes_visibly(rest),
         // Allow LOCAL files only — never a remote authority.
         "file" => is_local_file_url(uri),
         _ => false,
     }
+}
+
+/// Whether the text after a URL's scheme still reads as itself once its
+/// percent escapes are decoded, as a browser or mail client shows and uses
+/// its host, path and query: no decoded character that hides text (see
+/// `hides_text`). An encoded space, tab or line break, as in a form's text
+/// (`body=a%0Ab`), and visible non-ASCII text are fine, and an escape that
+/// does not decode stays text.
+fn decodes_visibly(rest: &str) -> bool {
+    let bytes = rest.as_bytes();
+    if !bytes.contains(&b'%') {
+        return true;
+    }
+    let hex = |byte: Option<&u8>| byte.and_then(|&b| char::from(b).to_digit(16));
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        match (bytes[at], hex(bytes.get(at + 1)), hex(bytes.get(at + 2))) {
+            (b'%', Some(high), Some(low)) => {
+                decoded.push((high * 16 + low) as u8);
+                at += 3;
+            }
+            (byte, ..) => {
+                decoded.push(byte);
+                at += 1;
+            }
+        }
+    }
+    !String::from_utf8_lossy(&decoded)
+        .chars()
+        .any(|c| hides_text(c) && !c.is_ascii_whitespace())
 }
 
 /// The local path a `file://` URI names, decoded: `file:///a%20b` is `/a b`.
@@ -666,7 +697,9 @@ fn decoded_file_url_path(uri: &str) -> Option<String> {
         }
     }
     let decoded = String::from_utf8(bytes).ok()?;
-    let clean = !decoded.chars().any(char::is_control)
+    // The opener gets this path, so what it decodes to must read as itself
+    // too: `a%E2%80%8Bb` is `a` and `b` around a zero-width space.
+    let clean = !decoded.chars().any(|c| c != ' ' && hides_text(c))
         && !decoded.starts_with("//")
         && !decoded.split(['/', '\\']).any(climbs);
     clean.then_some(decoded)
@@ -1706,7 +1739,6 @@ mod tests {
         for uri in [
             "https://x.test/café",
             "https://例.test/路径",
-            "https://x.test/a%E2%80%8Bb",
             "file:///tmp/caf%C3%A9",
         ] {
             assert!(is_safe_url(uri), "{uri}");
@@ -1874,6 +1906,53 @@ mod tests {
             .map(|link| link.uri)
             .collect::<Vec<_>>();
         assert_eq!(found, ["https://e.test/"]);
+    }
+
+    /// Percent-encoded, a character that hides text reads the same once the
+    /// opener decodes it: a file link's path, and a web link's host, path or
+    /// query, holding one is refused. An encoded space, line break or
+    /// visible non-ASCII text is not.
+    #[test]
+    fn percent_encoded_invisible_characters_are_refused() {
+        for uri in [
+            "file:///tmp/a%E2%80%8Bb.pdf",
+            "file:///tmp/a%E2%80%AEb.pdf",
+            "file:///tmp/a..%E2%80%8Bb.pdf",
+            "file:///tmp/a%C2%A0b.pdf",
+            "file://localhost/tmp/a%EF%BB%BFb.pdf",
+            "file:///tmp/a%C2%85b.pdf",
+            "https://x.test/a%E2%80%8Bb",
+            "https://ex%E2%80%8Bample.test/",
+            "https://x.test/?q=%E2%80%AE",
+            "https://x.test/#%E2%81%A6",
+            "ftp://host/a%E2%80%8Db",
+            "mailto:a%E2%80%8B@x.test",
+        ] {
+            assert!(!is_safe_url(uri), "{uri}");
+            assert_eq!(super::local_file_path(uri), None, "{uri}");
+        }
+        for uri in [
+            "file:///tmp/a%20b.pdf",
+            "file:///tmp/caf%C3%A9.pdf",
+            "file:///tmp/a..b.pdf",
+            "https://x.test/a%20b",
+            "https://x.test/caf%C3%A9",
+            "https://x.test/issues/new?body=a%0Ab%09c",
+            "https://x.test/a%zz",
+            "mailto:a@x.test?body=hi%20there%0A",
+        ] {
+            assert!(is_safe_url(uri), "{uri}");
+        }
+        #[cfg(unix)]
+        assert_eq!(
+            super::local_file_path("file:///tmp/a%20b.pdf"),
+            Some(std::path::PathBuf::from("/tmp/a b.pdf"))
+        );
+        // A path holding one has no file URL to hand a handler either.
+        assert_eq!(
+            super::file_url_for_path(std::path::Path::new("/tmp/a\u{200b}b.pdf")),
+            None
+        );
     }
 
     /// Drift guard: `file://` must be local-only — a remote

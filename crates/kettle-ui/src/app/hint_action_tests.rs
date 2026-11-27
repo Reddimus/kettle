@@ -607,14 +607,18 @@ fn file_links_are_gated_by_their_pane() {
         "a b.pdf"
     );
     assert_eq!(link_display_name("file:///home/me/proj/", 48), "proj");
-    // Untrusted names cannot reorder the prompt or push its warning away.
+    // Untrusted names cannot reorder the prompt or push its warning away. A
+    // name hiding a character is no local file, so the link shows as
+    // written: escaped, or with the character itself replaced.
+    for uri in [
+        "file:///home/me/invoice%E2%80%AEfdp.exe",
+        "file:///tmp/a%E2%80%8Bb.pdf",
+    ] {
+        assert_eq!(link_display_name(uri, 48), uri);
+    }
     assert_eq!(
-        link_display_name("file:///home/me/invoice%E2%80%AEfdp.exe", 48),
-        "invoice\u{FFFD}fdp.exe"
-    );
-    assert_eq!(
-        link_display_name("file:///tmp/a%E2%80%8Bb.pdf", 48),
-        "a\u{FFFD}b.pdf"
+        link_display_name("file:///home/me/invoice\u{202E}fdp.exe", 48),
+        "file:///home/me/invoice\u{FFFD}fdp.exe"
     );
     let width = |text: &str| unicode_width::UnicodeWidthStr::width(text);
     let long = link_display_name(&format!("file:///tmp/{}-end.pdf", "x".repeat(200)), 25);
