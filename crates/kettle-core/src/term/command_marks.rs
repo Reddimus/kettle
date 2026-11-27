@@ -609,6 +609,14 @@ mod tests {
     /// hung. Every wait ends on its condition first; this only stops a hang.
     const FIXTURE_HANG: std::time::Duration = std::time::Duration::from_secs(60);
 
+    /// Asks the fixture child to write its wire in this many pieces.
+    const PIECES_ENV: &str = "KETTLE_TEST_COMMAND_MARK_PIECES";
+
+    std::thread_local! {
+        /// How many pieces the next fixture child on this thread writes.
+        static CHILD_PIECES: std::cell::Cell<usize> = const { std::cell::Cell::new(1) };
+    }
+
     #[test]
     fn command_mark_wire_child() {
         let Ok(wire) = std::env::var(FIXTURE_ENV) else {
@@ -627,9 +635,20 @@ mod tests {
         }
         use std::io::Write;
         let mut output = std::io::stdout().lock();
-        output.write_all(b"\x1b[H\x1b[2J").unwrap();
-        output.write_all(wire.as_bytes()).unwrap();
-        output.flush().unwrap();
+        let bytes = [b"\x1b[H\x1b[2J".as_slice(), wire.as_bytes()].concat();
+        let pieces = std::env::var(PIECES_ENV)
+            .ok()
+            .and_then(|pieces| pieces.parse::<usize>().ok())
+            .unwrap_or(1)
+            .max(1);
+        for piece in bytes.chunks(bytes.len().div_ceil(pieces)) {
+            output.write_all(piece).unwrap();
+            output.flush().unwrap();
+            // A pause between pieces lets the reader take each as its own read.
+            if pieces > 1 {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
         // Avoid libtest's trailing status text changing the six-row fixture.
         std::process::exit(0);
     }
@@ -691,9 +710,10 @@ mod tests {
         use std::time::{Duration, Instant};
         let (tx, rx) = crossbeam_channel::unbounded();
         let (input_tx, input_rx) = crossbeam_channel::bounded(1);
-        // Drained while the fixture waits, so a native wire read in many
-        // chunks never blocks the reader on this sender.
-        let (output_tx, output_rx) = crossbeam_channel::bounded(2);
+        // The reader hands each chunk to this sender before parsing it, and
+        // nothing drains it while an observer holds the fixture, so a bounded
+        // queue would stop the reader before the chunk the observer awaits.
+        let (output_tx, output_rx) = crossbeam_channel::unbounded();
         if wire == "REPLY_FIXTURE" {
             tx.send(super::super::TermEvent::PtyWrite("REPLY\r\n".into()))
                 .unwrap();
@@ -728,7 +748,13 @@ mod tests {
                         None,
                         "xterm-256color",
                         "truecolor",
-                        &[(FIXTURE_ENV.into(), if raw { "" } else { wire }.into())],
+                        &[
+                            (FIXTURE_ENV.into(), if raw { "" } else { wire }.into()),
+                            (
+                                PIECES_ENV.into(),
+                                CHILD_PIECES.with(std::cell::Cell::get).to_string(),
+                            ),
+                        ],
                         &LaunchOverrides::default(),
                         false,
                         false,
@@ -869,6 +895,43 @@ mod tests {
         let pane = pane_observed(&wire, 4, std::sync::Arc::new(|| {}), |_, _| {});
         assert_text(&pane, 1, "TARGET");
         assert_rows(&pane, &[(0, 11), (5, 66), (1, 7)]);
+    }
+
+    /// An observer waits for the end of a native wire the child writes in four
+    /// pieces, so the reader takes it in several chunks while the observer
+    /// holds the fixture, with nothing draining the raw output meanwhile.
+    #[cfg(unix)]
+    #[test]
+    fn a_native_observer_can_wait_for_a_wire_written_in_pieces() {
+        struct Pieces;
+        impl Drop for Pieces {
+            fn drop(&mut self) {
+                CHILD_PIECES.with(|pieces| pieces.set(1));
+            }
+        }
+        CHILD_PIECES.with(|pieces| pieces.set(4));
+        let _reset = Pieces;
+        let pane = fixture(
+            "piece one\r\npiece two\r\npiece three\r\nDONE",
+            4,
+            std::sync::Arc::new(|| {}),
+            |pane, rx| {
+                let deadline = std::time::Instant::now() + FIXTURE_HANG;
+                while !pane
+                    .screen_text(0)
+                    .is_some_and(|screen| screen.text.contains("DONE"))
+                {
+                    forward_replies(pane, rx);
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "the reader stopped before the wire's last piece"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            },
+            false,
+        );
+        assert_text(&pane, 3, "DONE");
     }
 
     #[test]
