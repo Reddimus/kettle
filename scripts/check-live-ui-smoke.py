@@ -10459,36 +10459,45 @@ def live_helper_selftest() -> None:
             run_root.mkdir()
             record = run_root / "nvim.pid"
 
-            def require_rejected_record(kind: str) -> None:
-                started = time.monotonic()
-                rejected = subprocess.run(
-                    [sys.executable, "-c", wsl_cleanup_code, str(fixture_root), "pidfile"],
-                    capture_output=True,
-                    text=True,
-                    timeout=2,
-                    check=False,
-                )
+            def require_rejected_record(kind: str, reason: str) -> None:
+                # A record the cleanup opened blocking would hang it for good,
+                # so the timeout only catches a hang; the reason shows the
+                # record was refused where it was opened, not by a slow
+                # interpreter start or a later failure.
+                try:
+                    rejected = subprocess.run(
+                        [sys.executable, "-c", wsl_cleanup_code, str(fixture_root), "pidfile"],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired as error:
+                    raise AssertionError(
+                        f"a {kind} WSL PID record blocked before rejection"
+                    ) from error
                 assert rejected.returncode != 0, (
                     f"a {kind} WSL PID record was accepted: {rejected.stdout!r}"
                 )
-                assert time.monotonic() - started < 2, (
-                    f"a {kind} WSL PID record blocked before rejection"
+                assert reason in rejected.stderr, (
+                    f"a {kind} WSL PID record was not refused as {reason!r}: "
+                    f"{rejected.stderr!r}"
                 )
 
             os.mkfifo(record, 0o600)
-            require_rejected_record("FIFO")
+            require_rejected_record("FIFO", "unsafe pid record")
             record.unlink()
 
             target = fixture_root / "target.pid"
             target.write_text(f"{os.getpid()}\n", encoding="ascii")
             record.symlink_to(target)
-            require_rejected_record("symlink")
+            require_rejected_record("symlink", f"[Errno {errno.ELOOP}]")
             record.unlink()
 
             endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
                 endpoint.bind(str(record))
-                require_rejected_record("Unix socket")
+                require_rejected_record("Unix socket", f"[Errno {errno.ENXIO}]")
             finally:
                 endpoint.close()
                 record.unlink(missing_ok=True)
