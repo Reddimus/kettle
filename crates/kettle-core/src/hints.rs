@@ -33,7 +33,9 @@ pub struct HintSpan {
     /// edge, or delimiting punctuation. A path that ran into a character the
     /// pattern does not take (`out/report#1.pdf` matched as `out/report`, or
     /// `foo(1)/bar.png` as `/bar.png`) is only part of a name, so it may be
-    /// copied but must not be opened.
+    /// copied but must not be opened. A path holding a character that hides
+    /// text (a zero-width joiner, a variation selector) is not bounded
+    /// either: it does not read as the file it names.
     pub bounded: bool,
 }
 
@@ -41,10 +43,7 @@ fn res() -> &'static [(Kind, Regex)] {
     static RE: OnceLock<Vec<(Kind, Regex)>> = OnceLock::new();
     RE.get_or_init(|| {
         vec![
-            (
-                Kind::Url,
-                Regex::new(r#"(?:https?://|ftp://|file://|www\.)[^\s\x00-\x1f<>"]+"#).unwrap(),
-            ),
+            (Kind::Url, Regex::new(crate::links::URL_PATTERN).unwrap()),
             (
                 Kind::Path,
                 // A path with at least one separator, anchored at its first
@@ -97,8 +96,9 @@ fn is_cidr(text: &str) -> bool {
 }
 
 /// Require path context so progress counters and short ratios are ordinary text.
-/// Explicit roots are unambiguous; relative names need a filename extension,
-/// multiple directories, or a component with at least two letters.
+/// Explicit roots are unambiguous; relative names need a filename extension
+/// (a dotfile's name, `.a`, is one), multiple directories, or a component
+/// with at least two letters.
 pub(crate) fn has_path_context(text: &str) -> bool {
     let bytes = text.as_bytes();
     if text.starts_with(['/', '\\'])
@@ -119,15 +119,16 @@ pub(crate) fn has_path_context(text: &str) -> bool {
         || (parts.len() >= 3 && parts.iter().any(|part| letters(part) > 0))
         || parts.last().is_some_and(|name| {
             name.rsplit_once('.')
-                .is_some_and(|(stem, ext)| !stem.is_empty() && ext.chars().any(char::is_alphabetic))
+                .is_some_and(|(_, ext)| ext.chars().any(char::is_alphabetic))
         })
 }
 
 /// The stricter context for paths Kettle underlines on its own: besides
 /// [`has_path_context`], a relative name without an explicit root needs an
-/// extension on its last part or at least three parts, so slash-joined words
-/// in prose (`read/write`, `and/or`, `Save/restore`) are not drawn as links.
-/// Hint mode, an explicit request, keeps the looser rule.
+/// extension on its last part (a dotfile's name, `.env`, is one) or at least
+/// three parts, so slash-joined words in prose (`read/write`, `and/or`,
+/// `Save/restore`) are not drawn as links. Hint mode, an explicit request,
+/// keeps the looser rule.
 pub(crate) fn has_link_path_context(text: &str) -> bool {
     if !has_path_context(text) {
         return false;
@@ -143,7 +144,7 @@ pub(crate) fn has_link_path_context(text: &str) -> bool {
     parts.len() >= 3
         || parts.last().is_some_and(|name| {
             name.rsplit_once('.')
-                .is_some_and(|(stem, ext)| !stem.is_empty() && ext.chars().any(char::is_alphabetic))
+                .is_some_and(|(_, ext)| ext.chars().any(char::is_alphabetic))
         })
 }
 
@@ -172,9 +173,10 @@ const MAX_QUOTED_PATH: usize = 1024;
 /// ends with a space, and no character a name rarely holds. Quoted prose
 /// must not become a path, so a relative path's first segment has no space
 /// (`"see src/main.rs"` stays prose with `src/main.rs` in it), and the path
-/// ends in an extension or a separator, or is anchored (`/`, `~/`, `./`,
-/// `../`, a drive) with at least two separators (`"~/Library/Application
-/// Support"`). Nothing here touches the filesystem.
+/// ends in an extension (a dotfile's name, `.env`, is one) or a separator,
+/// or is anchored (`/`, `~/`, `./`, `../`, a drive) with at least two
+/// separators (`"~/Library/Application Support"`). Nothing here touches the
+/// filesystem.
 pub(crate) fn quoted_paths(line: &str) -> impl Iterator<Item = (usize, usize, usize)> + '_ {
     quoted_runs(line).filter_map(|(open, close)| {
         if !quote_has_end(line, close) {
@@ -241,7 +243,12 @@ fn quote_has_end(line: &str, close: usize) -> bool {
     grep || ends_a_match(tail) || tail.starts_with([',', ';', ':', ')', ']', '}', '>'])
 }
 
-/// Whether a bare path reaches the end of any quoted run holding it.
+/// Whether a bare path reaches the end of any quoted run holding it. Quoted
+/// text holding a character that hides text (`"docs/old\u{a0}dir/x.txt"`)
+/// may be one name, so no piece of it is whole; nor is a path joined to a
+/// word before it that names a parent once decoded (`"a/%2e%2e/b=/x.pdf"`).
+/// Only a path that ends at the close reaches those checks, so the run is
+/// read once.
 pub(crate) fn path_reaches_quote(
     line: &str,
     runs: &[(usize, usize)],
@@ -253,12 +260,20 @@ pub(crate) fn path_reaches_quote(
     runs[..holder]
         .last()
         .filter(|&&(_, close)| end <= close)
-        .is_none_or(|&(_, close)| {
+        .is_none_or(|&(open, close)| {
             quote_has_end(line, close)
                 && skip_location(&line[end..close])
                     .0
                     .trim_start_matches(|c| ",;:?!.".contains(c))
                     .is_empty()
+                && !line[open + 1..close]
+                    .chars()
+                    .any(|c| c != ' ' && crate::links::hides_text(c))
+                && {
+                    let lead = &line[open + 1..start];
+                    let word = lead.rsplit(' ').next().unwrap_or(lead);
+                    !crate::links::climbs_once_decoded(word)
+                }
         })
 }
 
@@ -327,10 +342,12 @@ fn quoted_path_len(body: &str, quote: char) -> Option<usize> {
     }
     let name = segments[last];
     let directory = name.is_empty();
-    let extension = name.rsplit_once('.').is_some_and(|(stem, extension)| {
-        !stem.is_empty()
-            && (1..=12).contains(&extension.len())
-            && extension.bytes().all(|b| b.is_ascii_alphanumeric())
+    // An extension of any length (`.swiftinterface`): ASCII letters and
+    // digits, in words joined by `-` or `_` (`.code-workspace`).
+    let extension = name.rsplit_once('.').is_some_and(|(_, extension)| {
+        extension
+            .split(['-', '_'])
+            .all(|word| !word.is_empty() && word.bytes().all(|b| b.is_ascii_alphanumeric()))
     });
     // Ends like a name, not prose punctuation; Unicode `\w` again, so a
     // decomposed name (`café` as `cafe\u{301}`) ends in a word character.
@@ -341,6 +358,15 @@ fn quoted_path_len(body: &str, quote: char) -> Option<usize> {
             .get_or_init(|| Regex::new(r"[\w)\]]$").unwrap())
             .is_match(name);
     (directory || extension || deep).then_some(path.len())
+}
+
+/// Whether a path does not open as the name it spells: it holds a
+/// character that hides text, a space aside, or names a parent once
+/// decoded (`%2e%2e`).
+fn path_misleads(path: &str) -> bool {
+    path.chars()
+        .any(|c| c != ' ' && crate::links::hides_text(c))
+        || crate::links::climbs_once_decoded(path)
 }
 
 /// Whether a match starting after `before` and followed by `rest` meets a
@@ -456,6 +482,30 @@ impl Taken {
         debug_assert!(!self.overlaps(start, end));
         self.0.insert(start, end);
     }
+
+    /// Take whatever of `start..end` is not taken yet, around the ranges
+    /// already taken inside it.
+    pub(crate) fn fill(&mut self, start: usize, end: usize) {
+        // Only the last range starting before `start` can reach into it.
+        let mut at = self
+            .0
+            .range(..start)
+            .next_back()
+            .map_or(start, |(_, &taken_end)| taken_end.max(start));
+        let mut gaps = Vec::new();
+        for (&taken_start, &taken_end) in self.0.range(start..end) {
+            if taken_start > at {
+                gaps.push((at, taken_start));
+            }
+            at = at.max(taken_end);
+        }
+        if at < end {
+            gaps.push((at, end));
+        }
+        for (gap_start, gap_end) in gaps {
+            self.0.insert(gap_start, gap_end);
+        }
+    }
 }
 
 /// Detect hint targets in one row's `line`, using `col_of_byte` to map byte
@@ -490,19 +540,29 @@ fn detect_line(
                     end: col_of_byte[be - 1],
                     kind: Kind::Path,
                     text: line[bs..be].to_string(),
-                    bounded: true,
+                    bounded: !path_misleads(&line[bs..be]),
                 });
             }
         }
         for m in re.find_iter(line) {
-            let raw = m.as_str();
+            let (m_start, raw) = if *kind == Kind::Url {
+                crate::links::url_match(&m)
+            } else {
+                (m.start(), m.as_str())
+            };
             let trimmed = if *kind == Kind::Path {
                 crate::url_trim::trim_path_trailing(raw)
             } else {
                 trim_trailing(raw)
             };
-            let before = line[..m.start()].chars().next_back();
-            let fragment = (cut.0 && m.start() == 0) || (cut.1 && m.end() == line.len());
+            let before = line[..m_start].chars().next_back();
+            let fragment = (cut.0 && m_start == 0) || (cut.1 && m.end() == line.len());
+            // A scheme with nothing after it (`see https://...`) is no URL,
+            // and no piece of it is a path either.
+            if *kind == Kind::Url && !fragment && !crate::links::names_a_target(trimmed) {
+                taken.fill(m_start, m.end());
+                continue;
+            }
             if trimmed.is_empty()
                 || fragment
                 || (*kind == Kind::Path
@@ -516,8 +576,10 @@ fn detect_line(
             // is part of a longer quoted name or sentence: `Files/a` in
             // `'My Files/a b.txt'`.
             let bounded = is_bounded(before, &line[m.end()..])
-                && (*kind != Kind::Path || path_reaches_quote(line, &runs, m.start(), m.end()));
-            let (bs, be) = (m.start(), m.start() + trimmed.len());
+                && (*kind != Kind::Path
+                    || (path_reaches_quote(line, &runs, m_start, m.end())
+                        && !path_misleads(trimmed)));
+            let (bs, be) = (m_start, m_start + trimmed.len());
             if taken.overlaps(bs, be) {
                 continue;
             }
@@ -821,6 +883,19 @@ mod tests {
                 selection_columns(&grid, 0, path.len() - 1),
                 Some((0, path.len() - 1))
             );
+        }
+    }
+
+    /// A longer run of dots ending a path is an ellipsis: the hint names
+    /// the directory before it, never the parent `/tmp/..`.
+    #[test]
+    fn an_ellipsis_ending_a_path_hint_is_not_its_parent() {
+        for line in ["open /tmp/...", "open /tmp/....", "open /tmp/...)."] {
+            let spans = detect(&[line]);
+            assert_eq!(spans.len(), 1, "{line}: {spans:?}");
+            assert_eq!(spans[0].kind, Kind::Path);
+            assert_eq!(spans[0].text, "/tmp/", "{line}");
+            assert!(spans[0].bounded, "{line}");
         }
     }
 
@@ -1324,6 +1399,143 @@ mod tests {
         }
     }
 
+    /// A path holding a character that hides text reads as another name, so
+    /// its hint copies rather than opens, quoted or bare.
+    #[test]
+    fn a_path_hiding_a_character_is_not_bounded() {
+        for line in [
+            "open \"docs/my a\u{200d}b.pdf\" now",
+            "open docs/a\u{200c}b.pdf now",
+            "open /tmp/a\u{fe0f}b.pdf now",
+            "open /tmp/a\u{3164}b.pdf now",
+        ] {
+            let spans = detect(&[line]);
+            let paths = spans
+                .iter()
+                .filter(|span| span.kind == Kind::Path)
+                .collect::<Vec<_>>();
+            assert!(!paths.is_empty(), "{line}: {spans:?}");
+            assert!(paths.iter().all(|span| !span.bounded), "{line}: {spans:?}");
+        }
+        let spans = detect(&["open \"docs/my café.pdf\" now"]);
+        assert_eq!(spans.len(), 1);
+        assert!(spans[0].bounded);
+        // A quoted name the quoted pattern refuses for such a character
+        // leaves bare pieces, none of them whole: `dir/x.txt` names
+        // another file.
+        for line in [
+            "open \"docs/old\u{a0}dir/x.txt\" now",
+            "open \"docs/old\u{2007}dir/.env\" now",
+            "\"see\u{a0}src/main.rs\"",
+        ] {
+            let spans = detect(&[line]);
+            assert!(!spans.is_empty(), "{line}");
+            assert!(spans.iter().all(|span| !span.bounded), "{line}: {spans:?}");
+        }
+        // A path naming a parent once decoded opens as nothing else either,
+        // as a clicked link refuses it.
+        for line in [
+            "x \"docs/%2e%2e/my report.pdf\" y",
+            "x \"docs/.%2E/my report.swiftinterface\" y",
+        ] {
+            let spans = detect(&[line]);
+            assert_eq!(spans.len(), 1, "{line}: {spans:?}");
+            assert!(!spans[0].bounded, "{line}");
+        }
+        let spans = detect(&["x \"docs/100%2e/my report.pdf\" y"]);
+        assert!(spans[0].bounded);
+        // A name naming a parent once decoded in another word leaves a later
+        // path whole; in the same word, or with a hidden character anywhere
+        // in the quoted text, it is copied.
+        let spans = detect(&["\"Compare docs/%2e%2e/old.txt with /tmp/report.pdf\""]);
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.text == "/tmp/report.pdf" && span.bounded),
+            "{spans:?}"
+        );
+        for line in [
+            "\"docs/%2e%2e/a?=/tmp/report.pdf\"",
+            "\"docs/old\u{a0}dir name/x.txt\"",
+            "\"Compare docs/a\u{200b}b.txt with /tmp/report.pdf\"",
+        ] {
+            let spans = detect(&[line]);
+            assert!(spans.iter().all(|span| !span.bounded), "{line}: {spans:?}");
+        }
+        // Without one, a bare path ending at the quote is whole, as before.
+        let spans = detect(&["\"see src/main.rs\""]);
+        assert_eq!(spans.len(), 1);
+        assert!(spans[0].bounded);
+    }
+
+    /// A dotfile's name is its extension, so a quoted path ending in one is
+    /// whole, not the bare piece after its space (`dir/.env`, which names
+    /// another file).
+    #[test]
+    fn a_quoted_path_ending_in_a_dotfile_is_whole() {
+        for path in [
+            "docs/my dir/.env",
+            "docs/annual report/.gitignore",
+            "docs/my dir/.bashrc",
+            "docs/my dir/.env.local",
+        ] {
+            let spans = detect(&[&format!("open \"{path}\" now")]);
+            assert_eq!(spans.len(), 1, "{path}: {spans:?}");
+            assert_eq!(spans[0].text, path);
+            assert!(spans[0].bounded, "{path}");
+        }
+        // A one-letter dotfile in a one-letter folder is a path too.
+        let spans = detect(&["see x/.a ok"]);
+        assert_eq!(spans.len(), 1, "{spans:?}");
+        assert_eq!(
+            (spans[0].kind, spans[0].text.as_str()),
+            (Kind::Path, "x/.a")
+        );
+        // Still no extension: these stay partial, as before.
+        for line in [
+            "open \"docs/my dir/Makefile\" now",
+            "open \"docs/my dir/.\" now",
+        ] {
+            let spans = detect(&[line]);
+            assert!(
+                spans.iter().all(|span| !span.text.contains(' ')),
+                "{line}: {spans:?}"
+            );
+        }
+    }
+
+    /// A quoted path's extension may be long or hyphenated, as real ones
+    /// are (`.swiftinterface`, `.code-workspace`).
+    #[test]
+    fn a_quoted_path_with_a_long_extension_is_whole() {
+        for path in [
+            "docs/annual report.swiftinterface",
+            "docs/annual report.documentation",
+            "a/b/annual report.swiftinterface",
+            "docs/my app.code-workspace",
+            "docs/my app.sublime-project",
+            "docs/my dir/.DS_Store",
+        ] {
+            let spans = detect(&[&format!("\"{path}\"")]);
+            assert_eq!(spans.len(), 1, "{path}: {spans:?}");
+            assert_eq!(spans[0].text, path);
+            assert!(spans[0].bounded, "{path}");
+        }
+        // Not an extension: an empty word, or punctuation ending prose.
+        for body in [
+            "docs/a b.-x",
+            "docs/a b.x--y",
+            "docs/a b.x-",
+            "docs/see the end.",
+        ] {
+            let spans = detect(&[&format!("\"{body}\"")]);
+            assert!(
+                spans.iter().all(|span| !span.text.contains(' ')),
+                "{body}: {spans:?}"
+            );
+        }
+    }
+
     /// A quote after a `:` never opens a quoted path: `host:"…"` and
     /// `'user@host':"…"` name remote files, which stay partial matches that
     /// copy. Pretty-printed JSON (`"file": "…"`) and arrays still take each
@@ -1397,6 +1609,22 @@ mod tests {
         ] {
             assert_eq!(taken.overlaps(start, end), overlaps, "{start}..{end}");
         }
+    }
+
+    /// Filling takes only the gaps around ranges already taken.
+    #[test]
+    fn filling_takes_only_what_is_free() {
+        let mut taken = Taken::default();
+        taken.insert(0, 4);
+        taken.insert(6, 8);
+        taken.insert(20, 22);
+        taken.fill(2, 12);
+        let ranges = taken.0.iter().map(|(&s, &e)| (s, e)).collect::<Vec<_>>();
+        assert_eq!(ranges, [(0, 4), (4, 6), (6, 8), (8, 12), (20, 22)]);
+        taken.fill(0, 30);
+        assert!((0..30).all(|at| taken.overlaps(at, at + 1)));
+        taken.fill(5, 7);
+        assert_eq!(taken.0.len(), 7);
     }
 
     /// Checking a line's matches stays linear however it repeats quotes and
@@ -1491,6 +1719,88 @@ mod tests {
         assert_eq!(h[0].text, "https://rust-lang.org", "no trailing ).");
         // The URL's path-looking substring is not also a separate hint.
         assert!(h.iter().all(|s| s.kind == Kind::Url));
+    }
+
+    /// An uppercase or mixed-case scheme is a URL hint with its text as
+    /// printed, not a path.
+    #[test]
+    fn uppercase_schemes_are_url_hints() {
+        for url in [
+            "HTTPS://example.com/a",
+            "Http://example.com/a",
+            "FTP://host/file",
+            "FILE:///etc/hosts",
+            "WWW.example.com/a",
+        ] {
+            let spans = detect(&[&format!("see {url} now")]);
+            assert_eq!(spans.len(), 1, "{url}: {spans:?}");
+            assert_eq!((spans[0].kind, spans[0].text.as_str()), (Kind::Url, url));
+        }
+        // A `www.` inside a longer name is part of it, in any case.
+        for path in ["docs/WWW.example.com.txt", "docs/www.example.com.txt"] {
+            let spans = detect(&[&format!("cat {path}")]);
+            assert_eq!(spans.len(), 1, "{path}: {spans:?}");
+            assert_eq!((spans[0].kind, spans[0].text.as_str()), (Kind::Path, path));
+        }
+        for line in ["docs/\u{b2}www.example.com.txt", "x\u{2167}www.example.com"] {
+            let spans = detect(&[line]);
+            assert!(
+                spans.iter().all(|span| span.kind != Kind::Url),
+                "{line}: {spans:?}"
+            );
+        }
+        // A scheme after a refused `www.` still starts a URL.
+        let spans = detect(&["docs/www.cfg=HTTPS://example.com/a"]);
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.kind == Kind::Url && span.text == "HTTPS://example.com/a"),
+            "{spans:?}"
+        );
+        // One pass, however many `www.` a token runs into.
+        let line = "xwww.".repeat(20_000);
+        let started = std::time::Instant::now();
+        assert!(
+            detect(&[line.as_str()])
+                .iter()
+                .all(|span| span.kind != Kind::Url)
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(1500),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A URL trimmed down to a bare scheme or `www` names nothing: no hint
+    /// opens it, and no piece of it becomes a path hint.
+    #[test]
+    fn a_bare_scheme_is_no_url_hint() {
+        for line in [
+            "see www...",
+            "see www.,",
+            "see www./",
+            "see https://...",
+            "see https:///",
+            "see https://?q=1",
+            "see https://#frag",
+            "see https://:8080/x",
+            "see ftp://***",
+            "see file://...",
+            "see https://?q=/etc/hosts",
+            "see file://?q=/etc/hosts",
+            "see file://localhost?q=/etc/hosts",
+            "see www.example@/etc/hosts",
+        ] {
+            let spans = detect(&[line]);
+            assert!(spans.is_empty(), "{line}: {spans:?}");
+        }
+        let spans = detect(&["see https://a"]);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(
+            (spans[0].kind, spans[0].text.as_str()),
+            (Kind::Url, "https://a")
+        );
     }
 
     /// A URL in Markdown code or emphasis is detected without the marks.
