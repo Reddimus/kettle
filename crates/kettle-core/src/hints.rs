@@ -335,15 +335,21 @@ fn continues_a_quoted_token(line: &str, start: usize) -> bool {
 }
 
 /// The quotes in `text` that a backslash does not escape, with their byte
-/// offsets. A quote after an odd run of backslashes is text inside its
-/// string, as JSON and a shell's double quotes read it (`"a\"b"`), so it
-/// neither opens nor closes one; after an even run (`"a\\"`) it does.
+/// offsets. Only a double quote can be escaped: after an odd run of
+/// backslashes it is text inside its string, as JSON and a shell's double
+/// quotes read it (`"a\"b"`), and after an even run (`"a\\"`) it closes. A
+/// backslash is a backslash inside a shell's single quotes, so a `'` is a
+/// quote whatever comes before it (`'C:\work\'`), and so is a backtick.
 fn unescaped_quotes(text: &str) -> impl Iterator<Item = (usize, char)> + '_ {
     let mut backslashes = 0usize;
     text.char_indices().filter(move |&(_, c)| {
         let escaped = backslashes % 2 == 1;
         backslashes = if c == '\\' { backslashes + 1 } else { 0 };
-        !escaped && matches!(c, '"' | '\'' | '`')
+        match c {
+            '"' => !escaped,
+            '\'' | '`' => true,
+            _ => false,
+        }
     })
 }
 
@@ -1756,6 +1762,29 @@ mod tests {
                 "{line}: {spans:?}"
             );
         }
+    }
+
+    /// Inside a shell's single quotes a backslash is a backslash: the next
+    /// `'` closes the string whatever comes before it, so a later path on
+    /// the line is its own.
+    #[test]
+    fn a_single_quote_closes_after_a_backslash() {
+        for line in [
+            r#"export A='C:\work\';B=/tmp/c.txt"#,
+            r#"x='a\';y=/tmp/c.txt"#,
+            r#"x='a\\';y=/tmp/c.txt"#,
+        ] {
+            let spans = detect(&[line]);
+            assert!(
+                spans
+                    .iter()
+                    .any(|span| span.text == "/tmp/c.txt" && span.bounded),
+                "{line}: {spans:?}"
+            );
+        }
+        // A double quote is still escaped by one.
+        let spans = detect(&[r#"{"file":"docs/a\"b=/tmp/report.pdf"}"#]);
+        assert!(spans.iter().all(|span| !span.bounded), "{spans:?}");
     }
 
     /// Compact JSON closes each string before the next opens, so a later
