@@ -1423,6 +1423,343 @@ mod tests {
         }
     }
 
+    /// Mainstream terminal output links exactly as it did before the 6.0
+    /// link fixes (main at f776689b6): cargo and ESLint JSON, compiler
+    /// locations, Markdown and prose URLs, IPv6 hosts and ports before an
+    /// ellipsis, quoted prose holding a path, and macOS screenshot names. A
+    /// change to link detection that moves any of them, by a link, a column
+    /// or whether quick select may open it, shows here.
+    #[test]
+    fn mainstream_lines_link_as_they_did() {
+        use crate::hints::Kind;
+        type Case = (
+            &'static str,
+            &'static [(&'static str, usize, usize)],
+            &'static [(Kind, &'static str, bool)],
+        );
+        let corpus: &[Case] = &[
+            (
+                "{\"reason\":\"compiler-artifact\",\"package_id\":\"x 0.1.0\",\"manifest_path\":\"/Users/me/p/Cargo.toml\",\"target\":{\"kind\":[\"lib\"],\"src_path\":\"/Users/me/p/src/lib.rs\"},\"filenames\":[\"/Users/me/p/target/debug/libx.rlib\"]}",
+                &[("file:///Users/me/p/target/debug/libx.rlib", 170, 203)],
+                &[
+                    (Kind::Path, "/Users/me/p/Cargo.toml", false),
+                    (Kind::Path, "/Users/me/p/src/lib.rs", false),
+                    (Kind::Path, "/Users/me/p/target/debug/libx.rlib", true),
+                ],
+            ),
+            (
+                "{\"reason\":\"compiler-message\",\"message\":{\"rendered\":\"warning: unused\",\"spans\":[{\"file_name\":\"src/main.rs\",\"line_start\":3}]}}",
+                &[],
+                &[(Kind::Path, "src/main.rs", false)],
+            ),
+            (
+                "[{\"filePath\":\"/Users/me/p/a.ts\",\"messages\":[],\"errorCount\":0},{\"filePath\":\"/Users/me/p/b.ts\",\"messages\":[]}]",
+                &[],
+                &[
+                    (Kind::Path, "/Users/me/p/a.ts", false),
+                    (Kind::Path, "/Users/me/p/b.ts", false),
+                ],
+            ),
+            (
+                "{\"cwd\":\"/work\",\"file\":\"/Users/me/x.py\"}",
+                &[("file:///Users/me/x.py", 23, 36)],
+                &[
+                    (Kind::Path, "/work", false),
+                    (Kind::Path, "/Users/me/x.py", true),
+                ],
+            ),
+            (
+                "{\"url\":\"https://x.test/a\",\"path\":\"/tmp/c.txt\"}",
+                &[("https://x.test/a", 8, 23), ("file:///tmp/c.txt", 34, 43)],
+                &[
+                    (Kind::Url, "https://x.test/a", false),
+                    (Kind::Path, "/tmp/c.txt", true),
+                ],
+            ),
+            (
+                "{\"type\":\"application/json\",\"file\":\"/tmp/c.txt\"}",
+                &[("file:///tmp/c.txt", 35, 44)],
+                &[
+                    (Kind::Path, "application/json", false),
+                    (Kind::Path, "/tmp/c.txt", true),
+                ],
+            ),
+            (
+                "{\"date\":\"2026/11/26\",\"file\":\"/tmp/c.txt\"}",
+                &[("file:///tmp/c.txt", 29, 38)],
+                &[(Kind::Path, "/tmp/c.txt", true)],
+            ),
+            (
+                "key=\"a/b\";other=/tmp/c.txt",
+                &[("file:///tmp/c.txt", 16, 25)],
+                &[(Kind::Path, "/tmp/c.txt", true)],
+            ),
+            (
+                "  --> src/main.rs:12:5",
+                &[("file:///work/src/main.rs", 6, 21)],
+                &[(Kind::Path, "src/main.rs", true)],
+            ),
+            (
+                "src/main.c:12:5: error: expected ';' before '}' token",
+                &[("file:///work/src/main.c", 0, 14)],
+                &[(Kind::Path, "src/main.c", true)],
+            ),
+            (
+                "crates/a/src/lib.rs:7:9: warning: unused variable",
+                &[("file:///work/crates/a/src/lib.rs", 0, 22)],
+                &[(Kind::Path, "crates/a/src/lib.rs", true)],
+            ),
+            ("main.go:3:2: undefined: x", &[], &[]),
+            (
+                "See [the docs](https://example.com/docs).",
+                &[("https://example.com/docs", 15, 38)],
+                &[(Kind::Url, "https://example.com/docs", true)],
+            ),
+            (
+                "Read https://example.com/a, then https://example.com/b.",
+                &[
+                    ("https://example.com/a", 5, 25),
+                    ("https://example.com/b", 33, 53),
+                ],
+                &[
+                    (Kind::Url, "https://example.com/a", true),
+                    (Kind::Url, "https://example.com/b", true),
+                ],
+            ),
+            (
+                "(see https://rust-lang.org).",
+                &[("https://rust-lang.org", 5, 25)],
+                &[(Kind::Url, "https://rust-lang.org", true)],
+            ),
+            (
+                "https://en.wikipedia.org/wiki/Foo_(bar),",
+                &[("https://en.wikipedia.org/wiki/Foo_(bar)", 0, 38)],
+                &[(Kind::Url, "https://en.wikipedia.org/wiki/Foo_(bar)", true)],
+            ),
+            (
+                "<https://example.com/x>",
+                &[("https://example.com/x", 1, 21)],
+                &[(Kind::Url, "https://example.com/x", true)],
+            ),
+            (
+                "**https://example.com/bold** and `https://example.com/code`",
+                &[
+                    ("https://example.com/bold", 2, 25),
+                    ("https://example.com/code", 34, 57),
+                ],
+                &[
+                    (Kind::Url, "https://example.com/bold", false),
+                    (Kind::Url, "https://example.com/code", false),
+                ],
+            ),
+            (
+                "curl http://[::1]:8080/health",
+                &[("http://[::1]:8080/health", 5, 28)],
+                &[(Kind::Url, "http://[::1]:8080/health", true)],
+            ),
+            (
+                "open http://[2001:db8::1]/a.",
+                &[("http://[2001:db8::1]/a", 5, 26)],
+                &[(Kind::Url, "http://[2001:db8::1]/a", true)],
+            ),
+            (
+                "Listening on http://127.0.0.1:8080...",
+                &[("http://127.0.0.1:8080", 13, 33)],
+                &[(Kind::Url, "http://127.0.0.1:8080", true)],
+            ),
+            (
+                "Waiting for http://localhost:3000...",
+                &[("http://localhost:3000", 12, 32)],
+                &[(Kind::Url, "http://localhost:3000", true)],
+            ),
+            (
+                "Waiting for http://192.168.1.10:3000...",
+                &[("http://192.168.1.10:3000", 12, 35)],
+                &[(Kind::Url, "http://192.168.1.10:3000", true)],
+            ),
+            (
+                "msg=\"./build.sh failed, see /tmp/build.log\"",
+                &[("file:///tmp/build.log", 28, 41)],
+                &[
+                    (Kind::Path, "./build.sh", false),
+                    (Kind::Path, "/tmp/build.log", true),
+                ],
+            ),
+            (
+                "\"see /tmp/report.pdf\"",
+                &[("file:///tmp/report.pdf", 5, 19)],
+                &[(Kind::Path, "/tmp/report.pdf", true)],
+            ),
+            (
+                "\"src/a.rs: cannot open /tmp/b.txt\"",
+                &[("file:///tmp/b.txt", 23, 32)],
+                &[
+                    (Kind::Path, "src/a.rs", false),
+                    (Kind::Path, "/tmp/b.txt", true),
+                ],
+            ),
+            (
+                "\"src/a.rs uses /tmp/b.txt\"",
+                &[("file:///tmp/b.txt", 15, 24)],
+                &[
+                    (Kind::Path, "src/a.rs", false),
+                    (Kind::Path, "/tmp/b.txt", true),
+                ],
+            ),
+            (
+                "echo \"src/main.rs is fine but /tmp/b.txt is not\"",
+                &[],
+                &[
+                    (Kind::Path, "src/main.rs", false),
+                    (Kind::Path, "/tmp/b.txt", false),
+                ],
+            ),
+            (
+                "cat \"/tmp/report.pdf.\"",
+                &[("file:///tmp/report.pdf", 5, 19)],
+                &[(Kind::Path, "/tmp/report.pdf", true)],
+            ),
+            (
+                "Saved to '/tmp/report.pdf.'",
+                &[("file:///tmp/report.pdf", 10, 24)],
+                &[(Kind::Path, "/tmp/report.pdf", true)],
+            ),
+            (
+                "open \"/Users/me/Desktop/Screenshot 2026-11-26 at 10.00.00\u{202f}AM.png\"",
+                &[],
+                &[(Kind::Path, "/Users/me/Desktop/Screenshot", false)],
+            ),
+            (
+                "[{\"filePath\":\"/Users/me/p/a.ts\"},{\"filePath\":\"/Users/me/p/b.ts\"}]",
+                &[("file:///Users/me/p/b.ts", 46, 61)],
+                &[
+                    (Kind::Path, "/Users/me/p/a.ts", false),
+                    (Kind::Path, "/Users/me/p/b.ts", true),
+                ],
+            ),
+            (
+                "{\"a\":\"x/y\",\"b\":\"/tmp/c.txt\"}",
+                &[("file:///tmp/c.txt", 16, 25)],
+                &[(Kind::Path, "/tmp/c.txt", true)],
+            ),
+            (
+                "{\"msg\":\"a/b\",\"path\":\"/tmp/c.txt\"}",
+                &[("file:///tmp/c.txt", 21, 30)],
+                &[(Kind::Path, "/tmp/c.txt", true)],
+            ),
+            (
+                "{\"reason\":\"compiler-artifact\",\"manifest_path\":\"/Users/me/p/Cargo.toml\",\"src_path\":\"/Users/me/p/src/lib.rs\"}",
+                &[("file:///Users/me/p/src/lib.rs", 83, 104)],
+                &[
+                    (Kind::Path, "/Users/me/p/Cargo.toml", false),
+                    (Kind::Path, "/Users/me/p/src/lib.rs", true),
+                ],
+            ),
+            (
+                "{\"level\":\"info\",\"msg\":\"wrote /tmp/out.pdf\",\"ts\":1}",
+                &[],
+                &[(Kind::Path, "/tmp/out.pdf", false)],
+            ),
+            (
+                "{\"level\":\"info\",\"msg\":\"saved\",\"file\":\"/tmp/out.pdf\"}",
+                &[("file:///tmp/out.pdf", 38, 49)],
+                &[(Kind::Path, "/tmp/out.pdf", true)],
+            ),
+            (
+                "ok src/a.rs,'x' /tmp/c.txt",
+                &[("file:///tmp/c.txt", 16, 25)],
+                &[
+                    (Kind::Path, "src/a.rs", false),
+                    (Kind::Path, "/tmp/c.txt", true),
+                ],
+            ),
+            (
+                "['a/b','c/d.txt']",
+                &[("file:///work/c/d.txt", 8, 14)],
+                &[(Kind::Path, "c/d.txt", true)],
+            ),
+            (
+                "[\"a/b\",\"c/d.txt\"]",
+                &[("file:///work/c/d.txt", 8, 14)],
+                &[(Kind::Path, "c/d.txt", true)],
+            ),
+            (
+                "(\"a/b\",\"c/d.txt\")",
+                &[("file:///work/c/d.txt", 8, 14)],
+                &[(Kind::Path, "c/d.txt", true)],
+            ),
+            (
+                "--include='src/*' /tmp/c.txt",
+                &[("file:///tmp/c.txt", 18, 27)],
+                &[(Kind::Path, "/tmp/c.txt", true)],
+            ),
+            (
+                "--include='src/*',/tmp/c.txt",
+                &[("file:///tmp/c.txt", 18, 27)],
+                &[(Kind::Path, "/tmp/c.txt", false)],
+            ),
+            (
+                "x='a/b'&&cat /tmp/c.txt",
+                &[("file:///tmp/c.txt", 13, 22)],
+                &[(Kind::Path, "/tmp/c.txt", true)],
+            ),
+            (
+                "see https://example.com/a...",
+                &[("https://example.com/a", 4, 24)],
+                &[(Kind::Url, "https://example.com/a", true)],
+            ),
+            (
+                "see www.example.com.",
+                &[("https://www.example.com", 4, 18)],
+                &[(Kind::Url, "www.example.com", true)],
+            ),
+            (
+                "src/lib.rs:10:5: note: here",
+                &[("file:///work/src/lib.rs", 0, 14)],
+                &[(Kind::Path, "src/lib.rs", true)],
+            ),
+        ];
+        for &(line, links, hints) in corpus {
+            let term = term_fed(240, 1, line.as_bytes());
+            let found = links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| (link.uri, link.start_col, link.end_col))
+                .collect::<Vec<_>>();
+            let want = links
+                .iter()
+                .map(|&(uri, start, end)| (uri.to_string(), start, end))
+                .collect::<Vec<_>>();
+            assert_eq!(found, want, "links in {line:?}");
+            let spans = crate::hints::detect_rows(term.grid(), &[0], 240)
+                .into_iter()
+                .map(|span| (span.kind, span.text, span.bounded))
+                .collect::<Vec<_>>();
+            let want = hints
+                .iter()
+                .map(|&(kind, text, bounded)| (kind, text.to_string(), bounded))
+                .collect::<Vec<_>>();
+            assert_eq!(spans, want, "hints in {line:?}");
+        }
+        // A macOS screenshot name, with the narrow no-break space before
+        // AM: its file URL, as Preview copied file and ls --hyperlink use
+        // it, and a web link spelling it.
+        let name = "/Users/me/Desktop/Screenshot 2026-11-26 at 10.00.00\u{202f}AM.png";
+        let url = "file:///Users/me/Desktop/Screenshot%202026-11-26%20at%2010.00.00%E2%80%AFAM.png";
+        assert_eq!(
+            super::file_url_for_path(std::path::Path::new(name)).as_deref(),
+            Some(url)
+        );
+        assert!(is_safe_url(url));
+        #[cfg(unix)]
+        assert_eq!(
+            super::local_file_path(url),
+            Some(std::path::PathBuf::from(name))
+        );
+        assert!(is_safe_url(
+            "https://x.test/Screenshot%2010.00.00%E2%80%AFAM.png"
+        ));
+    }
+
     /// A closing bracket that pairs with an open before it ends the link,
     /// whatever stray close came earlier in the query.
     #[test]
