@@ -1256,6 +1256,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   unfocused selections, and its outline follows. Nothing changes with
   `bidi = false` or in lines without right-to-left text.
 
+- Select Command Output no longer copies the next Bash prompt after output with no final newline, such as `printf done`; it stops where the output ends.
+
 - Closing the search bar no longer moves the text. When the prompt was above
   the bottom of the window, as after `clear`, closing it pulled lines from
   the scrollback back onto the screen and pushed everything down, so you lost

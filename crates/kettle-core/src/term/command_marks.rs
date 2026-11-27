@@ -11,18 +11,34 @@ pub struct CommandMark {
     pub exit_code: i32,
 }
 
+/// One completed command's output, as
+/// [`super::Terminal::command_output_rows`] answers: stable row ids
+/// `start..end`, and where on the last row the output stops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommandOutput {
+    pub start: u64,
+    pub end: u64,
+    /// The column D found the cursor at on row `end - 1`, when the output
+    /// ended partway along that row: a shell writes its next prompt right
+    /// after output with no final newline, so the cells from here on are not
+    /// output. `None` when the whole last row is output.
+    pub end_column: Option<usize>,
+}
+
 /// One entry of the ring: a completed command's mark, and its output rows
 /// `output..end` as stable row ids. `output` is the first row written after
 /// OSC 133 C and `end` the first row after the output at D; a cursor past
 /// column 0 at either mark sits on a row holding the command line or the
-/// output's last line, so that row falls before or inside the span. Empty,
-/// as `row..row`, when the command printed on no row of its own or a scroll
+/// output's last line, so that row falls before or inside the span, and
+/// `end_column` keeps where D found it on that last line. Empty, as
+/// `row..row`, when the command printed on no row of its own or a scroll
 /// split the span.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Completed {
     mark: CommandMark,
     output: u64,
     end: u64,
+    end_column: Option<usize>,
 }
 
 /// A command between C and D: its prompt row, and where its output began
@@ -80,7 +96,11 @@ impl CommandMarks {
                     row_after_cursor_text(grid),
                 );
             }
-            Boundary::End(code) => self.end(code, row_after_cursor_text(grid)),
+            Boundary::End(code) => self.end_at(
+                code,
+                row_after_cursor_text(grid),
+                column_of_unfinished_row(grid),
+            ),
             Boundary::Cancel => self.cancel_pending(),
         }
     }
@@ -101,22 +121,30 @@ impl CommandMarks {
         }
     }
 
-    /// OSC 133 D with the row after the output, `end`.
+    /// OSC 133 D with the row after the output, `end`, and a whole last row.
+    #[cfg(test)]
     pub(super) fn end(&mut self, code: Option<i32>, end: u64) {
+        self.end_at(code, end, None);
+    }
+
+    /// OSC 133 D with the row after the output, `end`, and the column the
+    /// output stopped at on row `end - 1` when it stopped partway along it.
+    pub(super) fn end_at(&mut self, code: Option<i32>, end: u64, end_column: Option<usize>) {
         if let Some(Some(Started { row, output })) = self.pending.take()
             && let Some(exit_code) = code
         {
             if self.marks.len() == 2048 {
                 self.marks.pop_front();
             }
-            let (output, end) = match output {
-                Some(output) if output < end => (output, end),
-                _ => (row, row),
+            let (output, end, end_column) = match output {
+                Some(output) if output < end => (output, end, end_column),
+                _ => (row, row, None),
             };
             self.marks.push_back(Completed {
                 mark: CommandMark { row, exit_code },
                 output,
                 end,
+                end_column,
             });
         }
     }
@@ -135,21 +163,27 @@ impl CommandMarks {
         self.marks.iter().map(|completed| completed.mark).collect()
     }
 
-    /// The output rows `start..end` of the newest retained command whose
-    /// output holds row `at`, or with no row, of the newest command. The
-    /// span is cut to the retained rows `origin..retained_end`; `None` when
-    /// nothing of it is left or the command printed nothing.
+    /// The output of the newest retained command whose output rows hold row
+    /// `at`, or with no row, of the newest command. The span is cut to the
+    /// retained rows `origin..retained_end`, and a last row cut off takes its
+    /// end column with it; `None` when nothing of it is left or the command
+    /// printed nothing.
     pub(super) fn output_rows(
         &mut self,
         at: Option<u64>,
         origin: u64,
         retained_end: u64,
-    ) -> Option<(u64, u64)> {
+    ) -> Option<CommandOutput> {
         self.prune(origin, retained_end);
         let span = |completed: &Completed| {
             let start = completed.output.max(origin);
             let end = completed.end.min(retained_end);
-            (start < end).then_some((start, end))
+            let end_column = completed.end_column.filter(|_| end == completed.end);
+            (start < end).then_some(CommandOutput {
+                start,
+                end,
+                end_column,
+            })
         };
         match at {
             Some(at) => self
@@ -157,7 +191,7 @@ impl CommandMarks {
                 .iter()
                 .rev()
                 .filter_map(span)
-                .find(|(start, end)| (*start..*end).contains(&at)),
+                .find(|output| (output.start..output.end).contains(&at)),
             None => self.marks.back().and_then(span),
         }
     }
@@ -169,7 +203,7 @@ impl CommandMarks {
         &mut self,
         term: &super::Term<crate::EventProxy>,
         at: Option<u64>,
-    ) -> Option<(u64, u64)> {
+    ) -> Option<CommandOutput> {
         if term
             .mode()
             .contains(alacritty_terminal::term::TermMode::ALT_SCREEN)
@@ -379,6 +413,16 @@ impl CommandMarks {
     }
 }
 
+/// The writing cursor's column when text before it on its row may be
+/// followed by more on the same row: past column 0, and not at the right
+/// margin with a wrap pending, which ends the row.
+fn column_of_unfinished_row(
+    grid: &alacritty_terminal::grid::Grid<alacritty_terminal::term::cell::Cell>,
+) -> Option<usize> {
+    let cursor = &grid.cursor;
+    (cursor.point.column.0 > 0 && !cursor.input_needs_wrap).then_some(cursor.point.column.0)
+}
+
 /// The first row at or below the writing cursor with nothing written before
 /// the cursor: its own row at column 0, else the row below.
 fn row_after_cursor_text(
@@ -402,6 +446,18 @@ mod tests {
 
     fn quiet(row: u64, exit_code: i32) -> CommandMark {
         CommandMark { row, exit_code }
+    }
+
+    /// [`CommandMarks::output_rows`], rows alone.
+    fn rows_of(
+        marks: &mut CommandMarks,
+        at: Option<u64>,
+        origin: u64,
+        retained_end: u64,
+    ) -> Option<(u64, u64)> {
+        marks
+            .output_rows(at, origin, retained_end)
+            .map(|output| (output.start, output.end))
     }
 
     fn spans(marks: &CommandMarks) -> Vec<(u64, u64, u64)> {
@@ -470,20 +526,20 @@ mod tests {
             vec![(10, 11, 14), (14, 14, 14), (15, 15, 15)],
             "an empty or inverted span is kept as the prompt row"
         );
-        assert_eq!(marks.output_rows(None, 0, 30), None, "newest is empty");
-        assert_eq!(marks.output_rows(Some(11), 0, 30), Some((11, 14)));
-        assert_eq!(marks.output_rows(Some(13), 0, 30), Some((11, 14)));
-        assert_eq!(marks.output_rows(Some(10), 0, 30), None, "prompt row");
-        assert_eq!(marks.output_rows(Some(14), 0, 30), None, "next prompt");
+        assert_eq!(rows_of(&mut marks, None, 0, 30), None, "newest is empty");
+        assert_eq!(rows_of(&mut marks, Some(11), 0, 30), Some((11, 14)));
+        assert_eq!(rows_of(&mut marks, Some(13), 0, 30), Some((11, 14)));
+        assert_eq!(rows_of(&mut marks, Some(10), 0, 30), None, "prompt row");
+        assert_eq!(rows_of(&mut marks, Some(14), 0, 30), None, "next prompt");
         marks.begin(Some(16), 17);
         marks.end(Some(0), 19);
-        assert_eq!(marks.output_rows(None, 0, 30), Some((17, 19)));
-        assert_eq!(marks.output_rows(Some(18), 0, 30), Some((17, 19)));
+        assert_eq!(rows_of(&mut marks, None, 0, 30), Some((17, 19)));
+        assert_eq!(rows_of(&mut marks, Some(18), 0, 30), Some((17, 19)));
         // Rows past the retained grid are cut off, and marks there dropped.
-        assert_eq!(marks.output_rows(Some(11), 0, 13), Some((11, 13)));
+        assert_eq!(rows_of(&mut marks, Some(11), 0, 13), Some((11, 13)));
         assert_eq!(marks.retained(0, 30).len(), 1);
         // The prompt row left history: the mark and its span go with it.
-        assert_eq!(marks.output_rows(Some(11), 11, 30), None);
+        assert_eq!(rows_of(&mut marks, Some(11), 11, 30), None);
         assert!(marks.retained(0, 30).is_empty());
     }
 
@@ -495,10 +551,10 @@ mod tests {
         let mut marks = CommandMarks::default();
         marks.begin(Some(10), 8); // C written above the prompt row
         marks.end(Some(0), 12);
-        assert_eq!(marks.output_rows(None, 0, 30), Some((8, 12)));
-        assert_eq!(marks.output_rows(None, 9, 30), Some((9, 12)));
-        assert_eq!(marks.output_rows(Some(8), 9, 30), None, "row 8 is gone");
-        assert_eq!(marks.output_rows(Some(9), 9, 30), Some((9, 12)));
+        assert_eq!(rows_of(&mut marks, None, 0, 30), Some((8, 12)));
+        assert_eq!(rows_of(&mut marks, None, 9, 30), Some((9, 12)));
+        assert_eq!(rows_of(&mut marks, Some(8), 9, 30), None, "row 8 is gone");
+        assert_eq!(rows_of(&mut marks, Some(9), 9, 30), Some((9, 12)));
     }
 
     const FIXTURE_ENV: &str = "KETTLE_TEST_COMMAND_MARK_WIRE";
@@ -817,11 +873,19 @@ mod tests {
         fn output(&mut self, at: Option<i64>) -> Option<(i128, i128)> {
             let top = self.screen_top();
             let at = at.map(|row| top.checked_add_signed(row).unwrap());
-            let (start, end) = self.marks.output_rows_in(&self.term, at)?;
+            let CommandOutput { start, end, .. } = self.marks.output_rows_in(&self.term, at)?;
             Some((
                 i128::from(start) - i128::from(top),
                 i128::from(end) - i128::from(top),
             ))
+        }
+
+        /// The column the output of [`Self::output`]'s command stops at on
+        /// its last row, when the row goes on past it.
+        fn end_column(&mut self, at: Option<i64>) -> Option<usize> {
+            let top = self.screen_top();
+            let at = at.map(|row| top.checked_add_signed(row).unwrap());
+            self.marks.output_rows_in(&self.term, at)?.end_column
         }
 
         /// Completed commands' prompt rows, relative to the screen's top, and
@@ -880,6 +944,60 @@ mod tests {
         }
     }
 
+    /// Output without a final newline, as bash and fish write it: D comes
+    /// partway along the output's last row and the next prompt follows on
+    /// that row, so the output stops at D's column. A command typed at that
+    /// prompt prints below it, whole rows again. Output that fills its last
+    /// row to the margin, with the wrap still pending at D, ends there, and
+    /// the prompt starts the next row.
+    #[test]
+    fn output_without_a_final_newline_stops_where_the_next_prompt_starts() {
+        let mut shared = parse(
+            &format!(
+                "{PROMPT}cmd\r\n\x1b]133;C\x07out1\r\nout2\x1b]133;D;0\x07{PROMPT}next\r\n\
+                 \x1b]133;C\x07out3\r\n\x1b]133;D;1\x07{PROMPT}"
+            ),
+            4,
+        );
+        let text: Vec<_> = (0..5).map(|row| shared.text(row)).collect();
+        assert_eq!(text, ["$ cmd", "out1", "out2$ next", "out3", "$"]);
+        assert_eq!(shared.rows(), [(0, 0), (2, 1)]);
+        assert_eq!(shared.output(Some(2)), Some((1, 3)));
+        assert_eq!(shared.end_column(Some(2)), Some(4), "out2 is four cells");
+        assert_eq!(shared.output(None), Some((3, 4)), "the next command");
+        assert_eq!(shared.end_column(None), None);
+
+        let full = "x".repeat(80);
+        let mut wrapped = parse(
+            &format!("{PROMPT}cmd\r\n\x1b]133;C\x07{full}\x1b]133;D;0\x07{PROMPT}"),
+            4,
+        );
+        assert_eq!(wrapped.text(1), full);
+        assert_eq!(wrapped.text(2), "$");
+        assert_eq!(wrapped.output(None), Some((1, 2)));
+        assert_eq!(wrapped.end_column(None), None, "the whole row is output");
+    }
+
+    /// A last row past the retained rows is cut off with its end column: the
+    /// row that ends the cut span is whole.
+    #[test]
+    fn a_span_cut_short_of_its_last_row_ends_with_a_whole_row() {
+        let mut marks = CommandMarks::default();
+        marks.begin(Some(10), 11);
+        marks.end_at(Some(0), 14, Some(5));
+        let output = |marks: &mut CommandMarks, retained_end| {
+            let output = marks.output_rows(None, 0, retained_end).unwrap();
+            (output.start, output.end, output.end_column)
+        };
+        assert_eq!(output(&mut marks, 30), (11, 14, Some(5)));
+        assert_eq!(output(&mut marks, 13), (11, 13, None));
+        // A command that printed nothing keeps no column.
+        marks.begin(Some(14), 15);
+        marks.end_at(Some(0), 15, Some(3));
+        assert_eq!(spans(&marks).last(), Some(&(14, 14, 14)));
+        assert_eq!(marks.marks.back().unwrap().end_column, None);
+    }
+
     /// No C, no command: nothing to select, though the rows hold text. A
     /// command that printed nothing has no output either.
     #[test]
@@ -934,11 +1052,13 @@ mod tests {
             let term = pane.term.lock().unwrap();
             term.grid().history_origin() + term.grid().history_size() as u64
         };
-        assert_eq!(pane.command_output_rows(None), Some((top + 1, top + 3)));
-        assert_eq!(
-            pane.command_output_rows(Some(top + 2)),
-            Some((top + 1, top + 3))
-        );
+        let whole = Some(CommandOutput {
+            start: top + 1,
+            end: top + 3,
+            end_column: None,
+        });
+        assert_eq!(pane.command_output_rows(None), whole);
+        assert_eq!(pane.command_output_rows(Some(top + 2)), whole);
         // The grid reflows before the native resize, which may refuse the
         // pseudoterminal of a child that has exited.
         let _ = pane.try_resize_geometry(super::super::PtyGeometry::from_cell_size(60, 6, 8, 16));

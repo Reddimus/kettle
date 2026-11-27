@@ -91,7 +91,11 @@ outcomes whose original row positions can no longer be trusted.
 ready to copy: from the row after the command line, where OSC 133 C arrives,
 up to the row where D arrives and the next prompt starts. A cursor past the
 first column at C or D counts its row with the command line or the output, so
-output without a final newline is included. Right-click a row of a command's
+output without a final newline is included, up to the column where D arrives.
+Bash writes the next prompt right after such output, on the same row, and the
+selection leaves that prompt out. zsh's `PROMPT_SP` writes its end-of-line mark
+(`%` by default) and padding after the output before D arrives, so with zsh
+that mark is selected with the line. Right-click a row of a command's
 output and the menu offers it after **Select All**; the command palette's
 **Select output of last command**, or the `select_command_output` action bound
 to a chord, takes the newest command. No platform binds it by default, so

@@ -3,7 +3,7 @@
 
 mod command_correlation;
 mod command_marks;
-pub use command_marks::CommandMark;
+pub use command_marks::{CommandMark, CommandOutput};
 mod local_echo;
 pub use command_correlation::CommandCorrelationCapability;
 pub use local_echo::LocalEcho;
@@ -8158,11 +8158,12 @@ impl Terminal {
     }
 
     /// Stable row ids `start..end` of one completed command's output (the
-    /// rows from its OSC 133 C to its D): the newest command whose output holds row
-    /// `at`, or with `None`, the newest command. `None` when that command
-    /// printed nothing, its rows are gone, or the alternate screen is up.
-    /// Locks as [`Self::command_marks`] does.
-    pub fn command_output_rows(&self, at: Option<u64>) -> Option<(u64, u64)> {
+    /// rows from its OSC 133 C to its D), and the column its last row's
+    /// output stops at when the next prompt shares that row: the newest
+    /// command whose output holds row `at`, or with `None`, the newest
+    /// command. `None` when that command printed nothing, its rows are gone,
+    /// or the alternate screen is up. Locks as [`Self::command_marks`] does.
+    pub fn command_output_rows(&self, at: Option<u64>) -> Option<CommandOutput> {
         let _graphics_guard = self
             .graphics_gate
             .lock()
