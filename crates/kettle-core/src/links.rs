@@ -1803,6 +1803,27 @@ mod tests {
         }
     }
 
+    /// Quoted prose that starts with a path still links a later path from a
+    /// root; a relative piece of a quoted name does not.
+    #[test]
+    fn quoted_prose_starting_with_a_path_links_a_rooted_one() {
+        for (line, uri) in [
+            (
+                "msg=\"./build.sh failed, see /tmp/build.log\"",
+                "file:///tmp/build.log",
+            ),
+            ("\"src/a.rs uses /tmp/b.txt\"", "file:///tmp/b.txt"),
+            ("\"src/a.rs: cannot open /tmp/b.txt\"", "file:///tmp/b.txt"),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>();
+            assert_eq!(found, [uri], "{line}");
+        }
+    }
+
     /// Compact JSON closes each string before the next opens, so a later
     /// value's path links whatever an earlier value held.
     #[test]

@@ -278,14 +278,16 @@ pub(crate) fn path_reaches_quote(
                     .any(|c| c != ' ' && crate::links::hides_text(c))
                 && {
                     // The quoted text before the path: a path-shaped word
-                    // glued to it, or one starting the quotes (a quoted path
-                    // with a space the pattern refused, `"docs/my dir/x"`),
-                    // makes it a piece of that path. Quoted prose starts
-                    // with a word.
+                    // glued to it, or, for a relative path, one starting the
+                    // quotes (a quoted path with a space the pattern refused,
+                    // `"docs/my dir/x"`), makes it a piece of that path. A
+                    // path from a root starts its own, as in quoted prose
+                    // (`"./build.sh failed, see /tmp/build.log"`).
                     let lead = &line[open + 1..start];
                     let glued = lead.rsplit(char::is_whitespace).next().unwrap_or(lead);
                     let first = lead.split(char::is_whitespace).next().unwrap_or(lead);
-                    !glued.contains(['/', '\\']) && !first.contains(['/', '\\'])
+                    !glued.contains(['/', '\\'])
+                        && (starts_its_own_path(&line[start..]) || !first.contains(['/', '\\']))
                 }
         })
 }
@@ -323,12 +325,27 @@ fn continues_a_quoted_token(line: &str, start: usize) -> bool {
         return true;
     }
     // The last quote before the path, if a colon kept it from opening a
-    // run and nothing closed it since.
-    window
-        .rfind(['"', '\'', '`'])
-        .filter(|&at| window[..at].ends_with(':'))
-        .and_then(|at| window[at + 1..].split(char::is_whitespace).next())
-        .is_some_and(|first| !first.is_empty() && path_shaped(first))
+    // run and nothing closed it since; a path from a root starts its own.
+    !starts_its_own_path(&line[start..])
+        && window
+            .rfind(['"', '\'', '`'])
+            .filter(|&at| window[..at].ends_with(':'))
+            .and_then(|at| window[at + 1..].split(char::is_whitespace).next())
+            .is_some_and(|first| !first.is_empty() && path_shaped(first))
+}
+
+/// Whether `path` starts from a root, `~/`, `./`, `../` or a drive, so it
+/// cannot continue a name before it in quoted text.
+fn starts_its_own_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    path.starts_with(['/', '\\'])
+        || ["~/", "./", "../"]
+            .iter()
+            .any(|root| path.starts_with(root))
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\'))
 }
 
 /// Whether the quoted run holding a bare path closes right at its `end`,
@@ -1575,6 +1592,29 @@ mod tests {
                 "{body}: {spans:?}"
             );
         }
+    }
+
+    /// Quoted prose that starts with a path keeps a later path from a root
+    /// whole; only a relative piece can continue the quoted name.
+    #[test]
+    fn quoted_prose_starting_with_a_path_keeps_a_rooted_one_whole() {
+        for (line, path) in [
+            (
+                "msg=\"./build.sh failed, see /tmp/build.log\"",
+                "/tmp/build.log",
+            ),
+            ("\"src/a.rs uses /tmp/b.txt\"", "/tmp/b.txt"),
+            ("\"src/a.rs: cannot open /tmp/b.txt\"", "/tmp/b.txt"),
+            ("{\"msg\":\"./a.sh failed, see /tmp/b.log\"}", "/tmp/b.log"),
+        ] {
+            let spans = detect(&[line]);
+            assert!(
+                spans.iter().any(|span| span.text == path && span.bounded),
+                "{line}: {spans:?}"
+            );
+        }
+        let spans = detect(&["open \"docs/my dir/a/b\" now"]);
+        assert!(spans.iter().all(|span| !span.bounded), "{spans:?}");
     }
 
     /// Compact JSON closes each string before the next opens, so a later
