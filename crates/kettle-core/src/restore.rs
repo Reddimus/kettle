@@ -733,21 +733,29 @@ mod tests {
         }
     }
 
-    /// Soft-wrapped rows, a leading wide spacer and a row of blanks come back
-    /// as the same text in a pane of one row, where replay cannot make a line
-    /// ahead of the wrap, and in panes narrower and wider than the one saved.
+    /// Soft-wrapped rows, wrap-scrolled colours, leading wide spacers, tabs and
+    /// a row of blanks come back as they look in the same pane resized: in a
+    /// pane of one row, in narrower and wider panes, and at the saved size.
     #[test]
     fn restored_wrapped_text_survives_other_pane_sizes() {
-        let mut script = vec![b'x'; 45];
+        let mut script = b"s\r\n".repeat(8);
+        script.extend_from_slice(&[b'x'; 45]);
         script.extend_from_slice(b"\r\n\x1b[42m");
         script.extend_from_slice(&[b'y'; 50]);
         script.extend_from_slice(b"\x1b[0m\r\na");
         script.extend_from_slice("\u{754c}".repeat(25).as_bytes());
-        script.extend_from_slice(b"\r\n");
+        script.extend_from_slice(b"\r\nx\ty\tz\r\n");
         script.extend_from_slice(&[b'z'; 40]);
-        script.extend_from_slice(b" \r\nend\r\n");
-        let mut source = tall_terminal();
-        Processor::new().advance(&mut source, &script);
+        script.extend_from_slice(b" \r\n\x1b[48;5;22m");
+        script.extend_from_slice(&[b'w'; 45]);
+        script.extend_from_slice(b"\x1b[0m\r\n");
+        // A leading spacer whose wide character was erased below it. Reflow
+        // drops it at a new wrap, and restore keeps it as a blank, so it is
+        // compared only at the saved width.
+        let mut stale = b"\x1b[7;38;5;196m".to_vec();
+        stale.extend_from_slice(&[b'v'; 39]);
+        stale.extend_from_slice("\u{4e16}".as_bytes());
+        stale.extend_from_slice(b"\x1b[0m\r\x1b[B\x1b[2Kq\r\n");
         let text = |term: &Term<EventProxy>| {
             let grid = term.grid();
             let all = term.bounds_to_string(
@@ -757,23 +765,21 @@ mod tests {
             let end = all.find("end").expect("saved rows") + 3;
             all[..end].to_string()
         };
-        let saved = snapshot(&source, MAX_RESTORE_LINES, &mut usize::MAX.clone());
-        for (columns, rows) in [(40, 1), (40, 2), (30, 10), (50, 10)] {
-            let (tx, _) = crossbeam_channel::unbounded();
-            let mut restored = Term::new(
-                Config {
-                    scrolling_history: 20_000,
-                    grapheme_clustering: true,
-                    ..Config::default()
-                },
-                &TermSize::new(columns, rows),
-                EventProxy::new(tx, Arc::new(|| {})),
-            );
-            Processor::new().advance(
-                &mut restored,
-                replay(&saved, "divider", columns, true).unwrap().as_bytes(),
-            );
-            assert_eq!(text(&restored), text(&source), "{columns}x{rows}");
+        for to in [(40, 10), (40, 1), (40, 2), (30, 10), (30, 1), (50, 10)] {
+            let mut script = script.clone();
+            if to.0 == 40 {
+                script.extend_from_slice(&stale);
+            }
+            script.extend_from_slice(b"end\r\n");
+            let (restored, expected, rows) = restored_and_resized(&script, (40, 10), to);
+            let label = format!("{to:?}");
+            // Tabs come back as blanks, and the leading spacer before `q` is
+            // saved as a blank, which copies as a space.
+            let source_text = text(&expected)
+                .replacen("x\ty\tz", "x       y       z", 1)
+                .replacen("vq", "v q", 1);
+            assert_eq!(text(&restored), source_text, "{label}");
+            assert_restored_like(&restored, &expected, rows, to.0 == 40, &label);
         }
     }
 
