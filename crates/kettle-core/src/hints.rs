@@ -126,9 +126,10 @@ pub(crate) fn has_path_context(text: &str) -> bool {
 
 /// The stricter context for paths Kettle underlines on its own: besides
 /// [`has_path_context`], a relative name without an explicit root needs an
-/// extension on its last part or at least three parts, so slash-joined words
-/// in prose (`read/write`, `and/or`, `Save/restore`) are not drawn as links.
-/// Hint mode, an explicit request, keeps the looser rule.
+/// extension on its last part (a dotfile's name, `.env`, is one) or at least
+/// three parts, so slash-joined words in prose (`read/write`, `and/or`,
+/// `Save/restore`) are not drawn as links. Hint mode, an explicit request,
+/// keeps the looser rule.
 pub(crate) fn has_link_path_context(text: &str) -> bool {
     if !has_path_context(text) {
         return false;
@@ -144,7 +145,7 @@ pub(crate) fn has_link_path_context(text: &str) -> bool {
     parts.len() >= 3
         || parts.last().is_some_and(|name| {
             name.rsplit_once('.')
-                .is_some_and(|(stem, ext)| !stem.is_empty() && ext.chars().any(char::is_alphabetic))
+                .is_some_and(|(_, ext)| ext.chars().any(char::is_alphabetic))
         })
 }
 
@@ -173,9 +174,10 @@ const MAX_QUOTED_PATH: usize = 1024;
 /// ends with a space, and no character a name rarely holds. Quoted prose
 /// must not become a path, so a relative path's first segment has no space
 /// (`"see src/main.rs"` stays prose with `src/main.rs` in it), and the path
-/// ends in an extension or a separator, or is anchored (`/`, `~/`, `./`,
-/// `../`, a drive) with at least two separators (`"~/Library/Application
-/// Support"`). Nothing here touches the filesystem.
+/// ends in an extension (a dotfile's name, `.env`, is one) or a separator,
+/// or is anchored (`/`, `~/`, `./`, `../`, a drive) with at least two
+/// separators (`"~/Library/Application Support"`). Nothing here touches the
+/// filesystem.
 pub(crate) fn quoted_paths(line: &str) -> impl Iterator<Item = (usize, usize, usize)> + '_ {
     quoted_runs(line).filter_map(|(open, close)| {
         if !quote_has_end(line, close) {
@@ -328,10 +330,8 @@ fn quoted_path_len(body: &str, quote: char) -> Option<usize> {
     }
     let name = segments[last];
     let directory = name.is_empty();
-    let extension = name.rsplit_once('.').is_some_and(|(stem, extension)| {
-        !stem.is_empty()
-            && (1..=12).contains(&extension.len())
-            && extension.bytes().all(|b| b.is_ascii_alphanumeric())
+    let extension = name.rsplit_once('.').is_some_and(|(_, extension)| {
+        (1..=12).contains(&extension.len()) && extension.bytes().all(|b| b.is_ascii_alphanumeric())
     });
     // Ends like a name, not prose punctuation; Unicode `\w` again, so a
     // decomposed name (`café` as `cafe\u{301}`) ends in a word character.
@@ -1254,6 +1254,35 @@ mod tests {
         let spans = detect(&["open \"docs/my café.pdf\" now"]);
         assert_eq!(spans.len(), 1);
         assert!(spans[0].bounded);
+    }
+
+    /// A dotfile's name is its extension, so a quoted path ending in one is
+    /// whole, not the bare piece after its space (`dir/.env`, which names
+    /// another file).
+    #[test]
+    fn a_quoted_path_ending_in_a_dotfile_is_whole() {
+        for path in [
+            "docs/my dir/.env",
+            "docs/annual report/.gitignore",
+            "docs/my dir/.bashrc",
+            "docs/my dir/.env.local",
+        ] {
+            let spans = detect(&[&format!("open \"{path}\" now")]);
+            assert_eq!(spans.len(), 1, "{path}: {spans:?}");
+            assert_eq!(spans[0].text, path);
+            assert!(spans[0].bounded, "{path}");
+        }
+        // Still no extension: these stay partial, as before.
+        for line in [
+            "open \"docs/my dir/Makefile\" now",
+            "open \"docs/my dir/.\" now",
+        ] {
+            let spans = detect(&[line]);
+            assert!(
+                spans.iter().all(|span| !span.text.contains(' ')),
+                "{line}: {spans:?}"
+            );
+        }
     }
 
     /// A quote after a `:` never opens a quoted path: `host:"…"` and

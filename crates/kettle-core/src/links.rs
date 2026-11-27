@@ -1456,6 +1456,32 @@ mod tests {
         assert!(found("\"../my dir/etc/hosts.txt\"").is_empty());
     }
 
+    /// A dotfile's name is its extension: a quoted path ending in one links
+    /// whole, and a two-part relative path to one links like `src/main.rs`.
+    #[test]
+    fn a_path_ending_in_a_dotfile_is_a_link() {
+        for (line, uri) in [
+            (
+                "open \"docs/my dir/.env\" now",
+                "file:///work/docs/my%20dir/.env",
+            ),
+            (
+                "open \"docs/annual report/.gitignore\" now",
+                "file:///work/docs/annual%20report/.gitignore",
+            ),
+            ("see docs/.env ok", "file:///work/docs/.env"),
+            ("see a/b/.env ok", "file:///work/a/b/.env"),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert_eq!(found.len(), 1, "{line}: {found:?}");
+            assert_eq!(found[0].uri, uri, "{line}");
+        }
+        for line in ["see docs/. ok", "see docs/.. ok", "see and/.5 ok"] {
+            assert_eq!(path_candidates(line).count(), 0, "{line}");
+        }
+    }
+
     /// A link ending in a wide character covers both of its cells, so the
     /// whole glyph underlines and clicks.
     #[test]
