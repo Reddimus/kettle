@@ -1700,6 +1700,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - URLs printed with an uppercase scheme, such as `HTTPS://`, `FILE://` or `WWW.`, are detected as links and quick-select URLs.
 - A file name holding `www.`, such as `docs/www.example.com.txt`, links the file rather than a web address.
 - The end of a quoted path that Kettle cannot read whole, such as `/tmp/report.pdf` in `"docs/a*b=/tmp/report.pdf"`, is no longer offered as a file of its own.
+- A relative path after a space inside quotes, such as `b/notes.txt` in `"a b/notes.txt"`, is no longer a link, since it may be the end of a quoted name: quick select copies it. A path from a root, as in `"see /tmp/report.pdf"`, still links.
 - A path inside text shaped like a link Kettle does not open, such as `/tmp/a.pdf` in `vscode://open?file=/tmp/a.pdf`, is no longer a link of its own.
 - On Windows, a file link whose name ends in a dot or a space is refused rather than opening the file Windows reads it as, such as `report.pdf` for `report.pdf..`.
 - A path ending in a dotfile, such as `docs/.env` or a quoted `"docs/my dir/.env"`, is a link, and quick select no longer offers only the part after the space.

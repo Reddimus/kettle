@@ -1746,9 +1746,12 @@ mod tests {
             ),
             // Inside a shell's single quotes a backslash is a backslash, so
             // the `'` after it closes the string, and the later path links.
+            // The string names no drive, which Windows alone would link
+            // (see `a_single_quote_closes_after_a_backslash`), so the line
+            // links the same everywhere.
             (
-                r#"export A='C:\work\';B=/tmp/c.txt"#,
-                &[("file:///tmp/c.txt", 22, 31)],
+                r#"export A='a\work\';B=/tmp/c.txt"#,
+                &[("file:///tmp/c.txt", 21, 30)],
                 &[(Kind::Path, "/tmp/c.txt", true)],
             ),
             // Glued to more text, a `\'` inside single quotes is an escape,
@@ -1944,10 +1947,14 @@ mod tests {
             let term = term_with(80, &[line], &[]);
             assert!(links_with_cwd(&term, Some("/work")).is_empty(), "{line}");
         }
+        // A relative path after a space inside quotes may be a piece of a
+        // quoted name, so it links nothing; one from a root links.
         let term = term_with(80, &["\"see src/main.rs\""], &[]);
+        assert!(links_with_cwd(&term, Some("/work")).is_empty());
+        let term = term_with(80, &["\"see /tmp/main.rs\""], &[]);
         let found = links_with_cwd(&term, Some("/work"));
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].uri, "file:///work/src/main.rs");
+        assert_eq!(found[0].uri, "file:///tmp/main.rs");
     }
 
     #[test]
@@ -2171,10 +2178,9 @@ mod tests {
             "{:?}",
             found("scp \"h:/srv/my report.pdf\" .")
         );
-        assert_eq!(
-            found("\"see src/main.rs\""),
-            [(5, 15, "file:///home/me/proj/src/main.rs".to_string())]
-        );
+        // A relative path after a space inside quotes may be a piece of a
+        // quoted name holding a space, so it links nothing.
+        assert!(found("\"see src/main.rs\"").is_empty());
         // A climb stays refused inside quotes too, and no piece of the
         // refused path links on its own.
         assert!(found("\"../up here/a.txt\"").is_empty());
@@ -2329,19 +2335,27 @@ mod tests {
     }
 
     /// Inside a shell's single quotes a backslash is a backslash, so the
-    /// next `'` closes the string and a later path on the line links.
+    /// next `'` closes the string and a later path on the line links. Only
+    /// Windows reads `C:\work\` as a drive's folder, which links there; on
+    /// any other system a backslash is part of a name and no separator.
     #[test]
     fn a_single_quote_closes_after_a_backslash() {
-        for line in [
-            r#"export A='C:\work\';B=/tmp/c.txt"#,
-            r#"x='a\';y=/tmp/c.txt"#,
+        let drive: &[&str] = if cfg!(windows) {
+            &["file:///C:/work/", "file:///tmp/c.txt"]
+        } else {
+            &["file:///tmp/c.txt"]
+        };
+        for (line, want) in [
+            (r#"export A='C:\work\';B=/tmp/c.txt"#, drive),
+            (r#"export A='a\work\';B=/tmp/c.txt"#, &["file:///tmp/c.txt"]),
+            (r#"x='a\';y=/tmp/c.txt"#, &["file:///tmp/c.txt"]),
         ] {
             let term = term_with(line.chars().count(), &[line], &[]);
             let found = links_with_cwd(&term, Some("/work"))
                 .into_iter()
                 .map(|link| link.uri)
                 .collect::<Vec<_>>();
-            assert_eq!(found, ["file:///tmp/c.txt"], "{line}");
+            assert_eq!(found, want, "{line}");
         }
     }
 
@@ -2375,6 +2389,276 @@ mod tests {
             (r#"echo \`date\` /tmp/x.log"#, "file:///tmp/x.log"),
         ] {
             assert_eq!(found(line), [uri], "{line}");
+        }
+    }
+
+    /// An apostrophe inside a word (`can't`, `it's`, `users'`) opens no
+    /// quoted string, so the JSON quotes after it are read as they are: the
+    /// tail of a quoted name with a space is no file of its own.
+    #[test]
+    fn an_apostrophe_in_a_word_opens_no_quote() {
+        let found = |line: &str| {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>()
+        };
+        for line in [
+            r#"can't open {"file":"/Users/me/my app/x.py"}"#,
+            r#"it's in {"file":"/Users/me/my app/x.py"}"#,
+            r#"the users' {"file":"/Users/me/my app/x.py"}"#,
+            r#"don't 7'x {"file":"docs/my dir/a/b"}"#,
+        ] {
+            assert!(found(line).is_empty(), "{line}: {:?}", found(line));
+        }
+        for (line, uri) in [
+            (
+                r#"can't open {"file":"/Users/me/x.py"}"#,
+                "file:///Users/me/x.py",
+            ),
+            (r#"it's at '/tmp/x.log'"#, "file:///tmp/x.log"),
+        ] {
+            assert_eq!(found(line), [uri], "{line}");
+        }
+    }
+
+    /// Where the quoting around a path is uncertain, a relative piece, or
+    /// one glued to the text before it, links nothing: an unmatched quote
+    /// before it hides no later pair, and another or an escaped quote inside
+    /// the string makes its reading uncertain. A path from a root that is a
+    /// whole token after whitespace still links.
+    #[test]
+    fn an_uncertain_quote_leaves_only_rooted_tokens_openable() {
+        let found = |line: &str| {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>()
+        };
+        for line in [
+            r#"a "b "c/d x/y.txt" e"#,
+            r#"it 'oops {"file":"docs/my dir/a/b"}"#,
+            r#"x="a\"b c/d.txt""#,
+            r#"x='a"b c/d.txt'"#,
+        ] {
+            assert!(found(line).is_empty(), "{line}: {:?}", found(line));
+        }
+        for (line, uri) in [
+            (r#"x='a"b /tmp/x.log'"#, "file:///tmp/x.log"),
+            (r#"a "b "c/d /tmp/x.log" e"#, "file:///tmp/x.log"),
+            (r#"echo "a b" c/d.txt "x""#, "file:///work/c/d.txt"),
+            (r#"see src/x.rs, it's fine"#, "file:///work/src/x.rs"),
+        ] {
+            assert_eq!(found(line), [uri], "{line}");
+        }
+    }
+
+    /// A relative path after a space inside a quoted string may be a piece
+    /// of a quoted name holding a space, which quoted prose cannot be told
+    /// from, so neither a link nor quick select opens it; a stray quote
+    /// before or after a string leaves its pairing in doubt, and then no
+    /// piece of it opens either. A path outside the string, or a whole one
+    /// from a root inside it, still opens, and an apostrophe inside a word
+    /// pairs with nothing.
+    #[test]
+    fn a_quoted_name_holding_a_space_opens_no_piece() {
+        let opens = |line: &str| {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            let links = links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>();
+            let hints = crate::hints::detect(&[line])
+                .into_iter()
+                .filter(|span| span.bounded)
+                .map(|span| span.text)
+                .collect::<Vec<_>>();
+            (links, hints)
+        };
+        let none: &[&str] = &[];
+        for (line, links, hints) in [
+            (
+                r#"export Z="a b/notes.txt" src/ok.rs:3"#,
+                &["file:///work/src/ok.rs"][..],
+                &["src/ok.rs"][..],
+            ),
+            (r#"{'msg':'x','file':'Q3 final/Q3 final.pdf'}"#, none, none),
+            (r#"x 'tis A='/Users/me/a b/notes/my dir.txt'"#, none, none),
+            (
+                r#"the "quoted x="~/Q3 final/a b/notes";B=/tmp/ok.log the "quoted"#,
+                none,
+                none,
+            ),
+            (
+                r#"the "quoted {"msg":"~/annual report/Q3 final.pdf"} the "quoted"#,
+                none,
+                none,
+            ),
+            (
+                r#"msg="failed to read /etc/app.toml""#,
+                &["file:///etc/app.toml"][..],
+                &["/etc/app.toml"][..],
+            ),
+            // An apostrophe inside a word pairs with no quote after it.
+            (
+                r#"it's in src/a.rs 'cause"#,
+                &["file:///work/src/a.rs"][..],
+                &["src/a.rs"][..],
+            ),
+            (
+                r#"I've updated 'foo' in src/a.rs, and it's done"#,
+                &["file:///work/src/a.rs"][..],
+                &["src/a.rs"][..],
+            ),
+        ] {
+            let (found, offered) = opens(line);
+            assert_eq!(found, links, "links in {line}");
+            assert_eq!(offered, hints, "hints in {line}");
+        }
+    }
+
+    /// Lines composed at random from prose with apostrophes and stray
+    /// quotes, JSON objects whose values hold spaces, paths and escaped
+    /// quotes, and shell assignments in single and double quotes: no link,
+    /// and no hint quick select may open, is a piece inside a quoted value;
+    /// only the whole value may be. Seeded, so a failure repeats.
+    #[test]
+    fn no_piece_of_a_quoted_value_opens_in_composed_lines() {
+        struct Rng(u64);
+        impl Rng {
+            fn pick(&mut self, n: usize) -> usize {
+                self.0 ^= self.0 << 13;
+                self.0 ^= self.0 >> 7;
+                self.0 ^= self.0 << 17;
+                (self.0 % n as u64) as usize
+            }
+        }
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        let prose = [
+            "can't open",
+            "it's in",
+            "the users' copy",
+            "don't",
+            "Bob's",
+            "see",
+            "5' tall",
+            "error:",
+            "x 'tis",
+            "the \"quoted",
+            "ok",
+        ];
+        let names = [
+            "my app",
+            "annual report",
+            "a b",
+            "notes",
+            "my dir",
+            "x",
+            "src",
+            "Q3 final",
+        ];
+        let extensions = ["", ".py", ".txt", ".pdf", ".tar.gz"];
+        let roots = ["/Users/me/", "docs/", "", "~/", "./"];
+        let tails = ["/tmp/report.pdf", "src/lib.rs", "/etc/x.conf"];
+        let others = [
+            "https://x.test/a",
+            "application/json",
+            "2026/11/26",
+            "it's a/b",
+            "x 0.1.0",
+            "/work",
+        ];
+        for _ in 0..4000 {
+            let mut line = String::new();
+            let mut values: Vec<(usize, usize)> = Vec::new();
+            for item in 0..1 + rng.pick(4) {
+                if item > 0 {
+                    line.push(' ');
+                }
+                // A quoted value, escaped for the quote `quote` it sits in.
+                let value = |rng: &mut Rng, quote: char, path: bool| {
+                    if !path {
+                        return others[rng.pick(others.len())].to_string();
+                    }
+                    let mut value = roots[rng.pick(roots.len())].to_string();
+                    for part in 0..1 + rng.pick(3) {
+                        if part > 0 {
+                            value.push('/');
+                        }
+                        value.push_str(names[rng.pick(names.len())]);
+                    }
+                    value.push_str(extensions[rng.pick(extensions.len())]);
+                    if rng.pick(4) == 0 {
+                        value.push('\\');
+                        value.push(quote);
+                        value.push_str("b=");
+                        value.push_str(tails[rng.pick(tails.len())]);
+                    }
+                    value
+                };
+                let quoted = |line: &mut String, values: &mut Vec<(usize, usize)>, text: String| {
+                    values.push((line.len(), line.len() + text.len()));
+                    line.push_str(&text);
+                };
+                match rng.pick(4) {
+                    0 => line.push_str(prose[rng.pick(prose.len())]),
+                    1 => {
+                        // JSON, compact, with double or single quotes.
+                        let q = if rng.pick(3) == 0 { '\'' } else { '"' };
+                        line.push('{');
+                        for pair in 0..1 + rng.pick(3) {
+                            if pair > 0 {
+                                line.push(',');
+                            }
+                            line.push(q);
+                            line.push_str(["file", "cwd", "msg", "path"][rng.pick(4)]);
+                            line.push(q);
+                            line.push(':');
+                            line.push(q);
+                            let path = rng.pick(3) != 0;
+                            let text = value(&mut rng, q, path);
+                            quoted(&mut line, &mut values, text);
+                            line.push(q);
+                        }
+                        line.push('}');
+                    }
+                    2 => {
+                        // A shell assignment or option.
+                        let q = if rng.pick(2) == 0 { '\'' } else { '"' };
+                        line.push_str(["x=", "export Z=", "--out=", "A="][rng.pick(4)]);
+                        line.push(q);
+                        let text = value(&mut rng, q, true);
+                        quoted(&mut line, &mut values, text);
+                        line.push(q);
+                        if rng.pick(3) == 0 {
+                            line.push_str(";B=/tmp/ok.log");
+                        }
+                    }
+                    _ => line.push_str(["/tmp/ok.log", "src/ok.rs:3", "./run.sh"][rng.pick(3)]),
+                }
+            }
+            // A piece strictly inside a value, not the whole value.
+            let piece = |start: usize, end: usize| {
+                values
+                    .iter()
+                    .any(|&(vs, ve)| start >= vs && end < ve && (start, end + 1) != (vs, ve))
+            };
+            let term = term_with(line.len(), &[line.as_str()], &[]);
+            for link in links_with_cwd(&term, Some("/work")) {
+                assert!(
+                    !piece(link.start_col, link.end_col),
+                    "{line:?} links a piece of a quoted value: {link:?}"
+                );
+            }
+            for span in crate::hints::detect(&[line.as_str()]) {
+                let opens = span.kind == crate::hints::Kind::Url || span.bounded;
+                assert!(
+                    !(opens && piece(span.start, span.end)),
+                    "{line:?} offers a piece of a quoted value to open: {span:?}"
+                );
+            }
         }
     }
 
