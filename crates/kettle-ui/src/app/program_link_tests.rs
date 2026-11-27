@@ -314,15 +314,22 @@ fn a_verbatim_path_must_read_the_same_to_win32() {
 /// `report.pdf`, another file, which then passes every later check.
 #[test]
 fn a_link_path_win32_would_change_is_refused_before_resolving() {
-    use super::win32_keeps_path;
+    use super::win32_reads_link_path;
     for path in [
         "C:/Temp/report.pdf..",
         r"C:\Temp\report.pdf ",
         "C:/Temp/a../b.pdf",
     ] {
-        assert!(!win32_keeps_path(path), "{path}");
+        assert!(!win32_reads_link_path(path), "{path}");
     }
-    assert!(win32_keeps_path("C:/Temp/report..pdf"));
+    // A `.` segment is the folder it is in, not a name ending in a dot.
+    for path in [
+        "C:/Temp/report..pdf",
+        "C:/Temp/./report.pdf",
+        r"C:\.\Temp\a.pdf",
+    ] {
+        assert!(win32_reads_link_path(path), "{path}");
+    }
     let src = production_source();
     let body = src
         .split("fn check_file_link(path: &std::path::Path) -> FileLinkCheck {")
@@ -330,7 +337,7 @@ fn a_link_path_win32_would_change_is_refused_before_resolving() {
         .and_then(|rest| rest.split("\n}\n").next())
         .expect("check_file_link");
     let keeps = body
-        .find("if cfg!(windows) && !path.to_str().is_some_and(win32_keeps_path) {")
+        .find("if cfg!(windows) && !path.to_str().is_some_and(win32_reads_link_path) {")
         .expect("the Win32 check on the link's own path");
     let resolve = body
         .find("std::fs::canonicalize(path)")
