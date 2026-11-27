@@ -3001,6 +3001,7 @@ impl Mux {
                         &pane.lines,
                         &self.restore_divider,
                         geometry.columns,
+                        geometry.rows,
                         cfg.grapheme_clustering,
                     )
                 });

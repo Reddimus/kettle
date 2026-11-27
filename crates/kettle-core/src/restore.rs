@@ -251,20 +251,31 @@ fn dimmed(output: &mut String, line: &str) {
     output.push_str(rest);
 }
 
-/// Generate display-only parser input. Cell mode changes are generated from
-/// validated metadata, never accepted as escape sequences from disk. Restore
-/// the new shell's configured mode and attributes after seeding old cells.
+/// Generate display-only parser input for a terminal of `columns` by `rows`.
+/// Cell mode changes are generated from validated metadata, never accepted as
+/// escape sequences from disk. Restore the new shell's configured mode and
+/// attributes after seeding old cells.
 pub fn replay(
     lines: &[RestoreRow],
     divider: &str,
     columns: usize,
+    rows: usize,
     grapheme_clustering: bool,
 ) -> Option<String> {
     if lines.is_empty() || lines.len() > MAX_RESTORE_LINES || !lines.iter().all(valid_row) {
         return None;
     }
     let mut output = String::new();
+    let mut continues = false;
     for (index, (line, wrapped, cells)) in lines.iter().enumerate() {
+        // A row after a soft wrap gets its line when its first character
+        // resolves the wrap, after the row's own SGR, and a scroll there
+        // fills that line with the row's background. Index and reverse index
+        // make the line first, in the default colours, and keep the wrap
+        // pending. One row has no line below to make.
+        if continues && rows > 1 {
+            output.push_str("\x1bD\x1bM");
+        }
         let mut start = 0;
         for &(end, grapheme) in cells {
             output.push_str(if grapheme {
@@ -279,6 +290,7 @@ pub fn replay(
         if !wrapped || index + 1 == lines.len() {
             output.push_str("\r\n");
         }
+        continues = *wrapped;
     }
     output.push_str(if grapheme_clustering {
         "\x1b[?2027h"
@@ -324,6 +336,69 @@ mod tests {
 
     fn texts(rows: &[RestoreRow]) -> Vec<String> {
         rows.iter().map(|row| row.0.clone()).collect()
+    }
+
+    /// A 40-column, 10-row terminal with deep history, as `terminal` has.
+    fn tall_terminal() -> Term<EventProxy> {
+        let (tx, _) = crossbeam_channel::unbounded();
+        let waker: Waker = Arc::new(|| {});
+        Term::new(
+            Config {
+                scrolling_history: 20_000,
+                grapheme_clustering: true,
+                ..Config::default()
+            },
+            &TermSize::new(40, 10),
+            EventProxy::new(tx, waker),
+        )
+    }
+
+    /// Feed `script` to a tall terminal, save it, and replay the saved rows
+    /// into a fresh one. Returns both terminals and the number of rows saved;
+    /// saved row `k` is `k` rows below the top of each terminal's history.
+    fn round_trip(script: &[u8]) -> (Term<EventProxy>, Term<EventProxy>, usize) {
+        let mut source = tall_terminal();
+        Processor::new().advance(&mut source, script);
+        let saved = snapshot(&source, MAX_RESTORE_LINES, &mut usize::MAX.clone());
+        let mut restored = tall_terminal();
+        Processor::new().advance(
+            &mut restored,
+            replay(&saved, "divider", 40, 10, true).unwrap().as_bytes(),
+        );
+        (source, restored, saved.len())
+    }
+
+    /// Cell `col` of the row `k` rows below the top of `term`'s history.
+    fn saved_cell(
+        term: &Term<EventProxy>,
+        k: usize,
+        col: usize,
+    ) -> &alacritty_terminal::term::cell::Cell {
+        let top = term.grid().topmost_line().0;
+        &term.grid()[Point::new(Line(top + k as i32), Column(col))]
+    }
+
+    /// A row below a soft-wrapped one gets its line when its first character
+    /// resolves the wrap. Replay used to set the row's own colours first, so
+    /// a scroll there gave the fresh line, and so the row's unwritten tail,
+    /// the row's background.
+    #[test]
+    fn restored_rows_after_a_wrap_keep_a_default_tail() {
+        let mut script = b"s\r\n".repeat(10);
+        script.extend_from_slice(&[b'a'; 45]);
+        script.extend_from_slice(b"\r\n");
+        script.extend_from_slice(&b"s\r\n".repeat(4));
+        script.extend_from_slice(b"\x1b[5;1H\x1b[48;5;22mXX\x1b[0m");
+        let (source, restored, rows) = round_trip(&script);
+        for k in 0..rows {
+            for col in 0..40 {
+                assert_eq!(
+                    saved_cell(&restored, k, col).bg,
+                    saved_cell(&source, k, col).bg,
+                    "row {k} column {col}"
+                );
+            }
+        }
     }
 
     /// Rows a remote session wrote stay out of a snapshot taken from its end
@@ -410,7 +485,7 @@ mod tests {
         let mut parser = Processor::new();
         parser.advance(
             &mut restored,
-            replay(&saved, "Restored divider", 40, true)
+            replay(&saved, "Restored divider", 40, 4, true)
                 .unwrap()
                 .as_bytes(),
         );
@@ -510,7 +585,7 @@ mod tests {
         let mut parser = Processor::new();
         parser.advance(
             &mut target,
-            replay(&rows, "divider", 40, false).unwrap().as_bytes(),
+            replay(&rows, "divider", 40, 4, false).unwrap().as_bytes(),
         );
         for col in 0..7 {
             let before = &source.grid()[Point::new(Line(0), Column(col))];
@@ -537,7 +612,7 @@ mod tests {
             ("\x1b[31mred".into(), false, vec![(2, true)]),
         ] {
             assert!(!valid_row(&row));
-            assert!(replay(&[row], "divider", 40, true).is_none());
+            assert!(replay(&[row], "divider", 40, 4, true).is_none());
         }
     }
 
@@ -550,7 +625,7 @@ mod tests {
         let mut target = terminal();
         Processor::new().advance(
             &mut target,
-            replay(&rows, "divider", 40, true).unwrap().as_bytes(),
+            replay(&rows, "divider", 40, 4, true).unwrap().as_bytes(),
         );
         for col in 0..3 {
             let cell = &target.grid()[Point::new(Line(0), Column(col))];
@@ -565,7 +640,7 @@ mod tests {
         let rows = vec![("\x1b[mplain\x1b[22m text".into(), false, vec![])];
         Processor::new().advance(
             &mut term,
-            replay(&rows, "divider", 40, true).unwrap().as_bytes(),
+            replay(&rows, "divider", 40, 4, true).unwrap().as_bytes(),
         );
         assert!(
             term.grid()[Point::new(Line(0), Column(0))]
@@ -641,7 +716,7 @@ mod tests {
         let mut term = terminal();
         Processor::new().advance(
             &mut term,
-            replay(&lines, "Restored divider", 40, true)
+            replay(&lines, "Restored divider", 40, 4, true)
                 .unwrap()
                 .as_bytes(),
         );
@@ -666,7 +741,7 @@ mod tests {
         let mut restored = terminal();
         Processor::new().advance(
             &mut restored,
-            replay(&saved, "divider".repeat(20).as_str(), 40, true)
+            replay(&saved, "divider".repeat(20).as_str(), 40, 4, true)
                 .unwrap()
                 .as_bytes(),
         );
@@ -739,6 +814,7 @@ mod tests {
             &[("saved output".into(), false, vec![])],
             "Restored divider",
             40,
+            6,
             false,
         )
         .unwrap()
