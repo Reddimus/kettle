@@ -34,6 +34,15 @@ fn url_re() -> &'static Regex {
     })
 }
 
+/// Whether a URL match may start after `before`. A scheme says where a URL
+/// starts, but a `www.` inside a longer name is part of that name: the file
+/// `docs/www.example.com.txt`, the address `me@www.example.com`.
+pub(crate) fn url_may_start_after(url: &str, before: Option<char>) -> bool {
+    !url.get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("www."))
+        || before.is_none_or(|c| !(c.is_alphanumeric() || "/\\.-_@%+~".contains(c)))
+}
+
 /// Whether a detected URL, trimmed of trailing punctuation, still names
 /// something to open: a host after `scheme://` or `www.`, or a path after
 /// `file://`. `see https://...` trims to a bare `https://`, and
@@ -307,7 +316,8 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
         };
         for m in url_re().find_iter(&text) {
             let matched = crate::url_trim::trim_trailing(m.as_str());
-            if fragment(m.start(), m.end()) {
+            let before = text[..m.start()].chars().next_back();
+            if fragment(m.start(), m.end()) || !url_may_start_after(matched, before) {
                 continue;
             }
             // A scheme with nothing after it is no link, and its query is
@@ -1687,6 +1697,26 @@ mod tests {
             assert_eq!(found[0].uri, uri, "{line}");
             assert!(is_safe_url(uri), "{uri}");
         }
+        // A `www.` inside a longer name is part of it, in any case.
+        for (line, uri) in [
+            (
+                "cat docs/WWW.example.com.txt",
+                "file:///work/docs/WWW.example.com.txt",
+            ),
+            (
+                "cat docs/www.example.com.txt",
+                "file:///work/docs/www.example.com.txt",
+            ),
+            ("see (WWW.x.test)", "https://WWW.x.test"),
+            ("--url=www.x.test", "https://www.x.test"),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert_eq!(found.len(), 1, "{line}: {found:?}");
+            assert_eq!(found[0].uri, uri, "{line}");
+        }
+        let term = term_with(20, &["mail me@WWW.x.test"], &[]);
+        assert!(links_with_cwd(&term, Some("/work")).is_empty());
         assert_eq!(super::normalize_url("WWW.x.test"), "https://WWW.x.test");
         assert_eq!(super::normalize_url("wwwx.test"), "wwwx.test");
         assert_eq!(super::normalize_url("w\u{e9}"), "w\u{e9}");

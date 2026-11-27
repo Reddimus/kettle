@@ -518,6 +518,11 @@ fn detect_line(
             };
             let before = line[..m.start()].chars().next_back();
             let fragment = (cut.0 && m.start() == 0) || (cut.1 && m.end() == line.len());
+            // A `www.` inside a longer name is part of that name, which the
+            // path pattern may take.
+            if *kind == Kind::Url && !crate::links::url_may_start_after(raw, before) {
+                continue;
+            }
             // A scheme with nothing after it (`see https://...`) is no URL,
             // and no piece of it is a path either.
             if *kind == Kind::Url && !fragment && !crate::links::names_a_target(trimmed) {
@@ -1524,6 +1529,12 @@ mod tests {
             let spans = detect(&[&format!("see {url} now")]);
             assert_eq!(spans.len(), 1, "{url}: {spans:?}");
             assert_eq!((spans[0].kind, spans[0].text.as_str()), (Kind::Url, url));
+        }
+        // A `www.` inside a longer name is part of it, in any case.
+        for path in ["docs/WWW.example.com.txt", "docs/www.example.com.txt"] {
+            let spans = detect(&[&format!("cat {path}")]);
+            assert_eq!(spans.len(), 1, "{path}: {spans:?}");
+            assert_eq!((spans[0].kind, spans[0].text.as_str()), (Kind::Path, path));
         }
     }
 
