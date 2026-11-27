@@ -1823,7 +1823,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   and the `chmod go-w` that fixes them, instead of failing part-way (#847).
 - Linux: a self-update rollback that cannot restore one file still restores
   all the others, and `install.sh` can install over a rollback an older
-  release left unfinished instead of refusing its installer files (#846).
+  release left unfinished instead of refusing its installer files. A rollback
+  waiting on a directory permission fix no longer makes every kettle command
+  fail; the app and `kettle update` name the directory and its `chmod` (#846).
 
 ## Older releases
 

@@ -252,11 +252,12 @@ never stops an update part-way, the update checks every directory it will
 write into before it downloads anything: the directory of each file in the
 install map, or the deepest one that exists above it when the update will create
 the rest. Files an older release installed and this one no longer ships are
-never written, so their directories are not checked. A directory that fails is named with its mode and the `chmod go-w`
-command that fixes it, and nothing is downloaded or changed. The check runs
-again after the download, before the first destination is touched, for files
-only the archive names. It is the same rule the writes apply, run earlier; a
-group the user alone belongs to is not trusted in its place.
+never written, so their directories are not checked. A directory that fails is
+named with its mode and the `chmod go-w` command that fixes it, and nothing is
+downloaded or changed. The check runs again after the download, for files only
+the archive names, before the transaction writes its journal or backups. It is
+the same rule the writes apply, run earlier; a group the user alone belongs to
+is not trusted in its place.
 
 Linux archives contain
 `kettle-package-manifest.json`. Kettle binds its product/version/target and
@@ -318,15 +319,29 @@ checks the install record. Releases before 2.54.0 checked the record first and
 so could never resume their own rollback; the installer can recover one of
 those, as described next.
 
+Resuming a rollback runs the same directory check first, over the directories
+the rollback has to write into. An entry it can skip, such as a file the update
+never replaced, needs nothing from its directory and never blocks it. A
+directory that fails is named with its `chmod go-w`, as before an update.
+Recovery at startup is best effort: a rollback that cannot finish never stops
+kettle from starting, `--version`, `--help` and `kettle ctl` included, and
+startup prints nothing about it. The app names the reason once for each journal
+and reason, in a log line and a desktop notification. `kettle update` names it
+too, and refuses to update until the rollback has finished.
+
 If the bundled `install.sh` or the online installer runs while a rollback is
 still pending, it reads the updater's journal as the receipt it is, after the
 same validation the updater applies to it. A file at a journaled path is
-treated as one the interrupted install wrote only when its bytes are what the
-journal shows the update left there in that entry's state: the file it found,
-before publication or once restored, or either file in between. The installer
-then lays the whole release over the prefix. Before writing anything it retires
-the journal, so that kettle does not roll the update back over the new install,
-and removes the backup copies whose bytes and marker match the journal. A
+treated as one the interrupted install wrote only when the path is one this
+installer installs or its record lists, and its bytes are what the journal
+shows the update left there in that entry's state: the file it found, before
+publication or once restored, or either file in between. A journal that names
+any other path did not come from the updater and stops the install. The
+installer then lays the whole release over the prefix. Before writing anything
+it retires the journal, so that kettle does not roll the update back over the
+new install, and removes the backup copies whose bytes and marker match the
+journal. A backup that still holds anything else, such as a copy the update
+stopped part-way through, keeps its marker. A
 journaled path holding anything else, the installer's own record included, is
 refused rather than replaced. A committed update's journal is left for kettle to
 confirm and remove, and a journal the installer cannot read stops it with the
@@ -454,13 +469,27 @@ sweep drops a record whose directory no longer matches it. The app and
   team, the same proof the live install has to give;
 - its signed `Info.plist` records a version older than the running build.
 
+`codesign` reads a bundle by pathname, more than once per check, and every path
+through `/Applications` runs through a directory an administrator can rename
+entries in. So the bundle is not checked where it lies. Through the folder held
+open since the checks above, it is moved into a fresh private directory under
+the state directory, on the same volume, and checked and removed there. Every
+directory on that path must belong to this user or root and be writable by
+nobody else, so only root or this user could swap the bundle while `codesign`
+and PlistBuddy read it. Its identity is compared with the held descriptor
+before the checks and after them, and a bundle that changed is left alone. A
+bundle that fails a check goes back into its folder. When the state directory
+is on another volume, or is not private, nothing moves and the folder is named
+instead.
+
 The most a wrong answer can cost is an obsolete official kettle the user owned.
 Anything else stays where it is. The app names what is left once, in a log line
 and a desktop notification, and so does `kettle update` on stderr: the full
 paths, and that the folders are safe to delete by hand. A private record under
 the state directory keeps the same set from being named again, and keeps the
 build that refused a folder from checking it again; a newer build checks it once
-more. A new leftover earns a new notice.
+more. A check that could not run, such as a tool that failed to start, is not a
+refusal and runs again at the next launch. A new leftover earns a new notice.
 
 Kettle writes no lock or bookkeeping file into `/Applications`. The update lock
 lives under `$XDG_STATE_HOME/kettle` (or `~/.local/state/kettle`), one per

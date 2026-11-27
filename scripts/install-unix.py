@@ -587,7 +587,7 @@ def _current_record(root_fd: int, relative: str) -> Optional[Dict[str, Any]]:
 
 
 def _adopt_interrupted_update(
-    root_fd: int, journal: Dict[str, Any]
+    root_fd: int, journal: Dict[str, Any], owned: set
 ) -> Tuple[Dict[str, Dict[str, Any]], set]:
     """Records for the files an interrupted self-update left, by path, and the
     paths it created that are gone again.
@@ -597,13 +597,22 @@ def _adopt_interrupted_update(
     left in the entry's state came from Kettle. Anything else at a journaled
     path changed afterwards, and is refused rather than replaced. The
     installer's own record is checked the same way but never adopted, since
-    the installer rewrites it."""
+    the installer rewrites it.
+
+    Only paths in `owned`, the files this install writes or its record already
+    lists, can be adopted. The updater writes nothing else, so a journal that
+    names another path did not come from it, whatever bytes it matches."""
     adopted: Dict[str, Dict[str, Any]] = {}
     gone = set()
     for entry in journal["entries"]:
         path = entry["relative"]
         if path in (PENDING_RELATIVE, UNINSTALL_RELATIVE):
             _not_from_updater()
+        if path != MANIFEST_RELATIVE and path not in owned:
+            _fail(
+                f"the update journal names {path}, which this installer neither "
+                "installs nor recorded, so it will not adopt it"
+            )
         fingerprints, may_be_absent = _journaled_fingerprints(entry)
         current = _current_record(root_fd, path)
         if current is None:
@@ -648,8 +657,9 @@ def _remove_update_backup(root_fd: int, journal: Dict[str, Any]) -> None:
 
     Only a backup whose marker names this transaction is touched, and in it
     only the copies whose bytes are the previous files the journal records,
-    then the marker and the directories that leaves empty. Anything else
-    stays where it is."""
+    then the directories that leaves empty. The marker goes last, and only
+    when nothing else is left, so a backup that keeps anything stays marked
+    as the updater's."""
     name = journal["backup_dir"]
     try:
         marker = _read_owned_json(
@@ -676,10 +686,16 @@ def _remove_update_backup(root_fd: int, journal: Dict[str, Any]) -> None:
         except (InstallerError, OSError):
             continue
     try:
-        _unlink_recorded(root_fd, f"{name}/{UPDATE_BACKUP_MARKER}")
         for directory in sorted(directories, key=lambda path: path.count("/"), reverse=True):
             _remove_recorded_directory(root_fd, directory)
-        _remove_recorded_directory(root_fd, name)
+        backup_fd = _open_relative_directory(root_fd, [name], create=False)
+        try:
+            left = os.listdir(backup_fd)
+        finally:
+            os.close(backup_fd)
+        if left == [UPDATE_BACKUP_MARKER]:
+            _unlink_recorded(root_fd, f"{name}/{UPDATE_BACKUP_MARKER}")
+            _remove_recorded_directory(root_fd, name)
     except (InstallerError, OSError):
         pass
 
@@ -1145,7 +1161,10 @@ def _install(arguments: argparse.Namespace) -> None:
             # wrote may still list them.
             update_gone: set = set()
             if update_journal is not None:
-                adopted, update_gone = _adopt_interrupted_update(root_fd, update_journal)
+                owned = {spec["path"] for spec in specs}
+                if existing is not None:
+                    owned.update(record["path"] for record in existing["files"])
+                adopted, update_gone = _adopt_interrupted_update(root_fd, update_journal, owned)
                 for path, record in adopted.items():
                     if record not in pending.setdefault(path, []):
                         pending[path].append(record)
