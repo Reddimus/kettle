@@ -1259,6 +1259,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Selections and search matches now cover all of the ligature ﷽ (U+FDFD),
   which Arabic fonts draw many cells wide.
 
+- Arabic text highlighted and drawn across another search match no longer
+  leaves its ink past that match unhighlighted.
+
 - Closing the search bar no longer moves the text. When the prompt was above
   the bottom of the window, as after `clear`, closing it pulled lines from
   the scrollback back onto the screen and pushed everything down, so you lost

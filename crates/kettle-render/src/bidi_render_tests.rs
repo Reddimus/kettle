@@ -922,7 +922,8 @@ fn highlights_cover_the_drawn_width_of_arabic_words() {
 parity_scene! {
 /// The bismillah ligature U+FDFD is a bidi neutral that Arabic faces draw
 /// many cells wide. Its highlight follows it in a row without a bidi layout
-/// and where a layout shows it left to right, as for an Arabic letter.
+/// and where a layout shows it left to right, as for an Arabic letter, and
+/// past another match drawn under it.
 fn highlights_cover_an_arabic_ligature_outside_right_to_left_text() {
     let _serial = gpu_test_guard();
     // The text, the ligature's column, and whether the row has a layout.
@@ -951,11 +952,26 @@ fn highlights_cover_an_arabic_ligature_outside_right_to_left_text() {
                     } else {
                         text.to_owned()
                     };
-                    for highlight in Highlight::ALL {
-                        let context = format!("{family} {mode:?}@{scale} {text:?} {highlight:?}");
+                    for (highlight, beneath) in Highlight::ALL
+                        .into_iter()
+                        .flat_map(|highlight| [(highlight, false), (highlight, true)])
+                    {
+                        let context = format!(
+                            "{family} {mode:?}@{scale} {text:?} {highlight:?} beneath={beneath}"
+                        );
                         let mut snap = snapshot_of(40, 4, format!("{text}\x1b[?25l").as_bytes());
                         let mut overlay = focused(false);
                         highlight.apply(&mut snap, &mut overlay, column..=column + 1);
+                        // A one-cell match the ligature is drawn across.
+                        let under = column + 3;
+                        if beneath {
+                            overlay.highlights.push(HighlightRect {
+                                row: 0,
+                                col: under,
+                                width: 1,
+                                active: false,
+                            });
+                        }
                         let frame =
                             capture(&mut renderer, &cfg, &[pane(&snap, 640, 220)], &overlay);
                         let map = renderer.pane_bidi[0].row(0);
@@ -980,9 +996,15 @@ fn highlights_cover_an_arabic_ligature_outside_right_to_left_text() {
                         }
                         let fill = dominant(&frame, grid_left..grid_right, &rows);
                         assert_ne!(fill, cfg.theme.background, "{context}: highlighted");
-                        let colors: Vec<_> = std::iter::once(fill)
+                        let mut colors: Vec<_> = std::iter::once(fill)
                             .chain(highlight.outline(&renderer, &cfg))
                             .collect();
+                        if beneath {
+                            let under = map.map_or(under, |map| map.visual(under));
+                            let left = first_pixel(ox + under as f32 * renderer.cell_w);
+                            let right = first_pixel(ox + (under + 1) as f32 * renderer.cell_w);
+                            colors.push(dominant(&frame, left..right, &rows));
+                        }
                         let (lo, hi) = (ink_left.min(grid_left), ink_right.max(grid_right));
                         for x in lo..hi {
                             let share = painted(&frame, x, &rows, &colors);

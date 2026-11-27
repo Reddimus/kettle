@@ -4223,7 +4223,8 @@ A row without cell metadata reports each glyph at the column its text starts
 in. `terminal::HighlightReach` takes each run of highlighted visual cells
 (selection and search together) and widens the fills at its ends over the
 right-to-left or Arabic text drawn past them, inside both the pane rect that
-clips its quads and the pixel columns its glyph scissor keeps; two runs
+clips its quads and the pixel columns its glyph scissor keeps; text drawn
+across a whole run reaches on past it, in that run's fill, and two runs
 reaching into one gap meet halfway. Selection runs carry the x their widened
 sides moved to, and the outline traces those, joining runs only where moved
 sides meet. Underlines, links and cursors stay on the cell grid, and other

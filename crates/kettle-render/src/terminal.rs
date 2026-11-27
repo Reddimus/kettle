@@ -107,8 +107,10 @@ impl HighlightReach {
     /// text; `drawn` is the x span each visual column's text is drawn over. A
     /// run reaches only over that text, within `clip`, the pixel columns
     /// that keep the pane's text. The fills at a run's ends take its reach,
-    /// whichever highlight they are, so the run's fill stays one block. Two
-    /// runs reaching into the same gap meet halfway through their overlap.
+    /// whichever highlight they are, so the run's fill stays one block. Text
+    /// drawn across a whole run reaches on into the gap beyond it, which
+    /// that run's fill takes. Two runs reaching into the same gap meet
+    /// halfway through their overlap.
     pub(crate) fn add_row(
         &mut self,
         cells: &[(i32, usize, bool)],
@@ -142,6 +144,12 @@ impl HighlightReach {
                 }
             })
             .collect();
+        for index in 1..runs.len() {
+            runs[index].reach.1 = runs[index].reach.1.max(runs[index - 1].reach.1);
+        }
+        for index in (1..runs.len()).rev() {
+            runs[index - 1].reach.0 = runs[index - 1].reach.0.min(runs[index].reach.0);
+        }
         for index in 1..runs.len() {
             let mut right = runs[index - 1].reach.1.min(runs[index].cells.0);
             let mut left = runs[index].reach.0.max(runs[index - 1].cells.1);
@@ -294,6 +302,46 @@ mod highlight_reach_tests {
             assert_eq!(reach.widen(&mut quad, row, first, last), [None; 2]);
             assert_eq!((quad.pos, quad.size), before, "row {row} {first}..={last}");
         }
+    }
+
+    #[test]
+    fn text_drawn_across_a_whole_run_reaches_on_past_it() {
+        let (ox, cw) = (5.0, 10.0);
+        let mut drawn = vec![None; 10];
+        // Column 0's ligature is drawn over the one-cell runs at columns 2
+        // and 5, ending in column 6; column 9's reaches back past column 3.
+        drawn[0] = Some((5.0, 72.0));
+        drawn[9] = Some((22.0, 105.0));
+        let mut reach = HighlightReach::default();
+        let cells = [(0, 0, true), (0, 2, false), (0, 5, false), (0, 8, false)];
+        reach.add_row(&cells, &drawn, (ox, cw), (0.0, 200.0));
+        reach.add_row(
+            &[(1, 3, false), (1, 9, true)],
+            &drawn,
+            (ox, cw),
+            (0.0, 200.0),
+        );
+        let widened = |row: i32, column: usize| {
+            let mut quad = rect(
+                ox + column as f32 * cw,
+                0.0,
+                cw,
+                10.0,
+                Rgb::new(0, 0, 0),
+                1.0,
+            );
+            reach.widen(&mut quad, row, column, column);
+            (quad.pos[0], quad.pos[0] + quad.size[0])
+        };
+        // Each fill reaches the next run, and the last one under the ink
+        // takes the rest of it: 5..72 is covered without a gap.
+        assert_eq!(widened(0, 0), (5.0, 25.0));
+        assert_eq!(widened(0, 2), (25.0, 55.0));
+        assert_eq!(widened(0, 5), (55.0, 72.0));
+        assert_eq!(widened(0, 8), (85.0, 95.0), "past the ink");
+        // Leftward the same way: 22..105 is covered.
+        assert_eq!(widened(1, 3), (22.0, 45.0));
+        assert_eq!(widened(1, 9), (45.0, 105.0));
     }
 }
 
