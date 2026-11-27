@@ -94,17 +94,48 @@ pub(crate) fn names_a_target(url: &str) -> bool {
     }
 }
 
-/// Whether a detected URL ends in a dot run that trimming would take off a
-/// local file's name (`file:///tmp/a..`), which names another file once
-/// trimmed: `raw` is the match, `trimmed` it trimmed, `rest` the line after
-/// it. Dots after a web URL end a sentence (#927): after its path they are
-/// not the host, and after a bare host they are its empty labels or the
-/// root of DNS, so the same host answers.
+/// Whether trimming dots off the detected URL `raw` (to `trimmed`, with
+/// `rest` the line after it) would change what it opens rather than drop
+/// prose. For a `file://` link: a dot run, which may be its file's
+/// (`file:///tmp/a..`), or a dot taken off a name made only of dots, which
+/// names another folder (`file:///tmp/%2e.` is `/tmp/..`, trimmed `/tmp/.`).
+/// For a bare host whose last label is a number: a dot run, as the trimmed
+/// host reads as an IPv4 address and the written one does not
+/// (`http://127.1..`, trimmed to loopback). Otherwise dots after a web URL
+/// end a sentence (#927): after its path they are not the host, and after
+/// a named host they are its empty labels or the root of DNS, so the same
+/// host answers.
 pub(crate) fn url_loses_a_dot_run(raw: &str, trimmed: &str, rest: &str) -> bool {
-    trimmed
+    let tail = &raw[trimmed.len()..];
+    let run = crate::url_trim::dot_run_after(tail, rest).is_some();
+    if trimmed
         .get(..7)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file://"))
-        && crate::url_trim::dot_run_after(&raw[trimmed.len()..], rest).is_some()
+    {
+        let dot_name = || {
+            decoded_file_url_path(trimmed).is_some_and(|path| {
+                let name = path.rsplit('/').next().unwrap_or("");
+                !name.is_empty() && name.bytes().all(|b| b == b'.')
+            })
+        };
+        return run || (tail.starts_with('.') && dot_name());
+    }
+    let after = trimmed.split_once("://").map_or(trimmed, |(_, rest)| rest);
+    if !run || after.contains(['/', '?', '#']) {
+        return false;
+    }
+    let host = after.rsplit_once('@').map_or(after, |(_, host)| host);
+    let host = host.split_once(':').map_or(host, |(name, _)| name);
+    let label = host.trim_end_matches('.').rsplit('.').next().unwrap_or("");
+    let hex = label
+        .get(..2)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("0x"));
+    !label.is_empty()
+        && if hex {
+            label[2..].bytes().all(|b| b.is_ascii_hexdigit())
+        } else {
+            label.bytes().all(|b| b.is_ascii_digit())
+        }
 }
 
 /// Whether the text after a URL's `scheme:` is `//` and an authority with
@@ -1306,6 +1337,11 @@ mod tests {
             "see file:///tmp/a..",
             "see file:///tmp/...",
             "see file:///tmp/a,..",
+            // `%2e.` decodes to `..`; trimmed, `%2e` would name `/tmp`.
+            "see file:///tmp/%2e.",
+            // Trimmed, these read as IPv4 loopback; as written, they do not.
+            "see http://127.1..",
+            "see http://0x7f.1...",
         ] {
             assert!(found(line).is_empty(), "{line}: {:?}", found(line));
         }
@@ -1318,6 +1354,8 @@ mod tests {
                 "https://example.test/docs",
             ),
             ("see file:///tmp/a.", "file:///tmp/a"),
+            ("see http://127.1.", "http://127.1"),
+            ("see http://127.0.0.1/x...", "http://127.0.0.1/x"),
         ] {
             assert_eq!(found(line), [uri], "{line}");
         }

@@ -932,8 +932,17 @@ mod tests {
         // prose, after its path or its host.
         let spans = detect(&["see /tmp/report.pdf,.."]);
         assert!(spans.iter().all(|span| !span.bounded), "{spans:?}");
-        let spans = detect(&["see file:///tmp/a.."]);
-        assert!(spans.iter().all(|span| span.kind != Kind::Url), "{spans:?}");
+        for line in [
+            "see file:///tmp/a..",
+            "see file:///tmp/%2e.",
+            "see http://127.1..",
+        ] {
+            let spans = detect(&[line]);
+            assert!(
+                spans.iter().all(|span| span.kind != Kind::Url),
+                "{line}: {spans:?}"
+            );
+        }
         for (line, url) in [
             (
                 "see https://example.test/docs...",
