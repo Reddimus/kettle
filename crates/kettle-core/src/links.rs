@@ -1798,6 +1798,8 @@ mod tests {
             "\"docs/a*b=/tmp/report.pdf\"",
             "host:\"docs/a*b=/tmp/report.pdf\"",
             "host:\"docs/a'b*=/tmp/report.pdf\"",
+            "open \"docs/my dir/a/b\"",
+            "{\"file\":\"/Users/me/my app/x.py\"}",
         ] {
             assert!(found(line).is_empty(), "{line}: {:?}", found(line));
         }

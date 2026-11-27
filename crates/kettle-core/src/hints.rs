@@ -277,9 +277,15 @@ pub(crate) fn path_reaches_quote(
                     .chars()
                     .any(|c| c != ' ' && crate::links::hides_text(c))
                 && {
+                    // The quoted text before the path: a path-shaped word
+                    // glued to it, or one starting the quotes (a quoted path
+                    // with a space the pattern refused, `"docs/my dir/x"`),
+                    // makes it a piece of that path. Quoted prose starts
+                    // with a word.
                     let lead = &line[open + 1..start];
-                    let word = lead.rsplit(char::is_whitespace).next().unwrap_or(lead);
-                    !word.contains(['/', '\\'])
+                    let glued = lead.rsplit(char::is_whitespace).next().unwrap_or(lead);
+                    let first = lead.split(char::is_whitespace).next().unwrap_or(lead);
+                    !glued.contains(['/', '\\']) && !first.contains(['/', '\\'])
                 }
         })
 }
@@ -288,17 +294,31 @@ pub(crate) fn path_reaches_quote(
 /// quote opens without making a quoted run, as one after a colon does
 /// (`host:"docs/a*b=/tmp/report.pdf"`): its word, from the last space
 /// before it, holds a quote with a separator after the first quote, so an
-/// apostrophe inside the token (`"docs/a'b=`) does not hide it. Its end is
-/// not a file of its own. The word is read at most [`MAX_QUOTED_PATH`]
-/// bytes back, so the check stays linear.
+/// apostrophe inside the token (`"docs/a'b=`) does not hide it; or the text
+/// after such a quote starts with a path-shaped word, as a quoted path with
+/// a space does (`{"file":"/Users/me/my app/x.py"}`). Its end is not a file
+/// of its own. The text is read at most [`MAX_QUOTED_PATH`] bytes back, so
+/// the check stays linear.
 fn continues_a_quoted_token(line: &str, start: usize) -> bool {
     let from = (start.saturating_sub(MAX_QUOTED_PATH)..=start)
         .find(|&at| line.is_char_boundary(at))
         .unwrap_or(start);
     let window = &line[from..start];
     let word = window.rsplit(char::is_whitespace).next().unwrap_or(window);
-    word.find(['"', '\'', '`'])
-        .is_some_and(|at| word[at + 1..].contains(['/', '\\']))
+    let path_shaped = |text: &str| text.contains(['/', '\\']);
+    if word
+        .find(['"', '\'', '`'])
+        .is_some_and(|at| path_shaped(&word[at + 1..]))
+    {
+        return true;
+    }
+    // The last quote before the path, if a colon kept it from opening a
+    // run and nothing closed it since.
+    window
+        .rfind(['"', '\'', '`'])
+        .filter(|&at| window[..at].ends_with(':'))
+        .and_then(|at| window[at + 1..].split(char::is_whitespace).next())
+        .is_some_and(|first| !first.is_empty() && path_shaped(first))
 }
 
 /// Whether the quoted run holding a bare path closes right at its `end`,
@@ -1561,6 +1581,15 @@ mod tests {
             let spans = detect(&[line]);
             assert!(spans.iter().all(|span| !span.bounded), "{line}: {spans:?}");
         }
+        // A quoted path with a space the pattern refused leaves no whole
+        // piece either.
+        for line in [
+            "open \"docs/my dir/notes...\" now",
+            "open \"docs/my dir/Makefile\" now",
+        ] {
+            let spans = detect(&[line]);
+            assert!(spans.iter().all(|span| !span.bounded), "{line}: {spans:?}");
+        }
         for (line, text) in [
             ("\"see /tmp/report.pdf\"", "/tmp/report.pdf"),
             ("file=/tmp/report.pdf", "/tmp/report.pdf"),
@@ -1619,13 +1648,13 @@ mod tests {
                 ("d/e f.txt".to_string(), true)
             ]
         );
-        // As with `"My Files/a.txt"`, a last piece that ends at the closing
-        // quote cannot be told from a whole relative path.
+        // A quoted path with a space after a colon is one token as well, so
+        // its last piece is no file of its own.
         assert_eq!(
             paths("{\"file\":\"/Users/me/my app/x.py\"}"),
             [
                 ("/Users/me/my".to_string(), false),
-                ("app/x.py".to_string(), true)
+                ("app/x.py".to_string(), false)
             ]
         );
     }
