@@ -356,7 +356,8 @@ pub struct AnimationState {
     /// `s=2`: wait for more frames at the end instead of looping.
     pub loading: bool,
     /// Loop count: `0` = infinite, `n` = play `n` times (kitty `v`,
-    /// normalized: `v=1`→infinite→0 here, `v=n`→`n-1`).
+    /// normalized: `v=1`→infinite→0 here, `v=n`→`n-1`). A stop keeps it; the
+    /// loops played so far live in the consumer's playback clock.
     pub loops: u32,
     /// Gap (ms) of the *root* frame (frame 1 = the base image). The root has
     /// no gap by default; `a=a,r=1,z=` or `a=f,r=1,z=` sets one.
@@ -1379,10 +1380,12 @@ impl KittyState {
                 st.selection_serial = st.selection_serial.wrapping_add(1);
             }
             match kv.get("s").and_then(|v| v.parse::<u32>().ok()) {
+                // Stopping resets the loops played so far, which the playback
+                // clock counts: running again restarts it. The loop count the
+                // client set with `v` stays.
                 Some(1) => {
                     st.running = false;
                     st.loading = false;
-                    st.loops = 0; // stopping resets the loop counter
                 }
                 Some(2) => {
                     st.running = true;
@@ -3274,6 +3277,45 @@ mod tests {
         );
     }
 
+    /// Stopping resets the loops played so far, not the loop count the client set
+    /// with `v`: a finite animation stopped and run again without `v` plays its
+    /// configured passes again, then holds on its last frame (#957).
+    #[test]
+    fn a_stopped_finite_animation_keeps_its_loop_count() {
+        let mut k = KittyState::default();
+        k.feed(&format!("a=T,i=3,f=32,s=1,v=1;{PX}"));
+        k.feed(&format!("a=f,i=3,f=32,s=1,v=1,z=40;{PX}"));
+        k.feed(&format!("a=f,i=3,f=32,s=1,v=1,z=40;{PX}"));
+        k.feed("a=a,i=3,r=1,z=40");
+        let gaps = [40, 40, 40];
+        k.feed("a=a,i=3,c=1,s=3,v=5");
+        let run = *k.animation(3).unwrap();
+        assert_eq!(run.loops, 4);
+        assert_eq!(playback_state(&gaps, &run, 480), (2, false));
+
+        k.feed("a=a,i=3,s=1");
+        let stopped = *k.animation(3).unwrap();
+        assert!(!stopped.running);
+        assert_eq!(stopped.loops, 4, "stop keeps the configured loop count");
+
+        k.feed("a=a,i=3,s=3");
+        let again = *k.animation(3).unwrap();
+        assert!(again.running);
+        assert_eq!(again.loops, 4);
+        // The last pass reaches its last frame at 440 ms and holds it.
+        assert_eq!(playback_state(&gaps, &again, 439), (1, true));
+        assert_eq!(playback_state(&gaps, &again, 440), (2, false));
+        assert_eq!(playback_state(&gaps, &again, 10_000), (2, false));
+
+        // `v=1` still makes it loop forever, through a stop as well.
+        k.feed("a=a,i=3,s=3,v=1");
+        k.feed("a=a,i=3,s=1");
+        k.feed("a=a,i=3,s=3");
+        let forever = *k.animation(3).unwrap();
+        assert_eq!(forever.loops, 0);
+        assert_eq!(playback_state(&gaps, &forever, 480), (0, true));
+    }
+
     #[test]
     fn animation_frames_transmit_and_control() {
         let mut k = KittyState::default();
@@ -3308,11 +3350,11 @@ mod tests {
         k.feed("a=a,i=3,r=1,z=70");
         assert_eq!(k.animation(3).unwrap().root_gap, 70, "r=1 → root frame gap");
 
-        // Stop resets running + loop counter.
+        // Stop ends the run and keeps the loop count.
         k.feed("a=a,i=3,s=1");
         let a = k.animation(3).copied().unwrap();
         assert!(!a.running);
-        assert_eq!(a.loops, 0);
+        assert_eq!(a.loops, 4);
 
         // d=f deletes one frame. The default is root frame 1, so frame 2 is
         // promoted and keeps its gap; the selected current-frame index shifts.

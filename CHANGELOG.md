@@ -1111,6 +1111,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - A restored row no longer paints its background across the empty rest of the
   row when it follows a wrapped line or a narrower pane wraps it.
 
+- A kitty animation that is stopped (`a=a,s=1`) keeps the loop count its client
+  set, so running it again without `v` plays that many passes and stops instead
+  of looping forever.
+
 - A restored line keeps its soft wrap when the row it wraps onto holds only
   blanks, so copying it adds no line break.
 
