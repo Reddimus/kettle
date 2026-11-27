@@ -315,6 +315,22 @@ busy and its close behaviour is unchanged.
   the one the pane's shell started with or the machine's current name, so
   an **ssh session's remote cwd is never adopted locally**. Windows paths travel URL-form
   (`file://HOST/C:/Users/...`) and normalize back to drive-letter form.
+- `CSI > 0 u` and `CSI < u` (bash and zsh) — the Kitty keyboard protocol's
+  push and pop. Each prompt pushes legacy key reporting, replacing the entry
+  the previous prompt pushed, and the next command pops it before `C`.
+  Readline and zle read legacy key encodings only. A program can leave
+  enhanced reporting on as it stops; a client suspended with Ctrl+Z may
+  re-enable it just before it stops. At the prompt the shell still gets the
+  keys it expects, and `fg` hands the resumed program back its own flags.
+  zsh also pops when the shell itself exits, since Ctrl+D runs no command;
+  `exec` typed at the prompt pops first, like any command. The entries are
+  positional, and the pop runs from the same hook as `C`, so the handover
+  follows that hook's limits: by default bash runs it for no command line that
+  is only a subshell, such as `(codex)`, and early for a `bind -x` widget; a
+  zsh widget that runs `fg` without accepting a line skips it; a nested bash
+  left with Ctrl+D leaves its entry behind. A program in such a case can
+  resume with legacy key reporting. Kettle's fish integration adds neither mark: fish 4
+  manages these flags for its own line editor.
 
 The OSC 133 marks also make close-confirmation prompt-aware. A pane idle at an
 integrated-shell prompt (marks seen, no command running) skips the

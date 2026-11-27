@@ -1258,6 +1258,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - Select Command Output no longer copies the next Bash prompt after output with no final newline, such as `printf done`; it stops where the output ends.
 
+- With Kettle's bash or zsh integration, a program stopped with Kitty key reporting still on, as Codex can be after Ctrl+Z, no longer leaves the prompt typing CSI-u fragments such as `7;3u`; `fg` gives the program its key reporting back.
+
 - Closing the search bar no longer moves the text. When the prompt was above
   the bottom of the window, as after `clear`, closing it pulled lines from
   the scrollback back onto the screen and pushed everything down, so you lost
