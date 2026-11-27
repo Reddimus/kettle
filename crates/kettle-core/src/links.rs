@@ -1751,6 +1751,28 @@ mod tests {
                 &[("file:///tmp/c.txt", 22, 31)],
                 &[(Kind::Path, "/tmp/c.txt", true)],
             ),
+            // Glued to more text, a `\'` inside single quotes is an escape,
+            // as JavaScript and Python write one, so the string goes on and
+            // its end is no file of its own (main linked /tmp/report.pdf).
+            (
+                r#"{'file':'docs/a\'b=/tmp/report.pdf'}"#,
+                &[],
+                &[
+                    (Kind::Path, "docs/a", false),
+                    (Kind::Path, "/tmp/report.pdf", false),
+                ],
+            ),
+            // A shell-escaped backtick or quote opens no string.
+            (
+                r#"echo \`date\` /tmp/x.log"#,
+                &[("file:///tmp/x.log", 14, 23)],
+                &[(Kind::Path, "/tmp/x.log", true)],
+            ),
+            (
+                r#"x=\'a/b;y=/tmp/x.log"#,
+                &[("file:///tmp/x.log", 10, 19)],
+                &[(Kind::Path, "/tmp/x.log", true)],
+            ),
         ];
         for &(line, links, hints) in corpus {
             let term = term_fed(240, 1, line.as_bytes());
@@ -2320,6 +2342,39 @@ mod tests {
                 .map(|link| link.uri)
                 .collect::<Vec<_>>();
             assert_eq!(found, ["file:///tmp/c.txt"], "{line}");
+        }
+    }
+
+    /// A `\'` inside single quotes closes them only at a shell token
+    /// boundary; glued to more text it is an escape and the string goes on,
+    /// so its end is no file of its own. An escaped quote outside a string
+    /// opens none.
+    #[test]
+    fn an_escaped_single_quote_closes_only_at_a_shell_boundary() {
+        let found = |line: &str| {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>()
+        };
+        for line in [
+            r#"{'file':'docs/a\'b=/tmp/report.pdf'}"#,
+            r#"x='docs/a\'b=/tmp/report.pdf'"#,
+            r#"x='a\'/tmp/report.pdf'"#,
+        ] {
+            assert!(found(line).is_empty(), "{line}: {:?}", found(line));
+        }
+        for (line, uri) in [
+            (
+                r#"{'msg':'it\'s','file':'/tmp/c.txt'}"#,
+                "file:///tmp/c.txt",
+            ),
+            (r#"x=\'a/b;y=/tmp/x.log"#, "file:///tmp/x.log"),
+            (r#"x=\`a/b;y=/tmp/x.log"#, "file:///tmp/x.log"),
+            (r#"echo \`date\` /tmp/x.log"#, "file:///tmp/x.log"),
+        ] {
+            assert_eq!(found(line), [uri], "{line}");
         }
     }
 

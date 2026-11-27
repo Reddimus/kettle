@@ -309,49 +309,71 @@ fn continues_a_quoted_token(line: &str, start: usize) -> bool {
     let window = &line[from..start];
     let word = window.rsplit(char::is_whitespace).next().unwrap_or(window);
     let path_shaped = |text: &str| text.contains(['/', '\\']);
-    // The quote that opens the string the path is in: strings the word
-    // opens and closes before it (compact JSON's `"cwd":"/work",`) are not
-    // it, another kind of quote inside it is text (`"docs/a'b=`), and so is
-    // an escaped one (`"docs/a\"b=`).
-    let mut open: Option<(char, usize)> = None;
-    for (at, c) in unescaped_quotes(word) {
-        match open {
-            Some((quote, _)) if quote == c => open = None,
-            Some(_) => {}
-            None => open = Some((c, at)),
-        }
-    }
-    if open.is_some_and(|(_, at)| path_shaped(&word[at + 1..])) {
+    // Right after an escaped quote the path may be the rest of a string
+    // that quote does not end (`'a\'/tmp/x'`), or follow a shell's literal
+    // quote: either reading may name another file, so it is not whole.
+    if window.ends_with(['"', '\'', '`'])
+        && window[..window.len() - 1]
+            .bytes()
+            .rev()
+            .take_while(|&b| b == b'\\')
+            .count()
+            % 2
+            == 1
+    {
         return true;
     }
-    // The last quote before the path, if a colon kept it from opening a
-    // run and nothing closed it since; a path from a root starts its own.
+    // The quote that opens the string the path is in: strings the word
+    // opens and closes before it (compact JSON's `"cwd":"/work",`) are not
+    // it, and quotes inside it are text unless they end it.
+    let after = line[start..].chars().next();
+    if open_quote(word, after).is_some_and(|(_, at)| path_shaped(&word[at + 1..])) {
+        return true;
+    }
+    // The quote of a string still open before the path, if a colon kept
+    // it from opening a run; a path from a root starts its own.
     !starts_its_own_path(&line[start..])
-        && unescaped_quotes(window)
-            .last()
-            .map(|(at, _)| at)
+        && open_quote(window, after)
+            .map(|(_, at)| at)
             .filter(|&at| window[..at].ends_with(':'))
             .and_then(|at| window[at + 1..].split(char::is_whitespace).next())
             .is_some_and(|first| !first.is_empty() && path_shaped(first))
 }
 
-/// The quotes in `text` that a backslash does not escape, with their byte
-/// offsets. Only a double quote can be escaped: after an odd run of
-/// backslashes it is text inside its string, as JSON and a shell's double
-/// quotes read it (`"a\"b"`), and after an even run (`"a\\"`) it closes. A
-/// backslash is a backslash inside a shell's single quotes, so a `'` is a
-/// quote whatever comes before it (`'C:\work\'`), and so is a backtick.
-fn unescaped_quotes(text: &str) -> impl Iterator<Item = (usize, char)> + '_ {
+/// The quote that opens the string still open at the end of `text`, and
+/// its byte offset; `after` is the character that follows `text` on the
+/// line. Strings are read as JSON, JavaScript, Python and a shell write
+/// them. Outside any string, a quote after an odd run of backslashes is
+/// text and opens none. Inside one, another kind of quote is text; the same
+/// kind closes it, unless a backslash escapes it. A backslash escapes a
+/// double quote (`"a\"b"`). Before a single quote or a backtick it is a
+/// shell's literal backslash where a shell token boundary follows
+/// (`'C:\work\';`), so the quote closes the string, and an escape, as in
+/// JavaScript or Python, where more text is glued on (`'docs/a\'b'`).
+fn open_quote(text: &str, after: Option<char>) -> Option<(char, usize)> {
+    let boundary =
+        |next: Option<char>| next.is_none_or(|c| c.is_whitespace() || ";&|)><".contains(c));
+    let mut open: Option<(char, usize)> = None;
     let mut backslashes = 0usize;
-    text.char_indices().filter(move |&(_, c)| {
+    let mut chars = text.char_indices().peekable();
+    while let Some((at, c)) = chars.next() {
         let escaped = backslashes % 2 == 1;
         backslashes = if c == '\\' { backslashes + 1 } else { 0 };
-        match c {
-            '"' => !escaped,
-            '\'' | '`' => true,
-            _ => false,
+        if !matches!(c, '"' | '\'' | '`') {
+            continue;
         }
-    })
+        match open {
+            None if !escaped => open = Some((c, at)),
+            Some((quote, _)) if quote == c => {
+                let next = chars.peek().map(|&(_, next)| next).or(after);
+                if !escaped || (c != '"' && boundary(next)) {
+                    open = None;
+                }
+            }
+            _ => {}
+        }
+    }
+    open
 }
 
 /// Whether `path` starts from a root, `~/`, `./`, `../` or a drive, so it
@@ -1907,6 +1929,44 @@ mod tests {
         // A double quote is still escaped by one.
         let spans = detect(&[r#"{"file":"docs/a\"b=/tmp/report.pdf"}"#]);
         assert!(spans.iter().all(|span| !span.bounded), "{spans:?}");
+    }
+
+    /// A `\'` inside single quotes closes them only where a shell token
+    /// boundary follows, as a shell's literal backslash does; glued to more
+    /// text it is an escape, as in JavaScript or Python, and the string goes
+    /// on. Outside any string an escaped quote opens none, and a path right
+    /// after an escaped quote is copied, its reading uncertain.
+    #[test]
+    fn an_escaped_single_quote_closes_only_at_a_shell_boundary() {
+        for line in [
+            r#"{'file':'docs/a\'b=/tmp/report.pdf'}"#,
+            r#"x='docs/a\'b=/tmp/report.pdf'"#,
+            r#"x=`docs/a\`b=/tmp/report.pdf`"#,
+            r#"x='a\'/tmp/report.pdf'"#,
+        ] {
+            let spans = detect(&[line]);
+            assert!(
+                spans
+                    .iter()
+                    .all(|span| !(span.text == "/tmp/report.pdf" && span.bounded)),
+                "{line}: {spans:?}"
+            );
+        }
+        for (line, path) in [
+            (r#"export A='C:\work\';B=/tmp/c.txt"#, "/tmp/c.txt"),
+            (r#"x='C:\work\'&&cat=/tmp/c.txt"#, "/tmp/c.txt"),
+            (r#"{'msg':'it\'s','file':'/tmp/c.txt'}"#, "/tmp/c.txt"),
+            (r#"x=\'a/b;y=/tmp/x.log"#, "/tmp/x.log"),
+            (r#"x=\`a/b;y=/tmp/x.log"#, "/tmp/x.log"),
+            (r#"x=\"a/b;y=/tmp/x.log"#, "/tmp/x.log"),
+            (r#"echo \`date\` /tmp/x.log"#, "/tmp/x.log"),
+        ] {
+            let spans = detect(&[line]);
+            assert!(
+                spans.iter().any(|span| span.text == path && span.bounded),
+                "{line}: {spans:?}"
+            );
+        }
     }
 
     /// Compact JSON closes each string before the next opens, so a later
