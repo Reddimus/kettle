@@ -638,16 +638,30 @@ fn encode_file_path(path: &str) -> String {
     out
 }
 
+/// Whether `c` is a space that shows as blank space: the ASCII space and
+/// the other Unicode space separators, such as the no-break space, the
+/// narrow no-break space macOS writes before AM and PM in a screenshot's
+/// name, and the figure, en, em and ideographic spaces. It reads as a
+/// space, so it hides nothing, though like any space it is no part of a
+/// URI as written.
+pub(crate) fn visible_space(c: char) -> bool {
+    matches!(
+        c,
+        ' ' | '\u{00A0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}'
+    )
+}
+
 /// Whether `c` hides or reorders text instead of showing as itself: a
-/// control, Unicode whitespace (the no-break and ideographic spaces, line
-/// and paragraph separators), a format character (zero-width spaces and
-/// joiners, bidirectional controls, the byte order mark, tags), another
+/// control, whitespace that is no visible space (the line and paragraph
+/// separators), a format character (zero-width spaces and joiners,
+/// bidirectional controls, the byte order mark, tags), another
 /// default-ignorable code point (variation selectors, Hangul fillers), or
 /// the blank Braille pattern. Text holding one does not read as what it
 /// names, so a link holding one does not open.
 pub(crate) fn hides_text(c: char) -> bool {
     c.is_control()
-        || c.is_whitespace()
+        || (c.is_whitespace() && !visible_space(c))
         || matches!(
             c,
             '\u{00AD}'
@@ -691,7 +705,7 @@ pub fn is_safe_url(uri: &str) -> bool {
     if uri.is_empty() || uri.len() > MAX_URL_BYTES {
         return false;
     }
-    if uri.chars().any(hides_text) {
+    if uri.chars().any(|c| visible_space(c) || hides_text(c)) {
         return false;
     }
     let Some((scheme, rest)) = uri.split_once(':') else {
@@ -1901,25 +1915,27 @@ mod tests {
     /// the other characters drawn as nothing. Visible non-ASCII stays.
     #[test]
     fn uris_holding_invisible_characters_are_refused() {
+        // A space of any kind is no part of a URI as written.
+        let spaces = [
+            '\u{a0}', '\u{1680}', '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}',
+            '\u{2005}', '\u{2006}', '\u{2007}', '\u{2008}', '\u{2009}', '\u{200a}', '\u{202f}',
+            '\u{205f}', '\u{3000}',
+        ];
+        for c in spaces {
+            assert!(
+                !is_safe_url(&format!("https://x.test/a{c}b")),
+                "U+{:04X}",
+                u32::from(c)
+            );
+            assert!(
+                !is_safe_url(&format!("file:///tmp/a{c}b.pdf")),
+                "U+{:04X}",
+                u32::from(c)
+            );
+        }
         let invisible = [
-            '\u{a0}',
-            '\u{1680}',
-            '\u{2000}',
-            '\u{2001}',
-            '\u{2002}',
-            '\u{2003}',
-            '\u{2004}',
-            '\u{2005}',
-            '\u{2006}',
-            '\u{2007}',
-            '\u{2008}',
-            '\u{2009}',
-            '\u{200a}',
             '\u{2028}',
             '\u{2029}',
-            '\u{202f}',
-            '\u{205f}',
-            '\u{3000}',
             '\u{200b}',
             '\u{200c}',
             '\u{200d}',
@@ -2208,6 +2224,41 @@ mod tests {
         assert_eq!(found, ["https://e.test/"]);
     }
 
+    /// A visible space is a space, as macOS writes one before AM and PM in
+    /// every default screenshot name: a file holding one has its file URL,
+    /// and that link, as `ls --hyperlink` and eza print it, opens.
+    #[test]
+    fn a_visible_space_in_a_name_is_a_space() {
+        use super::{file_url_for_path, local_file_path};
+        use std::path::Path;
+        let name = "/Users/me/Desktop/Screenshot 2026-11-26 at 10.00.00\u{202f}AM.png";
+        let url = "file:///Users/me/Desktop/Screenshot%202026-11-26%20at%2010.00.00%E2%80%AFAM.png";
+        assert_eq!(file_url_for_path(Path::new(name)).as_deref(), Some(url));
+        assert!(is_safe_url(url));
+        #[cfg(unix)]
+        assert_eq!(local_file_path(url), Some(std::path::PathBuf::from(name)));
+        for uri in [
+            "https://x.test/Screenshot%2010.00.00%E2%80%AFAM.png",
+            "file:///tmp/a%C2%A0b.pdf",
+            "file:///tmp/a%E2%80%87b.pdf",
+            "file:///tmp/a%E3%80%80b.pdf",
+        ] {
+            assert!(is_safe_url(uri), "{uri}");
+        }
+        assert_eq!(
+            path_match_to_file_uri("/tmp/a\u{202f}b.pdf", None).as_deref(),
+            Some("file:///tmp/a%E2%80%AFb.pdf")
+        );
+        // Zero-width and line-separating characters still hide text.
+        for uri in [
+            "file:///tmp/a%E2%80%8Bb.pdf",
+            "file:///tmp/a%E2%80%A8b.pdf",
+            "https://x.test/a%E2%80%8Bb",
+        ] {
+            assert!(!is_safe_url(uri), "{uri}");
+        }
+    }
+
     /// Percent-encoded, a character that hides text reads the same once the
     /// opener decodes it: a file link's path, and a web link's host, path or
     /// query, holding one is refused. An encoded space, line break or
@@ -2218,7 +2269,7 @@ mod tests {
             "file:///tmp/a%E2%80%8Bb.pdf",
             "file:///tmp/a%E2%80%AEb.pdf",
             "file:///tmp/a..%E2%80%8Bb.pdf",
-            "file:///tmp/a%C2%A0b.pdf",
+            "file:///tmp/a%E2%80%A9b.pdf",
             "file://localhost/tmp/a%EF%BB%BFb.pdf",
             "file:///tmp/a%C2%85b.pdf",
             "https://x.test/a%E2%80%8Bb",

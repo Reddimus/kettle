@@ -33,8 +33,9 @@ and confinement, described below.
 - **Hyperlink / URI abuse** — an `OSC 8` or auto-detected URL that
   bypasses `kettle_core::links::is_safe_url` and reaches the OS opener
   with a hostile scheme, with no host, or holding a character that hides or
-  reorders text (a Unicode space, a zero-width or bidirectional control, a
-  variation selector), as written or once its percent escapes are decoded,
+  reorders text (a zero-width or bidirectional control, a line separator, a
+  variation selector; a visible space such as a no-break space is a space),
+  as written or once its percent escapes are decoded,
   or a `file://` link that makes the OS opener run a
   program or follow a shortcut. Kettle refuses local links to programs and
   shortcuts (see `names_program_or_shortcut` and `check_file_link`): by

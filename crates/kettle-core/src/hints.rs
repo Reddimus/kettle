@@ -1454,7 +1454,7 @@ mod tests {
         for line in [
             "open \"docs/old\u{a0}dir/x.txt\" now",
             "open \"docs/old\u{2007}dir/.env\" now",
-            "\"see\u{a0}src/main.rs\"",
+            "\"see\u{200d}src/main.rs\"",
         ] {
             let spans = detect(&[line]);
             assert!(!spans.is_empty(), "{line}");
@@ -1490,10 +1490,13 @@ mod tests {
             let spans = detect(&[line]);
             assert!(spans.iter().all(|span| !span.bounded), "{line}: {spans:?}");
         }
-        // Without one, a bare path ending at the quote is whole, as before.
-        let spans = detect(&["\"see src/main.rs\""]);
-        assert_eq!(spans.len(), 1);
-        assert!(spans[0].bounded);
+        // Without one, a bare path ending at the quote is whole, as before;
+        // a no-break space is a space.
+        for line in ["\"see src/main.rs\"", "\"see\u{a0}src/main.rs\""] {
+            let spans = detect(&[line]);
+            assert_eq!(spans.len(), 1, "{line}: {spans:?}");
+            assert!(spans[0].bounded, "{line}");
+        }
     }
 
     /// A dotfile's name is its extension, so a quoted path ending in one is
