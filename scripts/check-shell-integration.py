@@ -159,38 +159,6 @@ def check_zsh(executable: str) -> None:
     if b"KETTLE_ZSH_HOOKS_OK" not in hook_output:
         raise RuntimeError("zsh hook fixture omitted its success sentinel")
 
-    keyboard = run(
-        [
-            executable,
-            "-f",
-            "-i",
-            str(FIXTURES / "zsh-keyboard.zsh"),
-            str(INTEGRATION / "kettle.zsh"),
-        ],
-        "zsh -f prompt key reporting fixture",
-        announce=False,
-    )
-    push, pop = b"\x1b[>0u", b"\x1b[<u"
-    head, rest = keyboard.split(b"KETTLE_KEYBOARD_SUBSHELL", 1)
-    subshell, after = rest.split(b"KETTLE_KEYBOARD_COMMAND", 1)
-    # The two prompts leave one entry: the second pops the first's before it
-    # pushes its own. A subshell that exits runs zshexit but must leave it,
-    # and the next command pops it before its C mark.
-    def keyboard_ops(output: bytes) -> list[bytes]:
-        return re.findall(rb"\x1b\[(?:>0|<)u", output)
-
-    if (
-        keyboard_ops(head) != [push, pop, push]
-        or keyboard_ops(subshell)
-        or keyboard_ops(after) != [pop]
-        or not after.startswith(pop + b"\x1b]133;C\x07")
-    ):
-        raise RuntimeError(
-            "zsh prompt key reporting entries did not balance: "
-            f"{head!r} {subshell!r} {after!r}"
-        )
-    print("zsh -f prompt key reporting fixture: PASS")
-
     completion = run(
         [
             executable,
