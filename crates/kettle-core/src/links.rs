@@ -1944,10 +1944,14 @@ mod tests {
             let term = term_with(80, &[line], &[]);
             assert!(links_with_cwd(&term, Some("/work")).is_empty(), "{line}");
         }
+        // A relative path after a space inside quotes may be a piece of a
+        // quoted name, so it links nothing; one from a root links.
         let term = term_with(80, &["\"see src/main.rs\""], &[]);
+        assert!(links_with_cwd(&term, Some("/work")).is_empty());
+        let term = term_with(80, &["\"see /tmp/main.rs\""], &[]);
         let found = links_with_cwd(&term, Some("/work"));
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].uri, "file:///work/src/main.rs");
+        assert_eq!(found[0].uri, "file:///tmp/main.rs");
     }
 
     #[test]
@@ -2171,10 +2175,9 @@ mod tests {
             "{:?}",
             found("scp \"h:/srv/my report.pdf\" .")
         );
-        assert_eq!(
-            found("\"see src/main.rs\""),
-            [(5, 15, "file:///home/me/proj/src/main.rs".to_string())]
-        );
+        // A relative path after a space inside quotes may be a piece of a
+        // quoted name holding a space, so it links nothing.
+        assert!(found("\"see src/main.rs\"").is_empty());
         // A climb stays refused inside quotes too, and no piece of the
         // refused path links on its own.
         assert!(found("\"../up here/a.txt\"").is_empty());
@@ -2438,6 +2441,70 @@ mod tests {
             (r#"see src/x.rs, it's fine"#, "file:///work/src/x.rs"),
         ] {
             assert_eq!(found(line), [uri], "{line}");
+        }
+    }
+
+    /// A relative path after a space inside a quoted string may be a piece
+    /// of a quoted name holding a space, which quoted prose cannot be told
+    /// from, so neither a link nor quick select opens it; a stray quote
+    /// before or after a string leaves its pairing in doubt, and then no
+    /// piece of it opens either. A path outside the string, or a whole one
+    /// from a root inside it, still opens, and an apostrophe inside a word
+    /// pairs with nothing.
+    #[test]
+    fn a_quoted_name_holding_a_space_opens_no_piece() {
+        let opens = |line: &str| {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            let links = links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>();
+            let hints = crate::hints::detect(&[line])
+                .into_iter()
+                .filter(|span| span.bounded)
+                .map(|span| span.text)
+                .collect::<Vec<_>>();
+            (links, hints)
+        };
+        let none: &[&str] = &[];
+        for (line, links, hints) in [
+            (
+                r#"export Z="a b/notes.txt" src/ok.rs:3"#,
+                &["file:///work/src/ok.rs"][..],
+                &["src/ok.rs"][..],
+            ),
+            (r#"{'msg':'x','file':'Q3 final/Q3 final.pdf'}"#, none, none),
+            (r#"x 'tis A='/Users/me/a b/notes/my dir.txt'"#, none, none),
+            (
+                r#"the "quoted x="~/Q3 final/a b/notes";B=/tmp/ok.log the "quoted"#,
+                none,
+                none,
+            ),
+            (
+                r#"the "quoted {"msg":"~/annual report/Q3 final.pdf"} the "quoted"#,
+                none,
+                none,
+            ),
+            (
+                r#"msg="failed to read /etc/app.toml""#,
+                &["file:///etc/app.toml"][..],
+                &["/etc/app.toml"][..],
+            ),
+            // An apostrophe inside a word pairs with no quote after it.
+            (
+                r#"it's in src/a.rs 'cause"#,
+                &["file:///work/src/a.rs"][..],
+                &["src/a.rs"][..],
+            ),
+            (
+                r#"I've updated 'foo' in src/a.rs, and it's done"#,
+                &["file:///work/src/a.rs"][..],
+                &["src/a.rs"][..],
+            ),
+        ] {
+            let (found, offered) = opens(line);
+            assert_eq!(found, links, "links in {line}");
+            assert_eq!(offered, hints, "hints in {line}");
         }
     }
 

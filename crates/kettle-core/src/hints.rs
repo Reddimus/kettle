@@ -300,13 +300,17 @@ pub(crate) fn path_reaches_quote(
 /// from the last space before it, holds a quote with a separator after it
 /// (`host:"docs/a*b=/tmp/report.pdf"`). Otherwise the string it sits in is
 /// trusted only when the quote that opened it closes after the path with
-/// nothing quoted between (`{"file":"/Users/me/my app/x.py"}`): there, a
-/// path-shaped first word makes a relative path a piece of the quoted name.
-/// Any other state is uncertain: an unmatched quote earlier (or later, if
-/// one before the path could pair with it), or another or an escaped quote
-/// between the string's opening and the path. Then the path may be a piece
-/// of a quoted name, and it stays whole only if it starts from a root as a
-/// whole token after whitespace (` /tmp/x.log`).
+/// nothing quoted between: there, a relative path after a space may be a
+/// piece of a quoted name holding one (`"a b/notes.txt"`,
+/// `{"file":"/Users/me/my app/x.py"}`), which the text cannot tell from
+/// quoted prose (`"see src/main.rs"`), so it is copied, while a path from a
+/// root starts its own (`"see /tmp/report.pdf"`). Any other state is
+/// uncertain: an unmatched quote earlier (or later, if one before the path
+/// could pair with it), a pairing that has gone out of step (see
+/// [`scan_quotes`]), or another or an escaped quote between the string's
+/// opening and the path. Then the path may be a piece of a quoted name, and
+/// it stays whole only if it starts from a root as a whole token after
+/// whitespace (` /tmp/x.log`).
 fn piece_of_a_quoted_token(line: &str, start: usize, end: usize) -> bool {
     let from = (start.saturating_sub(MAX_QUOTED_PATH)..=start)
         .find(|&at| line.is_char_boundary(at))
@@ -338,7 +342,11 @@ fn piece_of_a_quoted_token(line: &str, start: usize, end: usize) -> bool {
         return true;
     }
     let beyond = line[to..].chars().next();
-    match open_quote(window, after) {
+    let (open, doubtful) = scan_quotes(window, after);
+    if doubtful {
+        return !token;
+    }
+    match open {
         Some((quote, at)) => {
             let lead = &window[at + 1..];
             let mixed = lead.contains(['"', '\'', '`']);
@@ -346,22 +354,49 @@ fn piece_of_a_quoted_token(line: &str, start: usize, end: usize) -> bool {
                 return !token;
             }
             let glued = lead.rsplit(char::is_whitespace).next().unwrap_or(lead);
-            let first = lead.split(char::is_whitespace).next().unwrap_or(lead);
-            path_shaped(glued) || (!rooted && path_shaped(first))
+            path_shaped(glued) || (!rooted && lead.contains(char::is_whitespace))
         }
-        // Outside any string, unless a quote left open after the path
-        // could pair with one before it.
-        None => open_quote(&line[start..to], beyond)
-            .is_some_and(|(quote, _)| window.contains(quote) && !token),
+        // Outside any string, unless a quote left open after the path could
+        // pair with one before it that could open a string: then that pair
+        // may hold the path.
+        None => {
+            !token
+                && open_quote(&line[start..to], beyond)
+                    .is_some_and(|(quote, _)| could_open(window, quote))
+        }
     }
+}
+
+/// Whether `text` holds a `quote` that could open a string (see
+/// [`open_quote`]): not escaped, and for a single quote, not inside a word.
+fn could_open(text: &str, quote: char) -> bool {
+    let mut backslashes = 0usize;
+    let mut previous: Option<char> = None;
+    text.chars().any(|c| {
+        let escaped = backslashes % 2 == 1;
+        backslashes = if c == '\\' { backslashes + 1 } else { 0 };
+        let before = previous.replace(c);
+        c == quote && !escaped && opens_after(c, before)
+    })
+}
+
+/// Whether a quote `c` after `before` may open a string: a single quote
+/// only at the start, after whitespace, or after `=`, `:`, `(`, `[`, `{`
+/// or `,`, so an apostrophe inside a word (`can't`) opens nothing.
+fn opens_after(c: char, before: Option<char>) -> bool {
+    c != '\'' || before.is_none_or(|before| before.is_whitespace() || "=:([{,".contains(before))
+}
+
+/// Whether `next` ends a shell token: whitespace, the line's end, or `;`,
+/// `&`, `|`, `)`, `>` or `<`.
+fn shell_boundary(next: Option<char>) -> bool {
+    next.is_none_or(|c| c.is_whitespace() || ";&|)><".contains(c))
 }
 
 /// Whether a string opened by `quote` closes within `rest`, read as
 /// [`open_quote`] reads one: at the same kind of quote, unless a backslash
 /// escapes it. `beyond` is the character after `rest`.
 fn closes(rest: &str, quote: char, beyond: Option<char>) -> bool {
-    let boundary =
-        |next: Option<char>| next.is_none_or(|c| c.is_whitespace() || ";&|)><".contains(c));
     let mut backslashes = 0usize;
     let mut chars = rest.chars().peekable();
     while let Some(c) = chars.next() {
@@ -369,7 +404,7 @@ fn closes(rest: &str, quote: char, beyond: Option<char>) -> bool {
         backslashes = if c == '\\' { backslashes + 1 } else { 0 };
         if c == quote {
             let next = chars.peek().copied().or(beyond);
-            if !escaped || (c != '"' && boundary(next)) {
+            if !escaped || (c != '"' && shell_boundary(next)) {
                 return true;
             }
         }
@@ -391,9 +426,19 @@ fn closes(rest: &str, quote: char, beyond: Option<char>) -> bool {
 /// single quote opens a string only at the start of `text`, after
 /// whitespace, or after `=`, `:`, `(`, `[`, `{` or `,`.
 fn open_quote(text: &str, after: Option<char>) -> Option<(char, usize)> {
-    let boundary =
-        |next: Option<char>| next.is_none_or(|c| c.is_whitespace() || ";&|)><".contains(c));
+    scan_quotes(text, after).0
+}
+
+/// [`open_quote`]'s reading of `text`, and whether it paired a quote
+/// doubtfully: opened a double quote or backtick right after a letter or
+/// digit, or closed a quote right after whitespace or one of `=`, `:`, `(`,
+/// `[`, `{`, `,`, or right before a letter, a digit, `/`, `~` or `\`.
+/// Well-formed JSON and shell quoting do none of these, so such a pairing
+/// has gone out of step, as a stray quote earlier on the line puts it (`the
+/// "quoted {"msg":"a b"}`, `the "quoted x="a b/c"`).
+fn scan_quotes(text: &str, after: Option<char>) -> (Option<(char, usize)>, bool) {
     let mut open: Option<(char, usize)> = None;
+    let mut doubtful = false;
     let mut backslashes = 0usize;
     let mut previous: Option<char> = None;
     let mut chars = text.char_indices().peekable();
@@ -404,20 +449,24 @@ fn open_quote(text: &str, after: Option<char>) -> Option<(char, usize)> {
         if !matches!(c, '"' | '\'' | '`') {
             continue;
         }
-        let opens = c != '\''
-            || before.is_none_or(|before| before.is_whitespace() || "=:([{,".contains(before));
         match open {
-            None if !escaped && opens => open = Some((c, at)),
+            None if !escaped && opens_after(c, before) => {
+                doubtful |= before.is_some_and(char::is_alphanumeric);
+                open = Some((c, at));
+            }
             Some((quote, _)) if quote == c => {
                 let next = chars.peek().map(|&(_, next)| next).or(after);
-                if !escaped || (c != '"' && boundary(next)) {
+                if !escaped || (c != '"' && shell_boundary(next)) {
+                    doubtful |= before
+                        .is_some_and(|before| before.is_whitespace() || "=:([{,".contains(before))
+                        || next.is_some_and(|next| next.is_alphanumeric() || "/~\\".contains(next));
                     open = None;
                 }
             }
             _ => {}
         }
     }
-    open
+    (open, doubtful)
 }
 
 /// Whether `path` starts from a root, `~/`, `./`, `../` or a drive, so it
@@ -1422,7 +1471,6 @@ mod tests {
             ("is it out/a.png? yes", "out/a.png"),
             ("out/a.png, out/b.png", "out/a.png"),
             ("see out/a.png: done", "out/a.png"),
-            ("\"Please inspect out/a.png,\" she said.", "out/a.png"),
             ("\"src/main.rs:12\"", "src/main.rs"),
             ("[src/main.rs:12]", "src/main.rs"),
             ("See src/main.rs:12.", "src/main.rs"),
@@ -1520,17 +1568,27 @@ mod tests {
                 ("d/e f.txt".to_string(), true)
             ]
         );
-        // Quoted prose keeps its own path, and a quoted name that only
-        // reads as a path in part is left to the bare pattern.
+        // A relative path after a space inside quotes may be a piece of a
+        // quoted name holding a space, which quoted prose cannot be told
+        // from, so it is copied; a quoted name that only reads as a path in
+        // part is left to the bare pattern.
         for (line, bare) in [
-            ("\"see src/main.rs\"", Some(("src/main.rs", true))),
+            ("\"see src/main.rs\"", Some(("src/main.rs", false))),
+            (
+                "\"Please inspect out/a.png,\" she said.",
+                Some(("out/a.png", false)),
+            ),
             (
                 "\"cannot open src/main.rs now\"",
                 Some(("src/main.rs", false)),
             ),
             (
                 "msg=\"failed to read config/app.toml\"",
-                Some(("config/app.toml", true)),
+                Some(("config/app.toml", false)),
+            ),
+            (
+                "msg=\"failed to read /etc/app.toml\"",
+                Some(("/etc/app.toml", true)),
             ),
             ("\"/model sonnet\"", Some(("/model", false))),
             ("\"and/or more words\"", Some(("and/or", false))),
@@ -1649,9 +1707,9 @@ mod tests {
             let spans = detect(&[line]);
             assert!(spans.iter().all(|span| !span.bounded), "{line}: {spans:?}");
         }
-        // Without one, a bare path ending at the quote is whole, as before;
-        // a no-break space is a space.
-        for line in ["\"see src/main.rs\"", "\"see\u{a0}src/main.rs\""] {
+        // Without one, a path from a root ending at the quote is whole; a
+        // no-break space is a space.
+        for line in ["\"see /tmp/main.rs\"", "\"see\u{a0}/tmp/main.rs\""] {
             let spans = detect(&[line]);
             assert_eq!(spans.len(), 1, "{line}: {spans:?}");
             assert!(spans[0].bounded, "{line}");
