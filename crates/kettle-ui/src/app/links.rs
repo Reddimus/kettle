@@ -50,6 +50,12 @@ pub(super) enum FileLinkCheck {
 /// stopped.
 pub(super) fn check_file_link(path: &std::path::Path) -> FileLinkCheck {
     use kettle_core::links::names_program_or_shortcut;
+    // Win32 drops a name's trailing dots and spaces before it looks a path
+    // up, so `C:\Temp\report.pdf..` would resolve to `report.pdf`, another
+    // file than the link names: refuse a path it would not read as written.
+    if cfg!(windows) && !path.to_str().is_some_and(win32_keeps_path) {
+        return FileLinkCheck::Unresolved;
+    }
     let Ok(resolved) = std::fs::canonicalize(path) else {
         return FileLinkCheck::Unresolved;
     };
