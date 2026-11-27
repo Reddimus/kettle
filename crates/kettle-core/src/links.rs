@@ -1424,7 +1424,8 @@ mod tests {
     }
 
     /// Mainstream terminal output links exactly as it did before the 6.0
-    /// link fixes (main at f776689b6): cargo and ESLint JSON, compiler
+    /// link fixes (main at f776689b6), except where a line says why not:
+    /// cargo and ESLint JSON, compiler
     /// locations, Markdown and prose URLs, IPv6 hosts and ports before an
     /// ellipsis, quoted prose holding a path, and macOS screenshot names. A
     /// change to link detection that moves any of them, by a link, a column
@@ -1725,6 +1726,23 @@ mod tests {
                 "src/lib.rs:10:5: note: here",
                 &[("file:///work/src/lib.rs", 0, 14)],
                 &[(Kind::Path, "src/lib.rs", true)],
+            ),
+            // A backslash-escaped quote stays inside its string: the end of
+            // this value is no file of its own (main linked /tmp/report.pdf,
+            // which is not the file the JSON names), while a value after a
+            // string holding escaped quotes still links.
+            (
+                r#"{"file":"docs/a\"b=/tmp/report.pdf"}"#,
+                &[],
+                &[
+                    (Kind::Path, "docs/a", false),
+                    (Kind::Path, "/tmp/report.pdf", false),
+                ],
+            ),
+            (
+                r#"{"msg":"say \"hi\"","file":"/tmp/c.txt"}"#,
+                &[("file:///tmp/c.txt", 28, 37)],
+                &[(Kind::Path, "/tmp/c.txt", true)],
             ),
         ];
         for &(line, links, hints) in corpus {
@@ -2252,6 +2270,32 @@ mod tests {
                 .map(|link| link.uri)
                 .collect::<Vec<_>>();
             assert_eq!(found, [uri], "{line}");
+        }
+    }
+
+    /// A backslash-escaped quote is text inside its string: the end of a
+    /// JSON value holding one is no file of its own, and a value after a
+    /// string that holds one still links.
+    #[test]
+    fn an_escaped_quote_stays_inside_its_string() {
+        let found = |line: &str| {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>()
+        };
+        for line in [
+            r#"{"file":"docs/a\"b=/tmp/report.pdf"}"#,
+            r#""docs/a\"b=/tmp/report.pdf""#,
+        ] {
+            assert!(found(line).is_empty(), "{line}: {:?}", found(line));
+        }
+        for line in [
+            r#"{"msg":"say \"hi\"","file":"/tmp/c.txt"}"#,
+            r#"{"msg":"a\\","file":"/tmp/c.txt"}"#,
+        ] {
+            assert_eq!(found(line), ["file:///tmp/c.txt"], "{line}");
         }
     }
 
