@@ -381,9 +381,13 @@ fn quoted_path_len(body: &str, quote: char) -> Option<usize> {
     }
     let name = segments[last];
     let directory = name.is_empty();
+    // The closing quote marks where the name ends, so dots after it are the
+    // name's and leave its extension and last character as they were
+    // (`"/tmp/my report.pdf.."`). A name of dots alone has neither.
+    let named = name.trim_end_matches('.');
     // An extension of any length (`.swiftinterface`): ASCII letters and
     // digits, in words joined by `-` or `_` (`.code-workspace`).
-    let extension = name.rsplit_once('.').is_some_and(|(_, extension)| {
+    let extension = named.rsplit_once('.').is_some_and(|(_, extension)| {
         extension
             .split(['-', '_'])
             .all(|word| !word.is_empty() && word.bytes().all(|b| b.is_ascii_alphanumeric()))
@@ -395,7 +399,7 @@ fn quoted_path_len(body: &str, quote: char) -> Option<usize> {
         && separators >= 2
         && NAME_END
             .get_or_init(|| Regex::new(r"[\w)\]]$").unwrap())
-            .is_match(name);
+            .is_match(named);
     (directory || extension || deep).then_some(path.len())
 }
 
@@ -919,7 +923,12 @@ mod tests {
             assert_eq!(spans[0].text, text, "{line}");
             assert!(!spans[0].bounded, "{line}");
         }
-        for (line, text) in [("ls \"/tmp/a..\"", "/tmp/a.."), ("'/tmp/...'", "/tmp/...")] {
+        for (line, text) in [
+            ("ls \"/tmp/a..\"", "/tmp/a.."),
+            ("'/tmp/...'", "/tmp/..."),
+            ("open \"/tmp/my report.pdf..\" now", "/tmp/my report.pdf.."),
+            ("open \"/tmp/my dir/notes...\" now", "/tmp/my dir/notes..."),
+        ] {
             let spans = detect(&[line]);
             assert_eq!(spans.len(), 1, "{line}: {spans:?}");
             assert_eq!(

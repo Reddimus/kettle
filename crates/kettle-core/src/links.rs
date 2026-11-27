@@ -1286,6 +1286,10 @@ mod tests {
             ("ls \"/tmp/a..\"", "file:///tmp/a.."),
             ("ls '/tmp/...' now", "file:///tmp/..."),
             ("ls \"docs/report.pdf..\"", "file:///work/docs/report.pdf.."),
+            (
+                "open \"/tmp/my report.pdf..\" now",
+                "file:///tmp/my%20report.pdf..",
+            ),
             ("see /tmp/a.", "file:///tmp/a"),
             ("see /tmp/a.b..c", "file:///tmp/a.b..c"),
         ] {
