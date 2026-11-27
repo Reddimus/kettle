@@ -2402,6 +2402,68 @@ fn the_menu_names_the_output_row_under_the_pointer_in_scrolled_back_history() {
     );
 }
 
+/// A real interactive Bash at `SEL> `, running Kettle's shipped hooks after
+/// the user's `prompt_command`, or `None` where no Bash is installed.
+#[cfg(unix)]
+fn integrated_bash(prompt_command: &str) -> Option<(WindowState, u64)> {
+    let Some(bash) = ["/opt/homebrew/bin/bash", "/usr/local/bin/bash", "/usr/bin/bash", "/bin/bash"]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).is_file())
+    else {
+        eprintln!("bash not installed; real-shell output selection skipped");
+        return None;
+    };
+    let hooks = concat!(env!("CARGO_MANIFEST_DIR"), "/../../shell-integration/kettle.bash");
+    let hooks = format!("'{}'", hooks.replace('\'', "'\\''"));
+    Some(shell_window(
+        &format!(
+            "PS1='SEL> ' PROMPT_COMMAND={prompt_command} HISTFILE=/dev/null INPUTRC=/dev/null exec {bash} --noprofile --rcfile {hooks} -i"
+        ),
+        |term| bash_at_prompt(term, 0),
+    ))
+}
+
+/// The `SEL> ` prompt is on the cursor's row and the shell is at it, after
+/// `commands` commands have finished.
+#[cfg(unix)]
+fn bash_at_prompt(term: &kettle_core::Terminal, commands: usize) -> bool {
+    use kettle_core::Dimensions as _;
+    if !term.shell_at_prompt() || term.command_marks().len() != commands {
+        return false;
+    }
+    let t = term.term.lock().unwrap();
+    let row = t.grid().cursor.point.line;
+    (0..t.grid().columns())
+        .map(|col| t.grid()[row][kettle_core::Column(col)].c)
+        .collect::<String>()
+        .trim_end()
+        .ends_with("SEL>")
+}
+
+/// Type `command` and wait for the prompt after it, the `commands`th.
+#[cfg(unix)]
+fn run_in_bash(term: &kettle_core::Terminal, command: &str, commands: usize) {
+    term.write(format!("{command}\r").as_bytes());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !bash_at_prompt(term, commands) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{command}: no prompt; screen {:?}",
+            term.screen_text(0).map(|screen| screen.text)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// What Select Command Output copies for the command holding row `at`, or
+/// the newest.
+#[cfg(unix)]
+fn copied_output(term: &kettle_core::Terminal, at: Option<u64>) -> Option<String> {
+    term.term.lock().unwrap().selection = None;
+    assert!(super::select_command_output(term, at), "{at:?}");
+    selected_and_top_row(&term.term).0
+}
+
 /// A real interactive Bash running Kettle's hooks: output with no final
 /// newline leaves the next prompt on its last row, with nothing between them
 /// on the wire. Select Command Output copies the output without that prompt,
@@ -2410,68 +2472,41 @@ fn the_menu_names_the_output_row_under_the_pointer_in_scrolled_back_history() {
 #[cfg(unix)]
 #[test]
 fn select_command_output_leaves_out_the_bash_prompt_after_an_unterminated_line() {
-    let Some(bash) = ["/opt/homebrew/bin/bash", "/usr/local/bin/bash", "/usr/bin/bash", "/bin/bash"]
-        .into_iter()
-        .find(|path| std::path::Path::new(path).is_file())
-    else {
-        eprintln!("bash not installed; real-shell output selection skipped");
+    let Some((ws, pane)) = integrated_bash("") else {
         return;
     };
-    let hooks = concat!(env!("CARGO_MANIFEST_DIR"), "/../../shell-integration/kettle.bash");
-    // The prompt is on the cursor's row and the shell is at it, after
-    // `commands` commands have finished.
-    let at_prompt = |term: &kettle_core::Terminal, commands: usize| {
-        use kettle_core::Dimensions as _;
-        if !term.shell_at_prompt() || term.command_marks().len() != commands {
-            return false;
-        }
-        let t = term.term.lock().unwrap();
-        let row = t.grid().cursor.point.line;
-        (0..t.grid().columns())
-            .map(|col| t.grid()[row][kettle_core::Column(col)].c)
-            .collect::<String>()
-            .trim_end()
-            .ends_with("SEL>")
-    };
-    let (ws, pane) = shell_window(
-        &format!(
-            "PS1='SEL> ' HISTFILE=/dev/null INPUTRC=/dev/null exec {bash} --noprofile --rcfile {hooks} -i"
-        ),
-        |term| at_prompt(term, 0),
-    );
     let term = &ws.mux.panes[&pane].term;
-    let run = |command: &str, commands: usize| {
-        term.write(format!("{command}\r").as_bytes());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while !at_prompt(term, commands) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "{command}: no prompt; screen {:?}",
-                term.screen_text(0).map(|screen| screen.text)
-            );
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-    };
-    let copied = |at: Option<u64>| {
-        term.term.lock().unwrap().selection = None;
-        assert!(super::select_command_output(term, at), "{at:?}");
-        selected_and_top_row(&term.term).0
-    };
-    run("printf 'unterminated-output'", 1);
-    assert_eq!(copied(None).as_deref(), Some("unterminated-output"));
+    run_in_bash(term, "printf 'unterminated-output'", 1);
+    assert_eq!(copied_output(term, None).as_deref(), Some("unterminated-output"));
     let first = term.command_output_rows(None).unwrap();
     assert!(first.end_column.is_some(), "the prompt shares the row: {first:?}");
     // The next command is typed on that shared row.
-    run("printf 'first\\nsecond'", 2);
-    assert_eq!(copied(None).as_deref(), Some("first\nsecond"));
+    run_in_bash(term, "printf 'first\\nsecond'", 2);
+    assert_eq!(copied_output(term, None).as_deref(), Some("first\nsecond"));
     assert_eq!(
-        copied(Some(first.end - 1)).as_deref(),
+        copied_output(term, Some(first.end - 1)).as_deref(),
         Some("unterminated-output"),
         "the older output, by its row"
     );
-    run("printf 'ordinary-output\\n'", 3);
-    assert_eq!(copied(None).as_deref(), Some("ordinary-output"));
+    run_in_bash(term, "printf 'ordinary-output\\n'", 3);
+    assert_eq!(copied_output(term, None).as_deref(), Some("ordinary-output"));
     assert_eq!(term.command_output_rows(None).unwrap().end_column, None);
+    term.write(b"exit\r");
+}
+
+/// A real interactive Bash whose own prompt hook starts the prompt on a new
+/// row after Kettle's D and A marks: output that left the cursor partway
+/// along its last row keeps the cells right of the cursor, since no prompt
+/// was written over them.
+#[cfg(unix)]
+#[test]
+fn select_command_output_keeps_output_right_of_the_cursor_when_the_prompt_starts_below() {
+    let Some((ws, pane)) = integrated_bash("echo") else {
+        return;
+    };
+    let term = &ws.mux.panes[&pane].term;
+    run_in_bash(term, "printf 'abcdef\\033[3D'", 1);
+    assert_eq!(copied_output(term, None).as_deref(), Some("abcdef"));
     term.write(b"exit\r");
 }
 
