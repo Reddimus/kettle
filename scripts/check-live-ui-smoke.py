@@ -21568,6 +21568,15 @@ def live_session_failure_reason() -> Optional[str]:
     system = platform.system()
     if system == "Windows":
         return None
+    if not hasattr(os, "waitid"):
+        # Watching a launched Kettle exit without reaping it needs os.waitid,
+        # which macOS Pythons before 3.13 lack. Without it the startup probe and
+        # the cleanup both fail and leave the launched Kettle running, so refuse
+        # before launching anything.
+        return (
+            f"Python {platform.python_version()} has no os.waitid, "
+            "which watching the launched Kettle needs (use Python 3.13 or newer)"
+        )
     if system == "Darwin":
         try:
             manager = subprocess.run(
