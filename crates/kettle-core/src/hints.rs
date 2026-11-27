@@ -292,9 +292,9 @@ pub(crate) fn path_reaches_quote(
 
 /// Whether a path starting at `start` continues a path-shaped token that a
 /// quote opens without making a quoted run, as one after a colon does
-/// (`host:"docs/a*b=/tmp/report.pdf"`): its word, from the last space
-/// before it, holds a quote with a separator after the first quote, so an
-/// apostrophe inside the token (`"docs/a'b=`) does not hide it; or the text
+/// (`host:"docs/a*b=/tmp/report.pdf"`): in its word, from the last space
+/// before it, the quote opening the string it is in has a separator after
+/// it; or the text
 /// after such a quote starts with a path-shaped word, as a quoted path with
 /// a space does (`{"file":"/Users/me/my app/x.py"}`). Its end is not a file
 /// of its own. The text is read at most [`MAX_QUOTED_PATH`] bytes back, so
@@ -306,10 +306,20 @@ fn continues_a_quoted_token(line: &str, start: usize) -> bool {
     let window = &line[from..start];
     let word = window.rsplit(char::is_whitespace).next().unwrap_or(window);
     let path_shaped = |text: &str| text.contains(['/', '\\']);
-    if word
-        .find(['"', '\'', '`'])
-        .is_some_and(|at| path_shaped(&word[at + 1..]))
-    {
+    // The quote that opens the string the path is in: strings the word
+    // opens and closes before it (compact JSON's `"cwd":"/work",`) are not
+    // it, and another kind of quote inside it is text (`"docs/a'b=`).
+    let mut open: Option<(char, usize)> = None;
+    for (at, c) in word.char_indices() {
+        if matches!(c, '"' | '\'' | '`') {
+            match open {
+                Some((quote, _)) if quote == c => open = None,
+                Some(_) => {}
+                None => open = Some((c, at)),
+            }
+        }
+    }
+    if open.is_some_and(|(_, at)| path_shaped(&word[at + 1..])) {
         return true;
     }
     // The last quote before the path, if a colon kept it from opening a
@@ -1563,6 +1573,41 @@ mod tests {
             assert!(
                 spans.iter().all(|span| !span.text.contains(' ')),
                 "{body}: {spans:?}"
+            );
+        }
+    }
+
+    /// Compact JSON closes each string before the next opens, so a later
+    /// value's path is its own token, whatever an earlier value held.
+    #[test]
+    fn a_compact_json_path_is_whole_after_any_earlier_value() {
+        for (line, path) in [
+            (
+                "{\"cwd\":\"/work\",\"file\":\"/Users/me/x.py\"}",
+                "/Users/me/x.py",
+            ),
+            (
+                "{\"url\":\"https://x.test/a\",\"path\":\"/tmp/c.txt\"}",
+                "/tmp/c.txt",
+            ),
+            (
+                "{\"type\":\"application/json\",\"file\":\"/tmp/c.txt\"}",
+                "/tmp/c.txt",
+            ),
+            (
+                "{\"date\":\"2026/11/26\",\"file\":\"/tmp/c.txt\"}",
+                "/tmp/c.txt",
+            ),
+            (
+                "{\"msg\":\"it's a/b\",\"file\":\"/tmp/c.txt\"}",
+                "/tmp/c.txt",
+            ),
+            ("key=\"a/b\";other=/tmp/c.txt", "/tmp/c.txt"),
+        ] {
+            let spans = detect(&[line]);
+            assert!(
+                spans.iter().any(|span| span.text == path && span.bounded),
+                "{line}: {spans:?}"
             );
         }
     }

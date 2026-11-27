@@ -1803,6 +1803,34 @@ mod tests {
         }
     }
 
+    /// Compact JSON closes each string before the next opens, so a later
+    /// value's path links whatever an earlier value held.
+    #[test]
+    fn a_compact_json_path_links_after_any_earlier_value() {
+        for (line, uri) in [
+            (
+                "{\"cwd\":\"/work\",\"file\":\"/Users/me/x.py\"}",
+                "file:///Users/me/x.py",
+            ),
+            (
+                "{\"type\":\"application/json\",\"file\":\"/tmp/c.txt\"}",
+                "file:///tmp/c.txt",
+            ),
+            (
+                "{\"date\":\"2026/11/26\",\"file\":\"/tmp/c.txt\"}",
+                "file:///tmp/c.txt",
+            ),
+            ("key=\"a/b\";other=/tmp/c.txt", "file:///tmp/c.txt"),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>();
+            assert_eq!(found, [uri], "{line}");
+        }
+    }
+
     /// Quotes around one path-shaped token the quoted pattern rejects leave
     /// no piece of it linked as a file of its own; a path after a space in
     /// quoted prose, or unquoted, still links.
