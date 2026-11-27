@@ -7050,8 +7050,18 @@ mod tests {
         let expected = std::env::current_exe().unwrap().canonicalize().unwrap();
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
+            // Other tests in this binary start and reap children of this
+            // process, so one walk can find a child gone between listing it
+            // and reading it, and report itself incomplete. This test is
+            // about the executable path, so it retries the walk.
             let mut tree = super::RootedProcessTree::default();
-            assert!(tree.refresh_roots_within(&[pid], std::time::Duration::from_secs(5)));
+            let complete = (0..20).any(|attempt| {
+                if attempt > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                tree.refresh_roots_within(&[pid], std::time::Duration::from_secs(5))
+            });
+            assert!(complete, "no complete walk of this process in 20 tries");
             let executable = tree.executable_of(pid).expect("native executable path");
             assert_eq!(
                 std::path::Path::new(&executable).canonicalize().unwrap(),
