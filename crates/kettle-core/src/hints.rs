@@ -276,6 +276,21 @@ pub(crate) fn path_reaches_quote(
         })
 }
 
+/// Whether the quoted run holding a bare path closes right at its `end`,
+/// the quote ending the token, so the quote marks where the name ends:
+/// `"/tmp/a.."` names `a..`.
+pub(crate) fn quote_closes_at(
+    line: &str,
+    runs: &[(usize, usize)],
+    start: usize,
+    end: usize,
+) -> bool {
+    let holder = runs.partition_point(|&(open, _)| open < start);
+    runs[..holder]
+        .last()
+        .is_some_and(|&(_, close)| close == end && quote_has_end(line, close))
+}
+
 /// The length of the path in quoted text `body` (without a trailing `:12`
 /// or `:12:5`), or `None` when `body` does not read as a path (see
 /// [`quoted_paths`]).
@@ -549,8 +564,24 @@ fn detect_line(
             } else {
                 (m.start(), m.as_str())
             };
+            // A path that lost two or more dots to trimming may name a file
+            // ending in them: the exact name opens where a closing quote
+            // marks it, and otherwise the hint copies the text as printed.
+            let mut uncertain = false;
             let trimmed = if *kind == Kind::Path {
-                crate::url_trim::trim_path_trailing(raw)
+                let trimmed = crate::url_trim::trim_path_trailing(raw);
+                match crate::url_trim::trimmed_dot_run(raw, trimmed) {
+                    Some(exact)
+                        if exact == raw.len() && quote_closes_at(line, &runs, m_start, m.end()) =>
+                    {
+                        raw
+                    }
+                    Some(exact) => {
+                        uncertain = true;
+                        &raw[..exact]
+                    }
+                    None => trimmed,
+                }
             } else {
                 trim_trailing(raw)
             };
@@ -574,7 +605,8 @@ fn detect_line(
             // Inside quoted text, a path that stops before the closing quote
             // is part of a longer quoted name or sentence: `Files/a` in
             // `'My Files/a b.txt'`.
-            let bounded = is_bounded(before, &line[m.end()..])
+            let bounded = !uncertain
+                && is_bounded(before, &line[m.end()..])
                 && (*kind != Kind::Path
                     || (path_reaches_quote(line, &runs, m_start, m.end())
                         && !path_misleads(trimmed)));
@@ -824,17 +856,37 @@ mod tests {
         }
     }
 
-    /// A longer run of dots ending a path is an ellipsis: the hint names
-    /// the directory before it, never the parent `/tmp/..`.
+    /// A path ending in two or more dots may name a file ending in them or
+    /// trail off a sentence, so its hint copies the text as printed and
+    /// never opens a shorter path (`/tmp/a`) or the folder (`/tmp/`). A
+    /// closing quote right after the dots makes them the name's.
     #[test]
-    fn an_ellipsis_ending_a_path_hint_is_not_its_parent() {
-        for line in ["open /tmp/...", "open /tmp/....", "open /tmp/...)."] {
+    fn a_path_ending_in_a_dot_run_is_never_opened_shorter() {
+        for (line, text) in [
+            ("open /tmp/...", "/tmp/..."),
+            ("open /tmp/....", "/tmp/...."),
+            ("open /tmp/...).", "/tmp/..."),
+            ("ls /tmp/a..", "/tmp/a.."),
+            ("see foo/bar...", "foo/bar..."),
+        ] {
             let spans = detect(&[line]);
             assert_eq!(spans.len(), 1, "{line}: {spans:?}");
             assert_eq!(spans[0].kind, Kind::Path);
-            assert_eq!(spans[0].text, "/tmp/", "{line}");
-            assert!(spans[0].bounded, "{line}");
+            assert_eq!(spans[0].text, text, "{line}");
+            assert!(!spans[0].bounded, "{line}");
         }
+        for (line, text) in [("ls \"/tmp/a..\"", "/tmp/a.."), ("'/tmp/...'", "/tmp/...")] {
+            let spans = detect(&[line]);
+            assert_eq!(spans.len(), 1, "{line}: {spans:?}");
+            assert_eq!(
+                (spans[0].text.as_str(), spans[0].bounded),
+                (text, true),
+                "{line}"
+            );
+        }
+        // One dot ends a sentence.
+        let spans = detect(&["see /tmp/a."]);
+        assert_eq!((spans[0].text.as_str(), spans[0].bounded), ("/tmp/a", true));
     }
 
     #[test]

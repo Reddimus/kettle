@@ -71,11 +71,11 @@ fn trim_trailing_inner(s: &str, path: bool) -> &str {
     }
     if path {
         // A last component of `.` or `..` names a directory, so it stays.
-        // Any longer run of dots is prose, after a name (`notes...`) or a
-        // separator (`/usr/lib/...`), as Ghostty reads a path's end: the
-        // whole run goes, never just enough of it to leave `..`, which
-        // would name the parent instead. Each run is scanned once, so this
-        // stays linear too.
+        // Any longer run of dots goes whole, after a name (`notes...`) or a
+        // separator (`/usr/lib/...`), as Ghostty reads a path's end, never
+        // just enough of it to leave `..`, which would name the parent.
+        // Callers do not open a path trimmed that way (see
+        // `trimmed_dot_run`). Each run is scanned once, so this stays linear.
         let mut end = bytes.len();
         while end > kept {
             if bytes[end - 1] != b'.' {
@@ -95,6 +95,21 @@ fn trim_trailing_inner(s: &str, path: bool) -> &str {
         }
     }
     &s[..kept]
+}
+
+/// The length of `raw` up to the end of the dots trimming took off it, when
+/// it took two or more (`/tmp/a..` trimmed to `/tmp/a`, `/tmp/...` to
+/// `/tmp/`). The name may end in those dots, or a sentence may trail off
+/// after it, and the shorter path names another file, so a caller opens
+/// the exact name only where a closing quote marks it and nothing
+/// otherwise. `None` when trimming took at most one dot: a single dot ends
+/// a sentence.
+pub(crate) fn trimmed_dot_run(raw: &str, trimmed: &str) -> Option<usize> {
+    let dots = raw[trimmed.len()..]
+        .bytes()
+        .take_while(|&b| b == b'.')
+        .count();
+    (dots >= 2).then_some(trimmed.len() + dots)
 }
 
 /// The index of a bracket's pair: `()`, `[]` or `{}`.
@@ -255,6 +270,24 @@ mod tests {
                 let candidate = format!("{path}{tail}");
                 assert_eq!(trim_path_trailing(&candidate), trimmed, "{candidate}");
             }
+        }
+        // Two or more dots trimmed off leave the name uncertain.
+        use super::trimmed_dot_run;
+        for (raw, exact) in [
+            ("/tmp/a..", Some(8)),
+            ("/tmp/a...)", Some(9)),
+            ("/tmp/...", Some(8)),
+            ("/tmp/a.", None),
+            ("/tmp/a.)", None),
+            ("/tmp/a.,.", None),
+            ("/tmp/..", None),
+            ("/tmp/a", None),
+        ] {
+            assert_eq!(
+                trimmed_dot_run(raw, trim_path_trailing(raw)),
+                exact,
+                "{raw}"
+            );
         }
         // The run takes linear work however long it is.
         let long = format!("a/{}", ".".repeat(1_000_000));

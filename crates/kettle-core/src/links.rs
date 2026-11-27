@@ -143,7 +143,20 @@ fn diagnostic_prefix_re() -> &'static Regex {
 fn path_candidates(text: &str) -> impl Iterator<Item = (usize, usize, &str)> {
     let runs = crate::hints::quoted_runs(text).collect::<Vec<_>>();
     path_re().find_iter(text).filter_map(move |m| {
-        let matched = crate::url_trim::trim_path_trailing(m.as_str());
+        let raw = m.as_str();
+        let mut matched = crate::url_trim::trim_path_trailing(raw);
+        // Two or more dots trimmed off may belong to the name (`/tmp/a..`)
+        // or trail off a sentence, and the shorter path names another file.
+        // A quote right after them marks them as the name's; otherwise the
+        // path is no link.
+        if let Some(exact) = crate::url_trim::trimmed_dot_run(raw, matched) {
+            if exact == raw.len() && crate::hints::quote_closes_at(text, &runs, m.start(), m.end())
+            {
+                matched = raw;
+            } else {
+                return None;
+            }
+        }
         let before = text[..m.start()].chars().next_back();
         let after_host = text[..m.start()].strip_suffix(':').is_some_and(|prefix| {
             let previous = prefix
@@ -1162,6 +1175,77 @@ mod tests {
         }
     }
 
+    /// A path ending in two or more dots never links a shorter path or its
+    /// folder: the name may end in those dots. A closing quote right after
+    /// them makes them the name's; a single dot ends a sentence.
+    #[test]
+    fn a_path_ending_in_a_dot_run_links_only_its_exact_name() {
+        let found = |line: &str| {
+            let term = term_with(line.len(), &[line], &[]);
+            links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>()
+        };
+        for line in [
+            "ls /tmp/a..",
+            "ls /tmp/a.. now",
+            "open /tmp/...",
+            "see /tmp/notes...",
+            "(see /tmp/a..).",
+            "/tmp/....",
+        ] {
+            assert!(found(line).is_empty(), "{line}: {:?}", found(line));
+        }
+        for (line, uri) in [
+            ("ls \"/tmp/a..\"", "file:///tmp/a.."),
+            ("ls '/tmp/...' now", "file:///tmp/..."),
+            ("see /tmp/a.", "file:///tmp/a"),
+            ("see /tmp/a.b..c", "file:///tmp/a.b..c"),
+        ] {
+            assert_eq!(found(line), [uri], "{line}");
+        }
+    }
+
+    /// Trimming a URL's end never changes which host it opens: a path,
+    /// query or fragment after the host keeps it intact, and trimming the
+    /// host itself drops only dots, which separate its labels, or
+    /// characters no host may end in.
+    #[test]
+    fn trimming_a_url_never_changes_its_host() {
+        let host_of = |url: &str| {
+            let rest = &url[url.find("//").unwrap() + 2..];
+            rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())].to_string()
+        };
+        let labels = |host: &str| {
+            host.trim_end_matches(|c| ":;,'\"`*)]}".contains(c))
+                .split('.')
+                .filter(|label| !label.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        for host in [
+            "example.com",
+            "example.com.",
+            "a.b.c",
+            "[::1]",
+            "例え.テスト",
+        ] {
+            for tail in [
+                ".", "..", "...", ",", ").", ":", ";", "'", "\"", "*", "`", "..).", "]..",
+            ] {
+                let url = format!("https://{host}{tail}");
+                let trimmed = crate::url_trim::trim_trailing(&url);
+                assert_eq!(labels(&host_of(trimmed)), labels(host), "{url}");
+                for after in ["/a..", "/?q=a..", "/#f..", ":8080/x.."] {
+                    let url = format!("https://{host}{after}{tail}");
+                    let trimmed = crate::url_trim::trim_trailing(&url);
+                    assert_eq!(host_of(trimmed), host_of(&url), "{url}");
+                }
+            }
+        }
+    }
+
     /// A closing bracket that pairs with an open before it ends the link,
     /// whatever stray close came earlier in the query.
     #[test]
@@ -1797,7 +1881,7 @@ mod tests {
         // A name ending in `www` is a path; a scheme after a refused `www.`
         // still starts a URL.
         for (line, uri) in [
-            ("cat /tmp/www...", "file:///tmp/www"),
+            ("cat /tmp/www.,", "file:///tmp/www"),
             (
                 "docs/www.cfg=HTTPS://example.com/a",
                 "HTTPS://example.com/a",
