@@ -404,17 +404,9 @@ fn path_match_to_file_uri_with_home(
         return None;
     }
     let normalized = path.replace('\\', "/");
-    // A `%` is encoded below, so a name's `%2e` stays text in the URL
-    // (`100%2e.pdf`). A segment that would climb once decoded (`%2e%2e`,
-    // `.%2E`, `..%20`) is refused all the same, for a handler that decodes
-    // twice.
-    let climbs_decoded = |segment: &str| {
-        let lowered = segment.to_ascii_lowercase();
-        climbs(&lowered.replace("%2e", ".").replace("%20", " "))
-    };
     if normalized.starts_with("//")
         || has_parent_component(&normalized)
-        || normalized.split('/').any(climbs_decoded)
+        || climbs_once_decoded(&normalized)
     {
         return None;
     }
@@ -498,6 +490,17 @@ fn is_windows_drive_path(path: &str) -> bool {
 fn is_windows_drive_colon(path: &str, pos: usize) -> bool {
     let b = path.as_bytes();
     pos == 1 && b.len() >= 3 && b[0].is_ascii_alphabetic() && (b[2] == b'/' || b[2] == b'\\')
+}
+
+/// Whether a detected path has a segment that names a parent only once its
+/// escapes are decoded (`%2e%2e`, `.%2E`, `..%20`). A `%` in it is encoded in
+/// its URL, so `100%2e.pdf` stays that name, but a handler that decodes
+/// twice would climb, so such a path is not opened.
+pub(crate) fn climbs_once_decoded(path: &str) -> bool {
+    path.split(['/', '\\']).any(|segment| {
+        let lowered = segment.to_ascii_lowercase();
+        segment.contains('%') && climbs(&lowered.replace("%2e", ".").replace("%20", " "))
+    })
 }
 
 fn has_parent_component(path: &str) -> bool {

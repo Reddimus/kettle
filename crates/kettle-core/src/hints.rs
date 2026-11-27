@@ -265,7 +265,7 @@ pub(crate) fn path_reaches_quote(
                     .0
                     .trim_start_matches(|c| ",;:?!.".contains(c))
                     .is_empty()
-                && !path_hides_text(&line[open + 1..close])
+                && !path_misleads(&line[open + 1..close])
         })
 }
 
@@ -352,10 +352,13 @@ fn quoted_path_len(body: &str, quote: char) -> Option<usize> {
     (directory || extension || deep).then_some(path.len())
 }
 
-/// Whether a path holds a character that hides text, a space aside.
-fn path_hides_text(path: &str) -> bool {
+/// Whether a path does not open as the name it spells: it holds a
+/// character that hides text, a space aside, or names a parent once
+/// decoded (`%2e%2e`).
+fn path_misleads(path: &str) -> bool {
     path.chars()
         .any(|c| c != ' ' && crate::links::hides_text(c))
+        || crate::links::climbs_once_decoded(path)
 }
 
 /// Whether a match starting after `before` and followed by `rest` meets a
@@ -529,7 +532,7 @@ fn detect_line(
                     end: col_of_byte[be - 1],
                     kind: Kind::Path,
                     text: line[bs..be].to_string(),
-                    bounded: !path_hides_text(&line[bs..be]),
+                    bounded: !path_misleads(&line[bs..be]),
                 });
             }
         }
@@ -568,7 +571,7 @@ fn detect_line(
             let bounded = is_bounded(before, &line[m.end()..])
                 && (*kind != Kind::Path
                     || (path_reaches_quote(line, &runs, m.start(), m.end())
-                        && !path_hides_text(trimmed)));
+                        && !path_misleads(trimmed)));
             let (bs, be) = (m.start(), m.start() + trimmed.len());
             if taken.overlaps(bs, be) {
                 continue;
@@ -1301,6 +1304,18 @@ mod tests {
             assert!(!spans.is_empty(), "{line}");
             assert!(spans.iter().all(|span| !span.bounded), "{line}: {spans:?}");
         }
+        // A path naming a parent once decoded opens as nothing else either,
+        // as a clicked link refuses it.
+        for line in [
+            "x \"docs/%2e%2e/my report.pdf\" y",
+            "x \"docs/.%2E/my report.swiftinterface\" y",
+        ] {
+            let spans = detect(&[line]);
+            assert_eq!(spans.len(), 1, "{line}: {spans:?}");
+            assert!(!spans[0].bounded, "{line}");
+        }
+        let spans = detect(&["x \"docs/100%2e/my report.pdf\" y"]);
+        assert!(spans[0].bounded);
         // Without one, a bare path ending at the quote is whole, as before.
         let spans = detect(&["\"see src/main.rs\""]);
         assert_eq!(spans.len(), 1);
