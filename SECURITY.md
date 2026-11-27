@@ -34,7 +34,8 @@ and confinement, described below.
   bypasses `kettle_core::links::is_safe_url` and reaches the OS opener
   with a hostile scheme, with no host, or holding a character that hides or
   reorders text (a Unicode space, a zero-width or bidirectional control, a
-  variation selector), or a `file://` link that makes the OS opener run a
+  variation selector), as written or once its percent escapes are decoded,
+  or a `file://` link that makes the OS opener run a
   program or follow a shortcut. Kettle refuses local links to programs and
   shortcuts (see `names_program_or_shortcut` and `check_file_link`): by
   extension, read as Windows reads a name, an alternate data stream's own

@@ -146,7 +146,13 @@ fn cwd_is_local_rejects_unc_and_traversal() {
     assert!(!cwd_is_local("//evil.host/share"));
     assert!(!cwd_is_local("\\\\evil\\share"));
     assert!(!cwd_is_local("/x/../../etc/passwd"));
+    assert!(!cwd_is_local("/x/.. /etc"));
+    assert!(!cwd_is_local(r"C:\x\..\y"));
     assert!(!cwd_is_local(""));
+    // A name holding dots is no climb.
+    for name in ["/tmp/a..", "/tmp/.../x", "/srv/v1..v2", "/home/..hidden"] {
+        assert!(cwd_is_local(name), "{name}");
+    }
 }
 
 /// Link/path overlay underlines must follow focused output immediately.

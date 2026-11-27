@@ -446,10 +446,14 @@ path counts as a link (shown on hover and offered as a hint) when its last part
 has an extension (a dotfile such as `.env` counts) or it has three parts. Remote or unresolved paths are copied;
 see [configuration and hint actions](docs/CONFIG.md). Punctuation that ends a
 sentence is not part of a detected link, as in Ghostty, WezTerm and GNOME
-Terminal: trailing dots (`see https://example.com/docs...` links
-`https://example.com/docs`, and `/usr/lib/...` links `/usr/lib/`), commas,
-quotes, and a closing bracket that closes nothing the link opened. A path
-ending in `/.` or `/..` keeps them.
+Terminal: trailing dots after a URL (`see https://example.com/docs...` links
+`https://example.com/docs`), a single dot after a path, commas, quotes, and a
+closing bracket that closes nothing the link opened. A path ending in two or
+more dots, such as `/tmp/a..` or `/usr/lib/...`, may name a file whose name
+ends in them, so it is not a link and quick select only copies it, unless a
+closing quote right after the dots makes them part of the name (`"/tmp/a.."`
+links `/tmp/a..`). Dots after other punctuation count too (`report.pdf,..`),
+and a `file://` link ending in them is no link either.
 
 ## Themes
 

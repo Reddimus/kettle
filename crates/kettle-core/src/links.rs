@@ -27,30 +27,47 @@ pub struct Link {
 }
 
 /// The pattern for detected URLs, shared with quick select. A scheme is
-/// case-insensitive (RFC 3986), as `www.` is to a reader. A scheme starts a
-/// URL wherever it is, but a `www.` only where no name runs into it: not in
+/// case-insensitive (RFC 3986), as `www.` is to a reader, in ASCII only: a
+/// Unicode fold would read `httpſ://` (U+017F) as `https://`, a scheme the
+/// opener refuses. A scheme starts a URL wherever it is, but a `www.` only
+/// where no name runs into it, judged by Unicode classes: not in
 /// `docs/www.example.com.txt` or `me@www.example.com`. The pattern has no
 /// look-behind, so it takes the character before such a `www.` into the
 /// match, and [`url_match`] drops it; one pass stays linear.
-pub(crate) const URL_PATTERN: &str =
-    r#"(?i:https?://|ftp://|file://|(?:^|[^\w\p{N}/\\.\-@%+~])www\.)[^\s\x00-\x1f<>"]+"#;
+pub(crate) const URL_PATTERN: &str = r#"(?:(?i-u:https?://|ftp://|file://)|(?:^|[^\w\p{N}/\\.\-@%+~])(?i-u:www\.))[^\s\x00-\x1f<>"]+"#;
 
 fn url_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(URL_PATTERN).unwrap())
 }
 
-/// A [`URL_PATTERN`] match's start and text, without the character before
-/// a `www.` that the pattern takes to check it. A URL starts with a letter,
-/// and that character is never a letter or a number.
-pub(crate) fn url_match<'a>(m: &regex::Match<'a>) -> (usize, &'a str) {
+/// Text shaped like a URL of any scheme, Kettle's or not (`vscode://x`,
+/// `httpſ://x`): no piece of it is a local path, as its query is not
+/// (`vscode://open?file=/tmp/a.pdf`).
+pub(crate) fn url_shaped_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r#"\p{L}[\p{L}\p{N}+.\-]*://[^\s\x00-\x1f<>"]*"#).unwrap())
+}
+
+/// A [`URL_PATTERN`] match's start and text in `line`, without the
+/// character before a `www.` that the pattern takes to check it. A URL
+/// starts with a letter, and that character is never a letter or a number.
+/// `None` when the character before the URL is an invisible one, which
+/// does not end a word (`a\u{200b}www.x.test` reads as one token), or a
+/// control; Unicode whitespace shows as a space and does.
+pub(crate) fn url_match<'a>(line: &str, m: &regex::Match<'a>) -> Option<(usize, &'a str)> {
     let text = m.as_str();
     let taken = text
         .chars()
         .next()
         .filter(|c| !c.is_alphabetic())
         .map_or(0, char::len_utf8);
-    (m.start() + taken, &text[taken..])
+    let start = m.start() + taken;
+    let before = line[..start].chars().next_back();
+    if before.is_some_and(|c| hides_text(c) && (c.is_control() || !c.is_whitespace())) {
+        return None;
+    }
+    Some((start, &text[taken..]))
 }
 
 /// Whether a detected URL, trimmed of trailing punctuation, still names
@@ -75,6 +92,50 @@ pub(crate) fn names_a_target(url: &str) -> bool {
         Some((_, rest)) => names_a_host(rest),
         None => false,
     }
+}
+
+/// Whether trimming dots off the detected URL `raw` (to `trimmed`, with
+/// `rest` the line after it) would change what it opens rather than drop
+/// prose. For a `file://` link: a dot run, which may be its file's
+/// (`file:///tmp/a..`), or a dot taken off a name made only of dots, which
+/// names another folder (`file:///tmp/%2e.` is `/tmp/..`, trimmed `/tmp/.`).
+/// For a bare host whose last label is a number: a dot run, as the trimmed
+/// host reads as an IPv4 address and the written one does not
+/// (`http://127.1..`, trimmed to loopback). Otherwise dots after a web URL
+/// end a sentence (#927): after its path they are not the host, and after
+/// a named host they are its empty labels or the root of DNS, so the same
+/// host answers.
+pub(crate) fn url_loses_a_dot_run(raw: &str, trimmed: &str, rest: &str) -> bool {
+    let tail = &raw[trimmed.len()..];
+    let run = crate::url_trim::dot_run_after(tail, rest).is_some();
+    if trimmed
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file://"))
+    {
+        let dot_name = || {
+            decoded_file_url_path(trimmed).is_some_and(|path| {
+                let name = path.rsplit('/').next().unwrap_or("");
+                !name.is_empty() && name.bytes().all(|b| b == b'.')
+            })
+        };
+        return run || (tail.starts_with('.') && dot_name());
+    }
+    let after = trimmed.split_once("://").map_or(trimmed, |(_, rest)| rest);
+    if !run || after.contains(['/', '?', '#']) {
+        return false;
+    }
+    let host = after.rsplit_once('@').map_or(after, |(_, host)| host);
+    let host = host.split_once(':').map_or(host, |(name, _)| name);
+    let label = host.trim_end_matches('.').rsplit('.').next().unwrap_or("");
+    let hex = label
+        .get(..2)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("0x"));
+    !label.is_empty()
+        && if hex {
+            label[2..].bytes().all(|b| b.is_ascii_hexdigit())
+        } else {
+            label.bytes().all(|b| b.is_ascii_digit())
+        }
 }
 
 /// Whether the text after a URL's `scheme:` is `//` and an authority with
@@ -143,7 +204,22 @@ fn diagnostic_prefix_re() -> &'static Regex {
 fn path_candidates(text: &str) -> impl Iterator<Item = (usize, usize, &str)> {
     let runs = crate::hints::quoted_runs(text).collect::<Vec<_>>();
     path_re().find_iter(text).filter_map(move |m| {
-        let matched = crate::url_trim::trim_path_trailing(m.as_str());
+        let raw = m.as_str();
+        let mut matched = crate::url_trim::trim_path_trailing(raw);
+        // Two or more dots ending it may belong to the name (`/tmp/a..`) or
+        // trail off a sentence, and the shorter path names another file. A
+        // quote right after them marks them as the name's; otherwise the
+        // path is no link.
+        if let Some(run) = crate::url_trim::dot_run_after(&raw[matched.len()..], &text[m.end()..]) {
+            if run > 0
+                && matched.len() + run == raw.len()
+                && crate::hints::quote_closes_at(text, &runs, m.start(), m.end())
+            {
+                matched = raw;
+            } else {
+                return None;
+            }
+        }
         let before = text[..m.start()].chars().next_back();
         let after_host = text[..m.start()].strip_suffix(':').is_some_and(|prefix| {
             let previous = prefix
@@ -327,19 +403,30 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
             }
         };
         for m in url_re().find_iter(&text) {
-            let (start, raw) = url_match(&m);
+            // A URL an invisible character joins to the word before it is
+            // part of that word, and no piece of it links.
+            let Some((start, raw)) = url_match(&text, &m) else {
+                cover(m.start(), m.len(), &mut covered);
+                continue;
+            };
             let matched = crate::url_trim::trim_trailing(raw);
             if fragment(start, m.end()) {
                 continue;
             }
             // A scheme with nothing after it is no link, and its query is
-            // not a local path (`https://?q=/etc/hosts`).
-            if !names_a_target(matched) {
+            // not a local path (`https://?q=/etc/hosts`). Nor is a file link
+            // that trimming would cut a dot run off.
+            if !names_a_target(matched) || url_loses_a_dot_run(raw, matched, &text[m.end()..]) {
                 cover(start, raw.len(), &mut covered);
                 continue;
             }
             let uri = normalize_url(matched);
             push(start, matched.len(), uri, &mut covered);
+        }
+        // Text shaped like a URL of another scheme links nothing, and no
+        // piece of it is a local path either.
+        for m in url_shaped_re().find_iter(&text) {
+            cover(m.start(), m.len(), &mut covered);
         }
         // A quoted path goes before bare ones, so they cannot take a piece
         // of it; its link covers a location suffix as a bare path's does.
@@ -517,6 +604,14 @@ fn has_parent_component(path: &str) -> bool {
     path.split('/').any(climbs)
 }
 
+/// Whether a path segment names the parent folder, as Kettle's file link
+/// checks read it: `..`, or `..` and trailing spaces and dots, which
+/// Windows drops from the end of a name (`.. `). A name holding dots, such
+/// as `a..b` or `...`, does not.
+pub fn names_parent(segment: &str) -> bool {
+    climbs(segment)
+}
+
 /// Whether a path segment names the parent directory: `..`, or `..` and
 /// trailing spaces and dots, which Windows drops from the end of a name
 /// (`.. `). A segment of dots alone stays a name there, so `...` and
@@ -603,12 +698,52 @@ pub fn is_safe_url(uri: &str) -> bool {
         return false; // no scheme → not opened
     };
     match scheme.to_ascii_lowercase().as_str() {
-        "http" | "https" | "ftp" | "ftps" => names_a_host(rest),
-        "mailto" => !rest.is_empty(),
+        "http" | "https" | "ftp" | "ftps" => names_a_host(rest) && decodes_visibly(rest),
+        "mailto" => !rest.is_empty() && decodes_visibly(rest),
         // Allow LOCAL files only — never a remote authority.
         "file" => is_local_file_url(uri),
         _ => false,
     }
+}
+
+/// Whether the text after a URL's scheme still reads as itself once its
+/// percent escapes are decoded, as a browser or mail client shows and uses
+/// its host, path and query: no decoded character that hides text (see
+/// `hides_text`). An encoded space and visible non-ASCII text are fine
+/// anywhere, an encoded tab or line break only in the query or fragment, as
+/// in a form's text (`body=a%0Ab`), and an escape that does not decode
+/// stays text.
+fn decodes_visibly(rest: &str) -> bool {
+    let text_at = rest.find(['?', '#']).unwrap_or(rest.len());
+    decodes_to(&rest[..text_at], |c| c == ' ')
+        && decodes_to(&rest[text_at..], |c| c.is_ascii_whitespace())
+}
+
+/// Whether `part` decodes to no character that hides text but those
+/// `allowed`.
+fn decodes_to(part: &str, allowed: impl Fn(char) -> bool) -> bool {
+    let bytes = part.as_bytes();
+    if !bytes.contains(&b'%') {
+        return true;
+    }
+    let hex = |byte: Option<&u8>| byte.and_then(|&b| char::from(b).to_digit(16));
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        match (bytes[at], hex(bytes.get(at + 1)), hex(bytes.get(at + 2))) {
+            (b'%', Some(high), Some(low)) => {
+                decoded.push((high * 16 + low) as u8);
+                at += 3;
+            }
+            (byte, ..) => {
+                decoded.push(byte);
+                at += 1;
+            }
+        }
+    }
+    !String::from_utf8_lossy(&decoded)
+        .chars()
+        .any(|c| hides_text(c) && !allowed(c))
 }
 
 /// The local path a `file://` URI names, decoded: `file:///a%20b` is `/a b`.
@@ -666,7 +801,9 @@ fn decoded_file_url_path(uri: &str) -> Option<String> {
         }
     }
     let decoded = String::from_utf8(bytes).ok()?;
-    let clean = !decoded.chars().any(char::is_control)
+    // The opener gets this path, so what it decodes to must read as itself
+    // too: `a%E2%80%8Bb` is `a` and `b` around a zero-width space.
+    let clean = !decoded.chars().any(|c| c != ' ' && hides_text(c))
         && !decoded.starts_with("//")
         && !decoded.split(['/', '\\']).any(climbs);
     clean.then_some(decoded)
@@ -1129,6 +1266,113 @@ mod tests {
         }
     }
 
+    /// A path ending in two or more dots never links a shorter path or its
+    /// folder: the name may end in those dots. A closing quote right after
+    /// them makes them the name's; a single dot ends a sentence.
+    #[test]
+    fn a_path_ending_in_a_dot_run_links_only_its_exact_name() {
+        let found = |line: &str| {
+            let term = term_with(line.len(), &[line], &[]);
+            links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>()
+        };
+        for line in [
+            "ls /tmp/a..",
+            "ls /tmp/a.. now",
+            "open /tmp/...",
+            "see /tmp/notes...",
+            "(see /tmp/a..).",
+            "/tmp/....",
+            "see /tmp/report.pdf,..",
+            "see /tmp/report.pdf?..",
+        ] {
+            assert!(found(line).is_empty(), "{line}: {:?}", found(line));
+        }
+        for (line, uri) in [
+            ("ls \"/tmp/a..\"", "file:///tmp/a.."),
+            ("ls '/tmp/...' now", "file:///tmp/..."),
+            ("ls \"docs/report.pdf..\"", "file:///work/docs/report.pdf.."),
+            (
+                "open \"/tmp/my report.pdf..\" now",
+                "file:///tmp/my%20report.pdf..",
+            ),
+            ("see /tmp/a.", "file:///tmp/a"),
+            ("see /tmp/a.b..c", "file:///tmp/a.b..c"),
+        ] {
+            assert_eq!(found(line), [uri], "{line}");
+        }
+    }
+
+    /// Trimming a URL's end never changes which host it opens. A path,
+    /// query or fragment after the host stops the trim before it. A bare
+    /// host loses only dots, which leave its labels as they were (a last dot
+    /// names the root of DNS, and more are empty labels), or a character no
+    /// host ends in. A `file://` link losing a dot run is no link: the dots
+    /// may be its file's.
+    #[test]
+    fn trimming_a_url_never_changes_its_host() {
+        let host_of = |url: &str| {
+            let rest = &url[url.find("//").unwrap() + 2..];
+            rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())].to_string()
+        };
+        for host in [
+            "example.com",
+            "example.com.",
+            "a.b.c",
+            "[::1]",
+            "例え.テスト",
+        ] {
+            let name = host.strip_suffix('.').unwrap_or(host);
+            for tail in [
+                ".", "..", "...", ",", ").", ":", ";", "'", "\"", "*", "`", "..).", "]..",
+            ] {
+                for after in ["/a..", "/?q=a..", "/#f..", ":8080/x.."] {
+                    let url = format!("https://{host}{after}{tail}");
+                    let trimmed = crate::url_trim::trim_trailing(&url);
+                    assert_eq!(host_of(trimmed), host_of(&url), "{url}");
+                }
+                let url = format!("https://{host}{tail}");
+                let trimmed = crate::url_trim::trim_trailing(&url);
+                assert_eq!(host_of(trimmed), name, "{url}");
+            }
+        }
+        let found = |line: &str| {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>()
+        };
+        for line in [
+            "see file:///tmp/a..",
+            "see file:///tmp/...",
+            "see file:///tmp/a,..",
+            // `%2e.` decodes to `..`; trimmed, `%2e` would name `/tmp`.
+            "see file:///tmp/%2e.",
+            // Trimmed, these read as IPv4 loopback; as written, they do not.
+            "see http://127.1..",
+            "see http://0x7f.1...",
+        ] {
+            assert!(found(line).is_empty(), "{line}: {:?}", found(line));
+        }
+        for (line, uri) in [
+            ("see https://example.test.", "https://example.test"),
+            ("see https://example.test..", "https://example.test"),
+            ("see www.example.test...", "https://www.example.test"),
+            (
+                "see https://example.test/docs...",
+                "https://example.test/docs",
+            ),
+            ("see file:///tmp/a.", "file:///tmp/a"),
+            ("see http://127.1.", "http://127.1"),
+            ("see http://127.0.0.1/x...", "http://127.0.0.1/x"),
+        ] {
+            assert_eq!(found(line), [uri], "{line}");
+        }
+    }
+
     /// A closing bracket that pairs with an open before it ends the link,
     /// whatever stray close came earlier in the query.
     #[test]
@@ -1545,6 +1789,33 @@ mod tests {
         }
     }
 
+    /// Quotes around one path-shaped token the quoted pattern rejects leave
+    /// no piece of it linked as a file of its own; a path after a space in
+    /// quoted prose, or unquoted, still links.
+    #[test]
+    fn the_end_of_a_quoted_path_token_does_not_link() {
+        let found = |line: &str| {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>()
+        };
+        for line in [
+            "\"docs/\u{b2}www.example.com.txt#file=/tmp/report.pdf\"",
+            "\"docs/a*b=/tmp/report.pdf\"",
+            "host:\"docs/a*b=/tmp/report.pdf\"",
+            "host:\"docs/a'b*=/tmp/report.pdf\"",
+            "open \"docs/my dir/a/b\"",
+            "{\"file\":\"/Users/me/my app/x.py\"}",
+        ] {
+            assert!(found(line).is_empty(), "{line}: {:?}", found(line));
+        }
+        for line in ["file=/tmp/report.pdf", "\"see /tmp/report.pdf\""] {
+            assert_eq!(found(line), ["file:///tmp/report.pdf"], "{line}");
+        }
+    }
+
     /// A quoted relative path with a space links whole whatever the length
     /// of its extension.
     #[test]
@@ -1706,7 +1977,6 @@ mod tests {
         for uri in [
             "https://x.test/café",
             "https://例.test/路径",
-            "https://x.test/a%E2%80%8Bb",
             "file:///tmp/caf%C3%A9",
         ] {
             assert!(is_safe_url(uri), "{uri}");
@@ -1765,7 +2035,7 @@ mod tests {
         // A name ending in `www` is a path; a scheme after a refused `www.`
         // still starts a URL.
         for (line, uri) in [
-            ("cat /tmp/www...", "file:///tmp/www"),
+            ("cat /tmp/www.,", "file:///tmp/www"),
             (
                 "docs/www.cfg=HTTPS://example.com/a",
                 "HTTPS://example.com/a",
@@ -1786,6 +2056,68 @@ mod tests {
             super::local_file_path("FILE:///etc/hosts"),
             Some(std::path::PathBuf::from("/etc/hosts"))
         );
+    }
+
+    /// Text shaped like a URL of a scheme Kettle does not open, `httpſ://`
+    /// among them, holds no local path: not its query's either.
+    #[test]
+    fn another_schemes_url_holds_no_local_path() {
+        for line in [
+            "see httpſ://example.test/?file=/tmp/report.pdf",
+            "see vscode://open?file=/tmp/report.pdf",
+            "see x-app://h/a=/tmp/report.pdf",
+        ] {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert!(found.is_empty(), "{line}: {found:?}");
+        }
+        let term = term_with(30, &["see file=/tmp/report.pdf here"], &[]);
+        assert_eq!(
+            links_with_cwd(&term, Some("/work"))[0].uri,
+            "file:///tmp/report.pdf"
+        );
+    }
+
+    /// A scheme matches in any ASCII case only: `ſ` (U+017F) folds to `s`
+    /// in Unicode, but `httpſ://` is no scheme the opener takes.
+    #[test]
+    fn a_scheme_matches_ascii_case_only() {
+        for line in ["see httpſ://example.test/ok", "see HTTPſ://example.test/ok"] {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert!(found.is_empty(), "{line}: {found:?}");
+        }
+        for (line, uri) in [
+            ("see hTTpS://example.test/ok", "hTTpS://example.test/ok"),
+            ("see wWw.example.test/ok", "https://wWw.example.test/ok"),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert_eq!(found.len(), 1, "{line}: {found:?}");
+            assert_eq!(found[0].uri, uri);
+        }
+    }
+
+    /// An invisible character does not end a word, so a scheme or `www.`
+    /// after one is part of that word: no link, and no piece of it links.
+    /// A no-break space shows as a space and still ends one.
+    #[test]
+    fn an_invisible_character_does_not_start_a_url() {
+        for c in ['\u{200b}', '\u{2060}', '\u{ad}', '\u{feff}', '\u{200e}'] {
+            for line in [
+                format!("file docs/a{c}WWW.example.test/path.txt"),
+                format!("see a{c}https://x.test/p.txt"),
+                format!("see {c}www.x.test/a"),
+            ] {
+                let term = term_with(line.chars().count(), &[&line], &[]);
+                let found = links_with_cwd(&term, Some("/work"));
+                assert!(found.is_empty(), "U+{:04X}: {found:?}", u32::from(c));
+            }
+        }
+        let term = term_with(20, &["see a\u{a0}www.x.test"], &[]);
+        let found = links_with_cwd(&term, Some("/work"));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].uri, "https://www.x.test");
     }
 
     /// A web or FTP URL names a host: a scheme with nothing after it, or
@@ -1874,6 +2206,58 @@ mod tests {
             .map(|link| link.uri)
             .collect::<Vec<_>>();
         assert_eq!(found, ["https://e.test/"]);
+    }
+
+    /// Percent-encoded, a character that hides text reads the same once the
+    /// opener decodes it: a file link's path, and a web link's host, path or
+    /// query, holding one is refused. An encoded space, line break or
+    /// visible non-ASCII text is not.
+    #[test]
+    fn percent_encoded_invisible_characters_are_refused() {
+        for uri in [
+            "file:///tmp/a%E2%80%8Bb.pdf",
+            "file:///tmp/a%E2%80%AEb.pdf",
+            "file:///tmp/a..%E2%80%8Bb.pdf",
+            "file:///tmp/a%C2%A0b.pdf",
+            "file://localhost/tmp/a%EF%BB%BFb.pdf",
+            "file:///tmp/a%C2%85b.pdf",
+            "https://x.test/a%E2%80%8Bb",
+            "https://ex%E2%80%8Bample.test/",
+            "https://x.test/?q=%E2%80%AE",
+            "https://x.test/#%E2%81%A6",
+            "ftp://host/a%E2%80%8Db",
+            "mailto:a%E2%80%8B@x.test",
+            // A tab or line break is a form's text only in a query.
+            "https://x.test/a%09b",
+            "https://x%0A.test/",
+            "mailto:a%0Ab@x.test",
+        ] {
+            assert!(!is_safe_url(uri), "{uri}");
+            assert_eq!(super::local_file_path(uri), None, "{uri}");
+        }
+        for uri in [
+            "file:///tmp/a%20b.pdf",
+            "file:///tmp/caf%C3%A9.pdf",
+            "file:///tmp/a..b.pdf",
+            "https://x.test/a%20b",
+            "https://x.test/caf%C3%A9",
+            "https://x.test/issues/new?body=a%0Ab%09c",
+            "https://x.test/a#line%0Atwo",
+            "https://x.test/a%zz",
+            "mailto:a@x.test?body=hi%20there%0A",
+        ] {
+            assert!(is_safe_url(uri), "{uri}");
+        }
+        #[cfg(unix)]
+        assert_eq!(
+            super::local_file_path("file:///tmp/a%20b.pdf"),
+            Some(std::path::PathBuf::from("/tmp/a b.pdf"))
+        );
+        // A path holding one has no file URL to hand a handler either.
+        assert_eq!(
+            super::file_url_for_path(std::path::Path::new("/tmp/a\u{200b}b.pdf")),
+            None
+        );
     }
 
     /// Drift guard: `file://` must be local-only — a remote

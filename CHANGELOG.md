@@ -1690,13 +1690,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   before opening, custom URL handlers are bounded while their children run,
   and the file manager's executable identity is verified.
 - A detected link keeps a closing bracket that closes one opened in it, even after a stray closing bracket earlier in the link.
-- A detected path ending in three or more dots, such as `/tmp/...`, now links the folder before them instead of its parent folder `/tmp/..`.
+- A detected path ending in two or more dots, such as `/tmp/a..` or `/tmp/...`, no longer links a shorter path such as `/tmp/a`, `/tmp/` or the parent folder `/tmp/..`: quick select copies it, and a closing quote right after the dots, as in `"/tmp/a.."`, links that exact name. A `file://` link ending in two or more dots is no link either.
 - Local file links whose names hold two dots in a row, such as `a..b.pdf` or a folder named `...`, open; only a `..` that names the parent folder is refused.
 - A path on screen whose name holds a literal `%2e`, such as `/tmp/100%2e.pdf`, is a link. Quick select copies, rather than opens, a quoted path whose `%2e%2e` would name the parent folder if decoded again, as a clicked link refuses it.
-- A link holding an invisible character, such as a no-break or zero-width space or a control that reverses text, is refused, and quick select copies such a path rather than opening it.
+- A link holding an invisible character, such as a no-break or zero-width space or a control that reverses text, is refused, also when it is percent-encoded in a file link or in a web link's host, path or query, and quick select copies such a path rather than opening it.
 - Text that trails off after a bare scheme, such as `see https://...` or `see www...`, is no longer offered as a link or a quick-select URL, and a web link with no host is refused.
 - URLs printed with an uppercase scheme, such as `HTTPS://`, `FILE://` or `WWW.`, are detected as links and quick-select URLs.
 - A file name holding `www.`, such as `docs/www.example.com.txt`, links the file rather than a web address.
+- The end of a quoted path that Kettle cannot read whole, such as `/tmp/report.pdf` in `"docs/a*b=/tmp/report.pdf"`, is no longer offered as a file of its own.
+- A path inside text shaped like a link Kettle does not open, such as `/tmp/a.pdf` in `vscode://open?file=/tmp/a.pdf`, is no longer a link of its own.
+- On Windows, a file link whose name ends in a dot or a space is refused rather than opening the file Windows reads it as, such as `report.pdf` for `report.pdf..`.
 - A path ending in a dotfile, such as `docs/.env` or a quoted `"docs/my dir/.env"`, is a link, and quick select no longer offers only the part after the space.
 - A quoted path with a space whose extension is long or hyphenated, such as `"docs/annual report.swiftinterface"` or `"docs/my app.code-workspace"`, is a link.
 - A file link naming a program in a Windows alternate data stream, such as `notes.txt:payload.exe::$DATA`, is refused like the program itself.

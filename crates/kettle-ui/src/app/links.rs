@@ -17,9 +17,13 @@ pub(super) fn warn_refused_terminal_url(_uri: &str, warn: impl FnOnce(&str)) {
 /// it gets an explicit local-only guard too (defense-in-depth). Crucially this
 /// check does NO filesystem stat — `Path::is_dir` on a `//host` path would
 /// itself route over SMB — it's a pure string check: reject UNC/authority
-/// (`//`, leading `\`) and traversal.
+/// (`//`, leading `\`) and traversal: a segment naming the parent, not a
+/// name holding dots (`a..b`, `...`).
 pub(super) fn cwd_is_local(cwd: &str) -> bool {
-    !cwd.is_empty() && !cwd.starts_with("//") && !cwd.starts_with('\\') && !cwd.contains("..")
+    !cwd.is_empty()
+        && !cwd.starts_with("//")
+        && !cwd.starts_with('\\')
+        && !cwd.split(['/', '\\']).any(kettle_core::links::names_parent)
 }
 
 /// What opening a local file link would do, decided on the opener thread.
@@ -50,6 +54,12 @@ pub(super) enum FileLinkCheck {
 /// stopped.
 pub(super) fn check_file_link(path: &std::path::Path) -> FileLinkCheck {
     use kettle_core::links::names_program_or_shortcut;
+    // Win32 drops a name's trailing dots and spaces before it looks a path
+    // up, so `C:\Temp\report.pdf..` would resolve to `report.pdf`, another
+    // file than the link names: refuse a path it would not read as written.
+    if cfg!(windows) && !path.to_str().is_some_and(win32_reads_link_path) {
+        return FileLinkCheck::Unresolved;
+    }
     let Ok(resolved) = std::fs::canonicalize(path) else {
         return FileLinkCheck::Unresolved;
     };
@@ -91,6 +101,18 @@ pub(super) fn local_resolved_path(resolved: std::path::PathBuf) -> Option<std::p
     };
     let local = text.strip_prefix(r"\\?\").unwrap_or(text);
     (drive(local) && win32_keeps_path(local)).then(|| std::path::PathBuf::from(local))
+}
+
+/// Whether Win32 reads a link's path `text` as written before resolving it
+/// (see [`win32_keeps_path`]). A `.` segment names the folder it is in,
+/// which Win32 resolves as such rather than dropping a dot.
+pub(super) fn win32_reads_link_path(text: &str) -> bool {
+    let named = text
+        .split(['\\', '/'])
+        .filter(|name| *name != ".")
+        .collect::<Vec<_>>()
+        .join("/");
+    win32_keeps_path(&named)
 }
 
 /// Whether Win32 reads the drive path `local` as written once the verbatim

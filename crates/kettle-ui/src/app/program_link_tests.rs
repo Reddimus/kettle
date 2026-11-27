@@ -309,6 +309,45 @@ fn a_verbatim_path_must_read_the_same_to_win32() {
     }
 }
 
+/// Win32 reads a link's path before resolving it, so a name it would not
+/// read as written is refused first: `report.pdf..` would resolve to
+/// `report.pdf`, another file, which then passes every later check.
+#[test]
+fn a_link_path_win32_would_change_is_refused_before_resolving() {
+    use super::win32_reads_link_path;
+    for path in [
+        "C:/Temp/report.pdf..",
+        r"C:\Temp\report.pdf ",
+        "C:/Temp/a../b.pdf",
+    ] {
+        assert!(!win32_reads_link_path(path), "{path}");
+    }
+    // A `.` segment is the folder it is in, not a name ending in a dot.
+    for path in [
+        "C:/Temp/report..pdf",
+        "C:/Temp/./report.pdf",
+        r"C:\.\Temp\a.pdf",
+    ] {
+        assert!(win32_reads_link_path(path), "{path}");
+    }
+    let src = production_source();
+    let body = src
+        .split("fn check_file_link(path: &std::path::Path) -> FileLinkCheck {")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}\n").next())
+        .expect("check_file_link");
+    let keeps = body
+        .find("if cfg!(windows) && !path.to_str().is_some_and(win32_reads_link_path) {")
+        .expect("the Win32 check on the link's own path");
+    let resolve = body
+        .find("std::fs::canonicalize(path)")
+        .expect("the resolve");
+    assert!(
+        keeps < resolve,
+        "the link's path is checked before it resolves"
+    );
+}
+
 /// On Windows a resolved path is kept only as a local drive path.
 #[cfg(windows)]
 #[test]
