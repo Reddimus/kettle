@@ -252,11 +252,12 @@ never stops an update part-way, the update checks every directory it will
 write into before it downloads anything: the directory of each file in the
 install map, or the deepest one that exists above it when the update will create
 the rest. Files an older release installed and this one no longer ships are
-never written, so their directories are not checked. A directory that fails is named with its mode and the `chmod go-w`
-command that fixes it, and nothing is downloaded or changed. The check runs
-again after the download, before the first destination is touched, for files
-only the archive names. It is the same rule the writes apply, run earlier; a
-group the user alone belongs to is not trusted in its place.
+never written, so their directories are not checked. A directory that fails is
+named with its mode and the `chmod go-w` command that fixes it, and nothing is
+downloaded or changed. The check runs again after the download, for files only
+the archive names, before the transaction writes its journal or backups. It is
+the same rule the writes apply, run earlier; a group the user alone belongs to
+is not trusted in its place.
 
 Linux archives contain
 `kettle-package-manifest.json`. Kettle binds its product/version/target and
@@ -317,6 +318,16 @@ could not restore. The next start or update resumes from there, before it
 checks the install record. Releases before 2.54.0 checked the record first and
 so could never resume their own rollback; the installer can recover one of
 those, as described next.
+
+Resuming a rollback runs the same directory check first, over the directories
+the rollback has to write into. An entry it can skip, such as a file the update
+never replaced, needs nothing from its directory and never blocks it. A
+directory that fails is named with its `chmod go-w`, as before an update.
+Recovery at startup is best effort: a rollback that cannot finish never stops
+kettle from starting, `--version`, `--help` and `kettle ctl` included, and
+startup prints nothing about it. The app names the reason once for each journal
+and reason, in a log line and a desktop notification. `kettle update` names it
+too, and refuses to update until the rollback has finished.
 
 If the bundled `install.sh` or the online installer runs while a rollback is
 still pending, it reads the updater's journal as the receipt it is, after the

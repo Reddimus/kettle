@@ -2,6 +2,26 @@ use std::io::{BufRead as _, IsTerminal as _, Write as _};
 
 use kettle_update::{CheckOutcome, FeedClient, UpdateError};
 
+/// What `kettle update` says when the install cannot be prepared, or `None`
+/// when the notice just printed already said it.
+fn prepare_failure_message(error: &UpdateError, notice: Option<&str>) -> Option<String> {
+    if notice == Some(error.to_string().as_str()) {
+        return None;
+    }
+    Some(match error {
+        UpdateError::UpdateLocked => "kettle update: another update is already running".into(),
+        // Only these mean the executable belongs to something else.
+        UpdateError::UnmanagedInstall(_) | UpdateError::UnsupportedPlatform => format!(
+            "kettle update: {error}\nUse the package manager or installer that owns this \
+             executable. Self-update covers installs made by kettle's official Linux installer \
+             and the macOS kettle.app from the release page."
+        ),
+        // An official install that needs a permission fix, or an interrupted
+        // update it is still recovering.
+        _ => format!("kettle update: {error}"),
+    })
+}
+
 fn missing_artifact_message(has_asset: bool, tag: &str, release_url: &str) -> Option<String> {
     (!has_asset).then(|| {
         format!(
@@ -11,22 +31,15 @@ fn missing_artifact_message(has_asset: bool, tag: &str, release_url: &str) -> Op
 }
 
 pub fn run(assume_yes: bool, current: &str) -> i32 {
-    // Leftovers from earlier updates: remove the provable ones, name the rest
-    // once (#951).
-    if let Some(notice) = kettle_update::tidy_update_leftovers() {
+    // Leftovers from earlier updates, once: on macOS the bundles it could not
+    // remove (#951), on Linux a rollback that cannot finish (#846).
+    let notice = kettle_update::tidy_update_leftovers();
+    if let Some(notice) = notice.as_deref() {
         eprintln!("kettle update: {notice}");
     }
     if let Err(error) = kettle_update::prepare_managed_install_for_update() {
-        if matches!(&error, UpdateError::UpdateLocked) {
-            eprintln!("kettle update: another update is already running");
-        } else if matches!(&error, UpdateError::UnsafeInstallDirectory(_)) {
-            // The install is the official one; it only needs a permission fix.
-            eprintln!("kettle update: {error}");
-        } else {
-            eprintln!("kettle update: {error}");
-            eprintln!(
-                "Use the package manager or installer that owns this executable. Self-update covers installs made by kettle's official Linux installer and the macOS kettle.app from the release page."
-            );
+        if let Some(message) = prepare_failure_message(&error, notice.as_deref()) {
+            eprintln!("{message}");
         }
         return 2;
     }
@@ -129,6 +142,32 @@ mod tests {
             .find("kettle_update::prepare_managed_install_for_update()")
             .expect("kettle update prepares the install");
         assert!(tidy < prepare);
+    }
+
+    /// #846: a recovery problem is the install's, not a sign that another
+    /// tool owns it, and the notice printed just before is not repeated.
+    #[test]
+    fn prepare_failures_point_at_the_owner_only_for_foreign_installs() {
+        use kettle_update::UpdateError;
+        let unmanaged = UpdateError::UnmanagedInstall("not ours".into());
+        assert!(
+            super::prepare_failure_message(&unmanaged, None)
+                .unwrap()
+                .contains("package manager")
+        );
+        for error in [
+            UpdateError::Transaction("rollback restored every other file".into()),
+            UpdateError::UnsafeInstallDirectory("chmod go-w /x".into()),
+        ] {
+            let message = super::prepare_failure_message(&error, None).unwrap();
+            assert!(message.contains(&error.to_string()), "{message}");
+            assert!(!message.contains("package manager"), "{message}");
+            assert_eq!(
+                super::prepare_failure_message(&error, Some(&error.to_string())),
+                None,
+                "the notice already said it"
+            );
+        }
     }
 
     #[test]
