@@ -263,7 +263,10 @@ fn closing_a_pane_ends_a_stopped_exit_while_a_descendant_holds_the_slave() {
     let dir = kettle_test_support::private_tempdir("kettle-pty-held-");
     let marker = dir.path().join("tail-written");
     let holder_pid = dir.path().join("holder-pid");
-    let script = r#"(trap '' HUP; exec sleep 30) & echo $! > "$3"
+    // The holder records its own pid only once it ignores SIGHUP, and the shell
+    // waits for that record, so the holder is known to outlive the shell.
+    let script = r#"sh -c 'trap "" HUP; echo $$ > "$1.tmp"; mv "$1.tmp" "$1"; exec sleep 30' holder "$3" &
+while [ ! -s "$3" ]; do sleep 0.01; done
 "$1" --exact term::pty_tail_tests::pty_stop_output_child --quiet
 echo tail; : > "$2"; exit 0"#;
     let argv = [
@@ -278,25 +281,30 @@ echo tail; : > "$2"; exit 0"#;
     let (pane, _output) = pane_running(&argv, &[(STOP_OUTPUT_ONLY.into(), "1".into())], None);
     let pid = pane.child_pid().expect("child pid");
     wait_until("the shell never wrote its tail", || marker.exists());
-    let holder: libc::pid_t = std::fs::read_to_string(&holder_pid)
+    let holder: u32 = std::fs::read_to_string(&holder_pid)
         .unwrap()
         .trim()
         .parse()
         .unwrap();
-    struct Reap(libc::pid_t);
+    struct Reap(u32);
     impl Drop for Reap {
         fn drop(&mut self) {
             // SAFETY: kill takes a pid and a signal; this pid is the background
             // holder the test's own shell started and recorded.
-            unsafe { libc::kill(self.0, libc::SIGKILL) };
+            unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGKILL) };
         }
     }
     let _reap = Reap(holder);
+    let holding = || process_state(holder).is_some_and(|stat| !stat.contains('Z'));
     wait_until("the shell never began to exit", || {
         process_state(pid).is_some_and(|stat| stat.contains('E'))
     });
+    // With the holder gone, closing Kettle's slave would be the last close and
+    // end the exit without the restart this test is about.
+    assert!(holding(), "the holder ended before the pane closed");
     drop(pane);
     wait_until("the closed pane left its stopped shell in its exit", || {
         process_state(pid).is_none()
     });
+    assert!(holding(), "the holder ended with the shell");
 }
