@@ -251,9 +251,11 @@ fn fence_open(line: &str) -> Option<(usize, &str, bool)> {
     if mark == '`' && info.contains('`') {
         return None;
     }
+    // A language tag matches in any case, as GitHub and highlight.js read it.
     let mermaid = info
-        .strip_prefix("mermaid")
-        .is_some_and(|after| after.chars().next().is_none_or(|c| !word_char(c)));
+        .get(..7)
+        .is_some_and(|tag| tag.eq_ignore_ascii_case("mermaid"))
+        && info[7..].chars().next().is_none_or(|c| !word_char(c));
     Some((columns, &rest[..length], mermaid))
 }
 
@@ -796,6 +798,36 @@ mod tests {
     /// A fenced copy gives each Mermaid fence's body verbatim, in order;
     /// other fences, and an unclosed one, give nothing, and nothing after an
     /// unclosed one is a fence: it runs to the end of the text.
+    /// A fence's language tag matches in any case, as in GitHub and
+    /// highlight.js: `Mermaid` and `MERMAID` fences are sources, and a longer
+    /// word starting with it, in any case, is still another language (#962).
+    #[test]
+    fn a_mermaid_fence_tag_matches_in_any_case() {
+        for (text, source) in [
+            (
+                "```Mermaid\nflowchart TD\n  A-->B\n```",
+                "flowchart TD\n  A-->B",
+            ),
+            (
+                "```MERMAID\ngraph LR\n  A --> B\n```",
+                "graph LR\n  A --> B",
+            ),
+            (
+                "~~~Mermaid title\nsequenceDiagram\n  A->>B: Hi\n~~~",
+                "sequenceDiagram\n  A->>B: Hi",
+            ),
+        ] {
+            assert_eq!(diagram_sources(text, None).unwrap(), [source], "{text:?}");
+        }
+        for text in ["```Mermaidish\nhello\n```", "```MERMAIDS\nhello\n```"] {
+            assert_eq!(
+                diagram_sources(text, None),
+                Err(DiagramCopyError::NoDiagram),
+                "{text:?} is another language"
+            );
+        }
+    }
+
     #[test]
     fn each_mermaid_fence_is_a_source_verbatim() {
         let text = "Here:\n```mermaid\nflowchart TD\n  A-->B\n```\n\n~~~~ mermaid title\nsequenceDiagram\n  A->>B: Hi\n~~~~~\n```rust\nfn main() {}\n```";
