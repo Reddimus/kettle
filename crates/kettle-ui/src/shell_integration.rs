@@ -195,6 +195,27 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
+    /// What a test startup file prints to record that it ran.
+    const TRACE: &str = "kettle-startup-trace:";
+
+    /// The line a test startup file runs to record that `name` ran. It
+    /// prints to the shell's stdout, which `run` captures in order across
+    /// nested shells. An append to a trace file instead fails silently when
+    /// the temporary filesystem is full, and the lost line reads as a startup
+    /// file the shell skipped.
+    fn trace_line(name: &str) -> String {
+        format!("echo {TRACE}{name}\n")
+    }
+
+    /// The startup files `output` records, in order, one per line.
+    fn traced(output: &str) -> String {
+        output
+            .lines()
+            .filter_map(|line| line.split_once(TRACE))
+            .map(|(_, name)| format!("{name}\n"))
+            .collect()
+    }
+
     const PRINT_XDG: &str = "printf 'XDG=[%s]' (string join : -- $XDG_DATA_DIRS)";
 
     fn printed_xdg(output: &str) -> String {
@@ -221,11 +242,14 @@ mod tests {
         let home = temp.path().join("home");
         std::fs::create_dir(&home).unwrap();
         for name in [".zshenv", ".zprofile", ".zshrc", ".zlogin"] {
-            std::fs::write(home.join(name), format!("echo {name} >> \"$HOME/trace\"\n")).unwrap();
+            std::fs::write(home.join(name), trace_line(name)).unwrap();
         }
         std::fs::write(
             home.join(".zlogin"),
-            "echo .zlogin >> \"$HOME/trace\"\nprecmd_functions=()\npreexec_functions=()\nPS1=own\n",
+            format!(
+                "{}precmd_functions=()\npreexec_functions=()\nPS1=own\n",
+                trace_line(".zlogin")
+            ),
         )
         .unwrap();
         for (args, expected) in [
@@ -242,7 +266,7 @@ mod tests {
                 let script = format!(
                     "(( $+functions[__kettle_precmd] && ${{precmd_functions[(Ie)__kettle_precmd]}} )) || exit 21; {condition} || exit 22; [[ ! -v KETTLE_ZDOTDIR ]] || exit 23; zsh -ic '(( ! $+functions[__kettle_precmd] ))'"
                 );
-                run(
+                let output = run(
                     "/bin/zsh",
                     &[args, &script],
                     &home,
@@ -255,19 +279,20 @@ mod tests {
                         ("KETTLE_ZDOTDIR", original.unwrap_or("")),
                     ],
                 );
-                let trace = std::fs::read_to_string(home.join("trace")).unwrap_or_default();
                 let expected = if original == Some("") {
                     String::new()
                 } else {
                     format!("{expected}.zshenv\n.zshrc\n")
                 };
-                assert_eq!(trace, expected);
-                let _ = std::fs::remove_file(home.join("trace"));
+                assert_eq!(traced(&output), expected, "{args} {original:?}");
             }
         }
         std::fs::write(
             home.join(".zshenv"),
-            "echo .zshenv >> \"$HOME/trace\"\nset -u\ntypeset -g +x ZDOTDIR=\"$HOME\"\n",
+            format!(
+                "{}set -u\ntypeset -g +x ZDOTDIR=\"$HOME\"\n",
+                trace_line(".zshenv")
+            ),
         )
         .unwrap();
         run(
@@ -301,7 +326,10 @@ mod tests {
         let baseline = fish_xdg_baseline(fish, &home, None);
         std::fs::write(
             config.join("config.fish"),
-            "echo config >> $HOME/trace\nset -q KETTLE_XDG_DATA_DIRS; and exit 21\n",
+            format!(
+                "{}set -q KETTLE_XDG_DATA_DIRS; and exit 21\n",
+                trace_line("config")
+            ),
         )
         .unwrap();
         let output = run(
@@ -324,10 +352,7 @@ mod tests {
             1,
             "the first prompt is integrated"
         );
-        assert_eq!(
-            std::fs::read_to_string(home.join("trace")).unwrap(),
-            "config\n"
-        );
+        assert_eq!(traced(&output), "config\n");
         assert_eq!(
             printed_xdg(&output),
             baseline,
@@ -354,19 +379,21 @@ mod tests {
             (
                 ".bash_profile",
                 format!(
-                    "{checks} declare -a user_startup_array=(profile); echo profile >> \"$HOME/trace\"\n"
+                    "{checks} declare -a user_startup_array=(profile); {}",
+                    trace_line("profile")
                 ),
             ),
-            (".bash_login", "echo login >> \"$HOME/trace\"\n".into()),
-            (".profile", "echo fallback >> \"$HOME/trace\"\n".into()),
+            (".bash_login", trace_line("login")),
+            (".profile", trace_line("fallback")),
             (
                 ".bashrc",
                 format!(
-                    "{checks} declare -a user_startup_array=(rc); echo rc >> \"$HOME/trace\"\n"
+                    "{checks} declare -a user_startup_array=(rc); {}",
+                    trace_line("rc")
                 ),
             ),
-            ("custom-rc", "echo custom >> \"$HOME/trace\"\n".into()),
-            (".bash_logout", "echo logout >> \"$HOME/trace\"\n".into()),
+            ("custom-rc", trace_line("custom")),
+            (".bash_logout", trace_line("logout")),
         ] {
             std::fs::write(home.join(name), text).unwrap();
         }
@@ -400,7 +427,7 @@ mod tests {
                 args.push("--norc");
             }
             args.extend(["-ic", &script]);
-            run(
+            let output = run(
                 bash,
                 &args,
                 &home,
@@ -420,15 +447,11 @@ mod tests {
                     ),
                 ],
             );
-            assert_eq!(
-                std::fs::read_to_string(home.join("trace")).unwrap_or_default(),
-                expected
-            );
-            let _ = std::fs::remove_file(home.join("trace"));
+            assert_eq!(traced(&output), expected);
         }
         std::fs::remove_file(home.join(".bash_profile")).unwrap();
         for expected in ["login\nlogout\n", "fallback\nlogout\n"] {
-            run(
+            let output = run(
                 bash,
                 &[
                     "--posix",
@@ -439,11 +462,7 @@ mod tests {
                 &home,
                 &[("ENV", directory.join("bashrc").to_str().unwrap())],
             );
-            assert_eq!(
-                std::fs::read_to_string(home.join("trace")).unwrap(),
-                expected
-            );
-            std::fs::remove_file(home.join("trace")).unwrap();
+            assert_eq!(traced(&output), expected);
             let _ = std::fs::remove_file(home.join(".bash_login"));
         }
         for (saved, condition) in [
@@ -468,8 +487,7 @@ mod tests {
                 ],
             );
         }
-        let _ = std::fs::remove_file(home.join("trace"));
-        run(
+        let output = run(
             bash,
             &[
                 "--posix",
@@ -482,14 +500,11 @@ mod tests {
                 ("KETTLE_BASH_RCFILE", ""),
             ],
         );
-        assert!(
-            !home.join("trace").exists(),
-            "an empty rcfile does not mean .bashrc"
-        );
+        assert_eq!(traced(&output), "", "an empty rcfile does not mean .bashrc");
         std::fs::create_dir(home.join("bin")).unwrap();
         std::fs::write(home.join("bin/custom-rc"), "exit 43\n").unwrap();
         let path = format!("{}/bin:/usr/bin:/bin", home.display());
-        run(
+        let output = run(
             bash,
             &[
                 "--posix",
@@ -503,10 +518,7 @@ mod tests {
                 ("PATH", &path),
             ],
         );
-        assert_eq!(
-            std::fs::read_to_string(home.join("trace")).unwrap(),
-            "custom\n"
-        );
+        assert_eq!(traced(&output), "custom\n");
     }
 
     #[test]
@@ -537,7 +549,7 @@ mod tests {
         let home = temp.path().join("home");
         std::fs::create_dir(&home).unwrap();
         for name in [".zprofile", ".zshrc", ".zlogin"] {
-            std::fs::write(home.join(name), format!("echo {name} >> \"$HOME/trace\"\n")).unwrap();
+            std::fs::write(home.join(name), trace_line(name)).unwrap();
             run(
                 "/bin/zsh",
                 &[
@@ -549,7 +561,7 @@ mod tests {
             );
             std::fs::remove_file(home.join(name)).unwrap();
         }
-        run(
+        let output = run(
             "/bin/zsh",
             &["-lic", "(( $+functions[__kettle_precmd] )) || exit 21"],
             &home,
@@ -559,10 +571,7 @@ mod tests {
                 ("KETTLE_ZDOTDIR", ""),
             ],
         );
-        assert_eq!(
-            std::fs::read_to_string(home.join("trace")).unwrap_or_default(),
-            ".zprofile\n.zshrc\n.zlogin\n"
-        );
+        assert_eq!(traced(&output), ".zprofile\n.zshrc\n.zlogin\n");
     }
 
     #[test]
@@ -682,8 +691,8 @@ mod tests {
         let startup = home.join("bashrc");
         std::fs::write(&startup, rc).unwrap();
         std::fs::copy(directory.join("kettle.bash"), home.join("kettle.bash")).unwrap();
-        std::fs::write(&second, "echo second >> \"$HOME/trace\"\n").unwrap();
-        std::fs::write(home.join(".bashrc"), "echo personal >> \"$HOME/trace\"\n").unwrap();
+        std::fs::write(&second, trace_line("second")).unwrap();
+        std::fs::write(home.join(".bashrc"), trace_line("personal")).unwrap();
         for (first_exists, norc, login, expected) in [
             (true, false, false, "first\npersonal\n"),
             (false, false, false, "second\npersonal\n"),
@@ -691,7 +700,7 @@ mod tests {
             (true, false, true, ""),
         ] {
             if first_exists {
-                std::fs::write(&first, "echo first >> \"$HOME/trace\"\n").unwrap();
+                std::fs::write(&first, trace_line("first")).unwrap();
             } else {
                 std::fs::remove_file(&first).unwrap();
             }
@@ -703,7 +712,7 @@ mod tests {
                 "-ic",
                 "declare -F __kettle_pc >/dev/null || exit 54; exit 0",
             ]);
-            run(
+            let output = run(
                 bash,
                 &args,
                 &home,
@@ -713,11 +722,7 @@ mod tests {
                     ("KETTLE_BASH_NORC", if norc { "1" } else { "" }),
                 ],
             );
-            assert_eq!(
-                std::fs::read_to_string(home.join("trace")).unwrap_or_default(),
-                expected
-            );
-            let _ = std::fs::remove_file(home.join("trace"));
+            assert_eq!(traced(&output), expected);
         }
     }
 

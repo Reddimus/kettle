@@ -5424,11 +5424,14 @@ still clear the ring rather than guessing which history row survived.
 Completed-command marks use the same ids. Each entry of their 2048-command
 ring holds the prompt row, the exit code and the output rows `output..end`:
 the cursor's row at OSC 133 C and at D, or the row below it when the cursor is
-past the first column. A scroll moves that span only when every row in it
-moves by the same amount, which checking the span's ends and the screen and
-region edges inside it proves; any other scroll empties the span and keeps the
-tick. Reflow, reset and a journal overflow clear the ring. Select Command
-Output converts the span back to grid lines under the term lock.
+past the first column. In that case D also keeps the cursor's column, unless a
+wrap is pending at the right margin: the next prompt can follow the output on
+its last row, and the selection stops before that column. A scroll moves that
+span only when every row in it moves by the same amount, which checking the
+span's ends and the screen and region edges inside it proves; any other scroll
+empties the span and keeps the tick. Reflow, reset and a journal overflow
+clear the ring. Select Command Output converts the span back to grid lines
+under the term lock.
 
 Vi mode deliberately stays inside `alacritty_terminal`: Kettle toggles
 `TermMode::VI`, dispatches native `ViMotion`, uses the engine's vi cursor and

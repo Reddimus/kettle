@@ -324,15 +324,26 @@ class StableProcessHandle:
             library.mach_port_deallocate.argtypes = [ctypes.c_uint, ctypes.c_uint]
             library.mach_port_deallocate.restype = ctypes.c_int
             port = ctypes.c_uint()
+            token = (ctypes.c_uint32 * 8)()
             # A process in its exit teardown loses its task name a moment
             # before kill(0) stops answering for it, and a zombie answers
             # kill(0) until it is reaped. Neither is a live process: wait out
-            # the teardown, and count a zombie as gone.
+            # the teardown, and count a zombie as gone. An exec replaces the
+            # task, so a name taken just before one answers no query after
+            # it; the live process is looked up again.
             deadline = time.monotonic() + 0.5
             while True:
                 result = library.task_name_for_pid(task_self, pid, ctypes.byref(port))
+                retained = "task name"
                 if result == 0:
-                    break
+                    count = ctypes.c_uint(8)
+                    # TASK_AUDIT_TOKEN. Its pidversion field distinguishes a
+                    # reused PID.
+                    result = library.task_info(port.value, 15, token, ctypes.byref(count))
+                    library.mach_port_deallocate(task_self, port.value)
+                    if result == 0:
+                        break
+                    retained = "audit token"
                 try:
                     os.kill(pid, 0)
                 except ProcessLookupError:
@@ -345,16 +356,9 @@ class StableProcessHandle:
                     raise ProcessLookupError(pid)
                 if time.monotonic() >= deadline:
                     raise RuntimeError(
-                        f"could not retain Darwin task name for {pid}: kern_return={result}"
+                        f"could not retain Darwin {retained} for {pid}: kern_return={result}"
                     )
                 time.sleep(0.01)
-            token = (ctypes.c_uint32 * 8)()
-            count = ctypes.c_uint(8)
-            # TASK_AUDIT_TOKEN. Its pidversion field distinguishes a reused PID.
-            result = library.task_info(port.value, 15, token, ctypes.byref(count))
-            library.mach_port_deallocate(task_self, port.value)
-            if result != 0:
-                raise RuntimeError(f"could not retain Darwin audit token for {pid}")
             identity = tuple(int(value) for value in token)
             return cls(pid=pid, identity=identity, audit_token=identity)
         raise RuntimeError(
@@ -8770,6 +8774,95 @@ def darwin_zombie_selftest() -> None:
         child.wait()
 
 
+def darwin_exec_between_lookups_selftest() -> None:
+    """A process that execs between the task-name lookup and the audit-token
+    query is still that live process: the stable handle retains it, with the
+    identity it has after the exec, instead of failing to retain it."""
+    if platform.system() != "Darwin":
+        return
+    import ctypes
+
+    child = subprocess.Popen(
+        [
+            "/bin/sh",
+            "-c",
+            'trap "exec sleep 30" USR1; echo ready; while :; do sleep 0.01; done',
+        ],
+        stdout=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+    def command() -> str:
+        sampled = run(["ps", "-o", "comm=", "-p", str(child.pid)], timeout=5)
+        return Path(sampled.stdout.strip()).name
+
+    def exec_child() -> None:
+        child.send_signal(signal.SIGUSR1)
+        deadline = time.monotonic() + 5
+        while command() != "sleep":
+            assert time.monotonic() < deadline, "the child never ran its exec"
+            time.sleep(0.01)
+
+    class ExecBeforeFirstQuery:
+        """`task_info` that has the child exec before its first call goes on."""
+
+        def __init__(self, function) -> None:
+            self.function = function
+            self.pending = True
+
+        @property
+        def argtypes(self):
+            return self.function.argtypes
+
+        @argtypes.setter
+        def argtypes(self, value) -> None:
+            self.function.argtypes = value
+
+        @property
+        def restype(self):
+            return self.function.restype
+
+        @restype.setter
+        def restype(self, value) -> None:
+            self.function.restype = value
+
+        def __call__(self, *args):
+            if self.pending:
+                self.pending = False
+                exec_child()
+            return self.function(*args)
+
+    class ExecBetweenLookups(ctypes.CDLL):
+        def __getattr__(self, name):
+            function = super().__getattr__(name)
+            if name == "task_info":
+                function = ExecBeforeFirstQuery(function)
+                setattr(self, name, function)
+            return function
+
+    original_cdll = ctypes.CDLL
+    try:
+        assert child.stdout is not None and child.stdout.readline() == b"ready\n"
+        ctypes.CDLL = ExecBetweenLookups  # type: ignore[misc]
+        try:
+            handle = StableProcessHandle.open(child.pid)
+        finally:
+            ctypes.CDLL = original_cdll  # type: ignore[misc]
+        assert command() == "sleep", "the injected exec did not run"
+        try:
+            assert handle.matches_current(), (
+                "the handle kept the identity from before the exec"
+            )
+        finally:
+            handle.close()
+    finally:
+        ctypes.CDLL = original_cdll  # type: ignore[misc]
+        child.kill()
+        child.wait()
+        if child.stdout is not None:
+            child.stdout.close()
+
+
 def darwin_process_environment_selftest() -> None:
     import ctypes
     from types import SimpleNamespace
@@ -8910,6 +9003,7 @@ def live_helper_selftest() -> None:
     image_paste_helpers.composer_readiness_selftest(sys.modules[__name__])
     darwin_process_environment_selftest()
     darwin_zombie_selftest()
+    darwin_exec_between_lookups_selftest()
     wayland_clipboard_providers_are_reusable_selftest()
     assert "mapped_writes" in STEADY_UPLOAD_QUIET_KEYS, "a blink must not write through the mapped ring"
     import inspect
@@ -10365,36 +10459,45 @@ def live_helper_selftest() -> None:
             run_root.mkdir()
             record = run_root / "nvim.pid"
 
-            def require_rejected_record(kind: str) -> None:
-                started = time.monotonic()
-                rejected = subprocess.run(
-                    [sys.executable, "-c", wsl_cleanup_code, str(fixture_root), "pidfile"],
-                    capture_output=True,
-                    text=True,
-                    timeout=2,
-                    check=False,
-                )
+            def require_rejected_record(kind: str, reason: str) -> None:
+                # A record the cleanup opened blocking would hang it for good,
+                # so the timeout only catches a hang; the reason shows the
+                # record was refused where it was opened, not by a slow
+                # interpreter start or a later failure.
+                try:
+                    rejected = subprocess.run(
+                        [sys.executable, "-c", wsl_cleanup_code, str(fixture_root), "pidfile"],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired as error:
+                    raise AssertionError(
+                        f"a {kind} WSL PID record blocked before rejection"
+                    ) from error
                 assert rejected.returncode != 0, (
                     f"a {kind} WSL PID record was accepted: {rejected.stdout!r}"
                 )
-                assert time.monotonic() - started < 2, (
-                    f"a {kind} WSL PID record blocked before rejection"
+                assert reason in rejected.stderr, (
+                    f"a {kind} WSL PID record was not refused as {reason!r}: "
+                    f"{rejected.stderr!r}"
                 )
 
             os.mkfifo(record, 0o600)
-            require_rejected_record("FIFO")
+            require_rejected_record("FIFO", "unsafe pid record")
             record.unlink()
 
             target = fixture_root / "target.pid"
             target.write_text(f"{os.getpid()}\n", encoding="ascii")
             record.symlink_to(target)
-            require_rejected_record("symlink")
+            require_rejected_record("symlink", f"[Errno {errno.ELOOP}]")
             record.unlink()
 
             endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
                 endpoint.bind(str(record))
-                require_rejected_record("Unix socket")
+                require_rejected_record("Unix socket", f"[Errno {errno.ENXIO}]")
             finally:
                 endpoint.close()
                 record.unlink(missing_ok=True)

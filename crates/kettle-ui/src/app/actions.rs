@@ -1928,12 +1928,17 @@ pub(super) fn select_command_output(term: &kettle_core::Terminal, at: Option<u64
         .is_some_and(|rows| select_output_rows(&term.term, rows))
 }
 
-/// Select stable row ids `start..end` of `term` as whole rows, and scroll the
-/// first into view when it is off screen. `false`, changing nothing, when
-/// none of the rows is retained.
+/// Select stable row ids `start..end` of `term` as whole rows, except that a
+/// last row whose output stops at `end_column` is selected only up to it,
+/// and scroll the first into view when it is off screen. `false`, changing
+/// nothing, when none of the rows is retained.
 pub(super) fn select_output_rows(
     term: &kettle_core::term::SharedTerm,
-    (start, end): (u64, u64),
+    kettle_core::term::CommandOutput {
+        start,
+        end,
+        end_column,
+    }: kettle_core::term::CommandOutput,
 ) -> bool {
     use kettle_core::Dimensions as _;
     let Ok(mut t) = term.lock() else {
@@ -1952,10 +1957,17 @@ pub(super) fn select_output_rows(
         return false;
     };
     let first = first.max(-(history as i32));
+    let cut = last >= screen_lines as i32;
     let last = last.min(screen_lines as i32 - 1);
     if first > last || columns == 0 {
         return false;
     }
+    // The next prompt can follow output with no final newline on its last
+    // row; that row's output ends before the column D found the cursor at.
+    let last_column = match end_column {
+        Some(column) if !cut && column > 0 => column.min(columns) - 1,
+        _ => columns - 1,
+    };
     // Whole rows, from the first cell of the first to the last of the last.
     // Not `SelectionType::Lines`: the engine ends a copied line selection
     // with a newline, and widens it over a row the next prompt wrapped onto.
@@ -1965,7 +1977,7 @@ pub(super) fn select_output_rows(
         kettle_core::Side::Left,
     );
     selection.update(
-        kettle_core::Point::new(kettle_core::Line(last), kettle_core::Column(columns - 1)),
+        kettle_core::Point::new(kettle_core::Line(last), kettle_core::Column(last_column)),
         kettle_core::Side::Right,
     );
     t.selection = Some(selection);
