@@ -1620,6 +1620,13 @@ mod tests {
             assert_eq!(spans.len(), 1, "{path}: {spans:?}");
             assert_eq!((spans[0].kind, spans[0].text.as_str()), (Kind::Path, path));
         }
+        for line in ["docs/\u{b2}www.example.com.txt", "x\u{2167}www.example.com"] {
+            let spans = detect(&[line]);
+            assert!(
+                spans.iter().all(|span| span.kind != Kind::Url),
+                "{line}: {spans:?}"
+            );
+        }
         // A scheme after a refused `www.` still starts a URL.
         let spans = detect(&["docs/www.cfg=HTTPS://example.com/a"]);
         assert!(

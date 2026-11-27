@@ -33,7 +33,7 @@ pub struct Link {
 /// look-behind, so it takes the character before such a `www.` into the
 /// match, and [`url_match`] drops it; one pass stays linear.
 pub(crate) const URL_PATTERN: &str =
-    r#"(?i:https?://|ftp://|file://|(?:^|[^\w/\\.\-@%+~])www\.)[^\s\x00-\x1f<>"]+"#;
+    r#"(?i:https?://|ftp://|file://|(?:^|[^\w\p{N}/\\.\-@%+~])www\.)[^\s\x00-\x1f<>"]+"#;
 
 fn url_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -42,7 +42,7 @@ fn url_re() -> &'static Regex {
 
 /// A [`URL_PATTERN`] match's start and text, without the character before
 /// a `www.` that the pattern takes to check it. A URL starts with a letter,
-/// and that character is never one.
+/// and that character is never a letter or a number.
 pub(crate) fn url_match<'a>(m: &regex::Match<'a>) -> (usize, &'a str) {
     let text = m.as_str();
     let taken = text
@@ -1754,8 +1754,14 @@ mod tests {
             assert_eq!(found.len(), 1, "{line}: {found:?}");
             assert_eq!(found[0].uri, uri, "{line}");
         }
-        let term = term_with(20, &["mail me@WWW.x.test"], &[]);
-        assert!(links_with_cwd(&term, Some("/work")).is_empty());
+        for line in ["mail me@WWW.x.test", "docs/\u{b2}www.example.com.txt"] {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert!(
+                found.iter().all(|link| !link.uri.starts_with("https")),
+                "{line}: {found:?}"
+            );
+        }
         // A name ending in `www` is a path; a scheme after a refused `www.`
         // still starts a URL.
         for (line, uri) in [
