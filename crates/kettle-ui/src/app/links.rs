@@ -17,9 +17,13 @@ pub(super) fn warn_refused_terminal_url(_uri: &str, warn: impl FnOnce(&str)) {
 /// it gets an explicit local-only guard too (defense-in-depth). Crucially this
 /// check does NO filesystem stat — `Path::is_dir` on a `//host` path would
 /// itself route over SMB — it's a pure string check: reject UNC/authority
-/// (`//`, leading `\`) and traversal.
+/// (`//`, leading `\`) and traversal: a segment naming the parent, not a
+/// name holding dots (`a..b`, `...`).
 pub(super) fn cwd_is_local(cwd: &str) -> bool {
-    !cwd.is_empty() && !cwd.starts_with("//") && !cwd.starts_with('\\') && !cwd.contains("..")
+    !cwd.is_empty()
+        && !cwd.starts_with("//")
+        && !cwd.starts_with('\\')
+        && !cwd.split(['/', '\\']).any(kettle_core::links::names_parent)
 }
 
 /// What opening a local file link would do, decided on the opener thread.

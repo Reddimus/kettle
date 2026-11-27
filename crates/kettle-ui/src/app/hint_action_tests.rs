@@ -801,6 +801,10 @@ fn a_path_hint_resolves_to_a_safe_local_file_url() {
             "café/menú.png",
             "file:///home/me/proj/caf%C3%A9/men%C3%BA.png",
         ),
+        // A name holding dots is no climb: the exact quoted `"/tmp/a.."`
+        // opens as it links.
+        ("/tmp/a..", "file:///tmp/a.."),
+        ("/tmp/.../x.txt", "file:///tmp/.../x.txt"),
     ] {
         assert_eq!(url(text).as_deref(), Some(expected), "{text}");
         assert!(

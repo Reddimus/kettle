@@ -604,6 +604,14 @@ fn has_parent_component(path: &str) -> bool {
     path.split('/').any(climbs)
 }
 
+/// Whether a path segment names the parent folder, as Kettle's file link
+/// checks read it: `..`, or `..` and trailing spaces and dots, which
+/// Windows drops from the end of a name (`.. `). A name holding dots, such
+/// as `a..b` or `...`, does not.
+pub fn names_parent(segment: &str) -> bool {
+    climbs(segment)
+}
+
 /// Whether a path segment names the parent directory: `..`, or `..` and
 /// trailing spaces and dots, which Windows drops from the end of a name
 /// (`.. `). A segment of dots alone stays a name there, so `...` and
