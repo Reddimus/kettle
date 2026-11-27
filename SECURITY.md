@@ -53,6 +53,15 @@ and confinement, described below.
   first (`link_gate`, `pane_path_origin`). What runs in the pane when the
   link is opened decides, so output printed while a session was remote can
   still open locally after the pane returns to a local shell.
+  A detected path is read against its line's quotes as a shell reads them,
+  so a piece of a quoted name never becomes a link to another file: only a
+  path with no quote beside it in its word, a quoted string's whole text, a
+  path from a root starting a word, or one from a root that ends quoted
+  prose may open, and on a line a stray quote may have shifted, only a path
+  from a root starting a word; every other piece is copied (see
+  `hints::Quotes::lets_open` and
+  [link detection](docs/CONFIG.md#link-detection)). The underline and the
+  destination pill show exactly what a click opens.
   Every `file://` link and OSC 7 working directory is checked after
   decoding (`decoded_file_url_path`, `plain_cwd`): no `..` segment, network
   path, control character or encoded separator, however it is spelled. Two

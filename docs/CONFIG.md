@@ -664,6 +664,32 @@ moves a key into the main table without changing its parser arm.
 | `hide-from-taskbar` | Suppress from OS taskbar | winit Windows-only natively; cross-platform requires per-platform extensions |
 | `title-font` / `title-use-system-font` / `use-system-font` / `use-theme-colors` | Per-pane titlebar font + theme-color overrides | Multi-cycle per-pane font system |
 
+### Link detection
+
+Kettle underlines the URLs and file paths it finds in a pane's text, and the
+underline and the destination pill show exactly what a click opens. Quotes are
+read as a shell reads them: a string closes at the next quote of its kind (a
+backslash escapes a `"` inside double quotes), whitespace outside strings
+separates words, and an apostrophe after a letter or digit (`can't`) opens
+nothing unless a later `'` closes it as a shell would (`prefix'a b'`). A path
+opens only when no quote stands beside it in its word, past any string that
+closed before it (`src/main.rs`, `--out=/tmp/x.png`, `src/main.rs` in
+`echo "hello " src/main.rs`); when it is the whole text of a quoted string
+(`{"file":"/tmp/c.txt"}`); or when it starts from a root at the start of a word
+(`/tmp/x.log` in `/tmp/x.log"`). Inside quoted prose, a path from a root that
+ends the string opens too (`"see /tmp/report.pdf"`). Any other piece of a
+quoted string, or of a word that holds a quote, is not underlined and quick
+select only copies it: `/tmp/report.pdf` in `prefix'docs/a*b=/tmp/report.pdf'`,
+`b/notes.txt` in `"a b/notes.txt"`. Text between such an apostrophe and the `'`
+that closes it may or may not be quoted, and opens only a path from a root at
+the start of a word. A stray quote can shift every string on its line, so a line
+where one may have done so is uncertain as a whole: one holding a quote that
+never closes, an apostrophe that could close a string (`users'`) with no `'`
+closing it, or a string that runs on into more of its word after it closes
+(`"a"b`, `"$src"/a.txt`). On such a line only a path from a root at the start of
+a word opens, and relative and quoted paths are copied: nothing opens in
+`x 'tis A='/Users/me/a b/notes/my dir.txt'`.
+
 ### Selection and history controls
 
 Theme and default selection colours resolve their fill and text together to
