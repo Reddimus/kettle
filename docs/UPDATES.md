@@ -332,12 +332,16 @@ too, and refuses to update until the rollback has finished.
 If the bundled `install.sh` or the online installer runs while a rollback is
 still pending, it reads the updater's journal as the receipt it is, after the
 same validation the updater applies to it. A file at a journaled path is
-treated as one the interrupted install wrote only when its bytes are what the
-journal shows the update left there in that entry's state: the file it found,
-before publication or once restored, or either file in between. The installer
-then lays the whole release over the prefix. Before writing anything it retires
-the journal, so that kettle does not roll the update back over the new install,
-and removes the backup copies whose bytes and marker match the journal. A
+treated as one the interrupted install wrote only when the path is one this
+installer installs or its record lists, and its bytes are what the journal
+shows the update left there in that entry's state: the file it found, before
+publication or once restored, or either file in between. A journal that names
+any other path did not come from the updater and stops the install. The
+installer then lays the whole release over the prefix. Before writing anything
+it retires the journal, so that kettle does not roll the update back over the
+new install, and removes the backup copies whose bytes and marker match the
+journal. A backup that still holds anything else, such as a copy the update
+stopped part-way through, keeps its marker. A
 journaled path holding anything else, the installer's own record included, is
 refused rather than replaced. A committed update's journal is left for kettle to
 confirm and remove, and a journal the installer cannot read stops it with the

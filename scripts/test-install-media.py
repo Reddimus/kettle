@@ -978,6 +978,65 @@ module._uninstall(arguments)
         self.assertNotIn("share/kettle/added-by-update", recorded)
         self.assertFalse(journal.exists() or backup.exists())
 
+    def test_a_journal_naming_a_path_kettle_does_not_own_is_refused(self):
+        installed = self.run_installer()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        other = self.prefix / "bin/othertool"
+        other.write_bytes(b"someone else's tool")
+        other.chmod(0o755)
+        journal, _backup = self.interrupted_self_update()
+        document = json.loads(journal.read_text())
+        document["entries"].append({
+            "relative": "bin/othertool",
+            "existed": True,
+            "previous_unix_mode": 0o755,
+            "previous_size": other.stat().st_size,
+            "previous_sha256": hashlib.sha256(other.read_bytes()).hexdigest(),
+            "replacement_size": 1,
+            "replacement_sha256": hashlib.sha256(b"x").hexdigest(),
+            "state": "installed",
+        })
+        journal.write_text(json.dumps(document))
+
+        refused = self.run_installer()
+
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("names bin/othertool", refused.stderr)
+        recorded = {
+            record["path"]
+            for record in json.loads(
+                (self.prefix / "share/kettle/install-files.json").read_text()
+            )["files"]
+        }
+        self.assertNotIn("bin/othertool", recorded)
+        self.assertEqual(other.read_bytes(), b"someone else's tool")
+        self.assertTrue(journal.exists())
+
+    def test_a_backup_that_keeps_a_copy_stays_marked(self):
+        installed = self.run_installer()
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        journal, backup = self.interrupted_self_update(
+            phase="applying",
+            files=(
+                ("share/kettle/install.sh", b"#!/bin/sh\n# 9.9.9\n", "installed"),
+                ("bin/kettle-media-worker", b"9.9.9 worker", "backing_up"),
+            ),
+        )
+        # The update stopped part-way through copying this backup.
+        partial = backup / "bin/kettle-media-worker"
+        partial.write_bytes(partial.read_bytes()[:2])
+
+        repaired = self.run_installer()
+
+        self.assertEqual(repaired.returncode, 0, repaired.stderr)
+        self.assertFalse(journal.exists())
+        self.assertFalse((backup / "share/kettle/install.sh").exists())
+        self.assertTrue(partial.exists(), "a copy that does not match was removed")
+        self.assertTrue(
+            (backup / ".kettle-update-backup.json").exists(),
+            "a backup that still holds a copy lost its marker",
+        )
+
     def test_a_file_changed_after_an_interrupted_self_update_is_refused(self):
         installed = self.run_installer()
         self.assertEqual(installed.returncode, 0, installed.stderr)
