@@ -3398,11 +3398,27 @@ that parser could retire, the disconnected transport fails immediately rather
 than preserving an impossible pending count forever.
 Unix construction closes a separate race before this completion policy begins.
 The pump is running before the child is spawned, then retains Kettle's slave
-descriptor through the first successful master read. A child-only exit releases
-it before waiting for EOF; when macOS reports output and `NOTE_EXIT` together,
-the exit timestamp is recorded but the descriptor is released only after the
-read, because closing it first discards the tail. Linux waits on the master and
-a pidfd in one `poll`; macOS registers
+descriptor. On macOS it keeps it until the direct child has exited and nothing
+is left to read on the master: the last close of a slave there can discard
+output still unread, since an exiting child waits about half a second for the
+reader and then drops its tail, so a reader that had fallen behind lost a
+program's last output while the descriptor went at the first read. Holding it
+keeps the child's own close from being the last; once the exit is seen and the
+master is empty, the pump releases it and EOF follows, or the bounded wait
+below covers a descendant that keeps its own slave open. While it is held, an
+exiting child waits for its unread output without limit, and SIGKILL does not
+end that wait, so a child whose output is stopped (Ctrl+S, `tcflow`) stays in
+its exit until output resumes; a keypress resumes it under the default
+`ixany`. A session leader with stopped output waits the same way while a
+descendant holds the slave, even with no descriptor of Kettle's open. The
+descriptor sits in a slot the pane shares with the pump from before the pump
+first runs. Closing the pane, on the teardown thread, and `kettle exec`, before
+it signals the process tree, restart the stopped output from the master
+(`tcflow(TCOON)`) and then close the descriptor; the pump, draining, takes the
+output and the child's exit completes. Linux keeps unread output across the
+last close, so it releases the descriptor at the first read as before, and a
+child that closes its terminal still hangs the master up.
+Linux waits on the master and a pidfd in one `poll`; macOS registers
 master readability and `NOTE_EXIT` in one kqueue. Other Unix targets use a
 bounded exponential `poll` plus non-reaping `waitid(WNOWAIT)` fallback. The
 primary paths are event-driven, so a quiet long-running pane does not incur a
