@@ -562,7 +562,13 @@ fn detect_line(
         }
         for m in re.find_iter(line) {
             let (m_start, raw) = if *kind == Kind::Url {
-                crate::links::url_match(&m)
+                // After an invisible character the URL is part of the word
+                // before it, and no piece of it is a hint.
+                let Some(url) = crate::links::url_match(line, &m) else {
+                    taken.fill(m.start(), m.end());
+                    continue;
+                };
+                url
             } else {
                 (m.start(), m.as_str())
             };
@@ -1709,6 +1715,18 @@ mod tests {
                 spans.iter().all(|span| span.kind != Kind::Url),
                 "{line}: {spans:?}"
             );
+        }
+        // Nor does an invisible character end the word before a URL.
+        for line in [
+            "file docs/a\u{200b}WWW.example.test/path.txt",
+            "see a\u{2060}https://x.test/p.txt",
+        ] {
+            let spans = detect(&[line]);
+            assert!(
+                spans.iter().all(|span| span.kind != Kind::Url),
+                "{line}: {spans:?}"
+            );
+            assert!(spans.iter().all(|span| !span.bounded), "{line}: {spans:?}");
         }
         // A scheme after a refused `www.` still starts a URL.
         let spans = detect(&["docs/www.cfg=HTTPS://example.com/a"]);

@@ -40,17 +40,25 @@ fn url_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(URL_PATTERN).unwrap())
 }
 
-/// A [`URL_PATTERN`] match's start and text, without the character before
-/// a `www.` that the pattern takes to check it. A URL starts with a letter,
-/// and that character is never a letter or a number.
-pub(crate) fn url_match<'a>(m: &regex::Match<'a>) -> (usize, &'a str) {
+/// A [`URL_PATTERN`] match's start and text in `line`, without the
+/// character before a `www.` that the pattern takes to check it. A URL
+/// starts with a letter, and that character is never a letter or a number.
+/// `None` when the character before the URL is an invisible one, which
+/// does not end a word (`a\u{200b}www.x.test` reads as one token); Unicode
+/// whitespace shows as a space and does.
+pub(crate) fn url_match<'a>(line: &str, m: &regex::Match<'a>) -> Option<(usize, &'a str)> {
     let text = m.as_str();
     let taken = text
         .chars()
         .next()
         .filter(|c| !c.is_alphabetic())
         .map_or(0, char::len_utf8);
-    (m.start() + taken, &text[taken..])
+    let start = m.start() + taken;
+    let before = line[..start].chars().next_back();
+    if before.is_some_and(|c| hides_text(c) && !c.is_whitespace()) {
+        return None;
+    }
+    Some((start, &text[taken..]))
 }
 
 /// Whether a detected URL, trimmed of trailing punctuation, still names
@@ -340,7 +348,12 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
             }
         };
         for m in url_re().find_iter(&text) {
-            let (start, raw) = url_match(&m);
+            // A URL an invisible character joins to the word before it is
+            // part of that word, and no piece of it links.
+            let Some((start, raw)) = url_match(&text, &m) else {
+                cover(m.start(), m.len(), &mut covered);
+                continue;
+            };
             let matched = crate::url_trim::trim_trailing(raw);
             if fragment(start, m.end()) {
                 continue;
@@ -1925,6 +1938,28 @@ mod tests {
             super::local_file_path("FILE:///etc/hosts"),
             Some(std::path::PathBuf::from("/etc/hosts"))
         );
+    }
+
+    /// An invisible character does not end a word, so a scheme or `www.`
+    /// after one is part of that word: no link, and no piece of it links.
+    /// A no-break space shows as a space and still ends one.
+    #[test]
+    fn an_invisible_character_does_not_start_a_url() {
+        for c in ['\u{200b}', '\u{2060}', '\u{ad}', '\u{feff}', '\u{200e}'] {
+            for line in [
+                format!("file docs/a{c}WWW.example.test/path.txt"),
+                format!("see a{c}https://x.test/p.txt"),
+                format!("see {c}www.x.test/a"),
+            ] {
+                let term = term_with(line.chars().count(), &[&line], &[]);
+                let found = links_with_cwd(&term, Some("/work"));
+                assert!(found.is_empty(), "U+{:04X}: {found:?}", u32::from(c));
+            }
+        }
+        let term = term_with(20, &["see a\u{a0}www.x.test"], &[]);
+        let found = links_with_cwd(&term, Some("/work"));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].uri, "https://www.x.test");
     }
 
     /// A web or FTP URL names a host: a scheme with nothing after it, or
