@@ -2508,6 +2508,149 @@ mod tests {
         }
     }
 
+    /// Lines composed at random from prose with apostrophes and stray
+    /// quotes, JSON objects whose values hold spaces, paths and escaped
+    /// quotes, and shell assignments in single and double quotes: no link,
+    /// and no hint quick select may open, is a piece inside a quoted value;
+    /// only the whole value may be. Seeded, so a failure repeats.
+    #[test]
+    fn no_piece_of_a_quoted_value_opens_in_composed_lines() {
+        struct Rng(u64);
+        impl Rng {
+            fn pick(&mut self, n: usize) -> usize {
+                self.0 ^= self.0 << 13;
+                self.0 ^= self.0 >> 7;
+                self.0 ^= self.0 << 17;
+                (self.0 % n as u64) as usize
+            }
+        }
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        let prose = [
+            "can't open",
+            "it's in",
+            "the users' copy",
+            "don't",
+            "Bob's",
+            "see",
+            "5' tall",
+            "error:",
+            "x 'tis",
+            "the \"quoted",
+            "ok",
+        ];
+        let names = [
+            "my app",
+            "annual report",
+            "a b",
+            "notes",
+            "my dir",
+            "x",
+            "src",
+            "Q3 final",
+        ];
+        let extensions = ["", ".py", ".txt", ".pdf", ".tar.gz"];
+        let roots = ["/Users/me/", "docs/", "", "~/", "./"];
+        let tails = ["/tmp/report.pdf", "src/lib.rs", "/etc/x.conf"];
+        let others = [
+            "https://x.test/a",
+            "application/json",
+            "2026/11/26",
+            "it's a/b",
+            "x 0.1.0",
+            "/work",
+        ];
+        for _ in 0..4000 {
+            let mut line = String::new();
+            let mut values: Vec<(usize, usize)> = Vec::new();
+            for item in 0..1 + rng.pick(4) {
+                if item > 0 {
+                    line.push(' ');
+                }
+                // A quoted value, escaped for the quote `quote` it sits in.
+                let value = |rng: &mut Rng, quote: char, path: bool| {
+                    if !path {
+                        return others[rng.pick(others.len())].to_string();
+                    }
+                    let mut value = roots[rng.pick(roots.len())].to_string();
+                    for part in 0..1 + rng.pick(3) {
+                        if part > 0 {
+                            value.push('/');
+                        }
+                        value.push_str(names[rng.pick(names.len())]);
+                    }
+                    value.push_str(extensions[rng.pick(extensions.len())]);
+                    if rng.pick(4) == 0 {
+                        value.push('\\');
+                        value.push(quote);
+                        value.push_str("b=");
+                        value.push_str(tails[rng.pick(tails.len())]);
+                    }
+                    value
+                };
+                let quoted = |line: &mut String, values: &mut Vec<(usize, usize)>, text: String| {
+                    values.push((line.len(), line.len() + text.len()));
+                    line.push_str(&text);
+                };
+                match rng.pick(4) {
+                    0 => line.push_str(prose[rng.pick(prose.len())]),
+                    1 => {
+                        // JSON, compact, with double or single quotes.
+                        let q = if rng.pick(3) == 0 { '\'' } else { '"' };
+                        line.push('{');
+                        for pair in 0..1 + rng.pick(3) {
+                            if pair > 0 {
+                                line.push(',');
+                            }
+                            line.push(q);
+                            line.push_str(["file", "cwd", "msg", "path"][rng.pick(4)]);
+                            line.push(q);
+                            line.push(':');
+                            line.push(q);
+                            let path = rng.pick(3) != 0;
+                            let text = value(&mut rng, q, path);
+                            quoted(&mut line, &mut values, text);
+                            line.push(q);
+                        }
+                        line.push('}');
+                    }
+                    2 => {
+                        // A shell assignment or option.
+                        let q = if rng.pick(2) == 0 { '\'' } else { '"' };
+                        line.push_str(["x=", "export Z=", "--out=", "A="][rng.pick(4)]);
+                        line.push(q);
+                        let text = value(&mut rng, q, true);
+                        quoted(&mut line, &mut values, text);
+                        line.push(q);
+                        if rng.pick(3) == 0 {
+                            line.push_str(";B=/tmp/ok.log");
+                        }
+                    }
+                    _ => line.push_str(["/tmp/ok.log", "src/ok.rs:3", "./run.sh"][rng.pick(3)]),
+                }
+            }
+            // A piece strictly inside a value, not the whole value.
+            let piece = |start: usize, end: usize| {
+                values
+                    .iter()
+                    .any(|&(vs, ve)| start >= vs && end < ve && (start, end + 1) != (vs, ve))
+            };
+            let term = term_with(line.len(), &[line.as_str()], &[]);
+            for link in links_with_cwd(&term, Some("/work")) {
+                assert!(
+                    !piece(link.start_col, link.end_col),
+                    "{line:?} links a piece of a quoted value: {link:?}"
+                );
+            }
+            for span in crate::hints::detect(&[line.as_str()]) {
+                let opens = span.kind == crate::hints::Kind::Url || span.bounded;
+                assert!(
+                    !(opens && piece(span.start, span.end)),
+                    "{line:?} offers a piece of a quoted value to open: {span:?}"
+                );
+            }
+        }
+    }
+
     /// Compact JSON closes each string before the next opens, so a later
     /// value's path links whatever an earlier value held.
     #[test]
