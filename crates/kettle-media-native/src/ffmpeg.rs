@@ -1939,6 +1939,64 @@ mod tests {
         }
     }
 
+    /// What Ubuntu 26.04's FFmpeg 8.0.1 answered for the fixtures, as
+    /// recorded (`tests/fixtures/ffmpeg-8.0.1`), reads as each fixture is:
+    /// its version reads stills, each still's probe says its coding and the
+    /// size it is shown at, a grid's its whole size, and the clip's
+    /// description its stream, clock and length.
+    #[test]
+    fn ffmpeg_8_answers_read_as_recorded() {
+        let version = include_str!("../tests/fixtures/ffmpeg-8.0.1/version.txt");
+        assert!(reads_stills(version.lines().next().unwrap_or_default()));
+        for (text, codec, (width, height), grid) in [
+            (
+                include_str!("../tests/fixtures/ffmpeg-8.0.1/solid.heic.txt"),
+                "hevc",
+                (640, 480),
+                false,
+            ),
+            (
+                include_str!("../tests/fixtures/ffmpeg-8.0.1/solid.avif.txt"),
+                "av1",
+                (640, 480),
+                false,
+            ),
+            (
+                include_str!("../tests/fixtures/ffmpeg-8.0.1/grid.heic.txt"),
+                "hevc",
+                (1024, 768),
+                true,
+            ),
+        ] {
+            assert_eq!(
+                parse_still_probe(text),
+                Ok(StillProbe {
+                    codec: codec.into(),
+                    width,
+                    height,
+                    turn: 0,
+                    grid,
+                }),
+                "{codec} {width}x{height}"
+            );
+        }
+        let probe = parse_probe(include_str!(
+            "../tests/fixtures/ffmpeg-8.0.1/index.webm.txt"
+        ))
+        .unwrap();
+        assert_eq!(
+            (probe.stream.index, probe.stream.codec.as_str()),
+            (Some(0), "vp8")
+        );
+        assert_eq!(probe.shown(), Ok((64, 36)));
+        assert_eq!(probe.rotation(), 0);
+        assert_eq!(probe.stream.time_base, Some((1, 1000)));
+        assert_eq!((probe.start_us, probe.duration_us), (0, Some(4_000_000)));
+        assert_eq!(probe.fps_milli(), Some(10_000));
+        assert_eq!(probe.video_end_ms(), Some(4000));
+        assert!(!probe.has_audio);
+    }
+
     #[test]
     fn numbers_from_ffprobe_are_read_exactly_or_not_at_all() {
         assert_eq!(micros("10.000000"), Some(10_000_000));
