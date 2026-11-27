@@ -1108,14 +1108,6 @@ pub struct Pane {
     /// to the PTY. Unix input policy accepts it only when its pid still matches
     /// a fresh `tcgetpgrp` snapshot; Windows combines it with OSC 133 state.
     pub foreground_process: Option<kettle_remote::ForegroundProcess>,
-    /// Document row (see `kettle_core::restore::primary_end_row`) before which
-    /// this pane's primary grid may still hold a remote session's output,
-    /// recorded when the pane stops counting as remote, or when restore
-    /// replays output saved as remote. It never moves back, so with
-    /// `restore-scrollback-remote` off those rows stay out of the saved output
-    /// after `ssh` exits, until eviction, a scrollback clear or a reset has
-    /// taken every one of them out of the grid.
-    pub remote_output_end: Option<u64>,
     /// Media shown in this pane with `show`. It moves with the pane, into
     /// another window too.
     pub media_shelf: crate::media::Shelf,
@@ -1139,14 +1131,19 @@ impl Pane {
     /// Everything now in the primary grid may be a remote session's output:
     /// keep it out of the saved output (see [`Pane::remote_output_end`]).
     pub(crate) fn note_remote_output_ended(&mut self) {
-        let end = kettle_core::restore::primary_end_row(
-            &self
-                .term
-                .term
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
-        self.remote_output_end = Some(self.remote_output_end.map_or(end, |known| known.max(end)));
+        self.term.exclude_output_so_far();
+    }
+
+    /// Document row (see `kettle_core::restore::primary_end_row`) before which
+    /// this pane's primary grid may still hold a remote session's output,
+    /// recorded when the pane stops counting as remote, or when restore
+    /// replays output saved as remote. It never moves back over that output,
+    /// and a width change carries it with the rewrapped rows, so with
+    /// `restore-scrollback-remote` off those rows stay out of the saved output
+    /// after `ssh` exits, until eviction, a scrollback clear or a reset has
+    /// taken every one of them out of the grid.
+    pub(crate) fn remote_output_end(&self) -> Option<u64> {
+        self.term.excluded_output_end()
     }
 
     #[cfg(test)]
@@ -2436,7 +2433,7 @@ impl Mux {
                     output: pane.term.output_generation(),
                     geometry: pane.term.geometry_generation(),
                     remote: pane_saves_as_remote(pane),
-                    remote_end: pane.remote_output_end,
+                    remote_end: pane.remote_output_end(),
                 },
                 None => crate::session_content::PaneContentKey {
                     id,
@@ -2475,7 +2472,7 @@ impl Mux {
                         let first = kettle_core::restore::primary_first_row(&term);
                         match remote_rows(
                             remote_now,
-                            pane.remote_output_end,
+                            pane.remote_output_end(),
                             first,
                             cfg.restore_scrollback_remote,
                         ) {
@@ -2877,7 +2874,6 @@ impl Mux {
                 reconnect_launch: launch.cloned(),
                 remote_context: None,
                 foreground_process: None,
-                remote_output_end: None,
                 agent_attached: false,
                 read_only: false,
                 completion_overlay: cfg.completion_overlay
@@ -3001,6 +2997,7 @@ impl Mux {
                         &pane.lines,
                         &self.restore_divider,
                         geometry.columns,
+                        geometry.rows,
                         cfg.grapheme_clustering,
                     )
                 });

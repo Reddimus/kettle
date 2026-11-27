@@ -373,6 +373,11 @@ impl GridCell for Cell {
             ..Cell::default()
         };
     }
+
+    #[inline]
+    fn clear_wide_char(&mut self) {
+        self.clear_wide();
+    }
 }
 
 impl From<Color> for Cell {

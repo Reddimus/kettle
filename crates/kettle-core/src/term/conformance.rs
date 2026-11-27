@@ -40,17 +40,15 @@ fn harness_latched(
     (term, Processor::new(), rx, latched)
 }
 
-/// A one-column grid aborts the whole process on any wide character, and
+/// A one-column grid has no room for any wide character, and
 /// `kettle exec --cols 1`, a narrow enough split, and the `(1, 1, 1, 1)`
 /// geometry fallbacks can all request one.
 ///
 /// The engine declares `MIN_COLUMNS = 2` and then never enforces it. On a
-/// single-cell row the line-wrap path writes a leading spacer at column 0,
-/// wraps, writes the wide char at column 0 of the next row, and then indexes
-/// column 1 for the trailing spacer. `Row`'s `Index` is unchecked, so that
-/// panics on the PTY reader thread, and `panic = "abort"` in the release
-/// profile turns one bad cell into a dead application. A CJK filename in
-/// `ls` output is enough.
+/// single-cell row it prints a blank in place of each wide character, so a
+/// CJK filename in `ls` output would come out empty. Before the engine did
+/// that, the write indexed past the end of the row and panicked on the PTY
+/// reader thread, which `panic = "abort"` turned into a dead application.
 #[test]
 fn a_single_column_request_is_widened_to_what_the_engine_can_represent() {
     let geometry = PtyGeometry::new(1, 1, 1, 1);
@@ -73,7 +71,7 @@ fn a_single_column_request_is_widened_to_what_the_engine_can_represent() {
         MIN_COLUMNS
     );
 
-    // Drive the real thing. Without the clamp, these writes panic.
+    // Drive the real thing. Without the clamp, these print blanks.
     let (mut term, mut processor) = harness(geometry.columns, geometry.rows);
     feed(&mut term, &mut processor, "\u{754c}".as_bytes());
     feed(&mut term, &mut processor, "\u{1f680}".as_bytes());

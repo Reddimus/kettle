@@ -1105,6 +1105,25 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Fixed
 
+- A one-column terminal grid shows a wide character as a blank instead of
+  crashing, and narrowing a grid to one column no longer hangs.
+
+- A restored row that follows a wrapped line no longer paints its background
+  across the empty rest of the row.
+
+- A restored line keeps its soft wrap when the row it wraps onto holds only
+  blanks, so copying it adds no line break.
+
+- Restored output keeps the text after a tab in its column.
+
+- Restored output keeps blinking text's blink attribute.
+
+- Restored output keeps the colors of the blank a wide character leaves at the
+  end of a row it did not fit, and the row after it keeps its columns.
+
+- With `restore-scrollback-remote` off, changing a pane's width no longer saves
+  the output of a remote session that has ended.
+
 - Screen readers can highlight a command palette or picker result by pressing
   or focusing it, and act on the highlighted result with the picker's Choose
   button. Selecting a result never runs it. Pressing a quick-select label acts

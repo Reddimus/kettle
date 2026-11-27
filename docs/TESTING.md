@@ -4154,10 +4154,17 @@ and Spanish layout still require live platform checks.
 ## Bounded session-output restore
 
 `kettle-core::restore::tests` covers primary-screen capture during alternate
-screen use, SGR and wide/grapheme replay, control/hyperlink stripping, per-pane
-line and row-byte caps, and content/divider/new-output ordering.
-`kettle-ui::session_content::tests` checks the serialized 8 MiB cap, private
-round trips, corrupt and mismatched sidecars, unsafe controls, and removal.
+screen use, SGR (blink included) and wide/grapheme replay, control/hyperlink
+stripping, per-pane line and row-byte caps, and content/divider/new-output
+ordering. Cell-by-cell round trips in a 40-by-10 pane check the columns after
+tabs, soft wraps onto rows of blanks, the tail of a row whose wrap scrolls, and
+the blank a wide character leaves at the end of a row it did not fit.
+Soft-wrapped text also comes back whole in one-row, narrower and wider panes,
+and a remote session's boundary keeps its lines through narrowing, widening
+and eviction. `kettle-ui::session_content::tests` checks the serialized 8 MiB
+cap, private round trips, corrupt and mismatched sidecars, unsafe controls,
+removal, and, on Unix, that remote output stays out of the saved file when the
+pane's width changes.
 Session writer tests cover output-disable cleanup. Config and Settings tests
 cover defaults, bounds, both key spellings and persisted values. Run the full
 `kettle-ui`, `kettle-core`, `kettle-state`, `kettle-config` and `kettle-i18n`
