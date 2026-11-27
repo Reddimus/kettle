@@ -1653,6 +1653,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - URLs printed with an uppercase scheme, such as `HTTPS://`, `FILE://` or `WWW.`, are detected as links and quick-select URLs.
 - A path ending in a dotfile, such as `docs/.env` or a quoted `"docs/my dir/.env"`, is a link, and quick select no longer offers only the part after the space.
 - A quoted path with a space whose extension is long or hyphenated, such as `"docs/annual report.swiftinterface"` or `"docs/my app.code-workspace"`, is a link.
+- A file link naming a program in a Windows alternate data stream, such as `notes.txt:payload.exe::$DATA`, is refused like the program itself.
 - Sessions: session files are checked for trust before restoring commands,
   sessions that restore would reject are not autosaved, and repeated restore
   failures no longer turn off saving.

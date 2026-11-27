@@ -817,8 +817,9 @@ const PROGRAM_FILES: &[&str] = &[
 ///
 /// The name is read as Windows reads it, whatever the platform: trailing
 /// dots and spaces are dropped (`payload.exe.` runs `payload.exe`), and an
-/// alternate data stream (`a.exe::$DATA`, `a.txt:b.exe`) is checked both
-/// before and after its colon.
+/// alternate data stream, `file:stream:type`, is checked by its file name
+/// and by its stream name (`a.exe::$DATA`, `a.txt:b.exe`,
+/// `a.txt:b.exe::$DATA`).
 pub fn names_program_or_shortcut(path: &std::path::Path, is_dir: bool) -> bool {
     let Some(name) = path.file_name() else {
         return false;
@@ -834,10 +835,9 @@ pub fn names_program_or_shortcut(path: &std::path::Path, is_dir: bool) -> bool {
         };
         listed(PROGRAM_BUNDLES) || (!is_dir && listed(PROGRAM_FILES))
     };
-    known(&name)
-        || name
-            .split_once(':')
-            .is_some_and(|(stream_of, _)| known(stream_of))
+    // Each part on its own: the last `.` of the whole name may belong to
+    // neither, as in `a.txt:b.exe::$DATA`.
+    name.split(':').any(known)
 }
 
 /// Whether a `file://` URI points at the local machine with no traversal.
@@ -1322,6 +1322,16 @@ mod tests {
             "payload.exe::$DATA",
             "notes.txt:payload.exe",
             ".exe",
+            // A program stream, typed or not.
+            "notes.txt:payload.exe::$DATA",
+            "notes.txt:payload.bat::$DATA",
+            "report.pdf:setup.msi::$DATA",
+            "notes.txt:PAYLOAD.EXE::$DATA",
+            "notes.txt:tool.ps1::$DATA",
+            "a.txt:b.exe::$DATA",
+            "notes.txt:payload.exe.::$DATA",
+            "notes.txt:payload.exe::$DATA ",
+            "notes.txt:payload.lnk:$DATA",
         ] {
             assert!(program(name), "{name}");
         }
@@ -1335,6 +1345,10 @@ mod tests {
             "archive.tar.gz",
             "exe",
             "notes:2.txt",
+            "notes.txt:Zone.Identifier",
+            "notes.txt:Zone.Identifier:$DATA",
+            "photo.jpg:payload.txt::$DATA",
+            "notes.txt::$DATA",
         ] {
             assert!(!program(name), "{name}");
         }
