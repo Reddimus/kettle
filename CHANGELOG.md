@@ -1111,6 +1111,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - A restored row that follows a wrapped line no longer paints its background
   across the empty rest of the row.
 
+- A restored line keeps its soft wrap when the row it wraps onto holds only
+  blanks, so copying it adds no line break.
+
 - Screen readers can highlight a command palette or picker result by pressing
   or focusing it, and act on the highlighted result with the picker's Choose
   button. Selecting a result never runs it. Pressing a quick-select label acts

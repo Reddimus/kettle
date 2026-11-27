@@ -251,6 +251,19 @@ fn dimmed(output: &mut String, line: &str) {
     output.push_str(rest);
 }
 
+/// Whether a validated line prints anything besides its SGR.
+fn prints(line: &str) -> bool {
+    let mut rest = line;
+    while let Some(start) = rest.find('\x1b') {
+        if start > 0 {
+            return true;
+        }
+        let end = rest.find('m').expect("validated SGR") + 1;
+        rest = &rest[end..];
+    }
+    !rest.is_empty()
+}
+
 /// Generate display-only parser input for a terminal of `columns` by `rows`.
 /// Cell mode changes are generated from validated metadata, never accepted as
 /// escape sequences from disk. Restore the new shell's configured mode and
@@ -287,6 +300,12 @@ pub fn replay(
             start = end;
         }
         dimmed(&mut output, &line[start..]);
+        // A line break clears a pending wrap, so a blank resolves it first in
+        // a row of blanks after a wrap, and after a wrapped last row, whose
+        // blank continuation the snapshot leaves out.
+        if (continues && !prints(line)) || (*wrapped && index + 1 == lines.len()) {
+            output.push(' ');
+        }
         if !wrapped || index + 1 == lines.len() {
             output.push_str("\r\n");
         }
@@ -398,6 +417,80 @@ mod tests {
                     "row {k} column {col}"
                 );
             }
+        }
+    }
+
+    /// A soft wrap followed by a row holding only blanks stays a soft wrap.
+    /// Nothing in the blank row resolved the wrap during replay, so its line
+    /// break cleared it.
+    #[test]
+    fn restored_soft_wraps_survive_a_blank_continuation() {
+        let mut script = vec![b'a'; 40];
+        script.extend_from_slice(b" \r\nb\r\n");
+        // A tab at the end of a full row wraps it without writing, and the
+        // blank row it wraps onto is below the cursor, so it is not saved.
+        let mut last = vec![b'a'; 40];
+        last.extend_from_slice(b"\t\x1b[H");
+        for script in [script, last] {
+            let (source, restored, rows) = round_trip(&script);
+            assert!(saved_cell(&source, 0, 39).flags.contains(Flags::WRAPLINE));
+            for k in 0..rows {
+                assert_eq!(
+                    saved_cell(&restored, k, 39).flags.contains(Flags::WRAPLINE),
+                    saved_cell(&source, k, 39).flags.contains(Flags::WRAPLINE),
+                    "{script:?} row {k}"
+                );
+            }
+        }
+        let mut script = vec![b'a'; 40];
+        script.extend_from_slice(b" \r\nb\r\n");
+        let (_, restored, _) = round_trip(&script);
+        assert_eq!(saved_cell(&restored, 2, 0).c, 'b');
+    }
+
+    /// Soft-wrapped rows, a leading wide spacer and a row of blanks come back
+    /// as the same text in a pane of one row, where replay cannot make a line
+    /// ahead of the wrap, and in panes narrower and wider than the one saved.
+    #[test]
+    fn restored_wrapped_text_survives_other_pane_sizes() {
+        let mut script = vec![b'x'; 45];
+        script.extend_from_slice(b"\r\n\x1b[42m");
+        script.extend_from_slice(&[b'y'; 50]);
+        script.extend_from_slice(b"\x1b[0m\r\na");
+        script.extend_from_slice("\u{754c}".repeat(25).as_bytes());
+        script.extend_from_slice(b"\r\n");
+        script.extend_from_slice(&[b'z'; 40]);
+        script.extend_from_slice(b" \r\nend\r\n");
+        let mut source = tall_terminal();
+        Processor::new().advance(&mut source, &script);
+        let text = |term: &Term<EventProxy>| {
+            let grid = term.grid();
+            let all = term.bounds_to_string(
+                Point::new(grid.topmost_line(), Column(0)),
+                Point::new(grid.bottommost_line(), grid.last_column()),
+            );
+            let end = all.find("end").expect("saved rows") + 3;
+            all[..end].to_string()
+        };
+        let saved = snapshot(&source, MAX_RESTORE_LINES, &mut usize::MAX.clone());
+        for (columns, rows) in [(40, 1), (40, 2), (30, 10), (50, 10)] {
+            let (tx, _) = crossbeam_channel::unbounded();
+            let mut restored = Term::new(
+                Config {
+                    scrolling_history: 20_000,
+                    grapheme_clustering: true,
+                    ..Config::default()
+                },
+                &TermSize::new(columns, rows),
+                EventProxy::new(tx, Arc::new(|| {})),
+            );
+            Processor::new().advance(
+                &mut restored,
+                replay(&saved, "divider", columns, rows, true)
+                    .unwrap()
+                    .as_bytes(),
+            );
+            assert_eq!(text(&restored), text(&source), "{columns}x{rows}");
         }
     }
 
