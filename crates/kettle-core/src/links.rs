@@ -1746,9 +1746,12 @@ mod tests {
             ),
             // Inside a shell's single quotes a backslash is a backslash, so
             // the `'` after it closes the string, and the later path links.
+            // The string names no drive, which Windows alone would link
+            // (see `a_single_quote_closes_after_a_backslash`), so the line
+            // links the same everywhere.
             (
-                r#"export A='C:\work\';B=/tmp/c.txt"#,
-                &[("file:///tmp/c.txt", 22, 31)],
+                r#"export A='a\work\';B=/tmp/c.txt"#,
+                &[("file:///tmp/c.txt", 21, 30)],
                 &[(Kind::Path, "/tmp/c.txt", true)],
             ),
             // Glued to more text, a `\'` inside single quotes is an escape,
@@ -2332,19 +2335,27 @@ mod tests {
     }
 
     /// Inside a shell's single quotes a backslash is a backslash, so the
-    /// next `'` closes the string and a later path on the line links.
+    /// next `'` closes the string and a later path on the line links. Only
+    /// Windows reads `C:\work\` as a drive's folder, which links there; on
+    /// any other system a backslash is part of a name and no separator.
     #[test]
     fn a_single_quote_closes_after_a_backslash() {
-        for line in [
-            r#"export A='C:\work\';B=/tmp/c.txt"#,
-            r#"x='a\';y=/tmp/c.txt"#,
+        let drive: &[&str] = if cfg!(windows) {
+            &["file:///C:/work/", "file:///tmp/c.txt"]
+        } else {
+            &["file:///tmp/c.txt"]
+        };
+        for (line, want) in [
+            (r#"export A='C:\work\';B=/tmp/c.txt"#, drive),
+            (r#"export A='a\work\';B=/tmp/c.txt"#, &["file:///tmp/c.txt"]),
+            (r#"x='a\';y=/tmp/c.txt"#, &["file:///tmp/c.txt"]),
         ] {
             let term = term_with(line.chars().count(), &[line], &[]);
             let found = links_with_cwd(&term, Some("/work"))
                 .into_iter()
                 .map(|link| link.uri)
                 .collect::<Vec<_>>();
-            assert_eq!(found, ["file:///tmp/c.txt"], "{line}");
+            assert_eq!(found, want, "{line}");
         }
     }
 
