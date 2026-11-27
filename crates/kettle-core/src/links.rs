@@ -1499,6 +1499,7 @@ mod tests {
                 "file:///work/docs/annual%20report/.gitignore",
             ),
             ("see docs/.env ok", "file:///work/docs/.env"),
+            ("see x/.a ok", "file:///work/x/.a"),
             ("see a/b/.env ok", "file:///work/a/b/.env"),
         ] {
             let term = term_with(line.len(), &[line], &[]);

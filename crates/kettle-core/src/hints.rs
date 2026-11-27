@@ -98,8 +98,9 @@ fn is_cidr(text: &str) -> bool {
 }
 
 /// Require path context so progress counters and short ratios are ordinary text.
-/// Explicit roots are unambiguous; relative names need a filename extension,
-/// multiple directories, or a component with at least two letters.
+/// Explicit roots are unambiguous; relative names need a filename extension
+/// (a dotfile's name, `.a`, is one), multiple directories, or a component
+/// with at least two letters.
 pub(crate) fn has_path_context(text: &str) -> bool {
     let bytes = text.as_bytes();
     if text.starts_with(['/', '\\'])
@@ -120,7 +121,7 @@ pub(crate) fn has_path_context(text: &str) -> bool {
         || (parts.len() >= 3 && parts.iter().any(|part| letters(part) > 0))
         || parts.last().is_some_and(|name| {
             name.rsplit_once('.')
-                .is_some_and(|(stem, ext)| !stem.is_empty() && ext.chars().any(char::is_alphabetic))
+                .is_some_and(|(_, ext)| ext.chars().any(char::is_alphabetic))
         })
 }
 
@@ -1338,6 +1339,13 @@ mod tests {
             assert_eq!(spans[0].text, path);
             assert!(spans[0].bounded, "{path}");
         }
+        // A one-letter dotfile in a one-letter folder is a path too.
+        let spans = detect(&["see x/.a ok"]);
+        assert_eq!(spans.len(), 1, "{spans:?}");
+        assert_eq!(
+            (spans[0].kind, spans[0].text.as_str()),
+            (Kind::Path, "x/.a")
+        );
         // Still no extension: these stay partial, as before.
         for line in [
             "open \"docs/my dir/Makefile\" now",
