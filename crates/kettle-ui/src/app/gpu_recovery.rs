@@ -304,6 +304,13 @@ impl App {
             let _ = recovery_proxy.send_event(UserEvent::Wakeup);
         }));
         self.gpu = Some(new_gpu);
+        // The device was built from the reloaded config, so the GPU
+        // settings the adapter it got honours run now, and Settings stops
+        // asking for a restart to apply them.
+        if let Some(running) = &self.running_graphics {
+            self.running_graphics =
+                Some(running.after_gpu_rebuild(&cfg, &adapter, self.gpu_software_fallback));
+        }
 
         self.finish_gpu_renderer_recovery(ws);
         for seq in secondary_seqs {

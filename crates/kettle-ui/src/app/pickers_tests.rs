@@ -1016,12 +1016,13 @@ fn ssh_arrows_skip_the_placeholder_and_up_wraps_past_the_action_row() {
     assert_eq!((step(&rows, 0, true), step(&rows, 0, false)), (0, 0));
 }
 
-/// The wheel selects the row it exposes, here the last host below the
-/// Connect row, and never the Save row under it: that takes a deliberate
-/// Down or a click on it.
+/// The wheel scrolls the launcher's list, and a selection it scrolls past
+/// moves to the nearest host in view: the first after scrolling down, the
+/// last after scrolling up. It never selects the Save row, which takes a
+/// deliberate Down or a click on it, even when Save is all that is in view.
 #[test]
-fn ssh_wheel_reaches_the_last_host_row_but_never_save() {
-    use super::{PickerPointer, apply_picker_pointer, open_picker_list, picker_context_menu};
+fn ssh_wheel_moves_a_scrolled_past_selection_to_a_host_in_view_but_never_save() {
+    use super::{PickerPointer, apply_picker_pointer, open_picker_menu};
     let cfg = kettle_config::Config {
         ssh_hosts: (0..40)
             .map(|i| (format!("host-{i}"), format!("me@host-{i}")))
@@ -1029,37 +1030,58 @@ fn ssh_wheel_reaches_the_last_host_row_but_never_save() {
         ..Default::default()
     };
     let tr = kettle_i18n::Translator::default();
-    let (surface, cell) = ((320.0, 160.0), (8.0, 16.0));
+    let cell = (8.0, 16.0);
+    let project = |ws: &WindowState, surface: (f32, f32)| {
+        open_picker_menu(ws, &cfg, "dark-theme", &tr, None, surface, cell, cell, 0.0)
+    };
+    let shown = |menu: &kettle_render::ContextMenu| {
+        (0..menu.rows.len())
+            .filter(|&index| menu.visible_row_rect(index).is_some())
+            .count()
+    };
+    let surface = (320.0, 160.0);
     let mut ws = ssh_launcher_with("host");
-    let first = picker_context_menu(
-        open_picker_list(&ws, &cfg, "dark-theme", &tr, None).unwrap(),
-        surface,
-        cell,
-        cell,
-        0.0,
-    )
-    .unwrap();
+    let first = project(&ws, surface).unwrap();
     assert_eq!(first.rows.len(), 42);
     assert_eq!(
         ssh_rows("host", &cfg.ssh_hosts, &[]).last(),
         Some(&super::SshRow::SaveTyped)
     );
+    let visible = shown(&first);
     ws.cursor.x = f64::from(first.anchor.0 + first.panel_w_clamped * 0.5);
     ws.cursor.y = f64::from(first.anchor.1 + first.panel_h_clamped * 0.5);
     assert!(apply_picker_pointer(&mut ws, &cfg, &first, cell.1, PickerPointer::Wheel(100)));
+    let bottom = project(&ws, surface).unwrap();
+    assert_eq!(bottom.scroll_offset, 42 - visible);
+    assert!(bottom.visible_row_rect(41).is_some(), "Save is in view");
     let selected = ws.ssh_input.as_ref().unwrap().1;
-    assert_eq!(selected, 40);
+    assert_eq!(selected, 42 - visible, "the first host in view");
     assert_eq!(
         ssh_row_action("host", selected, &cfg.ssh_hosts, &[]),
-        Some(super::SshEnter::Connect("me@host-39".into()))
+        Some(super::SshEnter::Connect(format!("me@host-{}", selected - 1)))
     );
+    assert!(apply_picker_pointer(&mut ws, &cfg, &bottom, cell.1, PickerPointer::Wheel(-100)));
+    assert_eq!(project(&ws, surface).unwrap().scroll_offset, 0);
+    assert_eq!(ws.ssh_input.as_ref().unwrap().1, visible - 1, "the last row in view");
+    // A card one row tall: at the end only Save is in view, and the wheel
+    // leaves the selection on its host.
+    let tiny = (60..400)
+        .map(|height| (320.0, height as f32))
+        .find(|&surface| project(&ws, surface).is_some_and(|menu| shown(&menu) == 1))
+        .expect("a surface one row tall");
+    let mut ws = ssh_launcher_with("host");
+    let menu = project(&ws, tiny).unwrap();
+    ws.cursor.x = f64::from(menu.anchor.0 + menu.panel_w_clamped * 0.5);
+    ws.cursor.y = f64::from(menu.anchor.1 + menu.panel_h_clamped * 0.5);
+    assert!(apply_picker_pointer(&mut ws, &cfg, &menu, cell.1, PickerPointer::Wheel(100)));
+    assert_eq!(ws.ssh_input.as_ref().unwrap().1, 0, "never Save");
 }
 
-/// Whatever the picker, the wheel never selects a disabled row: it takes the
-/// nearest enabled row above it in view.
+/// Whatever the picker, the wheel never selects a disabled row: a selection
+/// it scrolls past moves to the nearest enabled row in view.
 #[test]
 fn picker_wheel_never_selects_a_disabled_row() {
-    use super::{PickerList, PickerPointer, apply_picker_pointer, picker_context_menu};
+    use super::{PickerList, PickerPointer, apply_picker_pointer, picker_context_menu_at};
     let row = |label: String, enabled: bool| ContextMenuRow {
         toggle: None,
         swatches: None,
@@ -1070,21 +1092,35 @@ fn picker_wheel_never_selects_a_disabled_row() {
         hint: String::new(),
         ..Default::default()
     };
-    let mut rows: Vec<ContextMenuRow> = (0..40).map(|i| row(format!("row-{i}"), true)).collect();
-    rows.push(row("disabled".into(), false));
-    let list = PickerList {
-        status: None,
-        card_scale: 1.0,
-        rows,
-        selected: 0,
-        footer: None,
+    let menu_for = |ws: &WindowState| {
+        let rows = (0..41)
+            .map(|i| row(format!("row-{i}"), i != 20))
+            .collect();
+        let list = PickerList {
+            status: None,
+            card_scale: 1.0,
+            rows,
+            selected: ws.ssh_input.as_ref().unwrap().1,
+            footer: None,
+        };
+        let surface = (320.0, 160.0);
+        picker_context_menu_at(list, surface, (8.0, 16.0), (8.0, 16.0), 0.0, ws.picker_view.scroll)
+            .unwrap()
     };
-    let menu = picker_context_menu(list, (320.0, 160.0), (8.0, 16.0), (8.0, 16.0), 0.0).unwrap();
     let mut ws = ssh_launcher_with("");
+    ws.ssh_input.as_mut().unwrap().1 = 30;
+    let menu = menu_for(&ws);
+    let visible = (0..menu.rows.len())
+        .filter(|&index| menu.visible_row_rect(index).is_some())
+        .count();
+    assert_eq!(menu.scroll_offset, 31 - visible);
     ws.cursor.x = f64::from(menu.anchor.0 + menu.panel_w_clamped * 0.5);
     ws.cursor.y = f64::from(menu.anchor.1 + menu.panel_h_clamped * 0.5);
-    assert!(apply_picker_pointer(&mut ws, &kettle_config::Config::default(), &menu, 16.0, PickerPointer::Wheel(100)));
-    assert_eq!(ws.ssh_input.as_ref().unwrap().1, 39);
+    // Up until the disabled row is the last one in view.
+    let delta = (21 - visible) as isize - menu.scroll_offset as isize;
+    assert!(apply_picker_pointer(&mut ws, &kettle_config::Config::default(), &menu, 16.0, PickerPointer::Wheel(delta)));
+    assert_eq!(menu_for(&ws).scroll_offset, 21 - visible);
+    assert_eq!(ws.ssh_input.as_ref().unwrap().1, 19);
 }
 
 #[test]
@@ -1789,7 +1825,7 @@ fn palette_shows_twelve_rows_at_1280x820() {
         let node = projection
             .nodes
             .iter()
-            .find(|(id, _)| *id == super::accessibility_modal_id(super::MODAL_KIND_PALETTE, option + 3))
+            .find(|(id, _)| Some(*id) == super::accessibility_picker_option_ids(super::MODAL_KIND_PALETTE, &menu.rows)[index])
             .unwrap();
         assert_eq!(node.1.label(), Some(menu.rows[index].label.as_str()));
         assert_eq!(
@@ -1895,37 +1931,40 @@ fn the_open_palette_is_sized_in_points_at_2x() {
     assert_eq!(menu_at(&ws).panel_w_clamped, 720.0, "the theme picker keeps its pixels");
 }
 
-/// One-row wheel steps scroll the whole empty palette, headings and all: a
-/// heading coming into view at the bottom does not hold the list in place,
-/// and no step selects a heading. Upward steps return to the top.
+/// One-row wheel steps scroll the whole empty palette, headings and all, one
+/// row a step down to the end and back to the top. No step selects a
+/// heading, and the selection is always in view.
 #[test]
 fn wheel_steps_scroll_past_headings() {
-    use super::{PickerPointer, apply_picker_pointer};
+    use super::{PickerPointer, apply_picker_pointer, picker_context_menu_at};
     let bindings = kettle_config::keybinds::defaults();
     let cfg = kettle_config::Config::default();
     let cell = (7.8, 16.25);
     let surface = (1280.0, 820.0);
     let mut ws = WindowState::new(0, Mux::new());
     ws.palette_input = Some((Default::default(), 0));
-    let menu_for = |selected: usize| {
+    let menu_for = |ws: &WindowState| {
+        let selected = ws.palette_input.as_ref().unwrap().1;
         let list = command_picker_list("", selected, &bindings, &EN_TEXT, None, Some(&[]), false, kettle_config::BroadcastDefault::default());
-        picker_context_menu(list, surface, cell, cell, 32.0).unwrap()
+        picker_context_menu_at(list, surface, cell, cell, 32.0, ws.picker_view.scroll).unwrap()
     };
-    let first = menu_for(0);
+    let first = menu_for(&ws);
     let max_offset = first.rows.len() - 12;
     ws.cursor.x = f64::from(first.anchor.0 + 20.0);
     ws.cursor.y = f64::from(first.anchor.1 + 40.0);
     for (delta, end) in [(1, max_offset), (-1, 0)] {
-        let mut offset = menu_for(ws.palette_input.as_ref().unwrap().1).scroll_offset;
+        let mut offset = menu_for(&ws).scroll_offset;
         let mut steps = 0;
         while offset != end {
-            let menu = menu_for(ws.palette_input.as_ref().unwrap().1);
+            let menu = menu_for(&ws);
             assert!(apply_picker_pointer(&mut ws, &cfg, &menu, cell.1, PickerPointer::Wheel(delta)));
-            let next = menu_for(ws.palette_input.as_ref().unwrap().1);
+            let next = menu_for(&ws);
             assert!(!next.rows[next.highlight].heading, "a wheel step selected a heading");
+            assert_eq!(next.scroll_offset, offset.saturating_add_signed(delta), "one row a step");
             assert!(
-                if delta > 0 { next.scroll_offset > offset } else { next.scroll_offset < offset },
-                "a wheel step {delta} at offset {offset} did not scroll"
+                (next.scroll_offset..next.scroll_offset + 12).contains(&next.highlight),
+                "the selection is in view at offset {}",
+                next.scroll_offset
             );
             offset = next.scroll_offset;
             steps += 1;
@@ -1942,4 +1981,469 @@ fn an_empty_picker_list_keeps_its_header() {
     let menu = picker_context_menu(list, (1280.0, 820.0), (7.8, 16.25), (7.8, 16.25), 32.0).expect("a header and card");
     let (_, _, w, h) = menu.picker_header_rect();
     assert!(w > 0.0 && h > 0.0);
+}
+
+/// Hover prelight, the quick-pick rule: a pointer that moves selects the row
+/// under it, and one that has not moved since the picker opened, took a key
+/// or scrolled keeps the selection it has. Moving again, even within the
+/// same row, selects that row once more. A hover never takes the motion.
+#[test]
+fn a_moving_pointer_selects_the_row_under_it_and_a_still_one_does_not() {
+    use super::{
+        PickerPointer, apply_picker_pointer, note_picker_keys, open_picker_list,
+        picker_context_menu, reset_picker_view,
+    };
+    let cfg = kettle_config::Config::default();
+    let tr = kettle_i18n::Translator::default();
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.layout_picker_entries = (0..40).map(|i| format!("layout-{i}")).collect();
+    ws.layout_picker_input = Some((Default::default(), 0));
+    let menu = picker_context_menu(
+        open_picker_list(&ws, &cfg, "dark-theme", &tr, None).unwrap(),
+        (800.0, 600.0),
+        (8.0, 16.0),
+        (8.0, 16.0),
+        0.0,
+    )
+    .unwrap();
+    let row_h = kettle_render::menu::row_height(16.0);
+    let (inset, _) = kettle_render::menu::picker_scroll_content(menu.panel_h_clamped);
+    let over = |ws: &mut WindowState, row: usize, dy: f32| {
+        ws.cursor.x = f64::from(menu.anchor.0 + 20.0);
+        ws.cursor.y = f64::from(menu.anchor.1 + inset + row_h * (row as f32 + 0.5) + dy);
+    };
+    let selected = |ws: &WindowState| ws.layout_picker_input.as_ref().unwrap().1;
+    let hover = |ws: &mut WindowState| {
+        apply_picker_pointer(ws, &cfg, &menu, 16.0, PickerPointer::Hover)
+    };
+    // The picker opens under a pointer resting on row 3.
+    over(&mut ws, 3, 0.0);
+    reset_picker_view(&mut ws);
+    assert!(!hover(&mut ws));
+    assert_eq!(selected(&ws), 0, "a pointer that did not move selects nothing");
+    over(&mut ws, 5, 0.0);
+    assert!(!hover(&mut ws), "a hover never takes the motion");
+    assert_eq!(selected(&ws), 5, "a moving pointer selects the row under it");
+    // Down, then the same position again: the keyboard's selection holds.
+    ws.layout_picker_input.as_mut().unwrap().1 = 6;
+    note_picker_keys(&mut ws);
+    hover(&mut ws);
+    assert_eq!(selected(&ws), 6, "the keyboard wins until the pointer moves");
+    // A real move within row 5 selects it again.
+    over(&mut ws, 5, 1.0);
+    hover(&mut ws);
+    assert_eq!(selected(&ws), 5);
+    // The wheel moves the rows under the pointer, which keeps what it has.
+    assert!(apply_picker_pointer(&mut ws, &cfg, &menu, 16.0, PickerPointer::Wheel(3)));
+    let after_wheel = selected(&ws);
+    hover(&mut ws);
+    assert_eq!(selected(&ws), after_wheel, "rows that scroll under a still pointer");
+    // Off the card, nothing is selected.
+    ws.cursor.x = f64::from(menu.anchor.0 - 5.0);
+    hover(&mut ws);
+    assert_eq!(selected(&ws), after_wheel);
+}
+
+/// The SSH launcher's Save row is lit, not selected, by a hover, and only
+/// while the physical pointer is in the window; a key or a move elsewhere
+/// puts the light out.
+#[test]
+fn a_hover_lights_the_ssh_save_row_without_selecting_it() {
+    use super::{
+        PickerPointer, apply_picker_pointer, note_picker_keys, open_picker_menu,
+        reset_picker_view,
+    };
+    let cfg = kettle_config::Config {
+        ssh_hosts: ssh_fixture_hosts(&[("alpha", "me@alpha"), ("beta", "me@beta")]),
+        ..Default::default()
+    };
+    let tr = kettle_i18n::Translator::default();
+    let mut ws = ssh_launcher_with("a");
+    reset_picker_view(&mut ws);
+    let project = |ws: &WindowState| {
+        open_picker_menu(
+            ws,
+            &cfg,
+            "dark-theme",
+            &tr,
+            None,
+            (800.0, 600.0),
+            (8.0, 16.0),
+            (8.0, 16.0),
+            0.0,
+        )
+        .unwrap()
+    };
+    let menu = project(&ws);
+    let save = menu.rows.len() - 1;
+    let row_h = kettle_render::menu::row_height(16.0);
+    let (inset, _) = kettle_render::menu::picker_scroll_content(menu.panel_h_clamped);
+    let at = |row: usize| {
+        winit::dpi::PhysicalPosition::new(
+            f64::from(menu.anchor.0 + 10.0),
+            f64::from(menu.anchor.1 + inset + row_h * (row as f32 + 0.5)),
+        )
+    };
+    ws.cursor = at(save);
+    ws.native_pointer = Some(ws.cursor);
+    assert!(!apply_picker_pointer(&mut ws, &cfg, &menu, 16.0, PickerPointer::Hover));
+    assert_eq!(ws.ssh_input.as_ref().unwrap().1, 0, "a hover never selects Save");
+    let lit = project(&ws);
+    assert!(lit.rows[save].prelit, "a hover lights it");
+    assert_eq!(lit.rows.iter().filter(|row| row.prelit).count(), 1);
+    ws.native_pointer = None;
+    assert!(!project(&ws).rows[save].prelit, "nor after the pointer left");
+    ws.native_pointer = Some(ws.cursor);
+    note_picker_keys(&mut ws);
+    assert!(!project(&ws).rows[save].prelit, "a key puts the light out");
+    ws.cursor = at(save);
+    ws.cursor.y += 1.0;
+    apply_picker_pointer(&mut ws, &cfg, &menu, 16.0, PickerPointer::Hover);
+    assert!(project(&ws).rows[save].prelit);
+    ws.cursor = at(0);
+    apply_picker_pointer(&mut ws, &cfg, &menu, 16.0, PickerPointer::Hover);
+    assert!(!project(&ws).rows[save].prelit, "a move to a host row");
+    assert_eq!(ws.ssh_input.as_ref().unwrap().1, 0);
+}
+
+/// The keyboard previews the theme it selects at once. A theme the pointer
+/// selects previews only once the pointer has rested 150 ms, a wake the
+/// scheduler waits for, so sweeping across rows does not flash themes; a
+/// key in between previews at once, and a picker that closes drops the wait.
+#[test]
+fn a_hovered_theme_previews_only_after_the_pointer_rests() {
+    use super::{
+        PickerPointer, ThemeHoverPreview, apply_picker_pointer, begin_theme_picker,
+        note_picker_keys, picker_context_menu, poll_theme_hover_preview, theme_picker_list,
+        theme_picker_selection, theme_preview_change,
+    };
+    use crate::window_state::THEME_HOVER_PREVIEW_DELAY;
+    use std::time::{Duration, Instant};
+    let tr = kettle_i18n::Translator::default();
+    let cfg = kettle_config::Config {
+        theme_name: "Dracula".into(),
+        ..Default::default()
+    };
+    let mut ws = WindowState::new(0, Mux::new());
+    begin_theme_picker(&mut ws, ("Dracula".into(), cfg.theme.clone()));
+    let state = ws.theme_picker_input.clone().unwrap();
+    let menu = picker_context_menu(
+        theme_picker_list(&state.query, state.selected, &state.opened_on, &tr),
+        (800.0, 600.0),
+        (8.0, 16.0),
+        (8.0, 16.0),
+        0.0,
+    )
+    .unwrap();
+    let row_h = kettle_render::menu::row_height(16.0);
+    let (inset, _) = kettle_render::menu::picker_scroll_content(menu.panel_h_clamped);
+    let hover_row = |ws: &mut WindowState, row: usize| {
+        ws.cursor.x = f64::from(menu.anchor.0 + 20.0);
+        ws.cursor.y =
+            f64::from(menu.anchor.1 + inset + row_h * ((row - menu.scroll_offset) as f32 + 0.5));
+        apply_picker_pointer(ws, &cfg, &menu, 16.0, PickerPointer::Hover);
+    };
+    let name = |ws: &WindowState| theme_picker_selection(ws.theme_picker_input.as_ref().unwrap(), &tr);
+    let (first, second) = (menu.scroll_offset, menu.scroll_offset + 1);
+    let target = if menu.highlight == first { second } else { first };
+    let before = Instant::now();
+    hover_row(&mut ws, target);
+    assert_eq!(ws.theme_picker_input.as_ref().unwrap().selected, target);
+    let hovered = name(&ws).unwrap();
+    assert_ne!(hovered, "Dracula");
+    assert!(theme_preview_change(&mut ws, &cfg, &tr).is_none(), "no preview yet");
+    let crate::window_state::PointerPreview::At(at) = ws.picker_view.pointer_preview else {
+        panic!("a wake for the rest");
+    };
+    assert!(at >= before + THEME_HOVER_PREVIEW_DELAY);
+    assert!(at <= Instant::now() + THEME_HOVER_PREVIEW_DELAY);
+    assert_eq!(
+        poll_theme_hover_preview(&mut ws, at - Duration::from_millis(40)),
+        ThemeHoverPreview::Wait(Duration::from_millis(40))
+    );
+    assert!(theme_preview_change(&mut ws, &cfg, &tr).is_none(), "still moving");
+    assert_eq!(poll_theme_hover_preview(&mut ws, at), ThemeHoverPreview::Due);
+    assert_eq!(ws.picker_view.pointer_preview, crate::window_state::PointerPreview::None);
+    let (preview, _) = theme_preview_change(&mut ws, &cfg, &tr).expect("the rest previews it");
+    assert_eq!(preview, hovered);
+    assert_eq!(poll_theme_hover_preview(&mut ws, at), ThemeHoverPreview::Idle);
+    // A key during the wait previews the selection at once.
+    let other = if target == first { second } else { first };
+    hover_row(&mut ws, other);
+    assert!(theme_preview_change(&mut ws, &cfg, &tr).is_none());
+    note_picker_keys(&mut ws);
+    let (preview, _) = theme_preview_change(&mut ws, &cfg, &tr).expect("a key previews at once");
+    assert_eq!(Some(preview.as_str()), name(&ws));
+    // A picker that closes drops the wait.
+    hover_row(&mut ws, target);
+    assert!(matches!(ws.picker_view.pointer_preview, crate::window_state::PointerPreview::At(_)));
+    ws.theme_picker_input = None;
+    assert_eq!(poll_theme_hover_preview(&mut ws, Instant::now()), ThemeHoverPreview::Idle);
+    assert_eq!(ws.picker_view.pointer_preview, crate::window_state::PointerPreview::None);
+}
+
+/// The scheduler waits for the pointer's theme preview like any other
+/// timed repaint, and each picker's keys hand the selection back to the
+/// keyboard first.
+#[test]
+fn the_hover_preview_wakes_the_loop_and_keys_take_the_selection_back() {
+    let src = production_source();
+    let wait = src
+        .split("fn about_to_wait_inner(")
+        .nth(1)
+        .expect("about_to_wait_inner");
+    assert!(wait.contains("let theme_preview_wait = self.settle_theme_hover_preview(ws, now);"));
+    assert!(wait.contains("if let Some(next) = theme_preview_wait {"));
+    for key in ["fn palette_key(", "fn theme_picker_key(", "fn layout_picker_key(", "fn ssh_key("] {
+        let body = src.split(key).nth(1).expect(key);
+        let start = &body[..body.find("modal_editor_key").expect("editor keys")];
+        assert!(start.contains("note_picker_keys(ws);"), "{key}");
+    }
+}
+
+/// Review D10: the wheel over a picker scrolls its list and keeps the
+/// selection while it stays in view; a selection the list scrolls past moves
+/// to the nearest row in view. Keys then move the list from where the last
+/// frame drew it, only as far as keeps the selection in view, and a theme
+/// the wheel selects previews once the pointer rests.
+#[test]
+fn the_wheel_scrolls_a_picker_and_keeps_its_selection_in_view() {
+    use super::{
+        PickerPointer, apply_picker_pointer, begin_theme_picker, open_picker_menu,
+        remember_picker_scroll, reset_picker_view,
+    };
+    let cfg = kettle_config::Config::default();
+    let tr = kettle_i18n::Translator::default();
+    let project = |ws: &WindowState| {
+        open_picker_menu(
+            ws,
+            &cfg,
+            "dark-theme",
+            &tr,
+            None,
+            (1280.0, 820.0),
+            (8.0, 16.0),
+            (8.0, 16.0),
+            0.0,
+        )
+        .unwrap()
+    };
+    let wheel = |ws: &mut WindowState, delta: isize| {
+        let menu = project(ws);
+        ws.cursor.x = f64::from(menu.anchor.0 + menu.panel_w_clamped * 0.5);
+        ws.cursor.y = f64::from(menu.anchor.1 + menu.panel_h_clamped * 0.5);
+        assert!(apply_picker_pointer(ws, &cfg, &menu, 16.0, PickerPointer::Wheel(delta)));
+        project(ws)
+    };
+    let mut ws = WindowState::new(0, Mux::new());
+    ws.layout_picker_entries = (0..40).map(|i| format!("layout-{i}")).collect();
+    ws.layout_picker_input = Some((Default::default(), 0));
+    reset_picker_view(&mut ws);
+    let selected = |ws: &WindowState| ws.layout_picker_input.as_ref().unwrap().1;
+    let select = |ws: &mut WindowState, row: usize| ws.layout_picker_input.as_mut().unwrap().1 = row;
+    let first = project(&ws);
+    let visible = (0..first.rows.len())
+        .filter(|&index| first.visible_row_rect(index).is_some())
+        .count();
+    assert_eq!(visible, 12);
+    select(&mut ws, 5);
+    let menu = wheel(&mut ws, 3);
+    assert_eq!(menu.scroll_offset, 3, "the wheel scrolls the list");
+    assert_eq!(selected(&ws), 5, "and keeps a selection in view");
+    assert_eq!(menu.highlight, 5);
+    let menu = wheel(&mut ws, 5);
+    assert_eq!(menu.scroll_offset, 8);
+    assert_eq!(selected(&ws), 8, "one it scrolls past moves to the first row in view");
+    let menu = wheel(&mut ws, 100);
+    assert_eq!(menu.scroll_offset, 40 - visible);
+    assert_eq!(selected(&ws), 40 - visible);
+    let menu = wheel(&mut ws, -100);
+    assert_eq!(menu.scroll_offset, 0);
+    assert_eq!(selected(&ws), visible - 1, "or to the last row in view");
+    // Keys move the list from where it was drawn.
+    let menu = wheel(&mut ws, 10);
+    assert_eq!((menu.scroll_offset, selected(&ws)), (10, 11));
+    remember_picker_scroll(&mut ws, Some(&menu));
+    select(&mut ws, 12);
+    let menu = project(&ws);
+    assert_eq!(menu.scroll_offset, 10, "a key inside the view moves nothing");
+    remember_picker_scroll(&mut ws, Some(&menu));
+    select(&mut ws, 22);
+    let menu = project(&ws);
+    assert_eq!(menu.scroll_offset, 11, "one row past the bottom moves one row");
+    remember_picker_scroll(&mut ws, Some(&menu));
+    select(&mut ws, 21);
+    assert_eq!(project(&ws).scroll_offset, 11, "Up inside the view moves nothing");
+    select(&mut ws, 4);
+    assert_eq!(project(&ws).scroll_offset, 4, "above the view: just far enough");
+    // A theme the wheel selects waits for the pointer to rest.
+    let mut ws = WindowState::new(0, Mux::new());
+    begin_theme_picker(&mut ws, ("Dracula".into(), cfg.theme.clone()));
+    let before = ws.theme_picker_input.as_ref().unwrap().selected;
+    let far = if before < project(&ws).rows.len() / 2 { 1000 } else { -1000 };
+    wheel(&mut ws, far);
+    assert_ne!(ws.theme_picker_input.as_ref().unwrap().selected, before);
+    assert!(matches!(ws.picker_view.pointer_preview, crate::window_state::PointerPreview::At(_)));
+    // The frame records where it drew the list.
+    let src = production_source();
+    let redraw = src.split("fn redraw(").nth(1).expect("redraw");
+    let overlay = redraw.find("let overlay = self.overlay(ws, reuse_pane_snapshots);").unwrap();
+    let remember = redraw
+        .find("remember_picker_scroll(ws, overlay.context_menu.as_ref());")
+        .expect("the frame remembers the picker's scroll");
+    assert!(overlay < remember);
+}
+
+/// Review: a palette with room for one row wheels past group headings. With
+/// the last command of a group selected, one detent down shows only the next
+/// heading; the selection moves to the first command past it, so the list
+/// moves on instead of snapping back, and one detent up returns. Detent by
+/// detent the list reaches its end and its top again.
+#[test]
+fn a_one_row_palette_wheels_past_group_headings() {
+    use super::{PickerPointer, apply_picker_pointer, open_picker_menu};
+    let cfg = kettle_config::Config::default();
+    let cell = (8.0, 16.0);
+    let mut ws = WindowState::new(0, Mux::new());
+    super::profiles::open_profile_palette(&mut ws, Some(&[]));
+    let project = |ws: &WindowState, surface: (f32, f32)| {
+        open_picker_menu(ws, &cfg, "dark-theme", &EN_TEXT, None, surface, cell, cell, 0.0)
+    };
+    let shown = |menu: &kettle_render::ContextMenu| {
+        (0..menu.rows.len())
+            .filter(|&index| menu.visible_row_rect(index).is_some())
+            .count()
+    };
+    let surface = (40..400)
+        .map(|height| (800.0, height as f32))
+        .find(|&surface| project(&ws, surface).is_some_and(|menu| shown(&menu) == 1))
+        .expect("a palette one row tall");
+    let first = project(&ws, surface).unwrap();
+    let heading = (1..first.rows.len())
+        .find(|&row| first.rows[row].heading)
+        .expect("a second group");
+    let last = heading - 1;
+    ws.palette_input.as_mut().unwrap().1 = kettle_render::menu_row_option(&first.rows, last).unwrap();
+    let menu = project(&ws, surface).unwrap();
+    assert_eq!((menu.scroll_offset, menu.highlight), (last, last));
+    ws.cursor.x = f64::from(menu.anchor.0 + menu.panel_w_clamped * 0.5);
+    ws.cursor.y = f64::from(menu.anchor.1 + menu.panel_h_clamped * 0.5);
+    let wheel = |ws: &mut WindowState, delta: isize| {
+        let menu = project(ws, surface).unwrap();
+        assert!(apply_picker_pointer(ws, &cfg, &menu, cell.1, PickerPointer::Wheel(delta)));
+        project(ws, surface).unwrap()
+    };
+    let down = wheel(&mut ws, 1);
+    assert_eq!(down.highlight, heading + 1, "the first command past the heading");
+    assert_eq!(down.scroll_offset, heading + 1, "the list moved on");
+    let up = wheel(&mut ws, -1);
+    assert_eq!((up.scroll_offset, up.highlight), (last, last), "and back");
+    for (delta, end) in [(1, first.rows.len() - 1), (-1, 1)] {
+        let mut offset = project(&ws, surface).unwrap().scroll_offset;
+        let mut steps = 0;
+        while offset != end {
+            let next = wheel(&mut ws, delta);
+            assert!(!next.rows[next.highlight].heading);
+            assert_eq!(next.scroll_offset, next.highlight, "the selection is the row shown");
+            assert!(
+                if delta > 0 { next.scroll_offset > offset } else { next.scroll_offset < offset },
+                "a detent {delta} at row {offset} did not move the list"
+            );
+            offset = next.scroll_offset;
+            steps += 1;
+            assert!(steps <= first.rows.len());
+        }
+    }
+}
+
+/// Review: the theme hover preview waits for the pointer to rest on the
+/// selected row, not for the selection to stop changing. Motion within the
+/// row starts the wait again, so a sweep that stays on a row for longer than
+/// the wait previews nothing mid-motion. Leaving the row (for the footer) or
+/// the window drops the wait: the window keeps its theme until the pointer
+/// rests on a row again or a key previews at once.
+#[test]
+fn the_hover_preview_waits_for_rest_and_drops_when_the_pointer_leaves_the_row() {
+    use super::{
+        PickerPointer, ThemeHoverPreview, apply_picker_pointer, begin_theme_picker,
+        note_picker_keys, picker_context_menu, picker_pointer_left, poll_theme_hover_preview,
+        theme_picker_list, theme_picker_selection, theme_preview_change,
+    };
+    use crate::window_state::PointerPreview;
+    use std::time::{Duration, Instant};
+    let tr = kettle_i18n::Translator::default();
+    let cfg = kettle_config::Config {
+        theme_name: "Dracula".into(),
+        ..Default::default()
+    };
+    let mut ws = WindowState::new(0, Mux::new());
+    begin_theme_picker(&mut ws, ("Dracula".into(), cfg.theme.clone()));
+    let state = ws.theme_picker_input.clone().unwrap();
+    let menu = picker_context_menu(
+        theme_picker_list(&state.query, state.selected, &state.opened_on, &tr),
+        (800.0, 600.0),
+        (8.0, 16.0),
+        (8.0, 16.0),
+        0.0,
+    )
+    .unwrap();
+    let row_h = kettle_render::menu::row_height(16.0);
+    let (inset, _) = kettle_render::menu::picker_scroll_content(menu.panel_h_clamped);
+    let move_to = |ws: &mut WindowState, x: f32, y: f32| {
+        ws.cursor.x = f64::from(x);
+        ws.cursor.y = f64::from(y);
+        apply_picker_pointer(ws, &cfg, &menu, 16.0, PickerPointer::Hover);
+    };
+    let row_y = |row: usize| menu.anchor.1 + inset + row_h * ((row - menu.scroll_offset) as f32 + 0.5);
+    let waiting = |ws: &WindowState| match ws.picker_view.pointer_preview {
+        PointerPreview::At(at) => at,
+        other => panic!("no wait: {other:?}"),
+    };
+    let target = if menu.highlight == menu.scroll_offset { menu.scroll_offset + 1 } else { menu.scroll_offset };
+    move_to(&mut ws, menu.anchor.0 + 20.0, row_y(target));
+    let first = waiting(&ws);
+    // Still moving within the row: the wait starts again.
+    std::thread::sleep(Duration::from_millis(5));
+    move_to(&mut ws, menu.anchor.0 + 60.0, row_y(target) + 1.0);
+    let again = waiting(&ws);
+    assert!(again > first, "motion within the row restarts the wait");
+    assert_eq!(
+        poll_theme_hover_preview(&mut ws, first),
+        ThemeHoverPreview::Wait(again - first),
+        "the first wait's end previews nothing"
+    );
+    assert!(theme_preview_change(&mut ws, &cfg, &tr).is_none());
+    // Onto the footer, under the rows: the wait is dropped, and no wake or
+    // later poll previews the row.
+    move_to(&mut ws, menu.anchor.0 + 20.0, menu.anchor.1 + menu.panel_h_clamped + 4.0);
+    assert_eq!(ws.picker_view.pointer_preview, PointerPreview::Held);
+    let later = Instant::now() + Duration::from_secs(1);
+    assert_eq!(poll_theme_hover_preview(&mut ws, later), ThemeHoverPreview::Idle);
+    assert!(theme_preview_change(&mut ws, &cfg, &tr).is_none(), "the window keeps its theme");
+    // Back onto the selected row, resting: it previews.
+    move_to(&mut ws, menu.anchor.0 + 30.0, row_y(target));
+    let at = waiting(&ws);
+    assert_eq!(poll_theme_hover_preview(&mut ws, at), ThemeHoverPreview::Due);
+    let (preview, _) = theme_preview_change(&mut ws, &cfg, &tr).expect("a rest previews it");
+    assert_eq!(Some(preview.as_str()), theme_picker_selection(ws.theme_picker_input.as_ref().unwrap(), &tr));
+    // A wiggle on a row already previewed starts nothing.
+    move_to(&mut ws, menu.anchor.0 + 31.0, row_y(target));
+    assert_eq!(ws.picker_view.pointer_preview, PointerPreview::None);
+    // Out of the window: the wait is dropped too.
+    let other = if target == menu.scroll_offset { target + 1 } else { menu.scroll_offset };
+    move_to(&mut ws, menu.anchor.0 + 20.0, row_y(other));
+    waiting(&ws);
+    picker_pointer_left(&mut ws);
+    assert_eq!(ws.picker_view.pointer_preview, PointerPreview::Held);
+    assert_eq!(poll_theme_hover_preview(&mut ws, later), ThemeHoverPreview::Idle);
+    // A key previews at once.
+    note_picker_keys(&mut ws);
+    assert!(theme_preview_change(&mut ws, &cfg, &tr).is_some(), "a key previews at once");
+    let src = production_source();
+    let left = src
+        .split("WindowEvent::CursorLeft { .. } => {")
+        .nth(1)
+        .and_then(|rest| rest.split("WindowEvent::CursorEntered").next())
+        .expect("the leave handler");
+    assert!(left.contains("picker_pointer_left(ws);"));
 }

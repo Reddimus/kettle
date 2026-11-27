@@ -343,7 +343,12 @@ impl App {
     }
 
     /// Open the in-app Settings overlay on its first row, over nothing else.
+    /// An open panel stays as it is: the app menu's Settings… (Cmd+,) on it
+    /// keeps its category, row and search, and what sits over it.
     pub(super) fn open_settings(&mut self, ws: &mut WindowState) {
+        if ws.settings_nav.is_some() {
+            return;
+        }
         self.close_all_modals(ws);
         if self.cpu_rendering {
             // Listing adapters would load a GPU driver into a process that
@@ -363,7 +368,6 @@ impl App {
                 },
             );
         }
-        ws.settings_restart_pending = crate::settings::SettingsApply::None;
         ws.settings_nav = Some(crate::settings::SettingsNav::default());
     }
 
@@ -1098,6 +1102,7 @@ impl App {
                 self.close_all_modals(ws);
                 ws.layout_picker_entries = crate::session::Session::list_layouts();
                 ws.layout_picker_input = Some((Default::default(), 0));
+                reset_picker_view(ws);
             }
             Action::OpenThemePicker => self.open_theme_picker(ws),
             Action::OpenMediaShelf => self.open_media_shelf(ws),
@@ -1139,17 +1144,21 @@ impl App {
                 let preview = matches!(action, Action::PreviewLink);
                 let targets = self.collect_hints(ws, preview);
                 if targets.is_empty() {
-                    // Nothing in the pane to preview: say so, as the plain
-                    // quick select's empty pane needs no word. A quick select
-                    // already open stays as it was.
+                    // Nothing in the pane to label: say so, a notification
+                    // for previews and a brief pane status for the plain
+                    // quick select. A quick select already open stays as it
+                    // was.
                     if preview {
                         let tr = self.ui_text;
                         fire_notify(
                             tr.text(kettle_i18n::Text::NotifyTitlePreviewNothing),
                             tr.text(kettle_i18n::Text::NotifyBodyPreviewNothing),
                         );
+                    } else {
+                        show_no_hints(ws, std::time::Instant::now());
                     }
                 } else {
+                    ws.no_hints_notice.dismiss();
                     self.close_all_modals(ws);
                     // The purpose goes with the targets it chose.
                     ws.hint_state = Some((targets, String::new()));
@@ -1171,11 +1180,15 @@ impl App {
                     self.open_preview_menu(ws, focus.pane, None);
                 } else {
                     // Not a click: the menu opens at the text cursor, where
-                    // the keyboard is.
-                    let (px, py) = self
-                        .keyboard_menu_point(ws)
-                        .unwrap_or((ws.cursor.x as f32, ws.cursor.y as f32));
+                    // the keyboard is, below or above its line but never over
+                    // it.
+                    let point = self.keyboard_menu_point(ws);
+                    let (px, py) = point.unwrap_or((ws.cursor.x as f32, ws.cursor.y as f32));
                     self.open_context_menu(ws, px, py, false);
+                    if let Some(point) = point {
+                        let line = self.text_line_anchor(ws, point);
+                        self.place_context_menu_at_line(ws, line);
+                    }
                 }
             }
             Action::UndoCloseTab => {

@@ -472,13 +472,14 @@ fn the_shortcut_list_shows_its_placeholder_in_a_standard_window() {
 #[test]
 fn ssh_rows_project_their_painted_hint_and_never_select_the_placeholder() {
     use super::picker_context_menu;
-    // Row 0's option, found by the label the row paints (fitted to the card).
+    // Row 0's option, found by its whole name (the painted label is fitted to
+    // the card; a screen reader hears the name in full).
     let option = |query: &str, imported: &[String]| {
         let list = ssh_picker_list(query, 0, &[], imported, &EN);
         let menu =
             picker_context_menu(list, (800.0, 600.0), (8.0, 16.0), (8.0, 16.0), 0.0).unwrap();
         let painted = menu.rows[0].hint.trim().to_string();
-        let label = menu.rows[0].label.clone();
+        let label = super::picker_row_name(&menu.rows[0]).to_string();
         let overlay = kettle_render::Overlay {
             ssh_query: Some(query.to_string()),
             context_menu: Some(menu),
@@ -862,13 +863,11 @@ fn selection_and_accessibility_skip_the_headings() {
                 .any(|(_, node)| node.role() == accesskit::Role::Group)
         );
         let menu = overlay.context_menu.as_ref().unwrap();
+        let ids = super::accessibility_picker_option_ids(super::MODAL_KIND_PALETTE, &menu.rows);
         for (option, (id, node)) in options.iter().enumerate() {
-            assert_eq!(
-                *id,
-                super::accessibility_modal_id(super::MODAL_KIND_PALETTE, option + 3)
-            );
-            assert_eq!(node.is_selected(), Some(option == 3), "option {option}");
             let row = kettle_render::menu_option_row(&menu.rows, option).unwrap();
+            assert_eq!(Some(*id), ids[row], "option {option}");
+            assert_eq!(node.is_selected(), Some(option == 3), "option {option}");
             assert_eq!(node.label(), Some(menu.rows[row].label.as_str()));
             match headings.iter().find(|(index, _)| index + 1 == row) {
                 Some((_, group)) => assert!(

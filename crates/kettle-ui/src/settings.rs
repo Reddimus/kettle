@@ -68,7 +68,8 @@ const GPU_BACKEND_LABELS: &[Label] = &[
 /// How a setting is edited. The overlay maps ←/→ (or Space/Enter) onto these.
 #[derive(Debug, Clone)]
 pub enum FieldKind {
-    /// A boolean. Left/Right/Space flip it. Persisted as `true` / `false`.
+    /// A boolean. Space, Enter and a click flip it; Left turns it off and
+    /// Right on. Persisted as `true` / `false`.
     Toggle,
     /// One of a fixed set of choices. Left/Right cycle. `values[i]` is what's
     /// written to config; `labels[i]` is shown to the user. `None` labels mean
@@ -119,7 +120,11 @@ pub enum FieldKind {
 pub(crate) enum HotkeyCapture {
     Cancel,
     Value(Option<kettle_config::keybinds::Trigger>),
+    /// Still waiting: a modifier on its own.
     Pending,
+    /// Still waiting, after a key without a modifier, which a global
+    /// shortcut cannot be.
+    Refused,
 }
 
 pub(crate) fn capture_hotkey(
@@ -131,7 +136,8 @@ pub(crate) fn capture_hotkey(
         Some(Key::Escape) if mods.is_empty() => HotkeyCapture::Cancel,
         Some(Key::Backspace | Key::Delete) if mods.is_empty() => HotkeyCapture::Value(None),
         Some(key) if !mods.is_empty() => HotkeyCapture::Value(Some(Trigger { mods, key })),
-        _ => HotkeyCapture::Pending,
+        Some(_) => HotkeyCapture::Refused,
+        None => HotkeyCapture::Pending,
     }
 }
 
@@ -263,6 +269,89 @@ pub(crate) enum SettingsApply {
     None,
     NewWindow,
     Restart,
+}
+
+/// The settings a renderer is built from, which apply only when Kettle
+/// starts: the renderer and the GPU policy, in the tokens Settings writes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GraphicsSettings([String; 5]);
+
+impl GraphicsSettings {
+    pub(crate) fn of(cfg: &Config) -> Self {
+        Self([
+            read_choice(cfg, "renderer"),
+            read_choice(cfg, "gpu-power-preference"),
+            read_choice(cfg, "gpu-backend"),
+            read_choice(cfg, "gpu"),
+            cfg.gpu_force_software.to_string(),
+        ])
+    }
+
+    /// What runs after a GPU recovery rebuilt the device from `cfg` on
+    /// `adapter` (`software` when it is a CPU adapter). The recovery tiers
+    /// pass over the saved pin, backend and power preference, and can
+    /// escalate to software, so a saved GPU setting counts as applied only
+    /// where the adapter it got honours it; any other keeps what ran
+    /// before, and a change to it stays pending. The renderer stays the one
+    /// Kettle started with.
+    pub(crate) fn after_gpu_rebuild(
+        &self,
+        cfg: &Config,
+        adapter: &kettle_render::GpuAdapterInfo,
+        software: bool,
+    ) -> Self {
+        use kettle_config::{GpuBackend, GpuPowerPreference};
+        let saved = Self::of(cfg);
+        let honoured = [
+            false,
+            match cfg.gpu_power_preference {
+                GpuPowerPreference::Auto => true,
+                GpuPowerPreference::Low => adapter.kind == "Integrated",
+                GpuPowerPreference::High => adapter.kind == "Discrete",
+            },
+            match cfg.gpu_backend {
+                GpuBackend::Auto => true,
+                GpuBackend::Dx12 => adapter.backend == "DX12",
+                GpuBackend::Vulkan => adapter.backend == "Vulkan",
+                GpuBackend::Metal => adapter.backend == "Metal",
+                GpuBackend::Gl => adapter.backend == "GL",
+            },
+            read_choice(cfg, "gpu") == "auto"
+                || kettle_render::pin_match_rank_fields(
+                    adapter.vendor,
+                    adapter.device,
+                    &adapter.name,
+                    cfg,
+                ) != u8::MAX,
+            software == cfg.gpu_force_software,
+        ];
+        Self(std::array::from_fn(|index| {
+            if honoured[index] {
+                saved.0[index].clone()
+            } else {
+                self.0[index].clone()
+            }
+        }))
+    }
+}
+
+/// What the saved settings still wait for in a window: a restart while the
+/// graphics settings differ from the ones Kettle `running` started with, or
+/// a new window while the window lacks a surface `cfg` needs. It is worked
+/// out from the values themselves, so it holds however the change was made
+/// and for as long as it is pending, and it goes once a change is undone.
+pub(crate) fn pending_apply(
+    running: Option<&GraphicsSettings>,
+    cfg: &Config,
+    surface_lacks: bool,
+) -> SettingsApply {
+    if running.is_some_and(|running| *running != GraphicsSettings::of(cfg)) {
+        SettingsApply::Restart
+    } else if surface_lacks {
+        SettingsApply::NewWindow
+    } else {
+        SettingsApply::None
+    }
 }
 
 /// What a row shows under its label. While the window system cannot blur
@@ -410,8 +499,18 @@ pub struct SettingsNav {
     /// user to press a chord to bind. The next non-modifier key press is
     /// captured as the new binding; Esc cancels.
     pub capturing: bool,
+    /// This capture refused a key pressed without a modifier; the row says
+    /// to add one until the capture ends.
+    pub capture_refused: bool,
     pub(crate) query: crate::text_editor::TextEditor,
     pub search_focused: bool,
+    /// The row focused when the query was first typed. A search left from
+    /// its field without moving into a result puts the focus back here.
+    pub(crate) search_origin: Option<(usize, usize)>,
+    /// How many rows the panel shows, as its layout last placed them: the
+    /// page keys move by that, less one for context. `0` before Settings
+    /// has a layout.
+    pub(crate) visible_rows: usize,
 }
 
 /// Fold Spanish precomposed and decomposed accents without changing stored text.
@@ -450,7 +549,7 @@ impl SettingsNav {
         }) else {
             return false;
         };
-        self.query = Default::default();
+        self.clear_query();
         self.search_focused = false;
         self.capturing = false;
         self.category = category;
@@ -467,14 +566,14 @@ impl SettingsNav {
     ) -> Option<(usize, usize)> {
         match hit {
             kettle_render::SettingsHit::Search => {
-                self.search_focused = true;
+                self.focus_search();
                 self.capturing = false;
             }
             kettle_render::SettingsHit::Category(index) if index < cats.len() => {
-                self.query = Default::default();
+                self.clear_query();
                 self.search_focused = false;
                 self.category = index;
-                self.field = self.field.min(cats[index].fields.len().saturating_sub(1));
+                self.field = nearest_enabled_field(cfg, &cats[index].fields, self.field, -1);
                 self.capturing = false;
             }
             kettle_render::SettingsHit::Field(index) | kettle_render::SettingsHit::Reset(index) => {
@@ -515,7 +614,7 @@ impl SettingsNav {
             )
             && matches!(key, Key::Character(s) if s == "/");
         if find || slash {
-            self.search_focused = true;
+            self.focus_search();
             return SearchRoute::Handled;
         }
         if matches!(key, Key::Named(NamedKey::Escape)) {
@@ -534,6 +633,13 @@ impl SettingsNav {
                 self.reconcile(cats, cfg, tr);
                 if !self.visible_fields(cats, tr).is_empty() {
                     self.search_focused = false;
+                } else if matches!(key, Key::Named(NamedKey::Tab)) {
+                    // No result to move into: Tab leaves the search for the
+                    // next category after the row the search began on.
+                    self.query = Default::default();
+                    self.reconcile(cats, cfg, tr);
+                    self.search_focused = false;
+                    return SearchRoute::Pass;
                 }
                 return SearchRoute::Handled;
             }
@@ -550,41 +656,36 @@ impl SettingsNav {
                 SearchRoute::Handled
             };
         }
-        let delta = match key {
-            Key::Named(NamedKey::ArrowDown) => Some(1),
-            Key::Named(NamedKey::ArrowUp) => Some(-1),
+        let (page, half) = self.page_steps(count);
+        let (page, half) = (page as isize, half as isize);
+        // Arrows wrap; page moves and jumps stop at the first and last
+        // results, as they do on a category's rows.
+        let (delta, wrap) = match key {
+            Key::Named(NamedKey::ArrowDown) => (1, true),
+            Key::Named(NamedKey::ArrowUp) => (-1, true),
+            Key::Named(NamedKey::PageDown) => (page, false),
+            Key::Named(NamedKey::PageUp) => (-page, false),
+            Key::Named(NamedKey::End) => (isize::MAX, false),
+            Key::Named(NamedKey::Home) => (isize::MIN, false),
             Key::Character(s) if cfg.vim_menu_nav && !mods.alt_key() && !mods.super_key() => {
                 match (s.to_ascii_lowercase().as_str(), mods.control_key()) {
-                    ("j", false) => Some(1),
-                    ("k", false) => Some(-1),
-                    ("d", true) => Some((count / 2).max(1) as isize),
-                    ("u", true) => Some(-((count / 2).max(1) as isize)),
-                    ("g", false) => {
-                        let enabled: Vec<_> = self
-                            .visible_fields(cats, tr)
-                            .into_iter()
-                            .filter(|&(c, f)| !field_disabled(cfg, cats[c].fields[f].key))
-                            .collect();
-                        if let Some(&(cat, field)) = if mods.shift_key() {
-                            enabled.last()
-                        } else {
-                            enabled.first()
-                        } {
-                            (self.category, self.field) = (cat, field);
-                        }
-                        return SearchRoute::Handled;
-                    }
-                    _ => None,
+                    ("j", false) => (1, true),
+                    ("k", false) => (-1, true),
+                    ("d", true) => (half, false),
+                    ("u", true) => (-half, false),
+                    ("g", false) if mods.shift_key() => (isize::MAX, false),
+                    ("g", false) => (isize::MIN, false),
+                    _ => return SearchRoute::Pass,
                 }
             }
-            _ => None,
+            _ => return SearchRoute::Pass,
         };
-        if let Some(delta) = delta {
+        if wrap {
             self.move_result(cats, cfg, tr, delta);
-            SearchRoute::Handled
         } else {
-            SearchRoute::Pass
+            self.page_result(cats, cfg, tr, delta);
         }
+        SearchRoute::Handled
     }
 
     /// Stable catalogue identities, grouped in catalogue order during search.
@@ -622,6 +723,21 @@ impl SettingsNav {
     }
 
     pub fn reconcile(&mut self, cats: &[Category], cfg: &Config, tr: &Translator) {
+        if self.query.is_empty() {
+            // Cleared from its field, the search chose nothing: the focus
+            // goes back to where it began, not to a match of a query
+            // typed on the way.
+            if let Some((category, field)) = self.search_origin.take()
+                && self.search_focused
+                && cats
+                    .get(category)
+                    .is_some_and(|cat| field < cat.fields.len())
+            {
+                (self.category, self.field) = (category, field);
+            }
+        } else if self.search_origin.is_none() {
+            self.search_origin = Some((self.category, self.field));
+        }
         let fields = self.visible_fields(cats, tr);
         if !fields.contains(&(self.category, self.field))
             && let Some(&(category, field)) = fields
@@ -668,6 +784,221 @@ impl SettingsNav {
             .unwrap_or(0);
         let next = (current as isize + delta).rem_euclid(fields.len() as isize) as usize;
         (self.category, self.field) = fields[next];
+    }
+
+    /// Move `delta` results in painted order, as the page in view counts
+    /// them, stopping at the first and the last and landing on a result
+    /// that applies (see [`page_target`]).
+    pub fn page_result(&mut self, cats: &[Category], cfg: &Config, tr: &Translator, delta: isize) {
+        let fields = self.visible_fields(cats, tr);
+        let applies: Vec<bool> = fields
+            .iter()
+            .map(|&(c, f)| !field_disabled(cfg, cats[c].fields[f].key))
+            .collect();
+        let Some(current) = fields
+            .iter()
+            .position(|pair| *pair == (self.category, self.field))
+            .or_else(|| applies.iter().position(|&applies| applies))
+        else {
+            return;
+        };
+        let next = page_target(&applies, current, delta);
+        if applies[next] {
+            (self.category, self.field) = fields[next];
+        }
+    }
+
+    /// Move the focused row within its category.
+    pub(crate) fn move_focus(&mut self, cats: &[Category], cfg: &Config, to: RowMove) {
+        let Some(fields) = cats.get(self.category).map(|cat| &cat.fields[..]) else {
+            return;
+        };
+        let count = fields.len();
+        if count == 0 {
+            return;
+        }
+        let field = self.field.min(count - 1);
+        let (page_rows, half) = self.page_steps(count);
+        let applies: Vec<bool> = fields.iter().map(|f| !field_disabled(cfg, f.key)).collect();
+        let page = |delta: usize, down: bool| {
+            let delta = delta as isize;
+            page_target(&applies, field, if down { delta } else { -delta })
+        };
+        self.field = match to {
+            RowMove::Next => next_enabled_field(cfg, fields, field, 1),
+            RowMove::Previous => next_enabled_field(cfg, fields, field, -1),
+            // Jumps land on the nearest row that applies, back toward the
+            // row they start from, as ↑/↓ skip the others.
+            RowMove::First => nearest_enabled_field(cfg, fields, 0, 1),
+            RowMove::Last => nearest_enabled_field(cfg, fields, count - 1, -1),
+            RowMove::PageDown => page(page_rows, true),
+            RowMove::PageUp => page(page_rows, false),
+            RowMove::HalfDown => page(half, true),
+            RowMove::HalfUp => page(half, false),
+        };
+    }
+
+    /// The rows Page Up/Page Down move through `count` rows or results: a
+    /// page as the panel shows it, less one row kept for context, as list
+    /// views move; and the half page vim's Ctrl+D/Ctrl+U move. Before the
+    /// panel has a layout, half the list for both.
+    fn page_steps(&self, count: usize) -> (usize, usize) {
+        match self.visible_rows {
+            0 => {
+                let half = (count / 2).max(1);
+                (half, half)
+            }
+            rows => (rows.saturating_sub(1).max(1), (rows / 2).max(1)),
+        }
+    }
+
+    /// Focus the search field. Gaining focus, it notes the row focused now,
+    /// a result chosen earlier included, as the one a search cleared from
+    /// the field goes back to.
+    pub(crate) fn focus_search(&mut self) {
+        if !self.search_focused {
+            self.search_origin = Some((self.category, self.field));
+        }
+        self.search_focused = true;
+    }
+
+    /// Drop the query, and the row the search began on with it.
+    pub(crate) fn clear_query(&mut self) {
+        self.query = Default::default();
+        self.search_origin = None;
+    }
+
+    /// Open the next (or previous) category on its first row, leaving any
+    /// search.
+    pub(crate) fn switch_category(&mut self, cats: &[Category], cfg: &Config, next: bool) {
+        if cats.is_empty() {
+            return;
+        }
+        self.clear_query();
+        let count = cats.len();
+        let category = self.category.min(count - 1);
+        self.category = if next {
+            (category + 1) % count
+        } else {
+            (category + count - 1) % count
+        };
+        self.field = nearest_enabled_field(cfg, &cats[self.category].fields, 0, 1);
+    }
+}
+
+/// Where a row key moves the focused Settings row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RowMove {
+    Next,
+    Previous,
+    First,
+    Last,
+    /// Page Down and Page Up: a page as the panel shows it.
+    PageDown,
+    PageUp,
+    /// vim's Ctrl+D and Ctrl+U: half that.
+    HalfDown,
+    HalfUp,
+}
+
+/// A value key on the focused Settings row: ←/→ (and vim `h`/`l`), or
+/// Space/Enter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ValueKey {
+    /// `-1` for ←, `+1` for →; with Shift, a number takes
+    /// [`COARSE_STEPS`] steps at once.
+    Step {
+        dir: i32,
+        coarse: bool,
+    },
+    Activate,
+}
+
+/// How many of its steps a number takes for Shift+←/→.
+pub(crate) const COARSE_STEPS: i32 = 10;
+
+/// What a key does on Settings' rows once chord capture and search have
+/// passed it on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RowCommand {
+    Close,
+    Move(RowMove),
+    /// `true` for the next category.
+    Category(bool),
+    Value(ValueKey),
+    Reset,
+}
+
+/// The row command for `key`. With `vim` (`vim-menu-nav`), `j`/`k` move,
+/// `h`/`l` change the value, `g`/`G` jump to the ends and Ctrl+D/Ctrl+U
+/// move half a page.
+pub(crate) fn row_command(
+    key: &winit::keyboard::Key,
+    mods: winit::keyboard::ModifiersState,
+    vim: bool,
+) -> Option<RowCommand> {
+    use winit::keyboard::{Key, NamedKey};
+    Some(match key {
+        Key::Named(NamedKey::Escape) => RowCommand::Close,
+        Key::Named(NamedKey::ArrowDown) => RowCommand::Move(RowMove::Next),
+        Key::Named(NamedKey::ArrowUp) => RowCommand::Move(RowMove::Previous),
+        Key::Named(NamedKey::Home) => RowCommand::Move(RowMove::First),
+        Key::Named(NamedKey::End) => RowCommand::Move(RowMove::Last),
+        Key::Named(NamedKey::PageDown) => RowCommand::Move(RowMove::PageDown),
+        Key::Named(NamedKey::PageUp) => RowCommand::Move(RowMove::PageUp),
+        Key::Named(NamedKey::Tab) => RowCommand::Category(!mods.shift_key()),
+        Key::Named(NamedKey::Space | NamedKey::Enter) => RowCommand::Value(ValueKey::Activate),
+        Key::Named(NamedKey::ArrowRight) => RowCommand::Value(ValueKey::Step {
+            dir: 1,
+            coarse: mods.shift_key(),
+        }),
+        Key::Named(NamedKey::ArrowLeft) => RowCommand::Value(ValueKey::Step {
+            dir: -1,
+            coarse: mods.shift_key(),
+        }),
+        Key::Named(NamedKey::Delete | NamedKey::Backspace) => RowCommand::Reset,
+        // Case-fold so CapsLock can't kill the nav layer; g-vs-G derives
+        // from the physical Shift state.
+        Key::Character(text) if vim && !mods.alt_key() && !mods.super_key() => {
+            match (text.to_ascii_lowercase().as_str(), mods.control_key()) {
+                ("j", false) => RowCommand::Move(RowMove::Next),
+                ("k", false) => RowCommand::Move(RowMove::Previous),
+                ("g", false) if mods.shift_key() => RowCommand::Move(RowMove::Last),
+                ("g", false) => RowCommand::Move(RowMove::First),
+                ("h", false) => RowCommand::Value(ValueKey::Step {
+                    dir: -1,
+                    coarse: mods.shift_key(),
+                }),
+                ("l", false) => RowCommand::Value(ValueKey::Step {
+                    dir: 1,
+                    coarse: mods.shift_key(),
+                }),
+                ("d", true) => RowCommand::Move(RowMove::HalfDown),
+                ("u", true) => RowCommand::Move(RowMove::HalfUp),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// The direction `settings_adjust` takes for a value key on `field`: the
+/// number of steps for a number, which Shift multiplies. `None` where the
+/// key leaves the row as it is.
+pub(crate) fn value_key_dir(cfg: &Config, field: &Field, key: ValueKey) -> Option<i32> {
+    match (&field.kind, key) {
+        // ← turns a switch off and → turns it on, the way its knob moves.
+        (FieldKind::Toggle, ValueKey::Step { dir, .. }) => {
+            (read_bool(cfg, field.key) != (dir > 0)).then_some(dir.signum())
+        }
+        // Space and Enter would step a number one way only; the arrows
+        // change it.
+        (FieldKind::Number { .. }, ValueKey::Activate) => None,
+        (FieldKind::Number { .. }, ValueKey::Step { dir, coarse: true }) => {
+            Some(dir * COARSE_STEPS)
+        }
+        (_, ValueKey::Step { dir, .. }) => Some(dir),
+        (_, ValueKey::Activate) => Some(0),
     }
 }
 
@@ -1412,7 +1743,8 @@ pub fn read(cfg: &Config, field: &Field, tr: &Translator) -> String {
             // keymap's order changes between launches, so a first match would
             // not be stable for an action with several chords.
             match kettle_config::Action::from_name(action) {
-                Some(a) => kettle_config::keybinds::hint_label(&cfg.keybinds, &a)
+                Some(a) => keybind_row_trigger(&cfg.keybinds, &a, cfg!(target_os = "macos"))
+                    .map(|trigger| trigger.label())
                     .unwrap_or_else(|| tr.text(T::SettingsValueUnbound).to_string()),
                 None => "—".to_string(),
             }
@@ -1426,6 +1758,17 @@ pub fn read(cfg: &Config, field: &Field, tr: &Translator) -> String {
             }
         }
     }
+}
+
+/// The chord a Keybinds row shows for `action`: the one the palette and the
+/// menus show, so on macOS a Cmd chord comes first, and every row of the
+/// page shows the macOS form beside Cmd chords.
+pub(crate) fn keybind_row_trigger(
+    bindings: &kettle_config::keybinds::Bindings,
+    action: &kettle_config::Action,
+    macos: bool,
+) -> Option<kettle_config::keybinds::Trigger> {
+    kettle_config::keybinds::hint_trigger(bindings, action, macos)
 }
 
 /// A number and its unit symbol. Symbols are not translated, and both
@@ -1443,7 +1786,8 @@ fn format_number(value: i64, suffix: &str) -> String {
 pub fn column_widths(cfg: &Config, cats: &[Category], tr: &Translator) -> (usize, usize) {
     use kettle_render::display_width as width;
     let mut label_cols = 0;
-    let mut value_cols = width(tr.text(Text::SettingsPressChord));
+    let mut value_cols = width(tr.text(Text::SettingsPressChord))
+        .max(width(tr.text(Text::SettingsCaptureNeedsModifier)));
     for field in cats.iter().flat_map(|cat| &cat.fields) {
         label_cols = label_cols.max(width(tr.text(field.label)));
         value_cols = value_cols.max(field_value_cols(cfg, field, tr));
@@ -1457,6 +1801,26 @@ pub fn column_widths(cfg: &Config, cats: &[Category], tr: &Translator) -> (usize
 /// while the value changes; it measures with the renderer's own
 /// `display_width`.
 pub fn field_value_cols(cfg: &Config, field: &Field, tr: &Translator) -> usize {
+    field_value_cols_on(cfg, field, tr, std::env::consts::OS)
+}
+
+/// The states a Window blur switch can show on `os` (`std::env::consts::OS`):
+/// only Wayland asks its compositor, so only Linux checks, and macOS always
+/// blurs.
+pub(crate) fn blur_states(os: &str) -> &'static [BlurState] {
+    match os {
+        "macos" => &[BlurState::Available],
+        "windows" => &[BlurState::Available, BlurState::Unavailable],
+        _ => &[
+            BlurState::Available,
+            BlurState::Checking,
+            BlurState::Unavailable,
+        ],
+    }
+}
+
+/// [`field_value_cols`] on `os`, which decides the Window blur states.
+pub(crate) fn field_value_cols_on(cfg: &Config, field: &Field, tr: &Translator, os: &str) -> usize {
     use kettle_render::display_width as width;
     let mut cols = width(&read(cfg, field, tr));
     match &field.kind {
@@ -1465,9 +1829,15 @@ pub fn field_value_cols(cfg: &Config, field: &Field, tr: &Translator) -> usize {
                 cols = cols.max(width(tr.text(value)));
             }
             // The words `row_value` shows instead while this session cannot
-            // blur, or is still asking whether it can.
+            // blur, or is still asking whether it can, where it can show them.
+            // Elsewhere the switch keeps every other switch's width.
             if field.key == "window-blur" {
-                for value in [Text::SettingsValueChecking, Text::SettingsValueUnavailable] {
+                for state in blur_states(os) {
+                    let value = match state {
+                        BlurState::Available => continue,
+                        BlurState::Checking => Text::SettingsValueChecking,
+                        BlurState::Unavailable => Text::SettingsValueUnavailable,
+                    };
                     cols = cols.max(width(tr.text(value)));
                 }
             }
@@ -1517,7 +1887,9 @@ pub fn field_value_cols(cfg: &Config, field: &Field, tr: &Translator) -> usize {
 pub fn next_value(cfg: &Config, field: &Field, dir: i32) -> String {
     match &field.kind {
         FieldKind::Toggle => {
-            // Any direction flips a toggle (Space, Left, Right all toggle).
+            // Any direction flips a toggle: a click, the wheel, Space. The
+            // arrow keys reach here only to move the knob their way
+            // (`value_key_dir`).
             (!read_bool(cfg, field.key)).to_string()
         }
         // The theme row steps through the popular themes of the current
@@ -1608,6 +1980,28 @@ pub fn default_value(field: &Field) -> Option<String> {
     }
 }
 
+/// The config keys a Reset of `field` removes: the uniform Window padding
+/// row writes both axes.
+pub(crate) fn reset_keys(field: &Field) -> Vec<&'static str> {
+    let mut keys = match field.key {
+        "window-padding-x" => vec!["window-padding-x", "window-padding-y"],
+        key => vec![key],
+    };
+    // An older name or a Terminator key that sets the same value goes too.
+    keys.extend(kettle_config::compatibility_keys(field.key));
+    keys
+}
+
+/// The lines a Reset of `field` adds where removing [`reset_keys`] alone
+/// does not give its default `value`: both padding axes for Window padding.
+pub(crate) fn reset_fallback(field: &Field, value: &str) -> Vec<(&'static str, String)> {
+    let keys: &[&'static str] = match field.key {
+        "window-padding-x" => &["window-padding-x", "window-padding-y"],
+        _ => std::slice::from_ref(&field.key),
+    };
+    keys.iter().map(|key| (*key, value.to_string())).collect()
+}
+
 /// Whether `field` already holds its [`default_value`] in `cfg`.
 pub fn holds_default(cfg: &Config, field: &Field) -> bool {
     match &field.kind {
@@ -1615,10 +2009,29 @@ pub fn holds_default(cfg: &Config, field: &Field) -> bool {
         FieldKind::Choice { .. } => {
             read_choice(cfg, field.key) == read_choice(&Config::default(), field.key)
         }
+        // Unrounded: a 13.4 px font from a `font` line shows as 13 px but is
+        // not the 13 px default.
         FieldKind::Number { .. } => {
-            read_number(cfg, field.key) == read_number(&Config::default(), field.key)
+            let defaults = Config::default();
+            exact_number(cfg, field.key) == exact_number(&defaults, field.key)
+                && (field.key != "window-padding-x" || cfg.padding_y == defaults.padding_y)
         }
         _ => true,
+    }
+}
+
+/// A number row's value as the config holds it, before [`read_number`]
+/// rounds it for display.
+fn exact_number(cfg: &Config, key: &str) -> f64 {
+    match key {
+        "font-size" => f64::from(cfg.font_size),
+        "background-opacity" => f64::from(cfg.background_opacity),
+        "window-padding-x" => f64::from(cfg.padding_x),
+        "tab-min-width" => f64::from(cfg.tab_min_width),
+        "scrollbar-width" => f64::from(cfg.scrollbar_width),
+        "scrollback" => cfg.scrollback as f64,
+        "scrollback-bytes" => cfg.scrollback_bytes as f64,
+        key => read_number(cfg, key) as f64,
     }
 }
 
@@ -1706,6 +2119,55 @@ pub fn next_enabled_field(cfg: &Config, fields: &[Field], start: usize, step: i3
         }
     }
     start.min(n - 1)
+}
+
+/// Where a page move of `delta` rows from `current` lands among rows in
+/// painted order, `applies` saying which of them apply. It aims at
+/// `current + delta`, kept in the list; a row there that does not apply
+/// gives way to the nearest one that does back toward `current`, so the
+/// page keeps its overlap, and failing that to the next one on in the
+/// direction of travel, so a row that does not apply never stops it.
+/// `current` when no row that applies lies that way.
+pub(crate) fn page_target(applies: &[bool], current: usize, delta: isize) -> usize {
+    let Some(last) = applies.len().checked_sub(1) else {
+        return current;
+    };
+    let current = current.min(last);
+    let target = (current as isize)
+        .saturating_add(delta)
+        .clamp(0, last as isize) as usize;
+    let found = if target > current {
+        (current + 1..=target)
+            .rev()
+            .chain(target + 1..=last)
+            .find(|&index| applies[index])
+    } else if target < current {
+        (target..current)
+            .chain((0..target).rev())
+            .find(|&index| applies[index])
+    } else {
+        None
+    };
+    found.unwrap_or(current)
+}
+
+/// The row nearest `target` that is not [`field_disabled`], looking first
+/// toward `toward` (`+1` down, `-1` up) and then the other way, without
+/// wrapping. `target` (clamped) when no row applies.
+pub fn nearest_enabled_field(cfg: &Config, fields: &[Field], target: usize, toward: i32) -> usize {
+    let Some(last) = fields.len().checked_sub(1) else {
+        return 0;
+    };
+    let target = target.min(last);
+    let enabled = |index: &usize| !field_disabled(cfg, fields[*index].key);
+    let after = (target..=last).find(enabled);
+    let before = (0..=target).rev().find(enabled);
+    let (first, second) = if toward >= 0 {
+        (after, before)
+    } else {
+        (before, after)
+    };
+    first.or(second).unwrap_or(target)
 }
 
 // ---- Config readers (string-keyed; the one place catalogue keys meet Config).
@@ -2192,6 +2654,115 @@ mod tests {
         assert_eq!(default_value(&theme), None);
     }
 
+    /// Reset takes a row's lines out of the config, both padding axes for
+    /// the uniform Window padding row, rather than writing the default the
+    /// running build has, so a reset row follows the platform's and later
+    /// releases' defaults (13 px fonts on macOS, 14 px on Linux).
+    #[test]
+    fn reset_removes_each_rows_keys() {
+        let cats = categories(&[]);
+        let field = |key: &str| {
+            cats.iter()
+                .flat_map(|cat| &cat.fields)
+                .find(|field| field.key == key)
+                .unwrap()
+        };
+        assert_eq!(
+            reset_keys(field("window-padding-x")),
+            ["window-padding-x", "window-padding-y"]
+        );
+        for key in [
+            "font-size",
+            "theme-mode",
+            "tab-bar-position",
+            "cursor-blink",
+        ] {
+            assert_eq!(reset_keys(field(key)), [key]);
+        }
+        // Their older names and Terminator keys go with them.
+        assert_eq!(reset_keys(field("osc52")), ["osc52", "clipboard"]);
+        assert_eq!(
+            reset_keys(field("update-policy")),
+            ["update-policy", "update-check", "check-for-updates"]
+        );
+        assert_eq!(
+            reset_keys(field("bell")),
+            ["bell", "visible-bell", "urgent-bell", "force-no-bell"]
+        );
+        assert_eq!(
+            reset_keys(field("scrollback")),
+            ["scrollback", "scrollback-infinite"]
+        );
+        let dir = kettle_test_support::private_tempdir("kettle-settings-reset-");
+        let path = dir.join("config");
+        std::fs::write(
+            &path,
+            "font-size = 20\nwindow-padding-x = 8\nwindow-padding-y = 8\n",
+        )
+        .unwrap();
+        for key in ["font-size", "window-padding-x"] {
+            kettle_config::reset_config_setting(&path, &reset_keys(field(key)), &[], |_| true)
+                .unwrap();
+        }
+        let padding = field("window-padding-x");
+        assert_eq!(
+            reset_fallback(padding, "4"),
+            [
+                ("window-padding-x", "4".to_string()),
+                ("window-padding-y", "4".to_string())
+            ]
+        );
+        assert_eq!(
+            reset_fallback(field("font-size"), "13"),
+            [("font-size", "13".to_string())]
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, "");
+        let cfg = Config::parse_text(&text);
+        assert!(holds_default(&cfg, field("font-size")));
+        assert!(holds_default(&cfg, field("window-padding-x")));
+    }
+
+    /// A number holds its default only at full precision. A `font = Mono
+    /// 13.4` line beside `font-size = 18` leaves 13.4 px once Reset removes
+    /// the size line; rounded, that read as the 13 px default and Reset
+    /// stopped there. Reset now adds the real default after the `font` line,
+    /// which keeps its family.
+    #[test]
+    fn reset_reaches_a_numbers_exact_default() {
+        let cats = categories(&[]);
+        let field = cats
+            .iter()
+            .flat_map(|cat| &cat.fields)
+            .find(|field| field.key == "font-size")
+            .unwrap();
+        let near = kettle_config::DEFAULT_FONT_SIZE + 0.4;
+        let font = format!("font = Mono {near}\n");
+        assert_eq!(
+            read(&Config::parse_text(&font), field, &EN),
+            read(&Config::default(), field, &EN)
+        );
+        assert!(!holds_default(&Config::parse_text(&font), field));
+        let dir = kettle_test_support::private_tempdir("kettle-settings-reset-exact-");
+        let path = dir.join("config");
+        std::fs::write(&path, format!("{font}font-size = 18\n")).unwrap();
+        let value = default_value(field).unwrap();
+        let fallback = reset_fallback(field, &value);
+        let fallback: Vec<(&str, &str)> = fallback
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect();
+        kettle_config::reset_config_setting(&path, &reset_keys(field), &fallback, |cfg| {
+            holds_default(cfg, field)
+        })
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let cfg = Config::parse_text(&text);
+        assert_eq!(cfg.font_size, kettle_config::DEFAULT_FONT_SIZE, "{text:?}");
+        assert_eq!(cfg.font_family, "Mono");
+        assert!(text.starts_with(&font));
+    }
+
     #[test]
     fn default_scrollback_memory_is_64_mb() {
         let cfg = Config::default();
@@ -2244,7 +2815,12 @@ mod tests {
         );
         assert_eq!(
             capture_hotkey(Some(Key::Char('x')), Mods::empty()),
-            HotkeyCapture::Pending
+            HotkeyCapture::Refused,
+            "the row says a key without a modifier was refused"
+        );
+        assert_eq!(
+            capture_hotkey(Some(Key::F(5)), Mods::empty()),
+            HotkeyCapture::Refused
         );
         assert_eq!(capture_hotkey(None, Mods::CTRL), HotkeyCapture::Pending);
         assert_eq!(
@@ -2882,18 +3458,67 @@ mod tests {
             }
             let label = read(&cfg, &row, &EN);
             assert_eq!(
-                Some(&label),
-                kettle_config::keybinds::hint_label(&cfg.keybinds, &close).as_ref()
+                Some(label.clone()),
+                kettle_config::keybinds::hint_trigger(
+                    &cfg.keybinds,
+                    &close,
+                    cfg!(target_os = "macos")
+                )
+                .map(|trigger| trigger.label())
             );
             shown.insert(label);
         }
-        // The shortest label wins: macOS spells Super as Cmd.
+        // On macOS the Cmd chord wins, as in the menus; elsewhere the
+        // shortest label. macOS spells Super as Cmd.
         let stable = if cfg!(target_os = "macos") {
             "Shift+Cmd+D"
         } else {
             "Ctrl+Shift+W"
         };
         assert_eq!(shown.into_iter().collect::<Vec<_>>(), [stable]);
+    }
+
+    /// On macOS the Keybinds page shows the Cmd chord the menus show for an
+    /// action that also has a Ctrl chord: Previous tab read `Ctrl+PageUp`
+    /// beside Next tab's `Shift+Cmd+]`. Elsewhere the shortest label wins.
+    #[test]
+    fn a_keybind_row_prefers_the_command_chord_on_macos() {
+        use kettle_config::keybinds::{Bindings, Mods, parse_trigger};
+        let previous = kettle_config::Action::from_name("prev_tab").unwrap();
+        let mut bindings = Bindings::new();
+        for chord in ["ctrl+pageup", "super+shift+["] {
+            bindings.insert(parse_trigger(chord).unwrap(), previous.clone());
+        }
+        let macos = keybind_row_trigger(&bindings, &previous, true).unwrap();
+        assert!(macos.mods.contains(Mods::SUPER), "{macos:?}");
+        let other = keybind_row_trigger(&bindings, &previous, false).unwrap();
+        assert_eq!(other, parse_trigger("ctrl+pageup").unwrap());
+    }
+
+    /// SETTINGS.md names the shortcut each platform opens Settings with:
+    /// it said Ctrl+, alone, which on macOS is not bound.
+    #[test]
+    fn the_settings_guide_names_each_platforms_shortcut() {
+        let guide = include_str!("../../../docs/SETTINGS.md");
+        let opening = guide.split("\n\n").nth(1).unwrap().replace('\n', " ");
+        assert!(
+            opening.contains("**Cmd+,** on macOS or **Ctrl+,** elsewhere"),
+            "{opening}"
+        );
+        let open = kettle_config::Action::OpenSettings;
+        let bound = kettle_config::keybinds::hint_trigger(
+            &Config::default().keybinds,
+            &open,
+            cfg!(target_os = "macos"),
+        )
+        .unwrap();
+        let shortcut = if cfg!(target_os = "macos") {
+            kettle_config::keybinds::Mods::SUPER
+        } else {
+            kettle_config::keybinds::Mods::CTRL
+        };
+        assert_eq!(bound.mods, shortcut);
+        assert_eq!(bound.key, kettle_config::keybinds::Key::Char(','));
     }
 
     #[test]
@@ -3265,6 +3890,10 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "settings_nav_tests.rs"]
+mod nav_tests;
 
 #[cfg(test)]
 mod search_tests {
@@ -3760,9 +4389,12 @@ mod control_size_tests {
         let (cw, line) = (8.4_f32, 17.5_f32);
         for language in [Language::En, Language::Es] {
             let tr = Translator::new(language);
-            let prompt = tr.text(Text::SettingsPressChord);
-            assert!(prompt.contains("Esc"), "{language:?}: {prompt}");
-            for surface in [(1280.0_f32, 820.0_f32), (640.0, 820.0)] {
+            for (prompt, surface) in [Text::SettingsPressChord, Text::SettingsCaptureNeedsModifier]
+                .into_iter()
+                .flat_map(|prompt| [(1280.0_f32, 820.0_f32), (640.0, 820.0)].map(|s| (prompt, s)))
+            {
+                let prompt = tr.text(prompt);
+                assert!(prompt.contains("Esc"), "{language:?}: {prompt}");
                 for field in cats
                     .iter()
                     .flat_map(|cat| &cat.fields)
@@ -3829,10 +4461,41 @@ mod control_size_tests {
             .collect()
     }
 
+    /// Where blur is always available (macOS), the Window blur switch is as
+    /// wide as every other switch, rather than sized for an Unavailable it
+    /// cannot show. Elsewhere it keeps room for every state it can show.
+    #[test]
+    fn window_blur_is_sized_for_the_states_its_platform_shows() {
+        let cats = categories(&[]);
+        let field = |key: &str| {
+            cats.iter()
+                .flat_map(|c| &c.fields)
+                .find(|f| f.key == key)
+                .unwrap()
+        };
+        let cfg = Config::default();
+        for language in [Language::En, Language::Es] {
+            let tr = Translator::new(language);
+            let switch = field_value_cols_on(&cfg, field("cursor-blink"), &tr, "macos");
+            assert_eq!(
+                field_value_cols_on(&cfg, field("window-blur"), &tr, "macos"),
+                switch,
+                "{language:?}"
+            );
+            for os in ["linux", "windows"] {
+                assert!(
+                    field_value_cols_on(&cfg, field("window-blur"), &tr, os)
+                        >= kettle_render::display_width(tr.text(Text::SettingsValueUnavailable)),
+                    "{language:?} {os}"
+                );
+            }
+        }
+    }
+
     /// The Window blur switch keeps one width through every state it can
-    /// show (On, Off, Checking…, Unavailable) in English and Spanish, so a
-    /// Wayland probe or an unavailable session never moves its edge or the
-    /// Reset chip beside it.
+    /// show here (On, Off, and where they occur Checking… and Unavailable)
+    /// in English and Spanish, so a Wayland probe or an unavailable session
+    /// never moves its edge or the Reset chip beside it.
     #[test]
     fn window_blur_keeps_one_width_through_its_states() {
         let cats = categories(&[]);
@@ -3850,11 +4513,7 @@ mod control_size_tests {
                         window_blur: saved,
                         ..Config::default()
                     };
-                    for state in [
-                        BlurState::Available,
-                        BlurState::Checking,
-                        BlurState::Unavailable,
-                    ] {
+                    for &state in blur_states(std::env::consts::OS) {
                         let set = kettle_render::SettingsOverlay {
                             rows: vec![kettle_render::SettingsRow {
                                 label: tr.text(blur.label).into(),

@@ -287,8 +287,12 @@ pub(crate) fn activity_marker_quads(
 
 /// Anchor to the actual control while keeping tooltips outside the header.
 /// The GNOME header's `+` leads the strip, so its tooltip hangs under it
-/// rather than at the far end where every other strip keeps `+`.
+/// rather than at the far end where every other strip keeps `+`. A control
+/// the UI names (`tooltip_anchor`) anchors it instead.
 pub(crate) fn tooltip_anchor(bar: &TabBar) -> Rect4 {
+    if let Some(anchor) = bar.tooltip_anchor {
+        return anchor;
+    }
     if bar.in_titlebar && !bar.linux_header {
         if bar.hovered_new_tab && !bar.pressed_new_tab {
             return bar.new_tab;
@@ -322,12 +326,93 @@ pub(crate) fn tooltip_rect(
     let w = (text.0 + 16.0 * scale).min(surface.0);
     let h = (text.1 + 8.0 * scale).min(surface.1);
     let x = (band.0 + band.2 - w - 8.0 * scale).clamp(0.0, (surface.0 - w).max(0.0));
-    let y = if band.1 < surface.1 * 0.5 {
+    let (below, _) = tooltip_side(band, surface, scale);
+    let y = if below {
         band.1 + band.3 + 4.0 * scale
     } else {
         band.1 - h - 4.0 * scale
     };
     (x, y.clamp(0.0, (surface.1 - h).max(0.0)), w, h)
+}
+
+/// The side of `anchor` a tooltip goes on, the one with more room in the
+/// window (below on a tie), and the height it has there.
+pub(crate) fn tooltip_side(anchor: Rect4, surface: (f32, f32), scale: f32) -> (bool, f32) {
+    let gap = 4.0 * scale;
+    let below = surface.1 - (anchor.1 + anchor.3) - gap;
+    let above = anchor.1 - gap;
+    if below >= above {
+        (true, below)
+    } else {
+        (false, above)
+    }
+}
+
+/// The most lines of `line_height` a tooltip hung from `anchor` shows: what
+/// fits on the side [`tooltip_rect`] puts it, the one with more room, so it
+/// never leaves the window or covers the control it names. At least one.
+/// The renderer wraps it at the window's width, less its padding, first, so
+/// this cap is the last resort of a text the window cannot hold.
+pub(crate) fn tooltip_max_lines(
+    anchor: Rect4,
+    surface: (f32, f32),
+    line_height: f32,
+    scale: f32,
+) -> usize {
+    let (_, room) = tooltip_side(anchor, surface, scale);
+    ((room - 8.0 * scale) / line_height.max(1.0))
+        .floor()
+        .max(1.0) as usize
+}
+
+/// The most times [`shape_tooltip`] shortens a text before it gives up on
+/// keeping any of it.
+const TOOLTIP_CUTS: usize = 64;
+
+/// Shape `text` into `buffer`, wrapped at the width it is given, in at most
+/// `max_lines` lines. A longer text keeps what its first lines hold, cut
+/// between graphemes, and ends with an ellipsis.
+pub(crate) fn shape_tooltip<'a>(
+    font_system: &mut glyphon::FontSystem,
+    buffer: &mut glyphon::Buffer,
+    text: &str,
+    attrs: &glyphon::Attrs<'a>,
+    emoji_family: Option<&'a str>,
+    max_lines: usize,
+) {
+    use unicode_segmentation::UnicodeSegmentation;
+    let max_lines = max_lines.max(1);
+    let mut shape = |buffer: &mut glyphon::Buffer, text: &str| {
+        crate::fonts::set_chrome_text(buffer, text, attrs, emoji_family);
+        buffer.shape_until_scroll(font_system, false);
+        buffer.layout_runs().count()
+    };
+    if shape(buffer, text) <= max_lines {
+        return;
+    }
+    // Where the last line that fits ends, in the one line a tooltip is.
+    let mut end = buffer
+        .layout_runs()
+        .nth(max_lines - 1)
+        .filter(|run| run.line_i == 0)
+        .and_then(|run| run.glyphs.iter().map(|glyph| glyph.end).max())
+        .unwrap_or(0)
+        .min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut kept = text[..end].trim_end().to_owned();
+    for _ in 0..TOOLTIP_CUTS {
+        if shape(buffer, &format!("{kept}\u{2026}")) <= max_lines {
+            return;
+        }
+        let Some((at, _)) = kept.grapheme_indices(true).next_back() else {
+            break;
+        };
+        kept.truncate(at);
+        kept.truncate(kept.trim_end().len());
+    }
+    shape(buffer, "\u{2026}");
 }
 
 pub(crate) fn tab_label_origin(lane: Rect4, label: &str, cell: (f32, f32)) -> (f32, f32) {
@@ -720,6 +805,24 @@ pub(crate) fn header_icon_buttons(bar: &TabBar) -> impl Iterator<Item = HeaderIc
 /// toggled on (Find while it is open) keeps a fill at rest, `tab_detail`'s
 /// 1.5:1, deepening to 1.8:1 under the pointer, as GNOME fills a checked
 /// flat button.
+/// The hover fill of each overflow arrow the pointer is over, as the
+/// strip's other flat buttons have: `(button, fill)`.
+pub(crate) fn scroll_arrow_fills(
+    bar: &TabBar,
+    strip: Rgb,
+    fg: Rgb,
+) -> impl Iterator<Item = (Rect4, Rgb)> {
+    [
+        (bar.scroll_left, bar.hovered_scroll_left),
+        (bar.scroll_right, bar.hovered_scroll_right),
+    ]
+    .into_iter()
+    .filter(|(button, _)| button.2 > 0.0 && button.3 > 0.0)
+    .filter_map(move |(button, hovered)| {
+        flat_button_fill(strip, fg, hovered, false, false).map(|fill| (button, fill))
+    })
+}
+
 pub(crate) fn flat_button_fill(
     strip: Rgb,
     fg: Rgb,
@@ -2790,5 +2893,150 @@ mod compact_header_contrast_tests {
                 .count(),
             2
         );
+    }
+}
+
+#[cfg(test)]
+mod scroll_arrow_tests {
+    use super::*;
+
+    /// Should 11 of the 6.0 UI review: an overflow arrow under the pointer
+    /// takes the strip's flat-button hover fill, only while hovered and
+    /// only where the strip has one, and its glyph is resolved against it.
+    #[test]
+    fn overflow_arrows_prelight_like_the_other_flat_buttons() {
+        let strip = Rgb::new(30, 30, 36);
+        let fg = Rgb::new(220, 220, 220);
+        let mut bar = TabBar::hidden();
+        bar.scroll_left = (0.0, 0.0, 20.0, 28.0);
+        bar.scroll_right = (580.0, 0.0, 20.0, 28.0);
+        assert_eq!(scroll_arrow_fills(&bar, strip, fg).count(), 0);
+        bar.hovered_scroll_right = true;
+        let fills: Vec<_> = scroll_arrow_fills(&bar, strip, fg).collect();
+        assert_eq!(
+            fills,
+            vec![(
+                bar.scroll_right,
+                flat_button_fill(strip, fg, true, false, false).unwrap()
+            )]
+        );
+        assert!(crate::color::contrast_ratio(fills[0].1, strip) >= 1.3 - 1e-6);
+        // A strip that does not overflow has no arrow to light.
+        bar.scroll_right = (0.0, 0.0, 0.0, 0.0);
+        assert_eq!(scroll_arrow_fills(&bar, strip, fg).count(), 0);
+        let src: String = crate::production_source().split_whitespace().collect();
+        assert!(src.contains(
+            "for(bounds,fill)intab_strip::scroll_arrow_fills(tabbar,chrome_strip_bg,theme.foreground)"
+        ));
+        assert!(src.contains(
+            "letbackground=tab_strip::scroll_arrow_fills(tabbar,chrome_strip_bg,fg).find(|(button,_)|*button==rect)"
+        ));
+    }
+
+    /// A control the UI names anchors the tooltip; without one the strip's
+    /// hovered button does, as before.
+    #[test]
+    fn a_named_anchor_places_the_tooltip_under_that_control() {
+        let mut bar = TabBar::hidden();
+        bar.band = (0.0, 0.0, 640.0, 28.0);
+        assert_eq!(tooltip_anchor(&bar), bar.band);
+        bar.tooltip_anchor = Some((580.0, 0.0, 20.0, 28.0));
+        assert_eq!(tooltip_anchor(&bar), (580.0, 0.0, 20.0, 28.0));
+        let (x, y, w, _) = tooltip_rect(tooltip_anchor(&bar), (640.0, 400.0), (90.0, 16.0), 1.0);
+        assert!(y >= 28.0, "below the strip");
+        assert!(x + w <= 600.0, "ends inside the arrow's end");
+    }
+
+    /// Defect 5 of the 6.0 final review: a tab's full title, 511 characters
+    /// of `WWWWWW `, wrapped to 13 lines in a 420 by 160 window; the tooltip
+    /// was clamped to the window, its last lines cut off, and it covered the
+    /// tab it names. It now keeps the lines that fit below the tab, ending in
+    /// an ellipsis, and stays clear of the tab.
+    #[test]
+    fn a_long_tooltip_ends_in_an_ellipsis_beside_its_control() {
+        let mut fonts = glyphon::FontSystem::new();
+        let (line, surface) = (17.5, (420.0, 160.0));
+        let mut buffer = glyphon::Buffer::new(&mut fonts, glyphon::Metrics::new(13.0, line));
+        buffer.set_size(Some(surface.0 - 16.0), None);
+        let title: String = "WWWWWW ".repeat(80).chars().take(511).collect();
+        let attrs = glyphon::Attrs::new();
+        let anchor = (100.0, 0.0, 120.0, 28.0);
+        shape_tooltip(&mut fonts, &mut buffer, &title, &attrs, None, usize::MAX);
+        let whole = buffer.layout_runs().count();
+        let max = tooltip_max_lines(anchor, surface, line, 1.0);
+        assert!(whole > max, "the fixture is longer than the room: {whole}");
+        shape_tooltip(&mut fonts, &mut buffer, &title, &attrs, None, max);
+        let lines = buffer.layout_runs().count();
+        assert!(lines >= 1 && lines <= max, "{lines} of {max}");
+        let shown: String = buffer.lines.iter().map(|line| line.text()).collect();
+        let kept = shown.strip_suffix('\u{2026}').expect("ends in an ellipsis");
+        assert!(title.starts_with(kept) && kept.len() > 100, "{shown:?}");
+        let width = buffer
+            .layout_runs()
+            .map(|run| run.line_w)
+            .fold(0.0, f32::max);
+        let (_, y, _, h) = tooltip_rect(anchor, surface, (width, line * lines as f32), 1.0);
+        assert!(y >= anchor.1 + anchor.3, "covers the tab at {y}");
+        assert!(y + h <= surface.1, "leaves the window: {}", y + h);
+        // Hung from a control low in the window it goes above, as clear.
+        let low = (100.0, 132.0, 120.0, 28.0);
+        let max = tooltip_max_lines(low, surface, line, 1.0);
+        shape_tooltip(&mut fonts, &mut buffer, &title, &attrs, None, max);
+        let lines = buffer.layout_runs().count();
+        let (_, y, _, h) = tooltip_rect(low, surface, (width, line * lines as f32), 1.0);
+        assert!(y >= 0.0 && y + h <= low.1, "covers the control: {y} {h}");
+        // A short text is shown whole.
+        shape_tooltip(&mut fonts, &mut buffer, "New Tab", &attrs, None, max);
+        assert_eq!(buffer.lines[0].text(), "New Tab");
+        let src: String = crate::production_source().split_whitespace().collect();
+        assert!(src.contains(
+            "letmax_lines=tab_strip::tooltip_max_lines(anchor,(sw,sh),tab_ch,self.scale);"
+        ));
+        assert!(src.contains(
+            "tab_strip::shape_tooltip(&mutself.font_system,&mutself.tab_tooltip_buffer,"
+        ));
+    }
+
+    /// Finding 5 of the second 6.0 review: a long title's tooltip should use
+    /// as much of the window as it can before its ellipsis. It wraps at the
+    /// window's width, less its padding, and goes on the side of its control
+    /// with more room, which for a control in the window's top half need not
+    /// be below; the whole title shows where the window can hold it, and the
+    /// ellipsis is left for a window that cannot.
+    #[test]
+    fn a_long_tooltip_takes_the_side_with_more_room_and_the_whole_width() {
+        // A tall control whose top is in the top half but with more room
+        // above it than below.
+        let surface = (420.0, 300.0);
+        let tall = (100.0, 100.0, 120.0, 120.0);
+        let (below, room) = tooltip_side(tall, surface, 1.0);
+        assert!(!below && room == 96.0, "{below} {room}");
+        assert_eq!(tooltip_max_lines(tall, surface, 17.5, 1.0), 5);
+        let (_, y, _, h) = tooltip_rect(tall, surface, (300.0, 5.0 * 17.5), 1.0);
+        assert!(y >= 0.0 && y + h <= tall.1, "above, clear of it: {y} {h}");
+        // The tab strip's tab, at the top: below, as before.
+        let tab = (100.0, 0.0, 120.0, 28.0);
+        assert!(tooltip_side(tab, surface, 1.0).0);
+        // A window wide and tall enough holds the whole long title: no
+        // ellipsis.
+        let mut fonts = glyphon::FontSystem::new();
+        let line = 17.5;
+        let mut buffer = glyphon::Buffer::new(&mut fonts, glyphon::Metrics::new(13.0, line));
+        let title: String = "WWWWWW ".repeat(80).chars().take(511).collect();
+        let window = (1280.0, 800.0);
+        buffer.set_size(Some(window.0 - 16.0), None);
+        let max = tooltip_max_lines(tab, window, line, 1.0);
+        shape_tooltip(
+            &mut fonts,
+            &mut buffer,
+            &title,
+            &glyphon::Attrs::new(),
+            None,
+            max,
+        );
+        let shown: String = buffer.lines.iter().map(|line| line.text()).collect();
+        assert_eq!(shown, title, "the whole title");
+        let src: String = crate::production_source().split_whitespace().collect();
+        assert!(src.contains("letwrap_width=(sw-16.0*self.scale).max(1.0);"));
     }
 }

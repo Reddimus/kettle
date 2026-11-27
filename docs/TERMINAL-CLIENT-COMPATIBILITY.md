@@ -557,7 +557,12 @@ shrink with them again, add `keybind = ctrl+shift+minus=decrease_font_size`
 and `keybind = ctrl+shift+_=decrease_font_size`.
 
 The pointer works the same way. While a program has mouse reporting on, it
-gets your clicks, and Shift keeps a click Kettle's: Shift+drag selects text,
+gets your clicks. Plain motion, for a program that asks for it (DEC 1003), is
+reported only while the pointer is over the program's pane: over the tab bar,
+the status bar, a pane title bar or another split it hears nothing, as in
+xterm. A drag that began with a press in the pane keeps reporting, at the
+nearest edge cell, until the button is released. Shift keeps a click Kettle's:
+Shift+drag selects text,
 and Shift+right-click opens Kettle's menu, which also offers "Preview Copied
 File" when the clipboard names an image, SVG, Mermaid, Markdown, PDF or video
 file. With text

@@ -1032,6 +1032,7 @@ impl World {
                 close: "x".into(),
                 opacity: 1.0,
                 focused: None,
+                hovered: None,
             });
         }
         if self.search {

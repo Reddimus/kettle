@@ -60,6 +60,12 @@ context = "crates/kettle-ui/src/app.rs: Destructive button that closes the focus
 [messages.confirm_button_close_tab]
 context = "crates/kettle-ui/src/app.rs: Destructive button that closes the focused tab."
 
+[messages.confirm_title_close_other_tabs]
+context = "crates/kettle-ui/src/app/modals.rs confirm_close: Heading of confirmation before Close Other Tabs, from a tab's right-click menu, closes every tab of the window but that one."
+
+[messages.confirm_button_close_other_tabs]
+context = "crates/kettle-ui/src/app/modals.rs confirm_close: Destructive button that closes every tab of the window but the one whose menu was opened."
+
 [messages.confirm_button_close_window]
 context = "crates/kettle-ui/src/app.rs: Destructive button that closes the window."
 
@@ -194,6 +200,9 @@ context = "crates/kettle-ui/src/app/accessibility.rs mark_context_submenu_row: s
 [messages.menu_a11y_terminal]
 context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the right-click menu."
 
+[messages.menu_a11y_tab]
+context = "crates/kettle-ui/src/app/menus.rs open_tab_menu: screen-reader name of the menu a right-click on a tab in the tab bar opens, which acts on that tab."
+
 [messages.menu_about]
 context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row. Row of the new-tab dropdown. kettle is the product name."
 
@@ -201,7 +210,22 @@ context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click men
 context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
 
 [messages.menu_close_tab]
-context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
+context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row. Also a row of the menu a right-click on a tab opens (tab_menu_items), where it closes that tab."
+
+[messages.menu_rename_tab]
+context = "crates/kettle-ui/src/app/menus.rs tab_menu_items: row of the menu a right-click on a tab in the tab bar opens. Opens the inline editor for that tab's title; the ellipsis says an editor opens."
+
+[messages.menu_duplicate_tab]
+context = "crates/kettle-ui/src/app/menus.rs tab_menu_items: row of the menu a right-click on a tab opens. Opens a new tab like that one (same directory and program)."
+
+[messages.menu_move_tab_left]
+context = "crates/kettle-ui/src/app/menus.rs tab_menu_items: row of the menu a right-click on a tab opens. Moves that tab one place left in the tab bar, wrapping from the first to the last."
+
+[messages.menu_close_other_tabs]
+context = "crates/kettle-ui/src/app/menus.rs tab_menu_items: row of the menu a right-click on a tab opens. Closes every other tab of the window, keeping this one; asks first when programs would stop."
+
+[messages.menu_move_tab_right]
+context = "crates/kettle-ui/src/app/menus.rs tab_menu_items: row of the menu a right-click on a tab opens. Moves that tab one place right in the tab bar, wrapping from the last to the first."
 
 [messages.menu_close_window]
 context = "crates/kettle-ui/src/app/menus.rs context_menu_items: right-click menu row."
@@ -765,6 +789,12 @@ context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is th
 [messages.notify_title_session_log_stopped]
 context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
 
+[messages.notify_title_setting_not_durable]
+context = "crates/kettle-ui/src/app/modals.rs settings_reset: desktop notification title when a Settings Reset was saved to the config file and applies, but the system could not confirm the change reached the disk. Starts with the product name like the other notification titles."
+
+[messages.notify_body_setting_not_durable]
+context = "crates/kettle-ui/src/app/modals.rs settings_reset: body of notify_title_setting_not_durable. The reset applies now; a sudden power loss or crash of the computer could undo it."
+
 [messages.notify_title_setting_not_saved]
 context = "crates/kettle-ui/src/app.rs: desktop notification title. kettle is the product name, kept lowercase."
 
@@ -1126,6 +1156,10 @@ context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-re
 [messages.picker_a11y_results]
 context = "crates/kettle-ui/src/app.rs push_picker_accessibility: screen-reader name of a picker's result list. label is the picker's translated name, such as Theme picker."
 args = [{ name = "label", type = "str" }]
+
+[messages.picker_a11y_choose]
+context = "crates/kettle-ui/src/app/accessibility.rs push_picker_accessibility: screen-reader name of the button beside a picker's results (command palette, theme, layout or SSH picker) that acts on the highlighted result, as Enter does: runs the command, applies the theme, opens the layout, connects, or opens the SSH launcher's save or remove step. item is that result's name as the list shows it. Never painted. Needs screen-reader second pass."
+args = [{ name = "item", type = "str" }]
 
 [messages.picker_a11y_ssh]
 context = "crates/kettle-ui/src/app.rs modal_accessibility_projection: screen-reader name of the ssh launcher dialog."
@@ -1656,9 +1690,6 @@ context = "crates/kettle-ui/src/app.rs codex_note: Settings footer under the Cod
 [messages.settings_note_codex_unsupported]
 context = "crates/kettle-ui/src/app.rs codex_note: Settings footer under the Codex previews row on a system where the integration cannot run."
 
-[messages.settings_note_language]
-context = "crates/kettle-ui/src/app.rs settings_footer_note: footer note while the Language row is focused. A new window keeps the current language; only a restart changes it."
-
 [messages.settings_note_language_pending]
 context = "crates/kettle-ui/src/app.rs settings_footer_note: footer note after the saved language differs from the one Kettle is running in. Infinitive in Spanish, like the other notes."
 
@@ -1676,6 +1707,9 @@ context = "crates/kettle-ui/src/app.rs settings_footer_note: a change needs a ne
 
 [messages.settings_press_chord]
 context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: shown in a Keybinds row while it waits for a key combination. Keep Esc."
+
+[messages.settings_capture_needs_modifier]
+context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: replaces settings_press_chord in a Keybinds or global hotkey row after a key pressed without Ctrl, Alt, Shift or Cmd was refused; the row still waits for a combination. A modifier is a key held with another, such as Ctrl. Keep Esc. Fits about 38 columns."
 
 [messages.settings_value_always]
 context = "crates/kettle-ui/src/settings.rs read(): Settings value."
@@ -1774,6 +1808,10 @@ context = "crates/kettle-ui/src/app/modals.rs settings_overlay_projection: the R
 [messages.settings_a11y_reset]
 context = "crates/kettle-ui/src/app/accessibility.rs: screen-reader name of the Reset button for the selected Settings row. setting is the row's label, value the default it would restore, as the row shows values (for example 14 px, Off). The button is marked unavailable while the row already holds that default."
 args = [{ name = "setting", type = "str" }, { name = "value", type = "str" }]
+
+[messages.settings_a11y_change]
+context = "crates/kettle-ui/src/app/accessibility.rs: screen-reader name of the button over the selected Settings row's value control that changes it as a left-click on the row does: turns a switch on or off, moves a choice to its next value, steps a number up, or opens the row's editor, theme picker or shortcut capture. setting is the row's label. Needs screen-reader second pass."
+args = [{ name = "setting", type = "str" }]
 
 [messages.settings_value_right]
 context = "crates/kettle-ui/src/settings.rs read(): Settings value. Tab bar position set in the config file."
@@ -2502,6 +2540,9 @@ context = "crates/kettle-ui/src/settings.rs: One-line factual Settings descripti
 [messages.settings_description_keybind_toggle_zoom]
 context = "crates/kettle-ui/src/settings.rs: One-line factual Settings description under its label; English budget 70 characters. Ellipsized in narrow panels."
 
+[messages.settings_search_results]
+context = "crates/kettle-ui/src/app/settings_text.rs settings_title: the Settings panel's title while the search field holds a query, in place of the open category's name; the results below come from every category. A heading."
+
 [messages.settings_search_placeholder]
 context = "crates/kettle-ui/src/settings.rs: Settings search input placeholder and accessible name."
 
@@ -2751,7 +2792,7 @@ context = "crates/kettle-ui: Settings position description."
 context = "crates/kettle-ui: Settings size description."
 
 [messages.quick_terminal_animation_description]
-context = "crates/kettle-ui: Settings animation description."
+context = "crates/kettle-ui: Settings > Quick terminal > Animation row description. Motion is reduced by the reduce-motion setting or, by default, the system's Reduce Motion."
 
 [messages.quick_terminal_autohide_description]
 context = "crates/kettle-ui: Settings autohide description."
@@ -2782,6 +2823,18 @@ context = "crates/kettle-ui/src/settings.rs: description of Automatic, On and Of
 
 [messages.tab_new_options]
 context = "Tab-strip dropdown tooltip. Opens shell choices and tab options."
+
+[messages.tab_scroll_previous]
+context = "crates/kettle-ui/src/app/chrome.rs strip_tooltip: tooltip of the tab strip's back overflow arrow (a chevron at the start of a top or bottom strip, above the rows of a side strip). A press selects the previous tab, which scrolls the strip. Followed by the shortcut when one is bound."
+
+[messages.tab_scroll_next]
+context = "crates/kettle-ui/src/app/chrome.rs strip_tooltip: tooltip of the tab strip's forward overflow arrow. A press selects the next tab, which scrolls the strip. Followed by the shortcut when one is bound."
+
+[messages.tab_scroll_left]
+context = "crates/kettle-ui/src/app/chrome.rs strip_tooltip: tooltip of the macOS title-bar tab strip's left overflow arrow. A press scrolls the strip one tab toward its start and leaves the selected tab as it is."
+
+[messages.tab_scroll_right]
+context = "crates/kettle-ui/src/app/chrome.rs strip_tooltip: tooltip of the macOS title-bar tab strip's right overflow arrow. A press scrolls the strip one tab toward its end and leaves the selected tab as it is."
 
 [messages.menu_new_window_profile]
 context = "crates/kettle-ui/src/app/menus.rs and macos_menu.rs: Profile submenu title in the new-tab dropdown and the macOS Shell menu. Each profile opens a new window in a separate process, never a tab, so the title says window."
@@ -2962,6 +3015,9 @@ args = [{ name = "plain", type = "str" }, { name = "alternate", type = "str" }]
 context = "crates/kettle-ui/src/app/hints.rs or links.rs: Hint-mode instructions when Shift does not change the action."
 args = [{ name = "plain", type = "str" }]
 
+[messages.hint_none]
+context = "crates/kettle-ui/src/app/hints.rs no_hints_status: brief pane status, shown for three seconds along the bottom of the pane, when quick select (palette_hint_mode) found nothing on screen to label: no URL, path, git hash or IP address. The hints are the labels quick select puts on those (etiquetas in Spanish, as in palette_hint_mode). Also a polite screen-reader Status."
+
 [messages.settings_category_sessions]
 context = "crates/kettle-ui/src/settings.rs, session_content.rs: Settings category for saved workspace and terminal output."
 
@@ -3131,6 +3187,9 @@ context = "crates/kettle-ui/src/app/profiles.rs: Notification body when another 
 
 [messages.a11y_header_find]
 context = "crates/kettle-ui/src/app/accessibility.rs and chrome.rs: name and tooltip of the magnifier button in Kettle's GNOME header bar, beside the ≡ main menu. It opens Find (search in the terminal's output and history) and closes it again; screen readers also report it pressed while Find is open. The tooltip adds the bound shortcut after it. Needs screen-reader second pass."
+
+[messages.a11y_tab_toolbar]
+context = "crates/kettle-ui/src/app/accessibility.rs: screen-reader name of the toolbar beside the tab list that holds the tab strip's own buttons: New tab, the new-tab menu, the macOS Settings gear, and in Kettle's GNOME header bar Find, the main menu and the window buttons. Never painted. Needs screen-reader second pass."
 
 [messages.notification_toast_sourced]
 context = "crates/kettle-ui/src/app/notification_toast.rs: the first line of the in-window notification toast a program raised (OSC 9, OSC 777 or kettle.notify). source is the title of the tab it came from, message the program's own text, both shown verbatim. Keep the punctuation that separates them."
@@ -3507,6 +3566,9 @@ plural = "count"
 
 [messages.scrollback_a11y_viewing]
 context = "crates/kettle-ui/src/app/accessibility.rs scrollback_accessibility_nodes: polite status a screen reader speaks once when the focused pane is scrolled back into its history, away from live output. It carries no line count on purpose, so further scrolling is not announced again."
+
+[messages.vi_mode_chip]
+context = "crates/kettle-render/src/scrollback.rs vi_mode_chip: small chip at the top right of a pane (or its bottom right) while vi mode is on, the keyboard mode that moves a cursor through the pane's text and history to select it (the palette's palette_toggle_vi_mode). It shows only where the cells under it are blank. vi is the name of the text editor whose keys the mode uses; keep it lowercase. Not read by screen readers."
 
 [messages.quick_portal_unset]
 context = "crates/kettle-ui/src/quick_terminal/portal.rs: Wayland shortcut status, value or platform note in Settings. Enter and Delete name keys; kettle quick-terminal is a literal command."

@@ -86,6 +86,38 @@ fn settings_accessibility_names_follow_the_ui_language() {
     );
 }
 
+/// While a search lists results from every category, screen readers name
+/// the dialog as its title reads, "Search results", not by the category the
+/// stored row belongs to; with no query they name the open category again.
+#[test]
+fn the_settings_dialog_is_named_search_results_while_searching() {
+    let dialog = |query: &str, tr: &Translator| {
+        let overlay = kettle_render::Overlay {
+            settings: Some(kettle_render::SettingsOverlay {
+                categories: vec![
+                    tr.text(kettle_i18n::Text::SettingsCategoryAppearance)
+                        .into(),
+                ],
+                search_query: query.into(),
+                ..Default::default()
+            }),
+            ..kettle_render::Overlay::default()
+        };
+        modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, tr)
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role() == accesskit::Role::Dialog)
+            .and_then(|(_, node)| node.label().map(str::to_string))
+            .unwrap()
+    };
+    assert_eq!(dialog("qqzzxx", &EN), "Settings, Search results");
+    assert_eq!(
+        dialog("qqzzxx", &ES),
+        "Configuración, Resultados de la búsqueda"
+    );
+    assert_eq!(dialog("", &EN), "Settings, Appearance");
+}
+
 #[test]
 fn gpu_kinds_translate_and_unknown_kinds_pass_through() {
     assert_eq!(gpu_kind_text(&EN, "Integrated"), "Integrated");
@@ -725,23 +757,29 @@ fn the_settings_hints_fit_a_default_window_in_every_language() {
     }
 }
 
-/// The Language row says a change waits for a restart; once the saved
-/// language differs from the running one, every row says so, ahead of the
-/// general restart note, which a new window would satisfy.
+/// The Language row's description says a change waits for a restart, so
+/// its footer repeats nothing while the choice is the running language.
+/// Once the saved language differs from the running one, every row says
+/// so, ahead of the general restart note, which a new window would satisfy.
 #[test]
 fn a_language_change_waits_for_a_restart() {
-    assert_eq!(
-        settings_footer_note(
-            &EN,
-            None,
-            Some("language"),
-            false,
-            SettingsApply::None,
-            false,
+    for tr in [EN, ES] {
+        assert_eq!(
+            settings_footer_note(
+                &tr,
+                None,
+                Some("language"),
+                false,
+                SettingsApply::None,
+                false,
+                None
+            ),
             None
-        )
-        .as_deref(),
-        Some("Applies when Kettle restarts.")
+        );
+    }
+    assert!(
+        EN.text(kettle_i18n::Text::SettingsDescriptionFieldLanguage)
+            .contains("restarting Kettle")
     );
     assert_eq!(
         settings_footer_note(
@@ -940,4 +978,25 @@ fn the_settings_projection_carries_reset_and_stable_widths() {
     ] {
         assert!(mouse.contains(wiring), "{wiring}");
     }
+}
+
+/// While the search field holds a query the panel's title says it lists
+/// search results, rather than naming the category it opened on.
+#[test]
+fn the_settings_title_says_search_results_while_searching() {
+    use kettle_i18n::Text;
+    assert_eq!(
+        super::settings_title(&EN, Text::SettingsCategoryAppearance, ""),
+        "Appearance"
+    );
+    assert_eq!(
+        super::settings_title(&EN, Text::SettingsCategoryAppearance, "font"),
+        "Search results"
+    );
+    assert_eq!(
+        super::settings_title(&ES, Text::SettingsCategoryGraphics, "qqzz"),
+        "Resultados de la búsqueda"
+    );
+    let source = include_str!("modals.rs");
+    assert!(source.contains("title: settings_title(tr, active.name, nav.query.text()),"));
 }

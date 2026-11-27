@@ -2782,7 +2782,9 @@ fn a_lane_draws_its_open_outside_button_only_when_offered() {
     )
     .expect("the lane fits");
     let open = geometry.open_outside.expect("offered");
+    // The chip behind a button's glyph, on its row's text line.
     let corner = |frame: &image::RgbaImage, rect: (f32, f32, f32, f32)| {
+        let rect = geometry.chip(rect);
         let p = frame.get_pixel(rect.0.ceil() as u32 + 1, rect.1.ceil() as u32 + 1);
         (p[0], p[1], p[2])
     };
@@ -2869,7 +2871,9 @@ fn a_lane_draws_a_gallerys_page_controls() {
         geometry.page_counter.unwrap(),
         geometry.page_next.unwrap(),
     );
+    // The chip behind a button's glyph, on its row's text line.
     let corner = |frame: &image::RgbaImage, rect: (f32, f32, f32, f32)| {
+        let rect = geometry.chip(rect);
         let p = frame.get_pixel(rect.0.ceil() as u32 + 1, rect.1.ceil() as u32 + 1);
         (p[0], p[1], p[2])
     };
@@ -5235,6 +5239,7 @@ fn toast_redesign_corners_reveal_terminal_while_center_is_opaque() {
             close: "\u{00d7}".into(),
             opacity: 1.0,
             focused: None,
+            hovered: None,
         }),
         ..Overlay::default()
     };
@@ -5287,6 +5292,7 @@ fn toast_redesign_text_focus_fade_and_dismissal_preserve_retained_layers() {
             close: "\u{00d7}".into(),
             opacity: 1.0,
             focused: Some(2),
+            hovered: None,
         }),
         ..Overlay::default()
     };
@@ -6906,6 +6912,7 @@ fn an_open_menu_covers_a_toast_beneath_it() {
             close: "\u{00d7}".into(),
             opacity: 1.0,
             focused: None,
+            hovered: None,
         }),
         context_menu: Some(menu),
         ..focused(false)
@@ -8779,6 +8786,73 @@ fn a_scrolled_back_pane_paints_its_jump_button_and_kept_history_label() {
         }
     }
     eprintln!("SCROLLBACK_BUTTON_GPU_PASS");
+}
+}
+
+parity_scene! {
+/// Review D20: a pane in vi mode paints its "Vi mode" chip, in the jump
+/// button's rest fill, where the chip's layout puts it: the blank top right
+/// of a pane whose text is a prompt at the top left. The same pane out of vi
+/// mode paints no chip.
+fn a_pane_in_vi_mode_paints_its_chip() {
+    let _serialized = gpu_test_guard();
+    let (width, height) = (640_u32, 400_u32);
+    let Some((mut renderer, base)) = renderer(width, height) else {
+        no_gpu_adapter();
+        return;
+    };
+    let near = |got: &image::Rgba<u8>, want: kettle_config::Rgb| {
+        [got[0], got[1], got[2]]
+            .into_iter()
+            .zip([want.r, want.g, want.b])
+            .all(|(a, b)| (i16::from(a) - i16::from(b)).abs() <= 2)
+    };
+    let linear = renderer.config.format.is_srgb();
+    for scale in [1.0_f32, 2.0] {
+        renderer.set_scale(scale);
+        let cfg = Config {
+            theme: kettle_config::Theme::by_name("TokyoNight Night"),
+            background_opacity: 1.0,
+            ..base.clone()
+        };
+        let mut snap = snapshot_of(40, 12, b"$ ls");
+        let text_cell = (
+            renderer.overlay_text_cell_width(),
+            renderer.overlay_text_line_height(),
+        );
+        let panes = [pane(&snap, width, height)];
+        let chip = crate::scrollback::vi_mode_chip(
+            panes[0].terminal,
+            scale,
+            text_cell,
+            cfg.scrollbar_width,
+            None,
+            None,
+            |_| false,
+            &panes[0].tr,
+        )
+        .expect("a chip");
+        let (x, y, w, h) = chip.rect;
+        assert!(x > width as f32 / 2.0 && y < height as f32 / 2.0, "top right: {:?}", chip.rect);
+        let fill = crate::scrollback::scrollback_button_colors(
+            &cfg.theme,
+            linear,
+            crate::color::Backing::opaque(cfg.theme.background),
+        )
+        .rest
+        .fill;
+        let sample = (x + 3.0 * scale, y + h / 2.0);
+        let frame = capture(&mut renderer, &cfg, &panes, &focused(false));
+        let got = frame.get_pixel(sample.0 as u32, sample.1 as u32);
+        assert!(near(got, cfg.theme.background), "scale {scale}: no chip out of vi mode, {got:?}");
+        snap.vi_mode = true;
+        let panes = [pane(&snap, width, height)];
+        let frame = capture(&mut renderer, &cfg, &panes, &focused(false));
+        let got = frame.get_pixel(sample.0 as u32, sample.1 as u32);
+        assert!(near(got, fill), "scale {scale}: chip fill {got:?}, want {fill:?}");
+        let right = frame.get_pixel((x + w - 3.0 * scale) as u32, sample.1 as u32);
+        assert!(near(right, fill), "scale {scale}: chip right {right:?}");
+    }
 }
 }
 

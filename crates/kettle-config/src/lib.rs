@@ -632,7 +632,8 @@ pub enum TextRenderer {
 /// Ghostty's custom GLSL shaders — which pin the GPU to a high frame rate even
 /// when idle — kettle advances on the media's own timestamps (or the starfield's
 /// ~10 fps cap) and freezes when the window is minimized or fully occluded, so a
-/// hidden window costs nothing. A still image ignores this entirely.
+/// hidden window costs nothing. `reduce-motion` holds `Always` and
+/// `WhenFocused` on their current frame. A still image ignores this entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BackgroundAnimation {
     /// Always animate, even when the window is unfocused, because a wallpaper
@@ -1283,12 +1284,14 @@ impl LinkUnderline {
 
 /// Whether Kettle avoids motion it would start on its own (`reduce-motion`):
 /// a video's preview looping while the pointer rests on its lane, the
-/// visual-bell flash and the notification toast's fade. A preview the user
-/// starts plays either way, and the bell mark on the tab shows either way.
+/// visual-bell flash, the toasts' fade, the quick terminal's slide and an
+/// animated background, which holds its frame. A preview the user starts
+/// plays either way, and the bell mark on the tab shows either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReduceMotion {
-    /// Follow macOS Reduce Motion or the Linux Settings portal. If the
-    /// system preference is unavailable, motion is avoided.
+    /// Follow macOS Reduce Motion, or the Linux Settings portal and, where
+    /// it has no preference, GNOME's `enable-animations`. If the desktop says
+    /// neither, motion is allowed.
     #[default]
     Auto,
     /// Always avoid it.
@@ -2746,6 +2749,204 @@ pub fn persist_config_toggle(path: &Path, key: &str, new_value: &str) -> std::io
     edit.commit(&out)
 }
 
+/// Reset a setting to its default in one atomic edit: what a Settings row's
+/// Reset does. Every line that sets one of `keys` goes; lines match as they
+/// do for [`persist_config_toggle`], in the sections Kettle reads, and
+/// `without_config_keys` says what else stays. Where the rest of the file
+/// still does not give the default (`restores` judges the candidate as
+/// Kettle reads it), each `fallback` line is added as
+/// [`persist_config_toggle`] adds a key it does not find; each line added
+/// must be a valid value by itself, and lines not needed are not checked.
+/// The candidate must then restore the default and add no malformed value,
+/// and it is
+/// committed once, under the edit's lock: on an error the file keeps its
+/// bytes, and its value. Returns what was saved, or `None` when the file
+/// already gave the default and nothing was written. A saved file whose
+/// directory could not be synced is saved, with
+/// [`ConfigSaved::not_durable`] set.
+pub fn reset_config_setting(
+    path: &Path,
+    keys: &[&str],
+    fallback: &[(&str, &str)],
+    restores: impl Fn(&Config) -> bool,
+) -> std::io::Result<Option<ConfigSaved>> {
+    reset_config_setting_with(
+        path,
+        keys,
+        fallback,
+        restores,
+        kettle_state::atomic_replace_reporting,
+    )
+}
+
+/// A config edit that reached the file.
+#[derive(Debug)]
+pub struct ConfigSaved {
+    /// The first-write backup of the file.
+    pub backup: PathBuf,
+    /// Set when the new file is in place, so every read sees it, but its
+    /// directory could not be synced: a power loss could bring back the old
+    /// file.
+    pub not_durable: Option<std::io::Error>,
+}
+
+/// How a config edit replaces the file: `kettle_state::atomic_replace_reporting`.
+type ReplaceFile =
+    fn(&Path, &[u8], kettle_state::AtomicWriteOptions) -> std::io::Result<kettle_state::Replaced>;
+
+fn reset_config_setting_with(
+    path: &Path,
+    keys: &[&str],
+    fallback: &[(&str, &str)],
+    restores: impl Fn(&Config) -> bool,
+    replace: ReplaceFile,
+) -> std::io::Result<Option<ConfigSaved>> {
+    for key in keys {
+        validate_single_line("config key", key)?;
+    }
+    let edit = ConfigEdit::begin(path)?;
+    let existing = &edit.document.text;
+    let mut out = without_config_keys(existing, keys).unwrap_or_else(|| existing.clone());
+    if !restores(&Config::parse_text(&out)) {
+        // Each line Reset adds must be valid by itself, as each line
+        // `persist_config_toggle` writes is: a count of diagnostics alone
+        // would let a new one take the place of an old one the removal
+        // clears. Lines a removal alone makes unneeded are not checked.
+        for (key, value) in fallback {
+            validate_single_line("config key", key)?;
+            validate_single_line("config value", value)?;
+        }
+        let added: String = fallback
+            .iter()
+            .map(|(key, value)| format!("{key} = {value}\n"))
+            .collect();
+        if !Config::detect_malformed_values(&added).is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "refusing to reset {keys:?}: a default it would add is not a valid config value"
+                ),
+            ));
+        }
+        let line_ending = preferred_line_ending(existing);
+        for (key, value) in fallback {
+            append_config_line(&mut out, key, value, line_ending);
+        }
+        if !restores(&Config::parse_text(&out)) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("resetting {keys:?} would not restore its default"),
+            ));
+        }
+    }
+    if out == *existing {
+        return Ok(None);
+    }
+    if Config::detect_malformed_values(&out).len() > Config::detect_malformed_values(existing).len()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("refusing to reset {keys:?}: it would introduce a malformed config value"),
+        ));
+    }
+    edit.commit_with(&out, replace).map(Some)
+}
+
+/// The keys besides `key` whose lines also decide its value: an older
+/// name for it, or a Terminator key folded into it. Spellings in the alias
+/// table (`KEY_ALIASES`) and `-`/`_` or case variants already match `key`
+/// itself. A Reset of `key` removes these too. Keys that also carry other
+/// settings are not listed, `font` (the family as well as the size) and
+/// `theme` (the theme as well as a fixed mode): a Reset keeps them and adds
+/// the default after them instead.
+pub fn compatibility_keys(key: &str) -> &'static [&'static str] {
+    match normalize_key(key).as_str() {
+        "bell" => &["visible-bell", "urgent-bell", "force-no-bell"],
+        "osc52" => &["clipboard"],
+        "update_policy" => &["update-check", "check-for-updates"],
+        "scrollback" => &["scrollback-infinite"],
+        _ => &[],
+    }
+}
+
+/// Add `key = value` where Kettle reads it, as [`persist_config_toggle`]
+/// adds a key it does not find: after a blank line at the end of the file,
+/// or at its top when the file ends in a section Kettle does not read.
+fn append_config_line(out: &mut String, key: &str, value: &str, line_ending: &str) {
+    let mut section = parse::Section::default();
+    for segment in out.split_inclusive('\n') {
+        let line = segment.trim();
+        if line.starts_with('[') {
+            section.enter(parse::section_header(line));
+        }
+    }
+    if section.applies() {
+        ensure_blank_line_before_append(out, line_ending);
+        out.push_str(&format!("{key} = {value}{line_ending}"));
+    } else {
+        out.insert_str(0, &format!("{key} = {value}{line_ending}"));
+    }
+}
+
+/// `text` without the lines that set one of `keys` in the sections Kettle
+/// reads, or `None` when no line does. Every other line keeps its bytes,
+/// line ending included, but one: the empty line [`persist_config_toggle`]
+/// leaves before a key it appends goes with that key, when the key ends the
+/// file. A line of spaces or tabs is the user's, as are further empty lines
+/// and those the file ends with after other content.
+fn without_config_keys(text: &str, keys: &[&str]) -> Option<String> {
+    #[derive(PartialEq)]
+    enum Line {
+        Kept,
+        Empty,
+        Removed,
+    }
+    let needles: Vec<String> = keys.iter().map(|key| normalize_key(key)).collect();
+    let mut section = parse::Section::default();
+    let mut lines: Vec<(&str, Line)> = text
+        .split_inclusive('\n')
+        .map(|segment| {
+            let (line, _) = split_line_ending(segment);
+            let kind = if line.trim().starts_with('[') {
+                section.enter(parse::section_header(line.trim()));
+                Line::Kept
+            } else if section.applies()
+                && parse_line_key(line).is_some_and(|key| needles.contains(&normalize_key(key)))
+            {
+                Line::Removed
+            } else if line.is_empty() {
+                Line::Empty
+            } else {
+                Line::Kept
+            };
+            (segment, kind)
+        })
+        .collect();
+    if !lines.iter().any(|(_, kind)| *kind == Line::Removed) {
+        return None;
+    }
+    // From the end: a removed key takes the one empty line just before it.
+    let mut after_removed = false;
+    for (_, kind) in lines.iter_mut().rev() {
+        match kind {
+            Line::Removed => after_removed = true,
+            Line::Empty if after_removed => {
+                *kind = Line::Removed;
+                after_removed = false;
+            }
+            Line::Empty => {}
+            Line::Kept => break,
+        }
+    }
+    Some(
+        lines
+            .into_iter()
+            .filter(|(_, kind)| *kind != Line::Removed)
+            .map(|(segment, _)| segment)
+            .collect(),
+    )
+}
+
 /// Append a `keybind = <trigger>=<action>` line to the user's config
 /// file, atomically and with the same first-write `.bak` backup as
 /// `persist_config_toggle`. `keybind` is *repeatable* (unlike the single-valued
@@ -3143,6 +3344,16 @@ impl ConfigEdit {
     }
 
     fn commit(self, text: &str) -> std::io::Result<PathBuf> {
+        let saved = self.commit_with(text, kettle_state::atomic_replace_reporting)?;
+        match saved.not_durable {
+            None => Ok(saved.backup),
+            Some(error) => Err(error),
+        }
+    }
+
+    /// Commit `text` through `replace`. An error leaves the file as it was;
+    /// a replacement in place whose directory could not be synced is saved.
+    fn commit_with(self, text: &str, replace: ReplaceFile) -> std::io::Result<ConfigSaved> {
         // Editors outside Kettle do not honor our advisory lock. Refuse to
         // overwrite a change made since this edit began.
         let current = match read_config_bytes(&self.path) {
@@ -3168,12 +3379,18 @@ impl ConfigEdit {
             &self.document.bytes,
             kettle_state::AtomicWriteOptions::PRIVATE,
         )?;
-        kettle_state::atomic_replace(
+        let replaced = replace(
             &self.path,
             &encoded,
             kettle_state::AtomicWriteOptions::PRESERVE_PERMISSIONS,
         )?;
-        Ok(self.backup)
+        Ok(ConfigSaved {
+            backup: self.backup,
+            not_durable: match replaced {
+                kettle_state::Replaced::Durable => None,
+                kettle_state::Replaced::NotDurable(error) => Some(error),
+            },
+        })
     }
 }
 
@@ -12877,6 +13094,14 @@ split_horiz = <Control><Shift>j
 
     // Drift guards for `persist_config_toggle`.
 
+    /// Remove `keys` as a Reset with nothing to add does.
+    fn remove(
+        path: &std::path::Path,
+        keys: &[&str],
+    ) -> std::io::Result<Option<super::ConfigSaved>> {
+        super::reset_config_setting(path, keys, &[], |_| true)
+    }
+
     fn tempdir_for(test_name: &str) -> kettle_test_support::PrivateTempDir {
         kettle_test_support::private_tempdir(&format!("kettle-cfg-{test_name}-"))
     }
@@ -13142,6 +13367,293 @@ split_horiz = <Control><Shift>j
                 assert!(text.ends_with("[[work]]\nscrollback_infinite = True\n"));
             }
         }
+    }
+
+    /// Reset removes a key's lines, aliases spelled with underscores or a
+    /// different case included, from the sections Kettle reads, and leaves
+    /// the rest of the file as it was: no explicit default, and no blank
+    /// line left behind from the append that added it.
+    #[test]
+    fn remove_config_keys_drops_the_lines_and_nothing_else() {
+        let dir = tempdir_for("remove-keys");
+        let path = dir.join("config");
+        let original =
+            "# my config\nfont-size = 18\ntheme = Dracula\n\n# padding\nwindow_padding_x = 9\n";
+        write_private_fixture(&path, original);
+        super::persist_config_toggle(&path, "tab-bar-position", "bottom").unwrap();
+        super::persist_config_toggle(&path, "window-padding-y", "9").unwrap();
+        assert!(
+            remove(
+                &path,
+                &["tab-bar-position", "Window-Padding-X", "window-padding-y"]
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# my config\nfont-size = 18\ntheme = Dracula\n\n# padding\n"
+        );
+        remove(&path, &["font-size"]).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, "# my config\ntheme = Dracula\n\n# padding\n");
+        assert_eq!(
+            Config::parse_text(&text).font_size,
+            Config::default().font_size
+        );
+        // Nothing to remove: the file is not written.
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(remove(&path, &["font-size"]).unwrap().is_none());
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before
+        );
+        // A profile Kettle does not read keeps its line.
+        let profiles =
+            "font-size = 18\n[profiles]\n[[default]]\nfont-size = 16\n[[work]]\nfont-size = 20\n";
+        write_private_fixture(&path, profiles);
+        remove(&path, &["font-size"]).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[profiles]\n[[default]]\n[[work]]\nfont-size = 20\n"
+        );
+        assert!(remove(&path, &["bad\nkey"]).is_err());
+    }
+
+    /// Removing a key leaves every unrelated byte as it was: blank lines the
+    /// file ends with after a comment, and each line's own ending in a file
+    /// that mixes them. Only the gap an appended key took before it goes.
+    #[test]
+    fn remove_config_keys_keeps_unrelated_bytes() {
+        let dir = tempdir_for("remove-keys-bytes");
+        let path = dir.join("config");
+        for (original, expected) in [
+            ("font-size = 18\n# EOF comment\n\n\n", "# EOF comment\n\n\n"),
+            ("a = 1\r\nfont-size = 18\nb = 2\r\n", "a = 1\r\nb = 2\r\n"),
+            ("a = 1\r\nb = 2\nfont-size = 18\r\n", "a = 1\r\nb = 2\n"),
+            ("font-size = 18\na = 1", "a = 1"),
+            ("a = 1\n\nfont-size = 18\n", "a = 1\n"),
+            ("a = 1\n\nfont-size = 18\n\n", "a = 1\n\n"),
+            // A line of spaces and tabs is the user's; so is a second
+            // empty line, which the writer never adds.
+            ("# owned\r\n \t\r\nfont-size = 18\r\n", "# owned\r\n \t\r\n"),
+            ("a = 1\n\n\nfont-size = 18\n", "a = 1\n\n"),
+            ("a = 1\n\nb = 2\n\nfont-size = 18\n", "a = 1\n\nb = 2\n"),
+        ] {
+            write_private_fixture(&path, original);
+            remove(&path, &["font-size"]).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                expected,
+                "{original:?}"
+            );
+        }
+    }
+
+    /// A Reset is one edit. Where removing the setting's lines does not give
+    /// the default (another line still sets it), the default is added in the
+    /// same edit, after a line such as `theme` that it must not drop. When
+    /// that candidate cannot be saved, here because it would pass the size
+    /// cap, the file keeps its bytes and its value: the old two-step Reset
+    /// had already committed the removal, leaving `clipboard = both` in force.
+    #[test]
+    fn reset_config_setting_commits_once_or_not_at_all() {
+        let dir = tempdir_for("reset-setting");
+        let path = dir.join("config");
+        let copy = |cfg: &Config| cfg.osc52 == Osc52::Copy;
+        let tail = "clipboard = both\nosc52=off\n";
+        let padding = super::MAX_CONFIG_BYTES as usize - 1 - tail.len() - 2;
+        let original = format!("#{}\n{tail}", "x".repeat(padding));
+        assert_eq!(original.len() as u64, super::MAX_CONFIG_BYTES - 1);
+        write_private_fixture(&path, &original);
+        assert_eq!(Config::parse_text(&original).osc52, Osc52::Off);
+        assert!(
+            super::reset_config_setting(&path, &["osc52"], &[("osc52", "copy")], copy).is_err()
+        );
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after == original,
+            "a failed Reset changed the file: {} bytes, ending {:?}",
+            after.len(),
+            &after[after.len().saturating_sub(40)..]
+        );
+        assert_eq!(Config::load_from(&path).osc52, Osc52::Off);
+        // The same Reset in a small file adds the default after the line
+        // that still sets the value.
+        write_private_fixture(&path, tail);
+        assert!(
+            super::reset_config_setting(&path, &["osc52"], &[("osc52", "copy")], copy)
+                .unwrap()
+                .is_some()
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, "clipboard = both\n\nosc52 = copy\n");
+        assert_eq!(Config::parse_text(&text).osc52, Osc52::Copy);
+        // A theme fixes the mode where `theme-mode` is gone: the default
+        // mode is written after it, and the theme stays.
+        let auto = |cfg: &Config| cfg.theme_mode == ThemeMode::Auto;
+        write_private_fixture(&path, "theme = Dracula\ntheme-mode = dark\n");
+        super::reset_config_setting(&path, &["theme-mode"], &[("theme-mode", "auto")], auto)
+            .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, "theme = Dracula\n\ntheme-mode = auto\n");
+        // Run again, the Reset finds the default in place and writes nothing.
+        assert!(
+            super::reset_config_setting(&path, &["theme-mode"], &[("theme-mode", "auto")], auto)
+                .unwrap()
+                .is_none()
+        );
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(before, "theme = Dracula\n\ntheme-mode = auto\n");
+        assert!(
+            super::reset_config_setting(&path, &["font-size"], &[("font-size", "14")], |_| true)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        // A default line that is not a valid value is refused, even where
+        // the line it would replace was malformed too, the file untouched.
+        let malformed = "font = Mono 18\nfont-size = garbage\n";
+        write_private_fixture(&path, malformed);
+        let size = DEFAULT_FONT_SIZE.to_string();
+        assert!(
+            super::reset_config_setting(
+                &path,
+                &["font-size"],
+                &[("font-size", size.as_str()), ("cursor-blink", "invalid")],
+                |cfg| cfg.font_size == DEFAULT_FONT_SIZE,
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), malformed);
+        // The same lines, unneeded once removal alone restores the default,
+        // are not checked: the reset goes ahead.
+        write_private_fixture(&path, "font-size = 18\n");
+        assert!(
+            super::reset_config_setting(
+                &path,
+                &["font-size"],
+                &[("font-size", size.as_str()), ("cursor-blink", "invalid")],
+                |cfg| cfg.font_size == DEFAULT_FONT_SIZE,
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        write_private_fixture(&path, &before);
+        // A default that cannot be reached is refused, the file untouched.
+        assert!(super::reset_config_setting(&path, &["theme-mode"], &[], |_| false).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    /// An older name or a Terminator key that still sets a value goes with
+    /// it on Reset, so removal alone restores the default and nothing is
+    /// pinned: `update-check` for `update-policy`, `clipboard` for `osc52`,
+    /// Terminator's bell pair and `force_no_bell` for `bell`, and
+    /// `scrollback_infinite` for the line count. A Reset of Clipboard
+    /// access then fits a file at the size cap.
+    #[test]
+    fn reset_clears_a_settings_compatibility_keys() {
+        let dir = tempdir_for("reset-compat");
+        let path = dir.join("config");
+        let defaults = Config::default();
+        type Same = fn(&Config, &Config) -> bool;
+        let cases: [(&str, &str, Same); 5] = [
+            (
+                "update-policy",
+                "update-check = false\nupdate-policy = notify\ncheck-for-updates = no\n",
+                |a, b| a.update_policy == b.update_policy,
+            ),
+            ("osc52", "clipboard = both\nosc52 = paste\n", |a, b| {
+                a.osc52 == b.osc52
+            }),
+            (
+                "bell",
+                "[global_config]\nvisible_bell = True\nurgent_bell = False\n",
+                |a, b| a.bell == b.bell,
+            ),
+            ("bell", "bell = both\nforce_no_bell = True\n", |a, b| {
+                a.bell == b.bell && a.force_no_bell == b.force_no_bell
+            }),
+            (
+                "scrollback",
+                "scrollback_infinite = True\nscrollback_lines = 100\n",
+                |a, b| a.scrollback == b.scrollback,
+            ),
+        ];
+        for (key, original, same) in cases {
+            write_private_fixture(&path, original);
+            assert!(
+                !same(&Config::parse_text(original), &defaults),
+                "{original:?}"
+            );
+            let mut keys = vec![key];
+            keys.extend(super::compatibility_keys(key));
+            super::reset_config_setting(&path, &keys, &[], |cfg| same(cfg, &defaults))
+                .unwrap_or_else(|error| panic!("{key}: {error}"));
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert!(
+                same(&Config::parse_text(&text), &defaults),
+                "{key}: {text:?}"
+            );
+        }
+        assert!(super::compatibility_keys("font-size").is_empty());
+        assert!(super::compatibility_keys("theme-mode").is_empty());
+        let tail = "clipboard = both\nosc52=off\n";
+        let original = format!(
+            "#{}\n{tail}",
+            "x".repeat(super::MAX_CONFIG_BYTES as usize - 1 - tail.len() - 2)
+        );
+        write_private_fixture(&path, &original);
+        let mut keys = vec!["osc52"];
+        keys.extend(super::compatibility_keys("osc52"));
+        super::reset_config_setting(&path, &keys, &[("osc52", "copy")], |cfg| {
+            cfg.osc52 == Osc52::Copy
+        })
+        .unwrap();
+        assert_eq!(Config::load_from(&path).osc52, Osc52::Copy);
+    }
+
+    /// Once the reset file is in place, failing to sync its directory does
+    /// not make the Reset a failure: it reports the file saved, warned that
+    /// it may not survive a power loss, so Settings reloads it. A failure
+    /// before the file is in place is an error, the file as it was.
+    #[test]
+    fn reset_config_setting_reports_a_saved_file_it_could_not_sync() {
+        let dir = tempdir_for("reset-not-durable");
+        let path = dir.join("config");
+        write_private_fixture(&path, "font-size = 18\n");
+        let saved = super::reset_config_setting_with(
+            &path,
+            &["font-size"],
+            &[],
+            |_| true,
+            |path, bytes, options| {
+                kettle_state::atomic_replace(path, bytes, options)?;
+                Ok(kettle_state::Replaced::NotDurable(std::io::Error::other(
+                    "injected EIO",
+                )))
+            },
+        )
+        .unwrap()
+        .expect("the file changed");
+        assert_eq!(
+            saved.not_durable.map(|error| error.to_string()).as_deref(),
+            Some("injected EIO")
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "");
+        write_private_fixture(&path, "font-size = 18\n");
+        assert!(
+            super::reset_config_setting_with(
+                &path,
+                &["font-size"],
+                &[],
+                |_| true,
+                |_, _, _| { Err(std::io::Error::other("rename failed")) }
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "font-size = 18\n");
     }
 
     /// Writing a new key into an empty config appends it.

@@ -202,7 +202,7 @@ impl App {
         linux_window_control_layout_with_preferences(
             band,
             ws.window.as_ref().is_some_and(|w| w.is_maximized()),
-            ws.native_pointer.map(|p| (p.x as f32, p.y as f32)),
+            chrome_pointer(ws),
             ws.pressed_window_control,
             &self.ui_text,
             preferences,
@@ -307,13 +307,11 @@ impl App {
     }
 }
 
-pub(super) fn window_control_tooltip_label(
+/// The window button whose tooltip shows: hovered and not held.
+pub(super) fn hovered_window_control_button(
     controls: &[kettle_render::WindowControlButton],
-) -> Option<&str> {
-    controls
-        .iter()
-        .find(|b| b.hovered && !b.pressed)
-        .map(|b| b.label.as_str())
+) -> Option<&kettle_render::WindowControlButton> {
+    controls.iter().find(|b| b.hovered && !b.pressed)
 }
 
 /// The window buttons in the header `band`, laid out as libadwaita does:

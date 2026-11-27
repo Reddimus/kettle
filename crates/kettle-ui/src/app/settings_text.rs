@@ -36,11 +36,8 @@ pub(super) fn settings_footer_note(
             notes.push(tr.text(Text::SettingsNoteBlur));
         }
         Some("completion-overlay") => notes.push(tr.text(Text::SettingsNoteNewShells)),
-        // A new window keeps the process's language, unlike the changes the
-        // general restart note covers.
-        Some("language") if !language_pending => {
-            notes.push(tr.text(Text::SettingsNoteLanguage));
-        }
+        // The Language row's description already says a change waits for a
+        // restart; the footer says so only once one is waiting.
         _ => {}
     }
     if language_pending {
@@ -117,6 +114,22 @@ pub(super) fn agent_previews_note(
     } else {
         Text::SettingsNoteAgentPreviews
     }
+}
+
+/// The Settings panel's title: the open category's name, or while the
+/// search field holds a query, which lists rows from every category,
+/// "Search results".
+pub(super) fn settings_title(
+    tr: &kettle_i18n::Translator,
+    category: kettle_i18n::Text,
+    query: &str,
+) -> String {
+    let title = if query.is_empty() {
+        category
+    } else {
+        kettle_i18n::Text::SettingsSearchResults
+    };
+    tr.text(title).to_string()
 }
 
 /// The Settings footer: each key followed by what it does, the groups apart

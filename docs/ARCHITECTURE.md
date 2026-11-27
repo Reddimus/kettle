@@ -1465,9 +1465,14 @@ lane request (`Tab::lanes`, by pane: side, share and whether expanded) is
 transient: never saved, cleared from a torn-off tab, and pruned with its
 pane. `partition_leaf` carves the lane in whole terminal cells and keeps
 the terminal at 20 columns and 5 rows at least; a lane without room to
-expand (a right one needs 16 columns for its header) is a one-row strip
-along the body's bottom whichever its side, and one without room for that a
-badge that changes nothing. Opening a lane into a badge is refused with a
+expand (a right one needs 16 columns for its header, a bottom one 4 rows and
+the room its header's buttons need above its resize edge) is a strip along
+the body's bottom whichever its side, and one without room for that a badge
+that changes nothing. The strip is as tall as its header's buttons need to be
+24-point targets (`Metrics::with_lane_header`, from
+`kettle_render::media_lane_header_room`) in whole terminal rows when the
+terminal keeps its 5 rows with that, and one row when it does not; with
+17.5 px rows in a 300 px leaf it takes two rows, leaving 15. Opening a lane into a badge is refused with a
 notice. What a lane shows is `WindowState::preview_panels` (by
 pane, the shelf item); `prune_previews`, on every pass of the event loop,
 closes a lane whose pane closed or left the window or whose item left the
@@ -1934,7 +1939,13 @@ The search bar owns the keyboard but not the pointer. It is a reserved lane
 below the grid, so `App::any_modal_open` (keyboard, file drops,
 focus-follows-mouse) includes it while `App::pointer_modal_open` (the mouse
 arms and the cursor icon) does not; both derive from one
-`non_search_modal_open` list so they cannot drift on anything else. The pure
+`non_search_modal` list so they cannot drift on anything else
+(`modal_owns_pointer` answers `pointer_modal_open` for code that has only the
+window). Chrome under a pointer modal takes no press, so it shows no hover:
+`chrome_pointer` is `None` then, and `hover_tab_bar` clears the tab, `✕`,
+button and window-control hover, with the hand cursor and tooltips they drive,
+on the first frame after a modal opens. The Settings gear keeps its hover over
+open Settings, where a press on it still arms it. The pure
 `search_pointer_route` decides each pointer event by geometry: a press inside
 the lane goes to the bar's controls, a press above it is ordinary grid input,
 and motion or release follow whichever gesture is live (an editor drag keeps
@@ -1954,6 +1965,11 @@ so lines above the lane stay put. A focused result's pane takes back no more
 than it is scrolled up, keeping its first visible row. The right-click menu is
 the one modal allowed to coexist with the bar; keys go to the menu while it is
 up because its arm precedes search in the key handler.
+The bar's AccessKit `Search` region has one polite `Status`
+(`search_status_nodes`): the match count, then the search's own status when
+the bar paints one (Wrapped, Invalid pattern), over both painted rects. Match
+and No matches are left to the count, and a bar that shows neither has no
+status node, so the live region always has a name.
 
 Modal text fields and search share `kettle-ui::text_editor::TextEditor`: one
 bounded UTF-8 string, a caret and an optional selection anchor on extended
@@ -1983,7 +1999,10 @@ the suffix, and commits through the same editor. IME candidate placement shapes
 the exact same projection, including preedit, rather than estimating text widths.
 Native and control pointer routes both place the caret and extend drag selections
 from those shaped stops. A pointer press ends composition before mapping into
-committed text.
+committed text. `text_field_press_rect` says where a press reaches a field (a
+picker's whole header, else the slot between prefix and hint), and the cursor
+shows the I-beam over that same rect, as it does over open Settings' search box
+and the find bar's editor.
 
 The SSH launcher's rows come from one model, `SshRow` in
 `kettle-ui::app::pickers`. A host whose name or alias equals the trimmed query
@@ -2007,7 +2026,8 @@ configured name or target equals, or `Remove` when row 0 is the configured
 host the query names. `SshRow::is_action` keeps them out of everything but a
 deliberate Down or a press on the row: the Up wrap, the clamp after the list
 shrinks, and the wheel limit in `apply_picker_pointer` all skip them, and a
-hover selects nothing. Save opens the title editor with
+hover only lights them (`PickerView::prelight`, painted as
+`ContextMenuRow::prelit`) without selecting them. Save opens the title editor with
 `TitleEditScope::SaveSshHost` and `TitleEditTarget::SshHost`, which no pane
 exit makes stale. Remove and a Save over an existing name go through
 `ConfirmAction::RemoveSshHost` and `ReplaceSshHost`, Cancel first. The
@@ -2040,11 +2060,78 @@ contiguously, as `screen` does in `fullscreen`) the palette leaves
 out rows the query only lies scattered through. Command labels accent the
 characters of the alignment that ranked the row; English alias matches in
 Spanish have no accent unless the displayed label also matches. The whole card counts
-as inside. Any pointer press cancels a keyboard-only hint. Settings closes
+as inside. A pointer that moves over a row selects it (`picker_hover`), the
+quick-pick rule of editors: `PickerView::pointer_seen` is the pointer position
+the picker last saw, set when it opens, on each of its keys
+(`note_picker_keys`) and on each wheel step, so rows that scroll or change
+under a still pointer are never selected and the keyboard's selection holds
+until the pointer really moves. A row a hover may not select is lit instead.
+The keyboard previews the theme it selects at once; a theme the pointer
+selects previews once the pointer has rested on its row 150 ms
+(`PickerView::pointer_preview`, which `theme_preview_change` waits for and
+`about_to_wait_inner` wakes for), so a sweep across the list does not flash
+themes. Each motion within the row starts the wait again, and leaving the
+row or the window (`picker_pointer_left`) drops it until the pointer rests on
+a row or a key previews. A click runs the row as
+Enter does. Any pointer press cancels a keyboard-only hint. Settings closes
 on a press outside its panel; an active path editor or keybinding capture instead
 cancels only that capture on a press outside its focused row. Confirmation dialogs
 keep their question and consume outside presses. The search lane and vi mode keep
 their existing pointer behavior because they are not transient popups.
+
+The pickers, Settings and title editing are modal `Dialog` nodes in the
+accessibility tree, as the confirmation's `AlertDialog` is: each owns the
+keyboard and the pointer while open. A node with a selected state never acts
+on a `Click`: AccessKit's adapters turn selecting a selectable item (macOS
+`setAccessibilitySelected:` and `AXPick`, AT-SPI `Selection.SelectChild`,
+`DeselectChild` and `DeselectSelectedChild`, UIA `SelectionItem`, which needs
+no Click support) into the same `Click` a press sends, with nothing to tell
+them apart. Every enabled picker option has Focus and Click, and both only
+highlight it, as the arrow keys do; the theme picker previews it as they do,
+at once, since the selection takes the keyboard's bookkeeping
+(`select_accessible_picker_option` calls `note_picker_keys`), so a hover
+preview the pointer left pending never holds it back. The picker acts on its highlighted result only from
+its Choose button ("Choose Split right"), a `Button` with no selected state
+beside the list, bound to that result and painted nowhere, as a zero-width
+line at the row's end: its Click gives the picker its own Enter
+(`press_picker_enter`), as `picker_pointer` does for a click on the row, so
+the SSH launcher's Save and Remove still open their own steps. Settings
+follows the same rule: Focus and Click on a row only select it, and the
+selected row's Change button (bound to the row's category and label, over its
+painted control) changes it through `settings_adjust` as a left-click on the
+row does, beside
+the Reset button.
+`accessibility_picker_request` maps a request to the value the picker's
+selection holds (a command for the palette, a row elsewhere). Each
+quick-select label that still matches what has been typed has a press too,
+which runs `act_hint` without Shift, as typing the label does; labels have no
+selected state. A dimmed label and a disabled placeholder have no press.
+The hovered link's `Link` node has a press too, which opens the link under
+the pointer through `open_pane_link`, as the click its status names does.
+
+A node a screen reader can act on is bound to its target, not to its place:
+its AccessKit id is a hash of the target (`accessibility_bound_id`), above
+every modal kind's ids. A picker option's id comes from what it acts on, as
+its builder names it in `ContextMenuRow::a11y_key` (the command, the layout,
+the theme, the SSH row's kind and host or target), else from its whole name,
+and how many options above it share that (`accessibility_picker_option_ids`).
+It is bound before the label is fitted to the panel, so two long names that fit
+to one painted label stay two results, and the option and its Choose button
+are named with the whole name (`ContextMenuRow::a11y_name`). A
+quick-select label's from its label, pane, cell and text (a card's cell, never
+its nonce) and whether its quick select is for previews
+(`bind_hint_accessibility` gives the window's labels these ids), and
+the hovered link's from its status target and painted bounds. Adapters queue
+requests against the tree they last received, so a request that arrives after
+the view changed names a node the current view does not hold and is dropped,
+where a place-based id would act on whatever took that place. The
+accessibility key hashes what each bound id is made from (a picker row's
+`a11y_key` and `a11y_name` through `hash_accessible_menu_rows`, each
+quick-select label's bound id, the link status's target and bounds, a Settings
+row's category and label), so a change that only rebinds a node, such as a
+reload that moves an SSH host to another target, still republishes the tree.
+Opening still
+goes through `open_pane_link` and the picker's own Enter, with their checks.
 
 The context menu retains its platform convention: left/middle presses outside
 it, including in the terminal, dismiss and consume; an outside right press
@@ -2158,7 +2245,11 @@ starts the strip, and clamps the grab offset inside that tab.
 The menu owns its origin through shell-discovery replacement and submenu
 navigation. Only the macOS new-tab menu omits Settings through About; its
 origin also supplies the accessible name and expanded/pressed state, and
-clears with the menu. AccessKit children follow each strip's screen order.
+clears with the menu. The AccessKit tab list holds only the tabs; the
+strip's own buttons (New tab, the new-tab menu, the gear, and in the GNOME
+header Find, the main menu and the window buttons) sit beside it in a
+`Toolbar` named "Tab bar controls" (`tab_strip_roots`), and each container's
+children follow the strip's screen order.
 On macOS the dropdown uses the ComboBox role, mapped to AXPopUpButton, and a
 toggled value for open state because this adapter drops HasPopup/expanded.
 While the menu is open, only its popup remains in the strip's accessibility
@@ -4470,7 +4561,14 @@ at low idle cost. The clock that places the stars stays continuous, so each
 repaint shows the exact position. The animated background (starfield or image)
 plays by default even when unfocused, but the event loop **freezes the wake
 when the window is minimized or occluded** (`window_occluded` +
-`is_minimized`), so a hidden window costs zero idle.
+`is_minimized`), so a hidden window costs zero idle. Reduced motion holds it:
+before it schedules or draws a frame, the app passes `motion_allowed` to
+`Renderer::set_background_motion`, which stops the shared `background_clock`
+at that moment, so a repaint shows the same frame and `background_is_animating`
+asks for no wakes. When motion returns, each clock moves on by the part of the
+pause it lived through (`resumed_clock`): playback resumes from the held
+frame, and an image decoded during the hold starts on its first frame.
+`background-animation = off` still shows frame 0.
 
 The **settings overlay is mouse-driven**: `kettle_render::settings_hit_test`
 recomputes the panel geometry from the SAME `settings_display_lines` + panel math
@@ -4487,11 +4585,18 @@ a later surface batch, it would paint over them and leave the menu blank.
 
 Each open menu level, and a picker's card, is a rounded panel (about 10
 logical pixels) on a shadow of four concentric low-opacity rounded layers,
-with the highlighted row drawn as an inset rounded selection. A picker whose
+with the highlighted row drawn as an inset rounded selection, and a prelit row
+(one a hover lights without selecting) as the same inset at half its accent. A picker whose
 results overflow also gets a decorative scrollbar thumb, a rounded pill in the
 gap between the selection's right inset and the border, drawn after the
 selection; its rows fill the panel from the header down, since pickers scroll
-with the selection and the wheel and keep no arrow strips. The panel's
+with the keys and the wheel and keep no arrow strips. The wheel scrolls the
+list only (`PickerView::scroll`): the selection stays while it is in view, and
+one the list scrolls past moves to the nearest row in view the wheel may
+select, or to the first one past a view that holds none, such as a one-row
+view on a group heading, so each detent moves the list on. Each frame records where it drew the list (`remember_picker_scroll`),
+and the keys move it from there only as far as keeps the selection in view
+(`picker_scroll_offset_from`). The panel's
 border is blended over the panel colour and drawn opaque, because the shader
 leaves the fill out of the border band; a translucent border would let the
 level beneath show through the edge. These are
@@ -4909,8 +5014,12 @@ non-regression claim.
   (one visible, three waiting; repeats and overflow are counted on toasts,
   never by evicting the visible one), is painted through the update toast's
   painter as one of the overlay's notices, and keeps its time in the update
-  toast's `ToastClock`. A desktop delivery is remembered in
-  `PendingDesktop` (64 entries, 60 s) under the id the worker reports
+  toast's `ToastClock`. A paused clock (hover or assistive focus) reports full
+  opacity, and resuming leaves at least three seconds, so a toast caught
+  mid-fade shows whole and later fades from the start; each tick compares
+  the opacity drawn before it with the one after and repaints once when a
+  pause changed it (`ToastClock::needs_frame`). A desktop delivery is
+  remembered in `PendingDesktop` (64 entries, 60 s) under the id the worker reports
   failures with, so a refused or failed one is queued as a toast in its own
   window. No path logs or stores the text.
 - **One process-wide desktop-notification worker** — every OSC 9/777, Lua,
@@ -5309,7 +5418,14 @@ selection, and renders the captured native state. The UI's `ViState` stores
 only the owning pane and whether visual selection is active; the visual kind
 (`v`, `V`, Ctrl-v) is the engine selection's own `SelectionType`. This single-owner
 model keeps viewport following, reflow, scrollback rotation, and selection
-invalidation consistent with the grid.
+invalidation consistent with the grid. The renderer marks the mode from the
+captured `PaneSnapshot::vi_mode` with a chip (`scrollback::vi_mode_chip`) in the
+kept-history label's lane and style: top right, else bottom right above the
+jump button, placed only where `rect_covers_text` finds no text, cursor or
+selection under it, and left out when both places are covered. It looks for
+them where the frame drew them: in a row with right-to-left text, at the
+visual columns of that frame's bidi layout (`PaneBidi`), not at their
+logical cells.
 
 ## Key design choices
 
@@ -5361,6 +5477,58 @@ and atomic config write-back via `persist_config_toggle`; its
 opt-in keys, and an opt-in pre-commit hook (`.githooks/pre-commit`) catches
 clippy / fmt / test / shellcheck / rustdoc regressions at commit time.
 A submenu restores its parent's selected row and scroll position when it closes.
+Hover goes through the pure `app/menu_pointer.rs`: a submenu row opens after a
+200 ms dwell (a click or Right opens it at once), and an open submenu holds
+while the pointer crosses its parent's other rows inside the triangle from the
+pointer's last position to the side of the submenu it faces (the two corners
+that bound the submenu seen from there, so a submenu that opened over its
+parent, or that the pointer approaches from below, counts too), giving way
+300 ms after the pointer leaves that triangle or comes to rest. A pointer off
+every panel (off the window included, until it moves in the window again,
+whatever its last position there was over) starts the same wait, and at its
+end every submenu closes; a submenu opened from the keyboard, with a pointer
+that was never over the menu, stays. A
+pointer at rest sends no events, so `about_to_wait` wakes once at the pending
+deadline
+(`context_menu_pointer_tick`); nothing redraws until the hover changes.
+Hovering a row that cannot run (a disabled Copy, an information line) leaves
+the highlight where it was, so the lit row is always one Enter can run.
+A pointer that leaves the menu's panels, or the window, with no submenu open
+clears the highlight, as macOS and GTK menus do: the overlay and `ctl`
+report no row (`usize::MAX`, `null`), Enter runs nothing, and the next arrow
+starts from the first or last row. A menu opened under the pointer, as a
+right-click opens it, counts as entered there, so a first motion off it
+clears the highlight too. A pointer that was never over the menu, as with one
+opened from the keyboard, leaves the highlight alone.
+`place_context_menu` opens a menu below its anchor and flips it above when it
+does not fit there, as GTK and macOS do. A right-click's anchor is the pointer,
+and a menu too tall for either side slides onto the window. A menu opened
+from the keyboard is anchored on the text cursor's line: too tall for either
+side, it takes the roomier one and is held short enough to leave the line in
+view (`ContextMenuSession::root_max_h`), and scrolls; with not one complete row
+of room beside the line it does not open, rather than cover the line or run
+off the window. A resize places it again beside the cursor's line once the
+terminals have reflowed (`follow_line_menu`), closing it if no row fits; a
+move closes its open submenus, which hung off its rows where they were, and
+leaves lit the row that opened them (`place_menu_root`).
+A right-click on a tab segment, native or through `ctl`, opens that tab's
+menu (`open_tab_menu`): Rename Tab…, Duplicate Tab, Move Tab Left/Right and
+Close Tab, as ordinary action rows. Like the terminal's menu it leaves an open
+Find bar, and its search, in place (`close_modals_for_context_menu`). The menu records the tab by the panes it
+holds (`ContextMenuSession::tab`), so a shell exiting meanwhile cannot
+retarget it, and the menu closes once that tab is gone
+(`dismiss_orphaned_tab_menu`, checked each event-loop turn).
+`step_tab_menu_row` finds the tab wherever it has moved and `act_on_menu_tab`
+runs the row on it: Close asks as the tab's ✕ does, Move uses
+`Mux::nudge_tab` and leaves the active tab active,
+and Rename and Duplicate bring the tab forward first. Close Other Tabs, a row
+no action runs (`ContextMenuItem::CloseOtherTabs`), asks once with
+`confirm_close` over all the other tabs' panes and busy count
+(`other_tabs_close_scope`). The question records those panes
+(`ConfirmAction::CloseOtherTabs { keep, panes }`), and on acceptance
+`Mux::close_tabs_except` closes only them: a tab all of whose panes were asked
+about closes whole, last first, a tab split since loses only its old panes, and
+a tab opened since stays. The kept tab ends active.
 
 Other additions:
 
@@ -6098,6 +6266,9 @@ for both size-chip text preparation and drawing, suppressing it under Settings
 or a picker card. After a font-size action kettle-ui sets
 `Overlay::resize_overlay_text` to the translated size and grid; the chip is
 sized from the shaped text, and the same string is a polite live region.
+The chip is static: the resize or font change that shows it draws it, and
+`about_to_wait_inner` wakes once at its expiry (`resize_chip_wait`) for the
+frame that erases it, rather than redrawing it at the ~30 fps animation tick.
 
 ### Paste consent and context-menu nesting
 
@@ -6328,14 +6499,20 @@ Link hover and hint chrome use `kettle-render::PaneStatus` projections from the
 focused terminal rectangle. `link_status_layout` shares destination elision and
 avoidance bounds across painting, AccessKit and `ui_geometry`; hint chips share
 `hint_label_rect`. The legend wraps and moves clear of bottom-row chips when
-space permits. All are passive overlays, so they reserve no terminal cells and
+space permits. Quick select with nothing to label shows "No hints here" in
+the legend's place for three seconds (`NoHintsNotice`, `no_hints_status`),
+which the scheduler expires and which a screen reader hears as a polite
+status. All are passive overlays, so they reserve no terminal cells and
 do not change pointer grid mapping or terminal IME placement. A hover records
 `LinksScanKey` at native pointer movement and becomes invalid on viewport or
 focus changes. Typing, wheel input, pointer exit and focus events explicitly
 dismiss it. Modifier presses preserve it so the advertised opening gesture
 remains visible. A selection drag suspends hover in `link_under_native_pointer`,
 and `link_rects` clears the hover flag of a link group any of whose cells is
-selected, leaving its status and hand cursor. Hint actions and their legend share `hint_action`; OSC 8
+selected, leaving its status and hand cursor. The hand also needs
+`link_click_opens`, the test the press makes (`link-single-click`, or Ctrl or
+Cmd held), so a plain hover keeps the I-beam and a modifier change re-syncs the
+cursor. Hint actions and their legend share `hint_action`; OSC 8
 captions use the URI rather than their displayed text. The underlines
 themselves are pane quads: `terminal::link_decoration` picks each line from
 the link's hover state, its source and `link-underline`, and pane quads are
@@ -6425,6 +6602,37 @@ System appearance is observed independently of a window's rendered palette.
 Linux appearance and reduced motion share a bounded XDG Settings worker
 transport (`kettle-ui/src/portal_settings.rs`): subscriptions precede snapshots,
 owner changes invalidate state, and retries and shutdown stay off the UI thread.
+Reduced motion reads `org.freedesktop.appearance reduced-motion`; only where the
+portal has none does `motion::SystemMotion` start a second watch, on GNOME's
+`org.gnome.desktop.interface enable-animations` through the same portal
+(`Preference::resolve`). Where the portal has neither key, or there is no
+portal, a GNOME-like session (`XDG_CURRENT_DESKTOP`) reads GNOME's own switch
+with the first `gsettings` on an absolute `PATH` entry that the process may
+run (as `faccessat` decides it for the effective user) and that starts: the
+search moves past one that cannot be started, such as a script whose
+interpreter is missing, all within the read's deadline and stop, so an
+unusable one earlier in `PATH` cannot hide a working one. The search yields
+one item per `PATH` entry, hit or miss, and the deadline and stop are checked
+before each entry is looked at, so a lookup held past either (a hung mount)
+is the last one that search starts. The one that ran
+is kept for the refreshes until it no longer starts; one that never started
+is not kept, so each refresh searches again and finds a later fix
+(`motion/gnome_local.rs`, `Preference::linux`). Finding `gsettings` and the read run on the watch's
+own thread. The first answer is due two seconds after the watch starts,
+lookup included, and is no longer pending then even if the thread is still
+held in the filesystem; each later read has two seconds and 64 bytes of
+output. A read's child is killed and reaped when it overruns or the watch is
+dropped, and no child starts past a read's deadline or after the stop. The
+read is repeated every 30 seconds so a change applies, and a failed one keeps
+the last answer. Dropping the watch never waits on the filesystem: it stops
+the thread and joins it within half a second, and otherwise leaves a thread
+held in a lookup or spawn to end on its own. A watch distinguishes a pending first answer, which holds motion
+back until the desktop answers or a bounded call fails, from an unavailable
+one. Under `auto` the portal watch starts on the first event-loop turn, the
+portal's GNOME watch as soon as the portal says it has no `reduced-motion`,
+and the local read once neither has an answer (`SystemMotion::prepare`), so
+that wait ends before the first motion. A desktop that says nothing allows
+motion.
 That worker and every other session-bus connection Kettle opens itself (global
 shortcuts, notifications, the image viewer and file-manager hand-offs) connect
 through `kettle-ui/src/dbus_bound.rs`, which reads each message's 16-byte
@@ -6496,7 +6704,14 @@ presses are consumed. The 6 logical pixel inner resize band takes priority over
 header input and uses `drag_resize_window`, except when maximized, fullscreen
 or non-resizable. Tiled windows retain the band because tiled state is not
 available. Native window controls activate on release over
-the originally pressed control. Close follows the native `CloseRequested`
+the originally pressed control, and so do `+`, Find and the Settings gear
+(`press_strip_button` / `release_strip_button`, `release_settings_gear`): each
+shows pressed while the pointer stays on it, and a release anywhere else
+cancels. A modal that takes the pointer while one is held ends its press
+(`WindowState::cancel_strip_presses`), so the release does nothing even after
+the modal has closed, and so does the next primary press, native or ctl, so a
+press whose release never came cannot take a later click's release. The `▾` (GNOME's `≡`) is a menu button and opens on press, as GTK's
+and AppKit's do; the overflow arrows step on press. Close follows the native `CloseRequested`
 confirmation policy; AccessKit exposes the same actions. Synthetic control
 input can activate buttons but does not impersonate a compositor drag serial.
 The shared `portal_settings.rs` watcher also reads GNOME button-layout beside

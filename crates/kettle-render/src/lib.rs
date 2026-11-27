@@ -66,7 +66,7 @@ pub use theme_picker::{
     theme_footer_layout, theme_footer_min_columns, theme_footer_slots, theme_readability,
 };
 
-use background::{BgImageAnim, BgImageWorker, starfield_time};
+use background::{BgImageAnim, BgImageWorker, background_clock, starfield_time};
 #[cfg(test)]
 use background::{BgImageJob, BgImageResult};
 #[cfg(test)]
@@ -136,6 +136,7 @@ pub(crate) const TAB_CLOSE_GLYPH_SCALE: f32 = 1.5;
 
 pub use labels::{
     display_width, fit_pane_titlebar_title, fit_tab_segment_title, tab_segment_label,
+    tab_segment_label_cut,
 };
 #[cfg(test)]
 use labels::{fit_tab_path, fit_tab_title};
@@ -194,7 +195,7 @@ use search::{search_bar_text, search_editor_label, search_focused_label};
 use settings::SettingsTextKind;
 use settings::settings_text_items;
 pub use settings::{
-    SettingsControl, SettingsHintLine, SettingsHit, SettingsLayout, SettingsOverlay,
+    SettingsControl, SettingsHintLine, SettingsHit, SettingsHover, SettingsLayout, SettingsOverlay,
     SettingsPanelGeometry, SettingsResetChip, SettingsRow, SettingsRowGeometry,
     settings_control_height, settings_hit_test, settings_hit_test_with_text_width, settings_layout,
     settings_panel_geometry, settings_value_rect,
@@ -404,7 +405,8 @@ const _: () = assert!(TEXT_FIELD_PLACEHOLDER_SEGMENT < SEARCH_SEGMENTS);
 pub use media_lane::{
     MediaCanvas, MediaLaneEdge, MediaLaneFrame, MediaLaneGeometry, MediaLaneHit, MediaLaneMode,
     MediaLanePanel, MediaLanePlay, MediaLaneScrubber, MediaLaneSender, MediaLaneSound,
-    MediaLaneSource, MediaLaneTile, media_lane_geometry, media_lane_geometry_scaled,
+    MediaLaneSource, MediaLaneTile, media_lane_control_enabled, media_lane_geometry,
+    media_lane_geometry_scaled, media_lane_header_room,
 };
 
 pub use media_viewport::{MAX_MEDIA_ZOOM, MEDIA_ZOOM_STEP, MIN_MEDIA_ZOOM, MediaViewport};
@@ -710,6 +712,8 @@ pub struct Renderer {
     new_tab_arrow_buffer: TextBuffer,
     tab_tooltip_buffer: TextBuffer,
     tab_tooltip_text: String,
+    /// The line cap, wrap width and text size the tooltip was shaped for.
+    tab_tooltip_fit: (usize, u32, u32),
     /// The Settings gear's coverage at its last side length, so a frame
     /// reuses it instead of rasterizing the gear again.
     settings_gear_mask: tab_strip::GearMask,
@@ -846,10 +850,14 @@ pub struct Renderer {
     /// (just a per-frame uniform); the only state is `starfield_started`.
     starfield: StarfieldLayer,
     presentation: PresentLayer,
-    /// Playback clock for the starfield drift — `elapsed()` feeds the shader's
-    /// continuous `time` so motion is smooth-valued even though we repaint at a
-    /// low fps cap.
+    /// Playback clock for the starfield drift — its `background_clock` feeds
+    /// the shader's continuous `time` so motion is smooth-valued even though
+    /// we repaint at a low fps cap.
     starfield_started: std::time::Instant,
+    /// When reduced motion stopped the animated backgrounds, while it holds
+    /// them (`set_background_motion`): the starfield and an animated image
+    /// show the frame of that moment and ask for no frames.
+    background_held: Option<std::time::Instant>,
     /// Terminator parity, bg-image: decoded background-image cache, keyed on
     /// `(path, blur_radius)` so a `background-blur` toggle re-decodes even when
     /// the image path is unchanged.
@@ -943,6 +951,9 @@ mod bg_image_worker_tests;
 
 #[cfg(test)]
 mod starfield_time_tests;
+
+#[cfg(test)]
+mod background_motion_tests;
 
 impl Renderer {
     pub fn render_frame(
@@ -1054,6 +1065,7 @@ impl Renderer {
                 invalidate_pane_titlebar_texts(&mut self.pane_titlebar_texts);
                 self.tab_texts.clear();
                 self.tab_tooltip_text.clear();
+                self.tab_tooltip_fit = (0, 0, 0);
                 self.tab_close_text.clear();
                 self.tabbar_text.clear();
                 self.new_tab_arrow_text.clear();
@@ -1359,11 +1371,13 @@ impl Renderer {
             self.apply_bg_image_worker_result(&want, blur_radius);
             // Select the frame to display now. A still image (1 frame) or
             // `background-animation = off` shows frame 0; otherwise the
-            // playback clock loops through frames at their own gaps. Focus does
-            // NOT gate the index (so an output-driven repaint while unfocused
-            // still shows the time-correct frame, no jump); focus only gates
-            // whether the render loop PROACTIVELY wakes to animate, via
+            // playback clock loops through frames at their own gaps, and
+            // reduced motion stops that clock. Focus does NOT gate the index
+            // (so an output-driven repaint while unfocused still shows the
+            // time-correct frame, no jump); focus only gates whether the
+            // render loop PROACTIVELY wakes to animate, via
             // `background_is_animating` feeding the anim tick.
+            let held = self.background_held;
             let bg_frame: Option<(&kettle_core::ImageData, bool)> = self
                 .bg_image_cache
                 .as_ref()
@@ -1372,7 +1386,10 @@ impl Renderer {
                     let idx = if c.frames.len() > 1
                         && cfg.background_animation != kettle_config::BackgroundAnimation::Off
                     {
-                        bg_image::bg_current_frame(&c.gaps, c.started.elapsed().as_millis())
+                        bg_image::bg_current_frame(
+                            &c.gaps,
+                            background_clock(held, c.started).as_millis(),
+                        )
                     } else {
                         0
                     };
@@ -1769,6 +1786,20 @@ impl Renderer {
                         );
                     }
                 }
+            }
+            // The overflow arrows prelight like the strip's other flat
+            // buttons while the pointer is over them.
+            for (bounds, fill) in
+                tab_strip::scroll_arrow_fills(tabbar, chrome_strip_bg, theme.foreground)
+            {
+                tab_strip::rounded_fill(
+                    &mut quads,
+                    bounds,
+                    6.0 * self.scale,
+                    (true, true),
+                    (fill, 1.0),
+                    None,
+                );
             }
             // Drag-in-progress ghost. While the user holds a
             // left button down on the tab bar, paint a
@@ -3029,8 +3060,53 @@ impl Renderer {
                 )
             })
             .collect();
+        // The chip that says a pane is in vi mode, where it hides no text:
+        // under the kept-history label, or above the jump button. Text and
+        // the cursor are where this frame's bidi layouts (`build_pane`) drew
+        // them.
+        let empty_bidi = bidi_rows::PaneBidi::default();
+        let vi_mode_chips: Vec<scrollback::ViModeChip> = panes
+            .iter()
+            .enumerate()
+            .filter(|(_, pane)| pane.snap.vi_mode)
+            .filter_map(|(index, pane)| {
+                let bidi = self.pane_bidi.get(index).unwrap_or(&empty_bidi);
+                let kept = kept_history_label(
+                    pane.terminal,
+                    pane.snap.history_view(),
+                    self.scale,
+                    scrollback_text_cell,
+                    cfg.scrollbar_width,
+                    &pane.tr,
+                )
+                .map(|label| label.rect);
+                let jump = scrollback_pills
+                    .iter()
+                    .find(|(id, _)| *id == pane.id)
+                    .map(|(_, pill)| pill.rect);
+                let origin = pane_grid_origin(pane.terminal, (pad_x, pad_y));
+                scrollback::vi_mode_chip(
+                    pane.terminal,
+                    self.scale,
+                    scrollback_text_cell,
+                    cfg.scrollbar_width,
+                    kept,
+                    jump,
+                    |rect| {
+                        scrollback::rect_covers_text(
+                            pane.snap,
+                            bidi,
+                            origin,
+                            (self.cell_w, self.cell_h),
+                            rect,
+                        )
+                    },
+                    &pane.tr,
+                )
+            })
+            .collect();
         // One buffer per text, in paint order: each button's count and then
-        // its key, then each label.
+        // its key, then each label, then each vi-mode chip.
         let scrollback_texts: Vec<(&str, f32)> = scrollback_pills
             .iter()
             .flat_map(|(_, pill)| {
@@ -3044,6 +3120,11 @@ impl Renderer {
                 kept_history_labels
                     .iter()
                     .map(|label| (label.label.as_str(), label.rect.3)),
+            )
+            .chain(
+                vi_mode_chips
+                    .iter()
+                    .map(|chip| (chip.label.as_str(), chip.rect.3)),
             )
             .collect();
         while self.scrollback_buffers.len() < scrollback_texts.len() {
@@ -3107,17 +3188,29 @@ impl Renderer {
         }
 
         let tab_tooltip = tabbar.tooltip.as_ref().map(|text| {
+            let anchor = tab_strip::tooltip_anchor(tabbar);
+            // As many lines as fit beside the control it names; a longer
+            // text ends in an ellipsis.
+            let max_lines = tab_strip::tooltip_max_lines(anchor, (sw, sh), tab_ch, self.scale);
+            let wrap_width = (sw - 16.0 * self.scale).max(1.0);
             self.tab_tooltip_buffer.set_metrics(tab_metrics);
-            self.tab_tooltip_buffer
-                .set_size(Some((sw - 16.0 * self.scale).max(1.0)), None);
-            if self.tab_tooltip_text != *text {
-                fonts::set_chrome_text(
+            self.tab_tooltip_buffer.set_size(Some(wrap_width), None);
+            let fit = (
+                max_lines,
+                wrap_width.to_bits(),
+                tab_metrics.font_size.to_bits(),
+            );
+            if self.tab_tooltip_text != *text || self.tab_tooltip_fit != fit {
+                tab_strip::shape_tooltip(
+                    &mut self.font_system,
                     &mut self.tab_tooltip_buffer,
                     text,
                     &Attrs::new().family(Family::Name(&family)),
                     self.emoji_family,
+                    max_lines,
                 );
                 self.tab_tooltip_text.clone_from(text);
+                self.tab_tooltip_fit = fit;
             }
             self.tab_tooltip_buffer
                 .shape_until_scroll(&mut self.font_system, false);
@@ -3127,12 +3220,7 @@ impl Renderer {
                 .map(|r| r.line_w)
                 .fold(0.0, f32::max);
             let lines = self.tab_tooltip_buffer.layout_runs().count().max(1) as f32;
-            tab_strip::tooltip_rect(
-                tab_strip::tooltip_anchor(tabbar),
-                (sw, sh),
-                (width, tab_ch * lines),
-                self.scale,
-            )
+            tab_strip::tooltip_rect(anchor, (sw, sh), (width, tab_ch * lines), self.scale)
         });
         let toast_count = usize::from(overlay.update_toast.is_some()) + overlay.notices.len();
         while self.update_toast_buffers.len() < toast_count * 3 {
@@ -3930,12 +4018,10 @@ impl Renderer {
                         right: (ax + aw).floor() as i32,
                         bottom: (ay + ah).floor() as i32,
                     },
-                    default_color: GColor::rgba(
-                        palette.text[i].r,
-                        palette.text[i].g,
-                        palette.text[i].b,
-                        (alpha * 255.0).round() as u8,
-                    ),
+                    default_color: {
+                        let ink = palette.text_for(i, toast.hovered);
+                        GColor::rgba(ink.r, ink.g, ink.b, (alpha * 255.0).round() as u8)
+                    },
                     custom_glyphs: &[],
                 });
             }
@@ -3986,6 +4072,11 @@ impl Renderer {
                 let rest = pill_colors.rest;
                 scrollback::kept_history_label_quads(&mut menu_q, label, rest.fill);
                 text(label.text_origin, label.rect, rest.ink);
+            }
+            for chip in &vi_mode_chips {
+                let rest = pill_colors.rest;
+                scrollback::vi_mode_chip_quads(&mut menu_q, chip, rest.fill);
+                text(chip.text_origin, chip.rect, rest.ink);
             }
         }
         if let Some(bounds) = tab_tooltip {
@@ -4268,43 +4359,29 @@ impl Renderer {
             if let Some(paint) = transport_paint {
                 transport_surfaces.extend(paint.shapes);
             }
-            for button in [
-                geometry.play,
-                geometry.sound,
-                geometry.theater,
-                geometry.fullscreen,
-                geometry.previous,
-                geometry.next,
-                geometry.open_outside,
-                geometry.mode,
-                geometry.canvas,
-                geometry.copy,
-                geometry.reload,
-                geometry.zoom_out,
-                geometry.zoom_in,
-                geometry.zoom_fit,
-                geometry.page_previous,
-                geometry.page_next,
-                Some(geometry.toggle),
-                Some(geometry.close),
-            ]
-            .into_iter()
-            .flatten()
-            {
+            // Each button's chip, lit while the pointer is over a button
+            // that would act, as the player's buttons are.
+            let hovered = overlay
+                .media_pointer
+                .and_then(|(px, py)| geometry.hit_test(px, py))
+                .filter(|hit| media_lane::media_lane_control_enabled(lane, *hit));
+            for (button, hit) in geometry.chip_controls() {
+                let Some(button) = button else {
+                    continue;
+                };
                 if geometry
                     .transport
                     .is_some_and(|transport| button.1 >= transport.1)
                 {
                     continue;
                 }
-                lane_q.push(rect(
-                    button.0,
-                    button.1,
-                    button.2,
-                    button.3,
-                    palette.divider,
-                    1.0,
-                ));
+                let fill = if hovered == Some(hit) {
+                    media_transport::hover_fill(palette.divider, palette.label)
+                } else {
+                    palette.divider
+                };
+                let (x, y, w, h) = geometry.chip(button);
+                lane_q.push(rect(x, y, w, h, fill, 1.0));
             }
             if let Some((fx, fy, fw, fh)) = lane.focused_control {
                 let line = (2.0 * self.scale).max(1.0).min(fw / 2.0).min(fh / 2.0);
@@ -5017,6 +5094,10 @@ impl Renderer {
                         bottom: tb,
                     }
                 };
+                // Resolved against the hover fill the arrow sits on.
+                let background = tab_strip::scroll_arrow_fills(tabbar, chrome_strip_bg, fg)
+                    .find(|(button, _)| *button == rect)
+                    .map_or(chrome_strip_bg, |(_, fill)| fill);
                 areas.push(TextArea {
                     buffer,
                     left,
@@ -5025,7 +5106,7 @@ impl Renderer {
                     bounds,
                     default_color: gc(self.chrome_colors.tab_text(
                         fg,
-                        chrome_strip_bg,
+                        background,
                         overlay.window_focused,
                     )),
                     custom_glyphs: &[],
@@ -5214,8 +5295,9 @@ impl Renderer {
                 if row.separator {
                     continue;
                 }
-                let background = overlays::menu_row_background(
-                    overlays::menu_row_selected(menu, i),
+                let background = overlays::menu_row_fill(
+                    menu,
+                    i,
                     theme,
                     accent,
                     &mut self.chrome_colors,
@@ -5352,6 +5434,7 @@ impl Renderer {
                 border,
                 control,
                 focus,
+                hover,
                 ..
             } = palette;
             // Ink on a switched-on toggle: whichever theme end stands out more
@@ -5406,7 +5489,10 @@ impl Renderer {
             }
             // Focus shows as a bar, not only as the light fill.
             let bar = settings::settings_focus_bar_width(line / self.scale) * self.scale;
-            if let Some(Some(r)) = layout.category_rects.get(set.active_category) {
+            if let Some(Some(r)) = set
+                .highlighted_category()
+                .and_then(|index| layout.category_rects.get(index))
+            {
                 shape(*r, selected, 1.0, selected, 0.0, 4.0);
                 shape(
                     settings::settings_focus_bar(*r, bar, self.scale),
@@ -5417,11 +5503,24 @@ impl Renderer {
                     0.0,
                 );
             }
-            for (_, rect) in [layout.category_previous, layout.category_next]
-                .into_iter()
-                .flatten()
+            // The pointer's prelight: no bar, and never the open category.
+            if let Some(SettingsHover::Category(index)) = set.hover
+                && let Some(Some(r)) = layout.category_rects.get(index)
             {
-                shape(rect, theme.background, 1.0, control, 1.0, 4.0);
+                shape(*r, hover, 1.0, hover, 0.0, 4.0);
+            }
+            for (next, arrow) in [
+                (false, layout.category_previous),
+                (true, layout.category_next),
+            ] {
+                if let Some((_, rect)) = arrow {
+                    let fill = if set.hover == Some(SettingsHover::Arrow(next)) {
+                        settings::settings_pressable(theme.background)
+                    } else {
+                        theme.background
+                    };
+                    shape(rect, fill, 1.0, control, 1.0, 4.0);
+                }
             }
             shape(
                 layout.search_rect,
@@ -5432,17 +5531,23 @@ impl Renderer {
                 4.0,
             );
             for row in &layout.rows {
-                let row_selected = row.index == set.focused_row && !set.search_focused;
-                if row_selected {
-                    shape(row.rect, selected, 1.0, selected, 0.0, 4.0);
-                    shape(
-                        settings::settings_focus_bar(row.rect, bar, self.scale),
-                        focus,
-                        1.0,
-                        focus,
-                        0.0,
-                        0.0,
-                    );
+                let row_fill = settings::settings_row_fill(set, row.index);
+                match row_fill {
+                    settings::SettingsRowFill::Focused => {
+                        shape(row.rect, selected, 1.0, selected, 0.0, 4.0);
+                        shape(
+                            settings::settings_focus_bar(row.rect, bar, self.scale),
+                            focus,
+                            1.0,
+                            focus,
+                            0.0,
+                            0.0,
+                        );
+                    }
+                    settings::SettingsRowFill::Hovered => {
+                        shape(row.rect, hover, 1.0, hover, 0.0, 4.0);
+                    }
+                    settings::SettingsRowFill::Panel => {}
                 }
                 let data = &set.rows[row.index];
                 for surface in settings::settings_row_surfaces(
@@ -5450,7 +5555,7 @@ impl Renderer {
                     data,
                     &palette,
                     (theme.background, acc, on_ink),
-                    row_selected,
+                    (row_fill, set.hover),
                     self.scale,
                 ) {
                     shape(
@@ -5465,11 +5570,16 @@ impl Renderer {
                 if let Some(reset) = row.reset
                     && reset.icon
                 {
+                    let chip = if set.hover == Some(SettingsHover::Reset(row.index)) {
+                        settings::settings_pressable(theme.background)
+                    } else {
+                        theme.background
+                    };
                     header_icons::push_header_icon(
                         &mut menu_q,
                         header_icons::HeaderIcon::Reset,
                         reset.rect,
-                        self.chrome_colors.text(theme.foreground, theme.background),
+                        self.chrome_colors.text(theme.foreground, chip),
                         self.scale,
                         &mut self.header_icon_masks,
                     );
@@ -5891,6 +6001,7 @@ impl Renderer {
             self.tab_close_text.hash(&mut h);
             self.new_tab_arrow_text.hash(&mut h);
             tabbar.tooltip.hash(&mut h);
+            self.tab_tooltip_fit.hash(&mut h);
             self.scroll_left_text.hash(&mut h);
             self.scroll_right_text.hash(&mut h);
             self.resize_overlay_text.hash(&mut h);
@@ -6382,10 +6493,11 @@ impl Renderer {
             cfg.background_type,
             kettle_config::BackgroundType::Starfield
         ) {
+            let clock = background_clock(self.background_held, self.starfield_started);
             self.starfield.upload(
                 self.device.handle(),
                 [sw, sh],
-                starfield_time(cfg.background_animation, self.starfield_started.elapsed()),
+                starfield_time(cfg.background_animation, clock),
             );
         }
         self.imgs.upload(self.device.handle(), [sw, sh], &img_items);
@@ -6917,3 +7029,6 @@ mod scrollback_pill_tests;
 
 #[cfg(test)]
 mod settings_hierarchy_tests;
+
+#[cfg(test)]
+mod settings_state_tests;

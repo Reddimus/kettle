@@ -67,6 +67,7 @@ fn update_toast_announces_politely_and_exposes_explicit_controls() {
         close: "x".into(),
         opacity: 1.0,
         focused: None,
+        hovered: None,
     };
     let nodes = super::accessibility::update_toast_nodes(&toast, "Descartar");
     assert_eq!(nodes.len(), 3);

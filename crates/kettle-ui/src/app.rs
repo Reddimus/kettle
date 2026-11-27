@@ -74,6 +74,7 @@ pub(crate) fn app_source() -> String {
         include_str!("app/layout.rs"),
         include_str!("app/links.rs"),
         include_str!("app/media.rs"),
+        include_str!("app/menu_pointer.rs"),
         include_str!("app/menus.rs"),
         include_str!("app/modals.rs"),
         include_str!("app/notifications.rs"),
@@ -179,6 +180,7 @@ pub(crate) use keyboard::*;
 pub(crate) use layout::*;
 pub(crate) use links::*;
 use media::*;
+pub(crate) use menu_pointer::*;
 pub(crate) use menus::*;
 pub(crate) use modals::*;
 use notification_toast::*;
@@ -213,6 +215,7 @@ mod linux_titlebar_tests;
 mod selection_hint;
 use linux_titlebar::*;
 mod media;
+mod menu_pointer;
 mod menus;
 mod modals;
 mod notices;
@@ -425,6 +428,9 @@ pub struct App {
     /// Window 1 draws on the CPU (`renderer`), so every window does, and
     /// `gpu` stays `None`: no GPU driver is loaded.
     cpu_rendering: bool,
+    /// The graphics settings window 1's renderer was built from. Settings
+    /// asks for a restart while the saved ones differ.
+    running_graphics: Option<crate::settings::GraphicsSettings>,
     /// The system fonts, loading on their own thread since `run_with`
     /// began. Window 1 takes them before its first spawn; later windows load their own.
     font_preload: Option<crate::font_preload::FontPreload>,

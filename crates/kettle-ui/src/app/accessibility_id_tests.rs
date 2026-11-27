@@ -112,6 +112,7 @@ fn accessibility_ids_do_not_collide() {
         ("update details", ACCESSIBILITY_UPDATE_DETAILS_ID),
         ("update dismiss", ACCESSIBILITY_UPDATE_DISMISS_ID),
         ("header find", ACCESSIBILITY_HEADER_FIND_ID),
+        ("tab toolbar", ACCESSIBILITY_TAB_TOOLBAR_ID),
         ("notification status", ACCESSIBILITY_NOTIFICATION_STATUS_ID),
         ("notification show", ACCESSIBILITY_NOTIFICATION_SHOW_ID),
         (
@@ -119,7 +120,6 @@ fn accessibility_ids_do_not_collide() {
             ACCESSIBILITY_NOTIFICATION_DISMISS_ID,
         ),
         ("search text", ACCESSIBILITY_SEARCH_TEXT_ID),
-        ("search status", ACCESSIBILITY_SEARCH_STATUS_ID),
         ("search count", ACCESSIBILITY_SEARCH_COUNT_ID),
         ("update status", ACCESSIBILITY_UPDATE_STATUS_ID),
         ("font size", ACCESSIBILITY_FONT_SIZE_ID),
@@ -130,6 +130,50 @@ fn accessibility_ids_do_not_collide() {
     ] {
         add(what.into(), id);
     }
+    // Bound ids, for a picker's results, a quick-select label and a link.
+    let rows: Vec<ContextMenuRow> = ["dev", "ops", "dev"]
+        .into_iter()
+        .map(|label| ContextMenuRow {
+            label: label.into(),
+            ..Default::default()
+        })
+        .collect();
+    for kind in [MODAL_KIND_PALETTE, MODAL_KIND_LAYOUTS] {
+        for (index, id) in accessibility_picker_option_ids(kind, &rows)
+            .into_iter()
+            .enumerate()
+        {
+            add(format!("picker {kind} option {index}"), id.unwrap());
+        }
+    }
+    add(
+        "hint".into(),
+        accessibility_hint_id(
+            &HintTarget {
+                row: 0,
+                col: 0,
+                label: "a".into(),
+                pane: 1,
+                what: HintWhat::Text {
+                    kind: kettle_core::hints::Kind::Url,
+                    text: "https://x.test".into(),
+                    bounded: true,
+                },
+            },
+            false,
+        ),
+    );
+    add(
+        "link".into(),
+        accessibility_link_id(&kettle_render::PaneStatus {
+            rect: (0.0, 0.0, 100.0, 16.0),
+            text: String::new(),
+            description: String::new(),
+            target: Some("https://x.test".into()),
+            link_bounds: None,
+            selection_hint: false,
+        }),
+    );
     let mut seen: std::collections::HashMap<u64, &str> = std::collections::HashMap::new();
     for (what, id) in &ids {
         if let Some(other) = seen.insert(id.0, what) {

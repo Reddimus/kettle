@@ -154,3 +154,125 @@ fn the_pointer_and_accessibility_read_the_painted_bar() {
     );
     assert!(!source.contains("scrollbar_width*scale).max(1.0)"));
 }
+
+/// The pointer shows the arrow, not the I-beam, over a scrollbar a press
+/// would grab, and keeps it while the bar is dragged. The hover strip is the
+/// one the press and the brighten use (`scrollbar_pane_at`), and a program
+/// that takes the press, or a pane with no history, leaves the I-beam. A link
+/// whose click opens it, which the press reaches first, keeps the hand.
+#[test]
+fn the_scrollbar_shows_the_arrow_where_a_press_grabs_it() {
+    let source: String = production_source().split_whitespace().collect();
+    for needle in [
+        "ifws.scrollbar_drag_offset.is_some(){returntrue;}letarea=self.area(ws);letSome(pane)=self.scrollbar_pane_at(ws,area,ws.cursor.xasf32,ws.cursor.yasf32)else{returnfalse;};",
+        "scrollbar_grabs_press(term.grid().history_size(),track,ws.mods.shift_key(),p.read_only,)",
+        "history>0&&(track==input::MouseTracking::Off||shift||read_only)",
+        "ifwant_pointer{CursorIcon::Pointer}elseifself.scrollbar_takes_pointer(ws){//Ascrollbarisacontrol,nottext:thearrow,as//overthechrome.CursorIcon::Default}else{CursorIcon::Text}",
+    ] {
+        assert!(source.contains(needle), "missing: {needle}");
+    }
+}
+
+/// A drag holds the arrow wherever the pointer takes it, so releasing it over
+/// text must give the pointer its I-beam back at once, and narrow the bar it
+/// held wide, rather than leave both for the next event in an idle window.
+/// The native release works the cursor out again as the drag ends, and both
+/// releases end the drag through the helper that asks for the frame.
+#[test]
+fn releasing_a_scrollbar_drag_restores_the_cursor_at_once() {
+    let source: String = production_source().split_whitespace().collect();
+    for needle in [
+        "ifend_scrollbar_drag(ws){self.update_scrollbar_hover(ws);self.sync_cursor_icon(ws);}",
+        "ifbcode==0{end_scrollbar_drag(ws);ws.tab_drag_active=false;",
+        "fnend_scrollbar_drag(ws:&mutWindowState)->bool{ifws.scrollbar_drag_offset.take().is_none(){returnfalse;}ws.scrollbar_hover=None;ifletSome(window)=&ws.window{window.request_redraw();}true}",
+    ] {
+        assert!(source.contains(needle), "missing: {needle}");
+    }
+}
+
+/// A program reporting motion (DEC 1003) takes the motion and returns before
+/// the rest of the hover work, so the scrollbar hover is updated first: moving
+/// from one pane's bar into a split whose program reports motion, or off a bar
+/// reached with Shift held, no longer leaves that bar lit and wide. A drag
+/// keeps the hover it started with.
+#[test]
+fn a_program_taking_motion_leaves_no_scrollbar_lit() {
+    let source: String = production_source().split_whitespace().collect();
+    let moved = source
+        .split("WindowEvent::CursorMoved{position,..}=>{")
+        .nth(1)
+        .and_then(|rest| rest.split("WindowEvent::MouseInput{").next())
+        .expect("CursorMoved arm");
+    let hover = moved
+        .find("self.update_scrollbar_hover(ws);")
+        .expect("the scrollbar hover is updated on motion");
+    let report = moved
+        .find("self.send_mouse(ws,input::MOUSE_NO_BUTTON,true,true)")
+        .expect("motion is reported");
+    assert!(
+        hover < report,
+        "the hover is updated before a program takes the motion"
+    );
+    assert_eq!(
+        moved.matches("scrollbar_pane_at(").count(),
+        0,
+        "one hover update"
+    );
+    assert!(source.contains(
+        "fnupdate_scrollbar_hover(&self,ws:&mutWindowState){ifws.scrollbar_drag_offset.is_some(){return;}letarea=self.area(ws);lethover=scrollbar_hover_pointer(ws).and_then(|(px,py)|self.scrollbar_pane_at(ws,area,px,py));ifhover!=ws.scrollbar_hover{ws.scrollbar_hover=hover;"
+    ));
+}
+
+/// A drag freezes the bar's hover, so it stays wide while held. Released off
+/// the bar, over text and without moving again, it must narrow: ending the
+/// drag lets the frozen hover go, and the native release works the hover out
+/// again from where the pointer is, which keeps it only on the bar.
+#[test]
+fn a_drag_released_off_the_bar_leaves_it_narrow() {
+    let mut ws = WindowState::new(1, Mux::new());
+    ws.scrollbar_hover = Some(PANE);
+    ws.scrollbar_drag_offset = Some(4.0);
+    assert!(super::end_scrollbar_drag(&mut ws));
+    assert_eq!(
+        ws.scrollbar_hover, None,
+        "the frozen hover went with the drag"
+    );
+    let cfg = Config {
+        scrollbar: ScrollbarMode::Auto,
+        ..Config::default()
+    };
+    let lines = (ROWS, HISTORY, 0);
+    let released = pane_scrollbar(&cfg, &ws, PANE, terminal(1.0), 1.0, lines);
+    ws.scrollbar_hover = Some(PANE);
+    let hovered = pane_scrollbar(&cfg, &ws, PANE, terminal(1.0), 1.0, lines);
+    assert!(
+        released.track_rect.2 < hovered.track_rect.2,
+        "released off the bar it is drawn at its resting width"
+    );
+}
+
+/// A drag captured past the window's edge can end with a release before any
+/// move: `CursorLeft` has cleared the hover and the physical pointer, while
+/// the last position seen inside, still in `ws.cursor`, may be on the bar.
+/// The hover the release works out again reads the physical pointer, so it
+/// finds nothing and the bar stays narrow with the pointer outside.
+#[test]
+fn a_release_after_the_pointer_left_lights_no_bar() {
+    let source: String = production_source().split_whitespace().collect();
+    let update = source
+        .split("fnupdate_scrollbar_hover(&self,ws:&mutWindowState){")
+        .nth(1)
+        .and_then(|rest| rest.split("ifhover!=ws.scrollbar_hover{").next())
+        .expect("update_scrollbar_hover");
+    assert!(
+        update.contains("lethover=scrollbar_hover_pointer(ws).and_then(|(px,py)|self.scrollbar_pane_at(ws,area,px,py));"),
+        "the hover reads the physical pointer: {update}"
+    );
+    assert!(
+        !update.contains("ws.cursor"),
+        "not the cursor a release keeps"
+    );
+    assert!(source.contains(
+        "fnscrollbar_hover_pointer(ws:&WindowState)->Option<(f32,f32)>{ws.native_pointer.map(|p|(p.xasf32,p.yasf32))}"
+    ));
+}

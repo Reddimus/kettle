@@ -992,6 +992,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   instead of appending to it.
 - A tab with a single pane no longer draws a frame around it; pane borders
   appear once a tab is split, and while broadcast input is on.
+- Right-clicking a tab opens a menu for that tab, with Rename Tab…,
+  Duplicate Tab, Move Tab Left, Move Tab Right, Close Tab and Close Other
+  Tabs, instead of the terminal's menu. Each acts on the tab you clicked, not
+  the active one. Close Other Tabs asks once, under `ask-before-closing`, for
+  all the tabs it would close, and closes only the panes it asked about, not
+  a tab or split opened while the question was up.
+- `kettle ctl ui_geometry` reports a context menu's `anchor` as what the
+  menu was placed around (the pointer, or for a menu opened from the
+  keyboard the text cursor's line) instead of the panel's corner, which
+  `rect` already gives.
 
 ### Security
 
@@ -1094,6 +1104,125 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   values.
 
 ### Fixed
+
+- Screen readers can highlight a command palette or picker result by pressing
+  or focusing it, and act on the highlighted result with the picker's Choose
+  button. Selecting a result never runs it. Pressing a quick-select label acts
+  on it, as typing the label does.
+
+- Screen readers can open the link under the pointer by pressing it, as a
+  Ctrl or Cmd click does.
+
+- Screen readers hear a picker result's whole name when the panel is too
+  narrow to show it.
+
+- Screen readers treat the command palette, the pickers, Settings and title
+  editing as modal dialogs, as they already treated confirmations.
+
+- On Linux, screen readers report each Settings switch as checked or not
+  checked.
+
+- On Linux and Windows, screen readers hear each Settings row's place in the
+  list, such as 3 of 12.
+
+- A screen reader's cursor can reach Settings rows scrolled out of the panel;
+  moving to one scrolls it into view.
+
+- Selecting a Settings row with a screen reader no longer changes its value:
+  the platforms send selection as a press. The row's Change button changes it,
+  as a click on the row does.
+
+- Screen readers find only tabs in the tab list; New Tab, the New Tab menu,
+  Settings and the header buttons are in a toolbar beside it.
+
+- The find bar's match count and status reach screen readers as one named
+  status, with no unnamed second one.
+
+- The New Tab button and the GNOME header's Find button act when released over them, like native buttons, so pressing one and dragging off cancels instead of opening a tab or toggling Find. A dialog, menu or picker that opens while one is held cancels it too.
+
+- A scrollbar no longer stays lit and wide after the pointer leaves it for a pane whose program tracks pointer motion.
+
+- The pointer shows the arrow, not the text cursor, over a scrollbar and while dragging it, and the text cursor comes back, and the bar narrows, as soon as a drag ends over text or outside the window.
+
+- The pointer shows the text cursor over the command palette's field, the picker filters, the title editor and the Settings search and value fields, as it already did in Find.
+
+- The pointer turns into a hand over a link only while a click would open it (Cmd or Ctrl held, or `link-single-click` on); a plain hover keeps the text cursor.
+
+- Tabs, their close buttons and the title-bar buttons no longer light up or show the hand cursor under the command palette, Settings, a picker or a dialog, where a click would not reach them.
+
+- A program that tracks the mouse no longer hears the pointer moving over the tab bar, the status bar or another split as motion at its edge.
+
+- A Settings switch under the pointer now reacts like a button, on the
+  highlighted option too, where the row's highlight hid any hover.
+
+- Turning Window blur on where the session cannot blur, such as X11 without
+  a compositor's blur, no longer makes Settings ask for a new window or a
+  restart; the switch reads Unavailable.
+
+- Reset in Settings no longer stops at a font size that only rounds to the
+  default, such as 13.4 px from a font = Mono 13.4 line; it sets the real
+  default and keeps the font family.
+
+- Settings answers the pointer: options and categories light up under it,
+  and Reset and choice controls react like dialog buttons, without moving
+  the keyboard highlight.
+
+- In light themes the highlighted Settings option and the open category now
+  have a tint you can see (at least 1.3:1 against the panel); before, only
+  the bar at their edge showed which was highlighted.
+
+- A long value scrolled in a text field, such as a path in Settings' Image
+  file prompt, no longer shows a cut-off sliver of a letter at the left edge
+  that looked like a second caret.
+
+- While you search Settings, its title reads "Search results" and no
+  category is marked as open, since the results come from every category.
+
+- Reset in Settings removes the option from your config file instead of
+  writing today's default into it, so the option follows the platform's
+  default (and later ones) and the file no longer gains a line with each
+  reset. It saves in one step: a reset that cannot be saved leaves the file
+  and the option as they were, and one saved but not confirmed on disk
+  applies with a warning.
+
+- In Settings search, Tab leaves a search with no matches, and clearing a
+  search you didn't move into puts the highlight back on the option it was
+  on, rather than on a match of something typed on the way.
+
+- On macOS the Settings Window blur switch is as wide as the other switches;
+  it kept room for an Unavailable state that macOS never shows.
+
+- The Settings guide and Getting started now give Cmd+, as the macOS
+  shortcut for Settings; they said Ctrl+, on every platform.
+
+- The Settings Language row no longer repeats "Applies when Kettle restarts"
+  in the footer while the choice is the running language; the footer speaks
+  up once a restart is needed, as documented.
+
+- On macOS, the Settings Keybinds page shows each action's Cmd shortcut, as
+  the menus do; Previous tab read Ctrl+PageUp beside Next tab's Shift+Cmd+].
+
+- When Settings refuses a shortcut key pressed without a modifier, the row
+  now says "Add a modifier, Esc to cancel" instead of only sending a desktop
+  notification.
+
+- On macOS, choosing Settings… (Cmd+,) while Settings is open no longer
+  sends it back to its first page and drops your search; it stays where it
+  is.
+
+- Settings keeps saying "Restart Kettle to apply graphics changes" after you
+  close and reopen it, for as long as a renderer or GPU change is still
+  waiting for a restart.
+
+- In Settings, ← now turns a switch off and → turns it on, instead of both
+  flipping it, and Space or Enter no longer steps a number up with no way
+  back down.
+
+- Settings takes Home, End, Page Up and Page Down to move through options
+  and search results, and Shift+←/→ changes a number ten steps at a time.
+
+- In Settings, `G`, `Ctrl+D` and `Ctrl+U` no longer land on a dimmed option
+  that doesn't apply; like the arrows, they skip it.
 
 - `tab-min-width` is measured in logical pixels, as documented. On a display
   with a scale above 100% tabs could shrink to a fraction of the width set
@@ -1560,6 +1689,73 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   leave a truncated file when they fail, GPU setup keeps trying other
   backends when one device fails to open, and macOS audio decoding moved off
   the sound-control thread.
+- A toast you hover, or focus with a screen reader, while it fades now shows
+  at full strength, and afterwards stays at least three seconds more.
+- On Linux, `reduce-motion = auto` now allows motion when the desktop has no
+  reduced-motion setting, and follows GNOME's animations setting otherwise,
+  also in a GNOME session without a Settings portal.
+- With `reduce-motion = off`, the quick terminal slides in even when the
+  system's Reduce Motion is on or cannot be read.
+- The resize chip no longer redraws an unchanged window about 30 times a
+  second while it shows.
+- Reduced motion now holds the starfield and animated background images still
+  on their current frame; an image loaded meanwhile starts from its first
+  frame when motion returns.
+
+- Moving the pointer over a row in the command palette or the theme, layout
+  or SSH picker now selects it, as the arrow keys do; a pointer that stays
+  still never takes the selection from the keys, and the theme picker
+  previews a hovered theme only once the pointer rests on it.
+- The mouse wheel over the command palette and the theme, layout and SSH
+  pickers scrolls the list without moving the selection; only a selection
+  that scrolls out of view moves, to the nearest row still shown.
+- Vi mode shows a small "Vi mode" chip in a corner of the pane, placed only
+  over blank cells, so it never covers text.
+- Quick-select hints with nothing on screen to label says "No hints here"
+  for a moment instead of doing nothing.
+
+- Context-menu submenus open once the pointer rests on their row for 200 ms
+  (a click or Right opens one at once), and an open submenu stays while the
+  pointer moves toward it across other rows, so a diagonal move no longer
+  lands on a different submenu. It closes 300 ms after the pointer leaves
+  the menu.
+- Hovering a menu row that cannot run, such as Copy with nothing selected or
+  the Shift hint's line, keeps the previous row lit instead of lighting
+  nothing, so Enter still runs the row you see.
+- Moving the pointer off a context menu, or out of the window, clears its
+  highlight unless a submenu is open, as macOS and GTK menus do; the next
+  Down or Up starts again from the top or the bottom.
+- A context menu that does not fit below the pointer, or below the text
+  cursor's line when opened from the keyboard, opens above it instead of
+  sliding up over it, so the menu no longer covers the prompt it was opened
+  for.
+
+- In a narrow window, tabs whose titles share a start and an end no longer
+  all read alike (`Tab …t-1`): a title with fewer than 16 columns to show
+  keeps its start and ends with an ellipsis.
+- Tooltips no longer pop up the moment the pointer crosses a button. The
+  first one shows after the pointer rests for half a second, the next one at
+  once while you move along the row, and a click hides it until the pointer
+  leaves the button.
+- The tab strip's overflow arrows light up and show the pointing hand under
+  the pointer, and their tooltips say what a press does.
+- A tab whose title is too long to show whole now shows the full title in a
+  tooltip when the pointer rests on it. A tooltip too long for the window
+  ends with an ellipsis rather than covering the tab or running off the
+  window.
+- The media viewer's and preview lane's header buttons light up under the
+  pointer and take a press anywhere in a 24 by 24 point target, up from 25
+  by 17.5 pixels. The header row grows only where the viewer has room; a
+  viewer or lane that fitted before still fits. A collapsed lane's strip is
+  tall enough for those targets where the terminal keeps its 5 rows, and a
+  short lane's buttons no longer overlap the edge that resizes it.
+- Those buttons have tooltips naming what they do and the key that does the
+  same.
+- A toast's Show and × buttons and its body, which a click answers as Show
+  does, and the bad-config notice's Open Config and Dismiss, light up under
+  the pointer.
+- A tab dragged onto a tab-strip overflow arrow and held there scrolls the
+  strip, so it can be moved past the tabs shown.
 
 ## Older releases
 

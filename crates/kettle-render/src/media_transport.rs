@@ -4,6 +4,16 @@ use crate::{
     CompletionPalette, MediaLaneGeometry, MediaLaneHit, MediaLanePanel, MediaLanePlay, Rgb,
 };
 
+/// How far a hovered player button's fill moves from its surface toward its
+/// ink: the transport's 48 on its 18 grey.
+const HOVER_MIX: f64 = 30.0 / 237.0;
+
+/// The fill a hovered lane button takes over `rest`, toward the `ink` its
+/// glyph is drawn in, as the player's buttons do over the transport bar.
+pub(crate) fn hover_fill(rest: Rgb, ink: Rgb) -> Rgb {
+    crate::color::over(rest, ink, HOVER_MIX, false)
+}
+
 pub(crate) struct TransportPaint {
     pub shapes: Vec<RoundedSurface>,
 }
@@ -106,7 +116,7 @@ pub(crate) fn paint(
                     r.2 - 2.0 * inset,
                     r.3 - 2.0 * inset,
                 ),
-                Rgb::new(48, 48, 48),
+                hover_fill(dark, white),
                 3.0 * unit,
                 0.0,
                 0.0,
@@ -226,6 +236,15 @@ fn progress_color(palette: CompletionPalette) -> Rgb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The shared hover step leaves the player's own hover exactly as it was.
+    #[test]
+    fn the_player_hover_is_the_shared_step() {
+        assert_eq!(
+            hover_fill(Rgb::new(18, 18, 18), Rgb::new(255, 255, 255)),
+            Rgb::new(48, 48, 48)
+        );
+    }
+
     #[test]
     fn progress_uses_the_theme_accent_and_preserves_visibility() {
         let dark = Rgb::new(18, 18, 18);

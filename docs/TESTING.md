@@ -154,6 +154,47 @@ Window-chrome regressions use `kettle-render`'s `solid_chrome_is_quiet`,
 traffic-light insets, 1x/1.5x/2x scaling, active-tab overflow, control hit corners,
 gaps, AccessKit bounds and the production `ui_geometry` serializer.
 `new_tab_tooltips_translate` checks English/Spanish labels and live shortcuts.
+`kettle-ui`'s `tooltip::tests` and `strip_tooltips_wait_for_a_rest` check
+tooltip timing: the 500 ms rest, the one-second warm spell, a press hiding the
+tooltip until the pointer leaves the control's place (a moment with no control
+to name, while the press is held or a dropdown is open, is no leave), and a
+single scheduler wake per deadline;
+`a_clicked_tab_title_rearms_after_the_pointer_crosses_its_close_button` checks
+that the place a press is held against is where its control is named;
+`the_tooltip_clock_follows_moves_presses_leaves` guards the wiring.
+`overflow_arrows_light_point_and_name_what_a_press_does` (`kettle-ui`) and
+`overflow_arrows_prelight_like_the_other_flat_buttons` (`kettle-render`) cover
+the arrows' hover, hand cursor, translated tooltips and anchor.
+`a_cut_tab_title_shows_whole_in_a_tooltip` (`kettle-ui`) and
+`a_tab_label_is_cut_only_when_the_strip_shortens_it` (`kettle-render`) cover
+the full-title tooltip, `a_long_tooltip_ends_in_an_ellipsis_beside_its_control`
+its line cap, `a_long_tooltip_takes_the_side_with_more_room_and_the_whole_width`
+its placement, and `narrow_tab_titles_keep_the_start_that_tells_them_apart`
+the end ellipsis below 16 columns.
+`every_lane_button_is_a_24_pixel_target`,
+`a_viewer_that_fitted_before_still_fits_with_full_targets`,
+`a_short_lanes_buttons_never_reach_its_resize_edge`,
+`a_minimum_bottom_gallery_keeps_its_edge_and_page_buttons`,
+`a_lane_keeps_room_for_full_button_targets` (`kettle-ui`),
+`a_hovered_lane_button_lights_its_chip`
+and `browsing_past_an_end_is_not_a_live_button` (`kettle-render`) and
+`moving_onto_a_lane_button_repaints_to_light_it` (`kettle-ui`) cover the media
+lane buttons' WCAG 2.5.8 targets and hover fill.
+`lane_button_tooltips_name_the_keys_the_lane_acts_on` checks every key a lane
+button's tooltip names against the lane's own key handling, and
+`lane_button_tooltips_share_the_clock_and_the_screen_reader_name` guards their
+timing and names; `the_fullscreen_viewer_names_no_key_that_does_something_else`
+ties the Esc a tooltip names to Esc's dispatch, and
+`a_lane_buttons_tooltip_is_named_only_on_the_button` keeps a video picture
+from naming its Play button. `the_toast_button_under_the_pointer_lights_alone`
+(`kettle-render`) and `toast_and_notice_buttons_light_under_the_pointer`
+(`kettle-ui`) cover the toast and notice buttons' hover, and
+`an_actionable_toast_body_lights_under_the_pointer` the notification toast's body.
+`a_tab_drag_resting_on_an_overflow_arrow_scrolls_the_strip` covers the
+400 ms drag auto-scroll, and `a_tab_drag_at_the_end_rests_on_nothing` and
+`the_last_drag_step_to_an_end_schedules_no_wake` that it schedules no wake
+where the tab can go no further; the drag itself needs a
+desktop.
 Full render/UI suites and clippy remain required; native focus changes,
 hover/press feedback, tooltip placement and Spanish acceptance need a desktop.
 
@@ -3138,7 +3179,8 @@ window fullscreen. Check the accessible names and toggle states for both size
 controls, including Spanish. Preserve the original pane focus and verify that
 player keys do not reach its terminal.
 
-Update-toast tests use injected clocks for foreground expiry and hover pauses,
+Update-toast tests use injected clocks for foreground expiry and hover pauses
+(a toast paused mid-fade is drawn whole and resumes with time to read it),
 and private cache fixtures for concurrent claims, restart persistence, abandoned
 claims, contention recovery and failed writes. An unreadable record must remain
 byte-identical. Native checks must retain terminal grid, cursor and
@@ -3463,7 +3505,20 @@ value is included in that name. Linux retains the value description used by
 AT-SPI, and Windows retains its separate name and value. The native macOS
 check opens Settings and reads these row names through the accessibility tree;
 it does not establish VoiceOver speech output. Control diagnostics retain the
-field name alone, including on macOS.
+field name alone, including on macOS. `settings_row_text_follows_each_platforms_reader`
+builds a row the macOS, AT-SPI and UI Automation ways on any host, so each
+platform's text keeps unit coverage off its own runner.
+`settings_switches_expose_their_checked_state` gives a switch row its checked
+state wherever the speech choice allows it (every platform but macOS) and no
+other row one, keeps each row's value, and checks that the accessibility key
+follows a switch's state. `settings_rows_report_their_place_among_all_rows`
+hands the projection to AccessKit's consumer and reads each row's position
+and set size as the AT-SPI and UIA adapters do, while browsing sections and
+in a search.
+`off_screen_settings_rows_stay_reachable_at_the_list_edges` checks that rows
+scrolled out of the panel pass AccessKit's common filter with Focus and Click,
+bounded as zero-height lines on the edge of the painted rows they left by, at
+1x and 2x, and that a section scrolled out whole still has bounds.
 
 ## Static text names on every platform
 
@@ -3474,6 +3529,85 @@ AT-SPI and UI Automation do: a label's from its value, any other node's from its
 label. They check the theme picker's footer text (with the lowest colour's
 number and the below-3:1 warning) and Settings' no-match line in English and
 Spanish. They do not run Orca or Narrator.
+
+## Accessibility tree semantics
+
+These `kettle-ui` tests check the generated tree and the action routing, not
+speech:
+
+- `picker_selection_requests_only_highlight_and_choose_acts` models the
+  requests AccessKit 0.25's adapters make when a screen reader selects,
+  deselects, picks, focuses or presses a node: macOS `setAccessibilitySelected:`
+  both ways and `AXPick`; AT-SPI `SelectChild`, `DeselectChild` and
+  `DeselectSelectedChild`; UIA `Select`, `AddToSelection` and
+  `RemoveFromSelection`; and the explicit `AXPress`, `DoAction` and `Invoke`.
+  It runs them against each option of the palette, the layout picker and the
+  SSH launcher's Save and Remove rows, with every option highlighted in turn.
+  Each only highlights its option. Only a press on the Choose button acts, on
+  the highlighted result. The button has no selected state, so no selection
+  request reaches it, and a Choose button bound to another result acts on
+  nothing.
+- `settings_selection_requests_never_change_a_row` runs the same modelled
+  requests against every Settings row, painted or scrolled out. Each only
+  selects its row. Only a press on the selected row's Change button changes
+  it, and a Change button queued for a row that is no longer selected changes
+  nothing. `settings_accessibility_click_dispatches_configure_and_retry` checks
+  that the Change button, not the row, reaches the global hotkey's configure
+  and retry.
+- `an_accessibility_selection_previews_its_theme_after_a_held_hover`: after
+  the pointer leaves a theme's row before its preview is due, a screen
+  reader's selection of another theme still previews it at once.
+- `the_change_button_names_space_only_where_space_changes_the_row`: the
+  Change button names Space as its key on a switch, a choice and a text row,
+  and no key on a value row, which may be a number that Space leaves alone.
+- `the_change_button_is_unavailable_while_a_chord_is_captured`: in the window
+  projection the Change button is disabled and offers no press while a
+  shortcut row captures a chord, and is available again afterwards.
+- `an_unpainted_reset_leaves_the_value_control_to_change`: in a panel too
+  narrow for the Reset chip, AccessKit's consumer hit test on the value control
+  finds the Change button. Reset stays in the tree as a zero-width line at the
+  control's left edge.
+- `the_accessibility_key_follows_what_picker_rows_are_bound_to`: changing only
+  an SSH host's target paints the same launcher row but changes its option ids
+  and the accessibility key, so the tree is published again. A row's whole
+  name counts too, and the key's source covers the other bound nodes.
+- `quick_select_labels_are_bound_to_their_quick_selects_purpose`: a label of
+  a plain quick select names nothing in a quick select for previews over the
+  same text, and the other way round.
+- `the_window_quick_select_tree_stays_valid_at_65536_targets` binds 65,536
+  quick-select labels through the window projection and hands the tree to
+  AccessKit's consumer. The list keeps its id and holds the 65,535 bound
+  labels the projection numbers.
+- `indexed_modal_lists_stop_short_of_the_next_kinds_ids`: a 70,000-row
+  context menu and quick select keep 65,535 rows each in the tree, every id
+  distinct, where row 65,535 of the menu would have taken the quick-select
+  list's id.
+- `quick_select_labels_offer_a_press_that_acts_on_their_target`: matching
+  quick-select labels have a Click action that runs `act_hint`. Dimmed labels
+  have none.
+- `a_hovered_link_offers_a_press_that_opens_it`: the hovered link's node has
+  a Click action that opens the link under the pointer through
+  `open_pane_link`. Its status text has none.
+- `picker_options_bind_to_their_result_not_their_fitted_label`: two layouts
+  whose long names fit to one painted label keep separate ids and whole spoken
+  names. After filtering, a Choose press queued for the one filtered out acts
+  on nothing. SSH rows bind to the host or target they act on.
+- `accessibility_requests_are_bound_to_their_targets`: after the layout
+  picker is filtered from dev and ops to ops, the id published for dev names
+  nothing while ops keeps its id. A quick-select label from an earlier session,
+  or one over other text, names nothing, and neither does a link node once
+  another link, or the same target painted elsewhere, is shown.
+- `every_modal_surface_is_a_modal_dialog`: the palette, the theme, layout and
+  SSH pickers, Settings and title editing each project one modal dialog.
+- `the_tab_list_holds_only_tabs_beside_a_toolbar_of_the_strips_buttons`: the
+  tab list's children are tabs only. New tab, the new-tab menu, the gear and
+  the GNOME header's Find, main menu and window buttons sit in a "Tab bar
+  controls" toolbar beside it, in screen order, in English and Spanish.
+- `the_find_bar_has_one_named_status`: the find bar's count and status are one
+  named polite status, in English and Spanish, bounded over both painted
+  rects, and absent when the bar shows neither.
+
+VoiceOver and Orca have not yet been run against these changes.
 
 ## Configured-session and desktop acceptance, 2026-11-01
 
@@ -3884,7 +4018,8 @@ desktop, verify repeated CLI/global/menu/palette toggles create one quick window
 focus returns on explicit hide, switching apps autohides without stealing focus,
 tabs and splits keep their processes while hidden, monitor selection and all
 five geometries work across mixed-DPI displays, and Reduce Motion disables the
-slide. Also check a taken hotkey, rebind/clear on reload, CapsLock/NumLock on X11,
+slide under `reduce-motion = auto` while `reduce-motion = off` still slides.
+Also check a taken hotkey, rebind/clear on reload, CapsLock/NumLock on X11,
 window-list/cycling exclusion, English/Spanish Settings, and Wayland/Windows
 desktop shortcuts. A GUI-free test run does not establish these native behaviors.
 
@@ -4040,7 +4175,20 @@ that Kettle Day keeps TokyoNight Day's surfaces, darkens each text colour
 without turning its hue, and credits its sources in its header. Portable
 tests cover portal value/filter policy and macOS appearance selection; Linux
 private-bus tests cover color-scheme snapshots,
-SettingChanged and owner loss using the shared reduced-motion transport.
+SettingChanged and owner loss using the shared reduced-motion transport, and
+the fallback to GNOME's `enable-animations` for a portal without
+`reduced-motion`. Portable tests pin that a desktop with neither allows motion
+and that only a pending first answer holds it back. Unix tests drive the local
+GNOME read with `/bin/sh` stand-ins for `gsettings`: its parsing and output
+cap, a `gsettings` its owner may not run (mode 0010) or that cannot start (a
+missing interpreter) skipped for a working one later in `PATH`, a search that
+runs again at the next refresh rather than keeping what cannot start, a
+deadline and a stop that hold across the whole search, including a held
+lookup in one `PATH` entry after which no other entry is looked at, an overrunning and a stopped read killed and reaped, a watch that follows
+a change and is dropped mid-read without leaving a child or thread, a drop
+that returns at once while the lookup is held and starts no child after it,
+a held lookup that stops counting as pending once the first answer's time is
+up, and a switch only GNOME itself reports holding motion back.
 Native acceptance still requires light/dark switching on macOS and Linux
 (Wayland and X11), including multiple windows, open overlays, custom side
 palettes, material/titlebar contrast, IME, and OSC 996/2031 subscribers.

@@ -228,11 +228,11 @@ fn a_fresh_window_starts_its_first_pane_before_the_window_and_gpu() {
 }
 
 /// Drift guard. The GPU device-picker branch writes THREE keys
-/// (vendor/device/name) and must check every `persist_pref` result.
-/// Setting `settings_restart_pending = crate::settings::SettingsApply::Restart` when none of the writes landed
-/// on disk tells the user a restart will apply a pin that silently reverts
-/// to auto. A behavioral test needs a live Settings overlay + a failing
-/// config write; pin the checked-result shape at the source.
+/// (vendor/device/name) and must check every `persist_pref` result, and say
+/// when the pin did not reach disk. The restart note follows the reloaded
+/// config (`settings::pending_apply`), so a pin that never landed never
+/// promises a restart. A behavioral test needs a live Settings overlay + a
+/// failing config write; pin the checked-result shape at the source.
 #[test]
 fn gpu_picker_checks_persist_results_before_flagging_restart() {
     let src = production_source();
@@ -250,12 +250,30 @@ fn gpu_picker_checks_persist_results_before_flagging_restart() {
         "the auto branch must fold all three persist_pref results together"
     );
     assert!(
-        arm.contains("if saved {")
-            && arm.contains("ws.settings_restart_pending = crate::settings::SettingsApply::Restart;")
-            && arm.contains("fire_notify("),
-        "settings_restart_pending must only be set when the writes actually succeeded, \
-             and a failure must be surfaced via fire_notify"
+        arm.contains("if !saved {") && arm.contains("fire_notify("),
+        "a failed write must be surfaced via fire_notify"
     );
+}
+
+/// A full GPU recovery builds the new device from the reloaded config, so
+/// Settings' restart note compares the saved graphics settings with what
+/// the recovery applied, not with the launch's.
+#[test]
+fn gpu_recovery_updates_the_running_graphics() {
+    let src = production_source();
+    let recover = src
+        .split("fn try_recover_gpu(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("try_recover_gpu");
+    let flat: String = recover.split_whitespace().collect();
+    let installed = flat.find("self.gpu=Some(new_gpu);").expect("installs the device");
+    let updated = flat
+        .find(
+            "self.running_graphics=Some(running.after_gpu_rebuild(&cfg,&adapter,self.gpu_software_fallback));",
+        )
+        .expect("updates the running graphics");
+    assert!(installed < updated);
 }
 
 #[test]

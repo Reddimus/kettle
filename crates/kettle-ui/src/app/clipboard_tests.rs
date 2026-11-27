@@ -223,6 +223,7 @@ fn osc52_policy_notices_are_once_per_direction_per_pane_and_accessible() {
                 close: tr.text(kettle_i18n::Text::NoticeDismiss).into(),
                 opacity: 1.0,
                 focused: None,
+                hovered: None,
             };
             let nodes = super::persistent_notice_nodes(Some(7), &toast);
             let node = &nodes

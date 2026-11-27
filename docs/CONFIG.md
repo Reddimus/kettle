@@ -118,7 +118,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `tab-bar-position` (`tab-position`) | `top`\|`bottom`\|`left`\|`right`\|`hidden` | `top` | Where the tab bar sits. `left`/`right` render a **vertical** tab strip (its width is `tab-bar-width`); when its tabs don't fit the window's height it scrolls with `⌃ ⌄` buttons and the mouse wheel, keeping the active tab in view. `hidden` forces the bar off regardless of `tab-bar` |
 | `tab-bar-width` | float 40–600 px | `180` | Width of the vertical tab strip when `tab-bar-position = left`/`right`. Clamped `[40, 600]`; ignored for `top`/`bottom` bars |
 | `tab-min-width` | float 40–600 logical px | `120` | Minimum width of a top or bottom tab, in logical pixels (points on macOS), so it is the same size at every display scale. Tabs divide and fill the bar evenly; in a title bar (macOS, or Kettle's GNOME header) they divide what is left after its controls and a 48 logical pixel window-drag lane, a lone tab included. Once tabs would shrink below this minimum, the bar overflows and (with `scroll-tabbar`) scrolls. In a title bar too narrow for its tabs at the minimum (one tab between the scroll arrows once they overflow), the Settings gear goes first, then the drag lane narrows to 16 logical pixels, and only then does a tab narrow. Clamped `[40, 600]` |
-| `scroll-tabbar` | bool | `true` | When horizontal tabs would shrink below `tab-min-width`, keep them at that width and scroll the bar with `‹ ›` arrow buttons + the mouse wheel (active tab kept in view). In a title bar `‹` sits at the strip's start and `›` just after the last tab shown, before the drag lane; the arrows, the wheel and a horizontal swipe scroll it one tab at a time without changing the active tab, and a new tab, a tab chosen from the keyboard, a close, a resize or a display-scale change scrolls the active tab back into view. A plain strip scrolls by moving the active tab instead. `false` lets them keep shrinking to fit instead. A side bar's rows can't shrink, so it always scrolls |
+| `scroll-tabbar` | bool | `true` | When horizontal tabs would shrink below `tab-min-width`, keep them at that width and scroll the bar with `‹ ›` arrow buttons + the mouse wheel (active tab kept in view). In a title bar `‹` sits at the strip's start and `›` just after the last tab shown, before the drag lane; the arrows, the wheel and a horizontal swipe scroll it one tab at a time without changing the active tab, and a new tab, a tab chosen from the keyboard, a close, a resize or a display-scale change scrolls the active tab back into view. A plain strip scrolls by moving the active tab instead. The arrows light and show the pointing hand under the pointer, and their tooltips say what a press does: Previous Tab and Next Tab with their shortcuts, or Scroll Tabs Left and Right in a title bar. A tab dragged onto an arrow and held there scrolls the strip a tab toward it every 0.4 seconds, so it can be dropped past the tabs shown. `false` lets them keep shrinking to fit instead. A side bar's rows can't shrink, so it always scrolls |
 | `unfocused-split-opacity` | float 0.1–1 | `0.7` | Dim level of unfocused split panes |
 | `scroll-multiplier` (`mouse-scroll-multiplier`) | float 0.1–50 | `1.0` | Mouse-wheel scroll-speed multiplier (1.0 ≈ 3 lines/notch). Applied with **sub-notch precision**: precision touchpads and high-resolution wheels report a fraction of a notch per event, and the remainder is carried across events instead of being rounded away, so slow gestures scroll smoothly and proportionally. Small multipliers stay usable for the same reason — at `0.1` a notch is 0.3 lines, which accumulates over three notches rather than vanishing |
 | `disable-mousewheel-zoom` | bool | `false` | When `true`, Ctrl+wheel does NOT change the font size. Useful for users who accidentally scroll-zoom on a laptop touchpad. The keyboard IncreaseFontSize / DecreaseFontSize / ResetFontSize chords still work |
@@ -153,7 +153,7 @@ configs were written against them: `green` is `#008000` and `gray`/`grey` is
 | `agent-display-agy` (alias `agent_display_agy`) | bool | `false` | agy previews: enables the explicitly installed native display plugin and its visual guidance. Install with `kettle agent-setup --agent agy --install`; start a new agy session afterwards. Explicit artifact fallback requires a signed macOS agy TUI with foreground terminal input. MCP display also supports Linux. Delivery uses the media shelf; native agy hooks cannot print Kettle inline cards. Needs `agent-display`. |
 | `add-kettle-to-path` (alias `add_kettle_to_path`) | `auto`\|`off` | `auto` | macOS and Linux: a new pane whose `PATH`, after the configured `env`, has no executable `kettle` gets the running Kettle's folder appended, after every entry, so `kettle show`, `kettle mcp` and `kettle agent-setup` work there; it is never put in front of your commands, and never a translocated copy's folder (run Kettle from `/Applications` first). Only absolute entries are looked in, and an empty `PATH` (which means the working directory) is left as it is. `off` leaves the `PATH` as configured. Panes already open keep theirs. |
 | `video-preview-hover` (alias `video_preview_hover`) | bool | `off` | Loop a video's silent preview while the pointer rests on its lane, for at most four seconds, from frames the lane already holds; it never starts decoding. Held back by `reduce-motion`. Applies live. |
-| `reduce-motion` (alias `reduce_motion`) | `auto`\|`on`\|`off` | `auto` | Whether Kettle avoids motion it would start on its own: the video hover preview, the visual-bell flash (the bell mark on the tab still shows) and the notification toast's fade. `auto` follows macOS Reduce Motion or the Linux Settings portal and avoids motion if that preference is unavailable; `on` always avoids it; `off` never. A preview the user starts plays either way. Applies live. |
+| `reduce-motion` (alias `reduce_motion`) | `auto`\|`on`\|`off` | `auto` | Whether Kettle avoids motion it would start on its own: the video hover preview, the visual-bell flash (the bell mark on the tab still shows), the toasts' fade, the quick terminal's slide, and an animated background (a starfield or animated image holds the frame it shows). `auto` follows macOS Reduce Motion, or on Linux the Settings portal's reduced-motion preference and, where the portal has none, GNOME's animations setting (`enable-animations`), read through the portal or, in a GNOME session it does not answer for, with `gsettings`; where the desktop says neither, motion is allowed. `on` always avoids it; `off` never. A preview the user starts plays either way. Applies live. |
 | `media-open-mode` (alias `media_open_mode`) | `overlay`\|`lane` | `overlay` | How manual previews open. `overlay` centers within 90% of the owning split without resizing its terminal. Esc or a backdrop click closes it; Pin moves the same preview into a lane. Applies to newly opened previews. |
 | `preview-lane-side` (alias `preview_lane_side`) | `bottom`\|`right` | `bottom` | Where a pane's preview lane opens: `bottom` keeps the terminal's columns, `right` keeps its rows. A lane takes about 40% of the pane and leaves the terminal at least 20 columns and 5 rows. Applies to lanes opened after it changes. See **Media** under keybind actions. |
 | `agent-display-claude-code` (alias `agent_display_claude_code`) | bool | `false` | Claude Code previews: Claude Code started in a new pane gets Kettle's own plugin (the display server and the hook that prints inline cards) through `CLAUDE_CODE_PLUGIN_DIRS`. Needs `agent-display`. Kettle writes the plugin into its own data directory, checks it before every new pane, and offers nothing while Claude Code's managed policy forbids plugins from the environment; it changes none of Claude Code's settings. On Linux, Kettle also offers a `claude` launch function for cards. Your own `claude` function (defined or autoloadable) still wins, and `kettle agent-setup --status` reports it. Aliases are not checked; fish abbreviations do not suppress Kettle's function. See [Wrapping your own claude or codex function](AGENT.md#wrapping-your-own-claude-or-codex-function). Panes already open keep what they started with. See [Kettle's Claude Code plugin](AGENT.md#kettles-claude-code-plugin) |
@@ -486,7 +486,7 @@ and the keybind map, for example `keybind = ctrl+grave=toggle_quick_terminal`.
 | `quick-terminal-position` | `top` \| `bottom` \| `left` \| `right` \| `center` | `top` | Screen edge, or centered; Wayland delegates placement to the desktop |
 | `quick-terminal-size` | integer percent, 1-100 | `40` | Top/bottom use this fraction of screen height and full width; left/right use this fraction of width and full height; center and Wayland use this fraction of both dimensions |
 | `quick-terminal-hotkey` | modified key chord, or `none` | unset | Examples: `ctrl+grave`, `cmd+escape`. Settings has a key-capture field; bare Delete/Backspace clears it and bare Esc cancels capture |
-| `quick-terminal-animation` | bool | `true` | Slide into view in 150 ms. System Reduce Motion or `reduce-motion = on` makes it instant, as does `false`. Kettle does not slide on Wayland |
+| `quick-terminal-animation` | bool | `true` | Slide into view in 150 ms, unless `reduce-motion` holds motion back (`on`, or the system's Reduce Motion under `auto`; `off` slides either way). `false` makes it instant. Kettle does not slide on Wayland |
 | `quick-terminal-autohide` | bool | `true` | Hide when another application gains focus. Switching to another Kettle window keeps it visible |
 
 On macOS and X11, each show selects the screen under the pointer (the active
@@ -565,7 +565,7 @@ table. For example, `show-titlebar` and `show_titlebar` are equivalent.
 | `background-type` | enum | `solid` | `solid` \| `transparent` \| `image` \| `starfield` (a zero-config procedural GPU starfield that needs no `background-image`; a fixed built-in example whose look is not tunable). Surfaced in Settings → Background. See **[BACKGROUNDS.md](BACKGROUNDS.md)** |
 | `background-image` | path | — | Wallpaper image (for `background-type = image`). Supports PNG/JPEG/WebP/BMP/GIF, **animated GIF / APNG / animated WebP** (plays as a moving background — see `background-animation`). Tilde expansion supported. Editable inline in Settings → Background. Curated sources in **[BACKGROUNDS.md](BACKGROUNDS.md)** |
 | `chrome-background` | enum | `theme` | When a wallpaper (`image` or `starfield`) is set, the opaque fill of the window chrome strips (tab bar, status bar) so the background never bleeds through them: `theme` (the theme's chrome color — default) \| `auto` (the background's average color, kept readable under the tab text; black over the starfield) \| `black` \| `white`. Without a wallpaper, strips use a slightly darker theme background instead of the ANSI bright-black colour, in every mode |
-| `background-animation` | enum | `always` | How an animated background (a `starfield` or an animated `background-image`) plays: `always` (`on`/`true`, the default; animate even when unfocused, but still freeze when the window is minimized/occluded) \| `when-focused` (`focused`, animate only while focused, zero idle otherwise — battery-friendly) \| `off` (`static`/`false`, freeze on first frame). Surfaced in Settings → Background |
+| `background-animation` | enum | `always` | How an animated background (a `starfield` or an animated `background-image`) plays: `always` (`on`/`true`, the default; animate even when unfocused, but still freeze when the window is minimized/occluded) \| `when-focused` (`focused`, animate only while focused, zero idle otherwise — battery-friendly) \| `off` (`static`/`false`, freeze on first frame). While `reduce-motion` holds motion back, `always` and `when-focused` hold the frame showing when motion stopped and schedule no frames; `off` still shows the first frame. Surfaced in Settings → Background |
 | `background-image-mode` | enum | `stretch_and_fill` | `stretch_and_fill` \| `tile` \| `center` \| `scale` (aspect-preserving fit) |
 | `background-image-align-horiz` | enum | `center` | `left` \| `center` \| `right` (applies to `center` + `scale` modes) |
 | `background-image-align-vert` | enum | `middle` | `top` \| `middle` \| `bottom` |
@@ -583,7 +583,7 @@ table. For example, `show-titlebar` and `show_titlebar` are equivalent.
 | `log-strip-ansi` | bool | `false` | Strip ANSI escape sequences from the per-pane session log (`Action::ToggleSessionLog`) before writing. `true` → log is plain-text (CSI / OSC / single-char ESC all stripped); `false` → raw stream is preserved (`cat`-replayable in a terminal) |
 | `light-theme` / `dark-theme` | theme name | `Kettle Day` / `TokyoNight Night` | Themes swapped by `Action::ToggleLightDark`. Lookup is case insensitive |
 | `search-case-sensitive` | enum | `smart` | `smart` ignores case until the query contains uppercase. `always` / `sensitive` forces matching case; `never` / `insensitive` always ignores it. `case-sensitive = true/false` remains accepted as an alias |
-| `link-single-click` | bool | `false` | Single-click opens URLs (default needs `Ctrl`/`Cmd`+click). Hover shows the destination and the current opening gesture; the pill clears on pointer exit, scrolling, typing or focus loss |
+| `link-single-click` | bool | `false` | Single-click opens URLs (default needs `Ctrl`/`Cmd`+click). Hover shows the destination and the current opening gesture; the pill clears on pointer exit, scrolling, typing or focus loss. The pointer is a hand only while a click would open the link |
 | `link-underline` (alias `link_underline`) | `hover`\|`always` | `hover` | When detected URLs and paths are underlined. `hover` draws no line at rest and the solid accent line while the pointer is over the link; `always` also draws a thin, dim line at rest. Explicit OSC 8 links keep their dotted resting line in both modes, since their text need not look like a link. Hover, the destination pill, the opening gesture and quick-select hints are the same in both modes. Applies live |
 | `disable-mouse-paste` | bool | `false` | Block middle-click paste |
 | `paste-protection` | enum | `auto` | `auto` confirms text containing CR/LF, C0 controls other than TAB, DEL or C1 controls when any writable recipient has not enabled bracketed paste, and text carrying a bracketed-paste end marker (`ESC [ 201 ~`, or `201~` after the one-character CSI U+009B) in any mode. `always` confirms every multi-line paste, including bracketed mode, and the same marker. `off` never confirms. The dialog's first sentence says why it asked and names the marker it found. It previews at most three lines and 160 columns with each control spelled in ASCII (`ESC`, `^C`, `CSI`, `U+202E`; a tab is not flagged), moving the preview to the most serious control when that lies further down, and lists up to four kinds of control with what each does in the current mode (one Kettle removes whichever button is chosen says so). When a recipient turns bracketed paste off between the question and the answer, a choice that would send a line break or a control is not acted on: Kettle asks again for the new mode. Text-direction formatting characters are listed and removed by Paste without controls, but do not by themselves make Kettle ask. It offers Cancel (focused initially), Paste without controls (only when controls exist, and recommended then; removes whole escape sequences and controls while preserving TAB/CR/LF), Paste as one line and Paste, in one row when the window allows and stacked otherwise, with Alt+letter access keys on Linux and Windows. A "Paste settings…" link pastes nothing and opens Settings on this key's row. All modes remove both bracketed-paste markers, in either form; bracketed paste also drops every other ESC byte and the signal bytes 0x03, 0x1A and 0x1C (and 0x19 on macOS). Live in Settings > Behavior > Paste protection. See [Pasting](../README.md#pasting) |
@@ -593,7 +593,7 @@ table. For example, `show-titlebar` and `show_titlebar` are equivalent.
 | `close-button-on-tab` | bool | `true` | Show close buttons on tabs. Horizontal: every tab when multiple tabs are open; only on hover with a single tab, when space permits. Vertical: every tab |
 | `new-tab-after-current-tab` | bool | `false` | Insert vs append behavior when creating a new tab |
 | `detachable-tabs` | bool | `true` | Allow cross-window tab tear-off / re-dock and the `move_tab_to_new_window` / `move_tab_to_window` actions. `false` keeps in-window tab switching and reordering but disables detach |
-| `ask-before-closing` | enum | `busy-or-multiple` | Close-confirmation policy: `always`, `busy-or-multiple`, `multiple-terminals`, or `never`. `busy-or-multiple` asks before closing more than one pane, and before closing a single pane (its tab, its window, or the pane itself) while a program other than an idle shell owns its terminal: a job such as `sleep` or an editor started from the shell, or the pane's own program when it was started as something other than an interactive shell (a profile or `-e` command such as `vim`, `ssh` or a script); an idle shell at its prompt closes without asking (not on Windows, where a single pane never asks). `multiple-terminals`, the default before, asks only when more than one pane would close. Applies to the close-window, close-tab, and close-pane **actions** (`Ctrl+Shift+W`, `Ctrl+Shift+Q`, the tab-bar `✕`, middle-clicking a tab); panes sitting idle at an integrated-shell prompt do not count as work to lose. The **titlebar `✕` and `Alt+F4`** are OS window-destroy requests rather than Kettle commands, so a window holding several panes closes at once under every setting except `always`. A window holding one pane asks under `busy-or-multiple` when a program is running in it, as it does for the actions; under `multiple-terminals` and `never` it closes at once. Set `always` if you want them to ask for every window. When one pane would close, the question names the program that owns its terminal (its name only, never its arguments). A pipeline is named after its first command, so `cat f | less` reads `cat`. Shells, programs Kettle cannot read, and Windows keep the general wording. Also on the right-click **Preferences ▸** menu as a radio group |
+| `ask-before-closing` | enum | `busy-or-multiple` | Close-confirmation policy: `always`, `busy-or-multiple`, `multiple-terminals`, or `never`. `busy-or-multiple` asks before closing more than one pane, and before closing a single pane (its tab, its window, or the pane itself) while a program other than an idle shell owns its terminal: a job such as `sleep` or an editor started from the shell, or the pane's own program when it was started as something other than an interactive shell (a profile or `-e` command such as `vim`, `ssh` or a script); an idle shell at its prompt closes without asking (not on Windows, where a single pane never asks). `multiple-terminals`, the default before, asks only when more than one pane would close. Applies to the close-window, close-tab, and close-pane **actions** (`Ctrl+Shift+W`, `Ctrl+Shift+Q`, the tab-bar `✕`, middle-clicking a tab, a tab menu's Close Tab, and its Close Other Tabs, which asks once for all the tabs it closes); panes sitting idle at an integrated-shell prompt do not count as work to lose. The **titlebar `✕` and `Alt+F4`** are OS window-destroy requests rather than Kettle commands, so a window holding several panes closes at once under every setting except `always`. A window holding one pane asks under `busy-or-multiple` when a program is running in it, as it does for the actions; under `multiple-terminals` and `never` it closes at once. Set `always` if you want them to ask for every window. When one pane would close, the question names the program that owns its terminal (its name only, never its arguments). A pipeline is named after its first command, so `cat f | less` reads `cat`. Shells, programs Kettle cannot read, and Windows keep the general wording. Also on the right-click **Preferences ▸** menu as a radio group |
 | `lua-sandbox` | enum | `safe` | Lua plugin trust level. `restricted` blocks `kettle.send_text` and `kettle.exec_action`. `safe` also removes command and file APIs from the Lua standard library, but a plugin can still run a command by typing it into the pane. `trusted` restores the command and file APIs (`os.execute`, `io.open`, `io.popen`, `loadfile`, `dofile`); the `debug` library and native C-module loading stay unavailable at every level because the VM is always mlua's safe state. Read any plugin before enabling it. See [Lua plugins](PLUGINS.md) |
 
 Close confirmations appear in a centered dialog with Cancel focused. Enter
@@ -766,7 +766,9 @@ logical pixels while the pane is scrolled back or the pointer hovers or drags
 it, in a channel as wide as the thumb; with `scrollbar = always` it keeps that
 width whenever there is history. Its thumb is at least 40 logical pixels long,
 and its hit strip is at least 12 logical pixels wide and reaches the pane's
-edge. All sizes scale with display DPI. The bar is painted solid only when, at
+edge. Over that strip, and while dragging the bar, the pointer is the arrow
+rather than the text cursor, except where a program using the mouse takes the
+click. All sizes scale with display DPI. The bar is painted solid only when, at
 its widest and with its 2-pixel edge, it fits in `window-padding-x` and the
 window is opaque (`background-opacity = 1`). Otherwise it is translucent, at
 most 90% cover, so text under it stays visible; it still shows in the same
@@ -788,8 +790,12 @@ or OSC 777 (`printf '\e]777;notify;Title;Body\a'`), and a Lua script with
   costs you a keystroke in vim or the shell. It stays for 7 seconds of time
   you can see it, not counting time the window is in the background, behind
   a dialog or under the pointer, and fades out only when motion is allowed.
+  Under the pointer or assistive focus it shows at full strength, even if
+  it had begun to fade, and afterwards it stays at least 3 more seconds.
   Screen readers announce it politely. With assistive focus on its Show or
-  Dismiss button, Enter, Space, Tab and Escape answer the toast.
+  Dismiss button, Enter, Space, Tab and Escape answer the toast. Show and ×
+  light up under the pointer, as a dialog's buttons do, and so does the rest
+  of the toast, which a click answers as Show does.
 - **No Kettle window has focus**: a desktop notification, as before, and
   the window asks for attention. If the desktop refuses it or the delivery
   fails (a D-Bus error on Linux, a toast error on Windows), the toast is
@@ -1022,7 +1028,8 @@ Settings Theme row opens it.
 inline rename overlay for the OS window / active tab / focused pane). None has
 a default key. `edit_tab_title` is also "Rename tab…" in the command palette
 and Rename Tab… in the macOS Window menu; all three are in the right-click
-menu as Set Window / Tab / Pane Title….
+menu as Set Window / Tab / Pane Title…, and a tab's own right-click menu has
+Rename Tab… for that tab.
 
 **Media**: `open_media_shelf` opens the focused pane's newest shelf item,
 or closes its open preview. Clicking an inline card opens that item. By
@@ -1036,7 +1043,10 @@ Choose **Pin** (or P) to keep the same item, zoom and playback in a lane.
 Only then does the terminal resize. `media-open-mode = lane` opens directly
 in that layout. A lane takes about 40% of the pane on `preview-lane-side`,
 leaving at least 20 terminal columns and 5 rows. With less room it becomes
-a one-row strip; a pane too small even for that gets a notice.
+a strip along the bottom, tall enough for 24-point buttons where the terminal
+keeps its 5 rows with that and one row where it does not; a pane too small
+even for that gets a notice. A bottom lane's buttons never reach the edge it
+resizes by.
 Keys still go to the terminal while a lane shows. Drag the lane's edge
 beside the terminal, marked by a short grip, to give it more or less of the
 pane: the terminal keeps its 20 columns and 5 rows and the lane its least,
@@ -1069,7 +1079,20 @@ only once it is ready (the place shows the one asked for meanwhile), starts
 fitted and its source from the top, and stays put if it cannot be drawn.
 `↻` reads a Markdown file's gallery again at the diagram shown. Where the header is too narrow, these give way,
 open outside first, then zoom out, zoom in and fit, copy, browsing, the
-background and the source, and reload last. A press or the wheel over a lane never
+background and the source, and reload last. Each of these buttons takes a
+press anywhere in a target at least 24 by 24 points. Where the lane has the
+room, the header row (and a gallery's detail line) grows to that height; where
+it has only the room it always needed, the buttons reach into the padding
+above and the line of text below instead, so a lane or viewer that fitted
+before still fits. One case stays short: in a bottom lane at its least height
+showing a gallery, the buttons above the page buttons are about 18 points
+tall, because the room they would need is the edge that resizes the lane or
+the page buttons themselves. The button under the pointer lights, unless it would do nothing (browsing
+past either end). Resting the pointer on a button (not on a video's
+picture, which a click plays as Play does) shows its name in a tooltip, with the key that does the same while the lane holds the keyboard
+(`+`, `-`, `0`, `C`, `K`, `M`, `T`, `F`, Page Up and Page Down, and in the
+centred viewer `P`, and Esc for × except in fullscreen, where Esc leaves
+fullscreen), or otherwise the shortcut bound to its action. A press or the wheel over a lane never
 reaches the terminal, and menus and dialogs open over it without closing it.
 The command palette lists it as "Open media shelf". On macOS its default
 chord is `Ctrl+Shift+Cmd+I`; elsewhere it has no default binding.
@@ -1173,7 +1196,9 @@ from the bottom of the viewport. Blank cells before a match hold its label;
 at column zero blank cells after it are used when available. Without space the
 label overlays the match start. A translated legend explains the available
 plain-label and Shift-label actions and Esc cancellation. Explicit OSC 8 captions
-use their stored destination. Quick-select hints is also available in the
+use their stored destination. When nothing on screen can be labelled,
+**No hints here** shows along the bottom of the pane for three seconds
+instead. Quick-select hints is also available in the
 macOS Edit menu, the palette (with its current binding), and the terminal context
 menu when a link or path is visible. This adds no configuration keys.
 
@@ -1195,7 +1220,8 @@ not look the path up itself, so printed text cannot make it reach a network
 mount. On Windows path hints are always copied),
 `new_ssh` (`ssh`), `context_menu`
 (`open_context_menu`: the right-click menu, opened at the text cursor
-rather than under the mouse pointer; `Menu` on Linux and Windows, and
+rather than under the mouse pointer, below the cursor's line or, when it does
+not fit there, above it, never over it; `Menu` on Linux and Windows, and
 bindable to any key on macOS). Up and Down move the highlight, which
 starts on the first row it can act on, Enter picks it and Escape closes the
 menu; while it is open no key reaches the program in the pane. Shift+F10,
@@ -1208,7 +1234,11 @@ copy/navigation mode (default `Ctrl+Shift+Space`): `h`/`j`/`k`/`l` move,
 `0`/`$`/`g`/`G`/`H`/`M`/`L` jump, `v` starts a visual selection, `V` a
 line selection and `Ctrl+v` a block selection (pressing another of the three
 switches the selection to that kind, the same one again ends it), `y` yanks it
-to the clipboard, `Esc` exits. See `man kettle` for the full keymap.
+to the clipboard, `Esc` exits. See `man kettle` for the full keymap. While it
+is on, a small **Vi mode** chip sits at the pane's top right (under the
+"Start of kept history" label when that shows), or at its bottom right above
+the jump-to-bottom button when text or the cursor is at the top; it only ever
+sits over blank, unselected cells, so with text in both places it stays hidden.
 
 **Misc**: `reset` (RIS — full terminal reset including engine state;
 like `clear_history`, it acts on Kettle's terminal, not the program in it,
@@ -1281,7 +1311,8 @@ Values are omitted, including environment values. Filenames and keys have
 control characters removed and are limited to 64 characters each.
 
 **Open Config** opens the file named by the notice with the operating system's
-default app, using the same mechanism as **Advanced…**. If a screen reader
+default app, using the same mechanism as **Advanced…**. It and **Dismiss**
+light up under the pointer. If a screen reader
 moves focus to the notice, Enter opens the file and Escape dismisses it. While
 the terminal retains focus, those keys go to the running shell or program. Both
 buttons remain available to screen readers. The terminal grid and IME cursor
@@ -1300,9 +1331,24 @@ including its transparency, and keeps an accent line. Wallpaper strips retain
 Horizontal New Tab Options and New Tab controls each have a hit area of at
 least 28 by 28 points (growing with a taller strip), a 4 point gap, an 8 point outside margin, and rounded hover and
 pressed feedback. Their tooltips follow the UI language; New Tab also shows
-its current configured shortcut. At 420 by 260 points, overflow keeps the
+its current configured shortcut. A tooltip shows once the pointer has rested
+on its control for half a second, and at once on the next control within a
+second of the last tooltip going away. A click hides it until the pointer
+leaves the control. The same timing applies to every tooltip in the strip, the
+GNOME header bar and the media viewer. At 420 by 260 points, overflow keeps the
 active title visible alongside both controls. Closing or renaming tabs uses
 the same layout as pointer actions and accessibility.
+
+A tab title too long for its tab is shortened with an ellipsis. A title
+derived from the working directory keeps its last folder, and a title that
+looks like a path keeps its end. Any other title keeps both ends when at least
+16 columns of it show, and only its start in a narrower tab, so tabs whose
+titles differ near the start still read apart. Resting the pointer on a
+shortened tab shows its whole title, or its whole working directory, in a
+tooltip. A long tooltip wraps at the window's width and goes on the side of
+the control it names with more room; only one with more lines than fit there
+keeps the lines that fit and ends with an ellipsis. It never covers the
+control or leaves the window.
 
 When a window loses focus on macOS or Linux, tab text and controls dim toward
 their backgrounds while retaining at least 3:1 contrast, and the active accent

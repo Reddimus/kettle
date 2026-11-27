@@ -278,6 +278,13 @@ command's place with headings skipped, the index selection, Enter and the
 accessibility tree use, so that command has `option` 0. A typed query shows no
 headings, so there the two are equal.
 
+When a context menu is open, `ui_geometry.context_menu` reports its panel as
+`rect` and, as `anchor`, what the panel was placed around: the point `x`, `y`
+it was opened at (a right-click's pointer), and for a menu opened from the
+keyboard the text cursor's line as `line` (`top`, `bottom`), `null` otherwise.
+The panel opens below the anchor or flips above it, so the two differ. Its
+`highlight` is `null` while no row is lit.
+
 When a confirmation is open, `ui_geometry.confirmation` reports its centered
 panel, heading, and body rectangles; scroll offset and limit; and each button's
 label, bounds, focus, hover, pressed, and destructive state. It is null otherwise.
@@ -286,7 +293,9 @@ accessibility. Rebinding confirmations use friendly action names and never
 include the payload of a SendText action.
 
 Video viewer geometry also reports `transport`, `timeline`, and `time_label`
-rectangles, plus `hovered_control` and `scrubbing`. `timeline` describes the
+rectangles, plus `hovered_control` and `scrubbing`. A lane's `hovered_control`
+names the button the physical pointer lights, a header button or a player's,
+and is null when none is lit. `timeline` describes the
 painted row; `time_label` includes the initial duration before playback, and
 `controls.scrubber` is present once seeking is available. All rectangles are
 physical pixels and use the same display scale as pointer and accessibility
@@ -481,7 +490,7 @@ The pinned lane takes about 40% of its pane and resizes the terminal; keys
 still go to the terminal unless the user focuses the lane.
 The lane shows one item fitted, with still images never enlarged past their pixels, on white for
 SVG and a checkerboard for raster, with its title, kind, size and sender,
-and `‹ ›` to browse, `▾` to collapse the lane to a one-row strip and `×` to
+and `‹ ›` to browse, `▾` to collapse the lane to a strip and `×` to
 close it. Where this platform permits an image viewer and the item still
 holds its pixels, the header also has `↗`, which opens it there (Preview on
 macOS, Loupe or Eye of GNOME on Linux), the same hand-off as a card menu's row. A
@@ -491,7 +500,9 @@ or not, and a PDF's a private copy of the PDF in the permitted document
 viewer (Preview on macOS, Papers or Evince on Linux), never a picture of its
 page. The
 terminal keeps at least 20 columns and 5 rows: with less room the lane is
-the strip, along the pane's bottom whichever side it opened on; opening one
+the strip, along the pane's bottom whichever side it opened on, in whole
+terminal rows tall enough for 24-point buttons (one row where the terminal
+would lose its 5 rows to that); opening one
 in a pane too small even for that shows a notice and leaves the item unseen,
 and a lane that loses its room later waits as the titlebar's shelf badge. Each pane
 has its own lane; `ui_geometry` reports the centered viewer as

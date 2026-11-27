@@ -717,18 +717,113 @@ pub(super) fn lane_interactive_controls(
         .collect()
 }
 
+/// The same test the renderer lights a hovered button by.
 pub(super) fn lane_control_enabled(
     lane: &kettle_render::MediaLanePanel,
     hit: kettle_render::MediaLaneHit,
 ) -> bool {
-    use kettle_render::MediaLaneHit as Hit;
-    match hit {
-        Hit::Previous => lane.position.0 > 1,
-        Hit::Next => lane.position.0 < lane.position.1,
-        Hit::PreviousPage => lane.page.is_some_and(|(page, _)| page > 1),
-        Hit::NextPage => lane.page.is_some_and(|(page, count)| page < count),
-        _ => true,
+    kettle_render::media_lane_control_enabled(lane, hit)
+}
+
+/// Whose keyboard a key held by a lane reaches: a lane's own, the centred
+/// viewer's, or the viewer's while it fills the screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LaneKeys {
+    Lane,
+    Viewer,
+    FullscreenViewer,
+}
+
+impl LaneKeys {
+    /// Whose keyboard it is while `overlay` is the window's viewer, if any.
+    pub(super) fn of(overlay: Option<crate::media::Overlay>) -> Self {
+        match overlay {
+            Some(open) if open.fullscreen => Self::FullscreenViewer,
+            Some(_) => Self::Viewer,
+            None => Self::Lane,
+        }
     }
+}
+
+/// What Esc does with a lane's keyboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PreviewExit {
+    /// The viewer leaves fullscreen and stays open.
+    LeaveFullscreen,
+    /// The viewer closes.
+    CloseViewer,
+    /// The lane gives the keyboard back to the terminal.
+    ReturnKeyboard,
+}
+
+/// What Esc does in `keys`: the dispatch and the tooltips both ask here.
+pub(super) fn preview_exit(keys: LaneKeys) -> PreviewExit {
+    match keys {
+        LaneKeys::FullscreenViewer => PreviewExit::LeaveFullscreen,
+        LaneKeys::Viewer => PreviewExit::CloseViewer,
+        LaneKeys::Lane => PreviewExit::ReturnKeyboard,
+    }
+}
+
+/// The key that does what `hit` does while a lane holds the keyboard
+/// ([`crate::media::preview_key`] and, in the centred viewer,
+/// [`crate::media::viewer_key`]), for its tooltip: only a key that does it
+/// in `keys`. Esc closes the viewer only when it does not fill the screen,
+/// and P pins only the viewer.
+pub(super) fn lane_control_key(
+    hit: kettle_render::MediaLaneHit,
+    keys: LaneKeys,
+) -> Option<kettle_config::Key> {
+    use kettle_config::Key;
+    use kettle_render::MediaLaneHit as Hit;
+    Some(match hit {
+        Hit::ZoomIn => Key::Char('+'),
+        Hit::ZoomOut => Key::Char('-'),
+        Hit::Fit => Key::Char('0'),
+        Hit::Copy => Key::Char('c'),
+        Hit::Play => Key::Char('k'),
+        Hit::Sound => Key::Char('m'),
+        Hit::Theater => Key::Char('t'),
+        Hit::Fullscreen => Key::Char('f'),
+        Hit::PreviousPage => Key::PageUp,
+        Hit::NextPage => Key::PageDown,
+        Hit::Pin if keys != LaneKeys::Lane => Key::Char('p'),
+        Hit::Close if preview_exit(keys) == PreviewExit::CloseViewer => Key::Escape,
+        _ => return None,
+    })
+}
+
+/// The action a lane control works as, whose bound shortcut its tooltip
+/// names: the inverse of [`lane_action_hit`].
+pub(super) fn lane_control_action(hit: kettle_render::MediaLaneHit) -> Option<Action> {
+    [
+        Action::PreviewNext,
+        Action::PreviewPrevious,
+        Action::PreviewNextDiagram,
+        Action::PreviewPreviousDiagram,
+        Action::ClosePreview,
+        Action::PreviewSource,
+        Action::PreviewCanvas,
+        Action::PreviewCopy,
+        Action::PreviewReload,
+        Action::VideoPlay,
+        Action::VideoMute,
+        Action::PreviewZoomIn,
+        Action::PreviewZoomOut,
+        Action::PreviewFit,
+    ]
+    .into_iter()
+    .find(|action| lane_action_hit(action) == Some(hit))
+}
+
+/// Where a lane button's tooltip names it: the `button` itself, when the
+/// pointer is on it. A press elsewhere that does what the button does (a
+/// video's picture plays as Play does) names no button.
+pub(super) fn lane_button_tooltip_region(
+    button: Option<kettle_render::Rect4>,
+    (x, y): (f32, f32),
+) -> Option<kettle_render::Rect4> {
+    button.filter(|rect| rect_contains(*rect, x, y))
 }
 
 /// A lane control's name in ctl `ui_geometry`.

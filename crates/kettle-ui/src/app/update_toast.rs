@@ -119,8 +119,9 @@ impl App {
         if !self.toast_visible(ws) || toast.remaining().is_zero() || expired_claim {
             return None;
         }
+        let geometry = self.update_toast_geometry(ws)?;
         Some(kettle_render::UpdateToastOverlay {
-            geometry: self.update_toast_geometry(ws)?,
+            geometry,
             message: self.update_toast_message(&toast.claim.notice),
             details: self
                 .ui_text
@@ -132,6 +133,7 @@ impl App {
                 Some(ACCESSIBILITY_UPDATE_DISMISS_ID) => Some(2),
                 _ => None,
             },
+            hovered: self.toast_control_hover(ws, &geometry, false),
             opacity: toast.opacity(self.motion_allowed()),
         })
     }
@@ -240,6 +242,7 @@ impl App {
             if !visible {
                 self.update_toast_focus = None;
             }
+            let drawn = toast.opacity(motion);
             toast.tick(now, visible, hovered || self.update_toast_focus.is_some());
             let expired = toast.remaining().is_zero()
                 || (!toast.acknowledged
@@ -264,10 +267,7 @@ impl App {
             } else {
                 let wake = toast.wake_after(motion);
                 if visible
-                    && !hovered
-                    && self.update_toast_focus.is_none()
-                    && motion
-                    && toast.remaining() <= std::time::Duration::from_millis(150)
+                    && toast.clock.needs_frame(drawn, motion)
                     && let Some(w) = &ws.window
                 {
                     w.request_redraw();

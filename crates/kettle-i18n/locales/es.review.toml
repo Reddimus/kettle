@@ -82,6 +82,10 @@ a11y_window_restore = "accepted"
 a11y_window_close = "accepted"
 
 tab_new_options = "accepted"
+tab_scroll_previous = "draft"
+tab_scroll_next = "draft"
+tab_scroll_left = "draft"
+tab_scroll_right = "draft"
 
 notify_profile_launch_busy = "accepted"
 notify_profile_launch_failed_body = "accepted"
@@ -131,6 +135,7 @@ hint_action_copy = "accepted"
 hint_action_preview = "accepted"
 hint_legend = "accepted"
 hint_legend_plain = "accepted"
+hint_none = "draft"
 
 settings_category_sessions = "accepted"
 settings_field_restore_scrollback_lines = "accepted"
@@ -224,7 +229,7 @@ quick_terminal_center = "accepted"
 quick_terminal_hotkey_description = "draft"
 quick_terminal_position_description = "accepted"
 quick_terminal_size_description = "draft"
-quick_terminal_animation_description = "accepted"
+quick_terminal_animation_description = "draft"
 quick_terminal_autohide_description = "draft"
 quick_terminal_hotkey_failed = "accepted"
 macos_menu_app = "draft"
@@ -318,6 +323,7 @@ settings_description_keybind_split_right = "accepted"
 settings_description_keybind_start_search = "accepted"
 settings_description_keybind_toggle_zoom = "accepted"
 settings_search_placeholder = "accepted"
+settings_search_results = "draft"
 settings_no_matches = "accepted"
 
 notify_body_reconnect_environment_unavailable = "draft"
@@ -691,6 +697,8 @@ notify_title_search_not_saved = "accepted"
 notify_title_session_log_error = "accepted"
 notify_title_session_log_stopped = "accepted"
 notify_title_setting_not_saved = "accepted"
+notify_title_setting_not_durable = "draft"
+notify_body_setting_not_durable = "draft"
 notify_title_split_failed = "accepted"
 notify_title_theme_not_saved = "accepted"
 notify_title_update_available = "accepted"
@@ -811,6 +819,7 @@ palette_zoom_out_all = "accepted"
 picker_a11y_layouts = "accepted"
 picker_a11y_palette = "accepted"
 picker_a11y_results = "accepted"
+picker_a11y_choose = "draft"
 picker_a11y_ssh = "accepted"
 picker_a11y_themes = "accepted"
 picker_create_layout_hint = "accepted"
@@ -982,13 +991,13 @@ settings_note_codex_new_panes = "accepted"
 settings_note_codex_translocated = "accepted"
 settings_note_codex_unavailable = "accepted"
 settings_note_codex_unsupported = "accepted"
-settings_note_language = "accepted"
 settings_note_language_pending = "accepted"
 settings_note_new_shells = "accepted"
 settings_note_graphics_restart = "accepted"
 settings_note_gpu_discovery_skipped = "accepted"
 settings_note_restart = "accepted"
 settings_press_chord = "draft"
+settings_capture_needs_modifier = "draft"
 settings_value_always = "accepted"
 settings_value_attention = "accepted"
 settings_value_detecting = "draft"
@@ -1055,6 +1064,7 @@ menu_a11y_update = "draft"
 window_title_gpu_lost = "accepted"
 window_title_software_fallback = "draft"
 a11y_header_find = "draft"
+a11y_tab_toolbar = "draft"
 
 # Messages whose review needs the second pass: destructive confirmations and
 # screen-reader names and descriptions.
@@ -1209,6 +1219,7 @@ osc52_blocked_write_by = "draft"
 scrollback_kept = "draft"
 scrollback_a11y_viewing = "draft"
 scrollback_kept_lines = "draft"
+vi_mode_chip = "draft"
 
 # 2026-11-16: C06 Settings. The Reset chip, the unavailable and checking
 # states of the Window blur switch, and the Reset button's screen-reader
@@ -1219,6 +1230,7 @@ settings_value_unavailable = "draft"
 settings_value_checking = "draft"
 settings_reset_button = "draft"
 settings_a11y_reset = "draft"
+settings_a11y_change = "draft"
 
 quick_portal_size = "draft"
 quick_portal_unset = "draft"
@@ -1235,6 +1247,17 @@ quick_portal_identity = "draft"
 quick_portal_managed = "draft"
 quick_portal_position = "draft"
 quick_portal_animation = "draft"
+
+# 2026-11-26: the menu a right-click on a tab opens. Its five new rows, its
+# screen-reader name and the Close Other Tabs confirmation are drafts.
+menu_rename_tab = "draft"
+menu_duplicate_tab = "draft"
+menu_move_tab_left = "draft"
+menu_move_tab_right = "draft"
+menu_a11y_tab = "draft"
+menu_close_other_tabs = "draft"
+confirm_title_close_other_tabs = "draft"
+confirm_button_close_other_tabs = "draft"
 
 [second-pass]
 keys = [
@@ -1254,6 +1277,7 @@ keys = [
 
     "hint_legend",
     "hint_legend_plain",
+    "hint_none",
     "link_open_click",
     "link_open_command_click",
     "link_open_control_click",
@@ -1360,10 +1384,12 @@ keys = [
     "media_lane_a11y_zoom_out",
     "menu_a11y_about",
     "menu_a11y_submenu",
+    "menu_a11y_tab",
     "menu_a11y_terminal",
     "picker_a11y_layouts",
     "picker_a11y_palette",
     "picker_a11y_results",
+    "picker_a11y_choose",
     "picker_a11y_ssh",
     "picker_a11y_themes",
     "receipt_a11y_dismiss",
@@ -1385,6 +1411,7 @@ keys = [
     "settings_a11y_fields",
     "settings_a11y_title",
     "settings_a11y_reset",
+    "settings_a11y_change",
     "update_a11y_available",
     "menu_a11y_update",
     "update_a11y_failed",
@@ -1393,6 +1420,7 @@ keys = [
     "mouse_override_menu_hint",
     "font_size_chip",
     "a11y_header_find",
+    "a11y_tab_toolbar",
     "notification_toast_show",
     "notification_toast_show_a11y",
     "notification_toast_a11y",
@@ -1511,4 +1539,6 @@ keys = [
     "scrollback_a11y_viewing",
     "scrollback_kept",
     "scrollback_kept_lines",
+    "confirm_title_close_other_tabs",
+    "confirm_button_close_other_tabs",
 ]

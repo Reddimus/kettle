@@ -248,6 +248,138 @@ pub fn kept_history_label(
     })
 }
 
+/// The chip that says a pane is in vi mode.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ViModeChip {
+    pub rect: Rect4,
+    pub label: String,
+    pub text_origin: (f32, f32),
+}
+
+/// A pane's vi-mode chip: sized and kept clear of the scrollbar as the
+/// kept-history label is, at the top right, below that label when it shows
+/// (`kept`), or else at the bottom right, above the jump button when it
+/// shows (`jump`). A place counts only when `covers_text`, given the chip's
+/// rect, says it hides no text and no cursor, so the chip never covers what
+/// the terminal shows; with neither place free there is no chip.
+#[allow(clippy::too_many_arguments)]
+pub fn vi_mode_chip(
+    terminal: Rect4,
+    scale: f32,
+    text_cell: (f32, f32),
+    scrollbar_width: f32,
+    kept: Option<Rect4>,
+    jump: Option<Rect4>,
+    covers_text: impl Fn(Rect4) -> bool,
+    tr: &Translator,
+) -> Option<ViModeChip> {
+    let (x, y, width, height) = terminal;
+    let (cell_width, line_height) = text_cell;
+    if !pane_text_fits(terminal, scale, text_cell) {
+        return None;
+    }
+    let label = tr.text(kettle_i18n::Text::ViModeChip).to_owned();
+    let pad = 6.0 * scale;
+    let gutter = scrollback_gutter(scrollbar_width, scale);
+    let w = display_width(&label) as f32 * cell_width + 2.0 * pad;
+    let h = line_height + pad;
+    if width < w + gutter + pad {
+        return None;
+    }
+    let left = x + width - gutter - w;
+    let top = kept.map_or(y + pad, |(_, ky, _, kh)| ky + kh + pad);
+    let bottom = jump.map_or(y + height - pad - h, |(_, jy, _, _)| jy - pad - h);
+    [top, bottom]
+        .into_iter()
+        .map(|top| (left, top, w, h))
+        .find(|&rect| rect.1 >= y && rect.1 + h <= y + height && !covers_text(rect))
+        .map(|rect| ViModeChip {
+            rect,
+            label,
+            text_origin: (rect.0 + pad, rect.1 + pad / 2.0),
+        })
+}
+
+/// Whether `rect` covers any text `snap` shows, its cursor or its selection,
+/// for a grid drawn from `origin` in cells `cell` big, each where the painter
+/// draws it: a row with right-to-left text is drawn in the visual order
+/// `bidi` holds for it. A cell holding only a space and no marks is not text;
+/// either half of a wide character is.
+pub(crate) fn rect_covers_text(
+    snap: &crate::PaneSnapshot,
+    bidi: &crate::bidi_rows::PaneBidi,
+    origin: (f32, f32),
+    cell: (f32, f32),
+    rect: Rect4,
+) -> bool {
+    use alacritty_terminal::index::{Column, Line, Point};
+    use alacritty_terminal::term::cell::Flags;
+    let (cw, ch) = cell;
+    let offset = snap.display_offset as i32;
+    // The visual columns a logical cell's glyph covers. A wide character
+    // keeps its lead on the left when reordered, so the pair spans its
+    // lead's visual column and the next.
+    let covered = |row: i32, col: usize, wide: bool| {
+        let vcol = bidi.row(row).map_or(col, |map| map.visual(col));
+        let x = origin.0 + vcol as f32 * cw;
+        let span = if wide { 2.0 } else { 1.0 };
+        crate::rects_overlap(rect, (x, origin.1 + row as f32 * ch, span * cw, ch))
+    };
+    let cursor = &snap.cursor;
+    if cursor.shape != alacritty_terminal::vte::ansi::CursorShape::Hidden {
+        let (line, col) = (cursor.point.line.0, cursor.point.column.0);
+        let under = snap
+            .cells
+            .iter()
+            .find(|cell| cell.line == line && cell.col == col)
+            .map_or(Flags::empty(), |cell| cell.flags);
+        // On a wide character's right half the cursor covers the pair.
+        let (lead, wide) = if under.contains(Flags::WIDE_CHAR_SPACER) {
+            (col.saturating_sub(1), true)
+        } else {
+            (col, under.contains(Flags::WIDE_CHAR))
+        };
+        if covered(line + offset, lead, wide) {
+            return true;
+        }
+    }
+    snap.cells.iter().any(|cell| {
+        if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+            // Covered with its lead.
+            return false;
+        }
+        let point = Point::new(Line(cell.line), Column(cell.col));
+        let blank = matches!(cell.c, ' ' | '\0' | '\t')
+            && cell.zerowidth().is_empty()
+            && !snap
+                .selection
+                .is_some_and(|selection| selection.contains(point));
+        !blank
+            && covered(
+                cell.line + offset,
+                cell.col,
+                cell.flags.contains(Flags::WIDE_CHAR),
+            )
+    })
+}
+
+/// The vi-mode chip's quads: the kept-history label's, a filled pill, as
+/// it is a label and not a control.
+pub(crate) fn vi_mode_chip_quads(
+    quads: &mut Vec<crate::QuadInstance>,
+    chip: &ViModeChip,
+    fill: Rgb,
+) {
+    crate::tab_strip::rounded_fill(
+        quads,
+        chip.rect,
+        chip.rect.3 / 2.0,
+        (true, true),
+        (fill, 1.0),
+        None,
+    );
+}
+
 /// The jump button's label ink on `fill`: the theme foreground, moved until
 /// its painted stem pixel clears `TEXT_CONTRAST`.
 fn pill_ink(theme: &kettle_config::Theme, fill: Rgb, linear: bool) -> Rgb {

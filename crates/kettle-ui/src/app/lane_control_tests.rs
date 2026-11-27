@@ -2436,3 +2436,210 @@ fn run_command_respects_preview_keyboard_ownership_in_each_window() {
     windows.get_mut(&2).unwrap().preview_focus = None;
     assert!(!pane_preview_holds_keyboard(&ws, &windows, foreign));
 }
+
+/// Must 4 of the 6.0 UI review: the media viewer's icon-only buttons had no
+/// tooltips. Each now names its action, with the key that does the same
+/// while the lane holds the keyboard; this keeps every key named the one the
+/// lane's key handling acts on, so a tooltip never promises a key that does
+/// something else.
+#[test]
+fn lane_button_tooltips_name_the_keys_the_lane_acts_on() {
+    use super::{LaneKeys, lane_action_hit, lane_control_action, lane_control_key};
+    use crate::media::{PageStep, PreviewKey as K, ViewerKey};
+    use kettle_config::Action;
+    use kettle_render::MediaLaneHit as Hit;
+    use winit::keyboard::{Key, ModifiersState, NamedKey, SmolStr};
+    let winit_key = |key: kettle_config::Key| match key {
+        kettle_config::Key::Char(c) => Key::Character(SmolStr::new(c.to_string())),
+        kettle_config::Key::PageUp => Key::Named(NamedKey::PageUp),
+        kettle_config::Key::PageDown => Key::Named(NamedKey::PageDown),
+        kettle_config::Key::Escape => Key::Named(NamedKey::Escape),
+        other => panic!("no lane key {other:?}"),
+    };
+    let none = ModifiersState::empty();
+    for (hit, expected) in [
+        (Hit::ZoomIn, K::ZoomIn),
+        (Hit::ZoomOut, K::ZoomOut),
+        (Hit::Fit, K::Fit),
+        (Hit::Copy, K::Copy),
+        (Hit::Play, K::Play),
+        (Hit::Sound, K::Mute),
+        (Hit::Theater, K::Theater),
+        (Hit::Fullscreen, K::Fullscreen),
+        (Hit::PreviousPage, K::Page(PageStep::By(-1))),
+        (Hit::NextPage, K::Page(PageStep::By(1))),
+    ] {
+        for keys in [LaneKeys::Lane, LaneKeys::Viewer, LaneKeys::FullscreenViewer] {
+            let key = winit_key(lane_control_key(hit, keys).expect("a lane key"));
+            assert_eq!(crate::media::preview_key(&key, none), expected, "{hit:?}");
+            assert_eq!(crate::media::viewer_key(&key, none), None, "{hit:?}");
+        }
+    }
+    // The viewer pins with P and closes with Esc; a lane does neither.
+    let pin = winit_key(lane_control_key(Hit::Pin, LaneKeys::Viewer).unwrap());
+    assert_eq!(crate::media::viewer_key(&pin, none), Some(ViewerKey::Pin));
+    let close = winit_key(lane_control_key(Hit::Close, LaneKeys::Viewer).unwrap());
+    assert_eq!(crate::media::preview_key(&close, none), K::Exit);
+    for hit in [Hit::Pin, Hit::Close, Hit::Toggle, Hit::Mode, Hit::Reload] {
+        assert_eq!(lane_control_key(hit, LaneKeys::Lane), None, "{hit:?}");
+    }
+    // Outside the lane's keyboard, a bound action's shortcut: the inverse of
+    // the actions a lane runs as its buttons.
+    for action in [
+        Action::PreviewNext,
+        Action::PreviewPrevious,
+        Action::PreviewNextDiagram,
+        Action::PreviewPreviousDiagram,
+        Action::ClosePreview,
+        Action::PreviewSource,
+        Action::PreviewCanvas,
+        Action::PreviewCopy,
+        Action::PreviewReload,
+        Action::VideoPlay,
+        Action::VideoMute,
+        Action::PreviewZoomIn,
+        Action::PreviewZoomOut,
+        Action::PreviewFit,
+    ] {
+        let hit = lane_action_hit(&action).unwrap();
+        assert_eq!(lane_control_action(hit), Some(action));
+    }
+    assert_eq!(lane_control_action(Hit::Toggle), None);
+}
+
+/// The lane buttons' tooltips are the window's tooltip: the same clock, so
+/// the same rest, warm spell and press rule, the same name a screen reader
+/// hears, and the frame carries it even when the tab strip is hidden.
+#[test]
+fn lane_button_tooltips_share_the_clock_and_the_screen_reader_name() {
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(source.contains(
+        "let target = strip_tooltip_target(ws, bar, &self.strip_tooltip_context(ws, bar)) .or_else(|| self.lane_control_tooltip(ws)) .map(|tip| (tip.target, tip.rect));"
+    ));
+    assert!(
+        source.contains(
+            "let mut tabbar = self.tab_bar(ws); self.attach_lane_tooltip(ws, &mut tabbar);"
+        )
+    );
+    assert!(source.contains(".filter(|tip| shown == Some(tip.target))"));
+    assert!(
+        source.contains(
+            "let Some(text) = self.lane_control_label(ws, lane, hit) else { continue; };"
+        )
+    );
+    assert!(source.contains("let label = self.lane_control_label(ws, &lane, hit)?;"));
+    assert!(source.contains("target: crate::tooltip::TooltipTarget::Media(lane.pane, hit),"));
+    assert!(source.contains("anchor: Some(button),"));
+}
+
+/// Defect 4 of the 6.0 final review: the window lays its lanes out with the
+/// room their header's buttons need, measured by the cell and scale the lane
+/// lays its header out with.
+#[test]
+fn panes_lay_lanes_out_with_room_for_their_buttons() {
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(source.contains(
+        "let lane_header = kettle_render::media_lane_header_room( ( self.overlay_text_cell_width(ws), self.overlay_text_line_height(ws), ), scale, );"
+    ));
+    assert!(
+        source.contains(".unwrap_or_else(LayoutStyle::fallback) .with_lane_header(lane_header)")
+    );
+}
+
+/// Defect 6 of the 6.0 final review: in the fullscreen viewer the Close
+/// tooltip named Esc, which there leaves fullscreen and keeps the viewer
+/// open. A tooltip names Esc for Close only where Esc closes the viewer,
+/// asked of the same rule the key's dispatch follows; P still pins.
+#[test]
+fn the_fullscreen_viewer_names_no_key_that_does_something_else() {
+    use super::{LaneKeys, PreviewExit, lane_control_key, preview_exit};
+    use kettle_config::Key;
+    use kettle_render::MediaLaneHit as Hit;
+    let open = |fullscreen| crate::media::Overlay {
+        pane: 1,
+        origin: None,
+        control: None,
+        theater: false,
+        fullscreen,
+    };
+    assert_eq!(LaneKeys::of(None), LaneKeys::Lane);
+    assert_eq!(LaneKeys::of(Some(open(false))), LaneKeys::Viewer);
+    assert_eq!(LaneKeys::of(Some(open(true))), LaneKeys::FullscreenViewer);
+    assert_eq!(
+        preview_exit(LaneKeys::FullscreenViewer),
+        PreviewExit::LeaveFullscreen
+    );
+    assert_eq!(
+        lane_control_key(Hit::Close, LaneKeys::FullscreenViewer),
+        None,
+        "Esc leaves fullscreen there"
+    );
+    assert_eq!(
+        lane_control_key(Hit::Close, LaneKeys::Viewer),
+        Some(Key::Escape)
+    );
+    assert_eq!(
+        lane_control_key(Hit::Pin, LaneKeys::FullscreenViewer),
+        Some(Key::Char('p'))
+    );
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(source.contains("K::Exit => match preview_exit(LaneKeys::of(ws.preview_overlay)) {"));
+    assert!(source.contains("lane_control_key(hit, LaneKeys::of(ws.preview_overlay))"));
+}
+
+/// N3 of the 6.0 live recheck: `ui_geometry` reported a lane's
+/// `hovered_control` only for the player's buttons, so it read null while a
+/// header button under the pointer was lit. It now names whatever the frame
+/// lights, from the same hit test and the same rule.
+#[test]
+fn ui_geometry_names_the_lane_button_the_pointer_lights() {
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(source.contains(
+        "lane[\"hovered_control\"] = self .hovered_lane_control(ws) .filter(|&(hovered, _)| hovered == pane) .map(|(_, hit)| lane_control_name(hit)) .into();"
+    ));
+    // The same rule repaints the lit chip as the pointer moves.
+    assert!(source.contains(
+        "let hovered = self.hovered_lane_control(ws); if hovered != ws.lane_control_hover {"
+    ));
+}
+
+/// Defect 4 of the second 6.0 review: a press on a video's picture, which
+/// plays as Play does, was held against the Play button's rect, so a pixel's
+/// move in the picture let the Play tooltip back. A lane button's tooltip is
+/// now named only on the button itself, which is also where a press on it is
+/// held; the picture names no button.
+#[test]
+fn a_lane_buttons_tooltip_is_named_only_on_the_button() {
+    use super::lane_button_tooltip_region;
+    let play = (10.0, 200.0, 44.0, 44.0);
+    assert_eq!(
+        lane_button_tooltip_region(Some(play), (20.0, 210.0)),
+        Some(play)
+    );
+    assert_eq!(
+        lane_button_tooltip_region(Some(play), (200.0, 100.0)),
+        None,
+        "the picture names no button"
+    );
+    assert_eq!(lane_button_tooltip_region(None, (20.0, 210.0)), None);
+    let source = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(source.contains(
+        "let button = lane_button_tooltip_region(button, (pointer.x as f32, pointer.y as f32))?;"
+    ));
+    assert!(source.contains("anchor: Some(button), rect: button, })"));
+}

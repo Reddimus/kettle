@@ -1,4 +1,4 @@
-use super::{production_source, starfield_time};
+use super::{background_clock, production_source, starfield_time};
 use kettle_config::BackgroundAnimation;
 use std::time::Duration;
 
@@ -23,5 +23,26 @@ fn the_starfield_uniform_takes_its_time_from_starfield_time() {
         .split_once(");")
         .expect("end of upload")
         .0;
-    assert!(upload.contains("starfield_time(cfg.background_animation"));
+    assert!(upload.contains("starfield_time(cfg.background_animation, clock)"));
+    assert!(
+        production.contains(
+            "let clock = background_clock(self.background_held, self.starfield_started);"
+        ),
+        "the uniform's clock is the one reduced motion holds"
+    );
+}
+
+/// Held by reduced motion, an animated background's clock stops where it
+/// was, whatever the time; one that started since the hold shows its first
+/// frame.
+#[test]
+fn a_held_background_clock_stops_where_it_was() {
+    let started = std::time::Instant::now();
+    let held = started + Duration::from_secs(3);
+    assert_eq!(
+        background_clock(Some(held), started),
+        Duration::from_secs(3)
+    );
+    assert_eq!(background_clock(Some(started), held), Duration::ZERO);
+    assert!(background_clock(None, started) < Duration::from_secs(3));
 }

@@ -1252,6 +1252,7 @@ impl App {
                         ContextMenuItem::Media { label, .. }
                         | ContextMenuItem::Preview { label, .. } => *label,
                         ContextMenuItem::Info { label, .. } => label.as_str(),
+                        ContextMenuItem::CloseOtherTabs { label } => label,
                         ContextMenuItem::Separator => "",
                     };
                     let row = serde_json::json!({
@@ -1279,10 +1280,13 @@ impl App {
                 }
                 serde_json::json!({"depth": depth, "rect": rect_json(panel.rows_rect()), "highlight": panel.highlight, "rows": rows})
             }).collect();
+            // `null` while no row is lit: the pointer left the menu.
+            let shown = menu_shown_highlight(menu, &target.context_menu_session.pointer);
             Some(serde_json::json!({
-                "anchor": {"x": ax, "y": ay},
+                // What the panel was placed around; `rect` is the panel.
+                "anchor": menu_anchor_json(target.context_menu_session.anchor),
                 "rect": rect_json((ax, ay, panel_w, panel_h)),
-                "highlight": menu.highlight,
+                "highlight": (shown < menu.items.len()).then_some(shown),
                 "scroll_offset": menu.scroll_offset,
                 "depth": menu.drill_stack.len(),
                 "parents": parents,
@@ -2461,10 +2465,12 @@ impl App {
         event_loop: &ActiveEventLoop,
         bcode: u8,
     ) -> bool {
-        // A new primary press ends a jump button's press whose release never
-        // came.
+        // A new primary press ends a jump button's or a title-bar button's
+        // press whose release never came, so the strip cannot take this
+        // press's release.
         if bcode == 0 {
             ws.scrollback_pill_press = None;
+            ws.cancel_strip_presses();
         }
         // As natively: a card press whose release never came is over, as is
         // a lane's drag, a program still holding this button gets its
@@ -2560,12 +2566,18 @@ impl App {
         if ws.linux_titlebar && linux_title_space(&bar, px, py) {
             return true;
         }
+        // As natively, a right-click on a tab opens that tab's menu.
+        if bcode == 2
+            && let Some(idx) = tab_menu_segment(&bar, px, py)
+        {
+            self.open_tab_menu(ws, idx, px, py);
+            return true;
+        }
         if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
             if press_settings_gear(ws, &bar, (px, py), bcode) {
                 // Armed on a primary press; opens on release.
-            } else if bcode == 0 && search_button_at(&bar, px, py) {
-                ws.pressed_search = true;
-                self.toggle_header_find(ws);
+            } else if bcode == 0 && press_strip_button(ws, &bar, (px, py)) {
+                // `+` and Find: armed on a primary press; act on release.
             } else if bcode == 0
                 && bar.new_tab_menu.2 > 0.0
                 && rect_contains(bar.new_tab_menu, px, py)
@@ -2573,17 +2585,6 @@ impl App {
                 ws.pressed_new_tab_menu = true;
                 let (ax, ay, _, ah) = bar.new_tab_menu;
                 self.open_new_tab_menu(ws, ax, ay + ah);
-            } else if bcode == 0 && rect_contains(bar.new_tab, px, py) {
-                ws.pressed_new_tab = true;
-                let area = self.area(ws);
-                let (cols, rows) = self.grid_of(ws, area);
-                let geometry = self.pty_geometry_for_grid(ws, cols, rows);
-                match ws.mux.new_tab_geometry(&self.cfg, geometry, self.waker()) {
-                    // Fire TabAdd so Lua / dev-record see tabs opened via the
-                    // agent `+` click, like every other new-tab path.
-                    Ok(()) => self.fire_tab_add_event(ws),
-                    Err(e) => log::warn!("could not open a new tab (agent send_mouse): {e}"),
-                }
             } else if bcode == 0
                 && bar.scroll_left.2 > 0.0
                 && rect_contains(bar.scroll_left, px, py)
@@ -2689,13 +2690,17 @@ impl App {
         event_loop: &ActiveEventLoop,
         bcode: u8,
     ) -> bool {
-        if bcode == 0 && (ws.pressed_new_tab || ws.pressed_new_tab_menu || ws.pressed_search) {
-            ws.pressed_new_tab = false;
+        if bcode == 0 && ws.pressed_new_tab_menu {
             ws.pressed_new_tab_menu = false;
-            ws.pressed_search = false;
             if let Some(window) = &ws.window {
                 window.request_redraw();
             }
+        }
+        if bcode == 0
+            && let Some(released) = release_strip_button(ws, |ws| self.tab_bar(ws))
+        {
+            self.act_on_strip_release(ws, released);
+            return true;
         }
         if bcode == 0
             && let Some(action) = release_settings_gear(ws, |ws| self.tab_bar(ws))
@@ -2767,7 +2772,7 @@ impl App {
             handled = true;
         }
         if bcode == 0 {
-            ws.scrollbar_drag_offset = None;
+            end_scrollbar_drag(ws);
             ws.tab_drag_active = false;
             ws.tab_drag_press = None;
             ws.tab_pressed_idx = None;

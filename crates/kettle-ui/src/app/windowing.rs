@@ -144,6 +144,37 @@ impl App {
         moved
     }
 
+    /// A tab drag resting on an overflow arrow scrolls the strip a tab
+    /// toward it every [`TAB_DRAG_SCROLL_DWELL`], by moving the dragged
+    /// tab, which the strip keeps in view, one place past the last one shown.
+    /// Called from the scheduler; returns when to look again.
+    pub(super) fn scroll_tab_drag_at_arrow(
+        &mut self,
+        ws: &mut WindowState,
+        now: std::time::Instant,
+    ) -> Option<std::time::Instant> {
+        let dragging = ws.tab_drag_active && ws.tab_drag_press.is_none();
+        let over = ws.hovered_scroll_arrow.filter(|_| dragging);
+        // The dragged tab is the active one: at either end it can go no
+        // further that way, and the drag waits on nothing there.
+        let (step, rest) = tab_drag_arrow_pass(
+            ws.tab_drag_arrow,
+            over,
+            (ws.mux.active, ws.mux.tabs.len()),
+            now,
+        );
+        ws.tab_drag_arrow = rest;
+        if let Some(forward) = step
+            && ws.mux.move_active_tab(if forward { 1 } else { -1 })
+        {
+            ws.mux.touch_active_tab_seen();
+            if let Some(window) = &ws.window {
+                window.request_redraw();
+            }
+        }
+        rest.map(|(_, since)| since + TAB_DRAG_SCROLL_DWELL)
+    }
+
     /// Window attributes shared by window 1 (`resumed_inner`) and
     /// windows 2..N (`open_window`), so a second window honors borderless /
     /// always-on-top / hide-from-taskbar / geometry-hinting / WM_CLASS
@@ -2344,6 +2375,61 @@ pub(super) fn tab_drag_target_index(
     last_shown
         .or_else(|| segments.last().map(|seg| seg.idx))
         .unwrap_or(0)
+}
+
+/// How long a dragged tab rests on an overflow arrow before the strip
+/// scrolls a tab toward it, and again for each further tab.
+pub(super) const TAB_DRAG_SCROLL_DWELL: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// A tab drag and the overflow arrows at `now`: `rest` is the arrow the drag
+/// rests on (`true` forward) and since when, `over` the arrow under the
+/// pointer while a drag is live, and `can_step` whether the dragged tab can
+/// move a place that way. Returns the way to scroll now, if the rest has
+/// lasted [`TAB_DRAG_SCROLL_DWELL`], and the rest to keep: a step starts the
+/// next one, and moving to the other arrow or off them starts over. Where
+/// the tab can go no further there is no rest and nothing to wake for; the
+/// rest starts again once a move or a new tab lets it.
+pub(super) fn tab_drag_arrow_step(
+    rest: Option<(bool, std::time::Instant)>,
+    over: Option<bool>,
+    can_step: impl Fn(bool) -> bool,
+    now: std::time::Instant,
+) -> (Option<bool>, Option<(bool, std::time::Instant)>) {
+    match (rest, over) {
+        (_, None) => (None, None),
+        (_, Some(arrow)) if !can_step(arrow) => (None, None),
+        (Some((forward, since)), Some(arrow)) if forward == arrow => {
+            if now.saturating_duration_since(since) >= TAB_DRAG_SCROLL_DWELL {
+                (Some(forward), Some((forward, now)))
+            } else {
+                (None, Some((forward, since)))
+            }
+        }
+        (_, Some(arrow)) => (None, Some((arrow, now))),
+    }
+}
+
+/// One scheduler pass of a tab drag over the overflow arrows, with the
+/// dragged tab at `at` of `count` tabs: the step to take now, as
+/// [`tab_drag_arrow_step`] says, and the rest to keep after it. The rest is
+/// kept only while the tab could take another step that way from where the
+/// step leaves it, so the last step to an end schedules no wake.
+pub(super) fn tab_drag_arrow_pass(
+    rest: Option<(bool, std::time::Instant)>,
+    over: Option<bool>,
+    (at, count): (usize, usize),
+    now: std::time::Instant,
+) -> (Option<bool>, Option<(bool, std::time::Instant)>) {
+    let can_step = |at: usize, forward: bool| {
+        if forward { at + 1 < count } else { at > 0 }
+    };
+    let (step, rest) = tab_drag_arrow_step(rest, over, |forward| can_step(at, forward), now);
+    let after = match step {
+        Some(true) => at + 1,
+        Some(false) => at.saturating_sub(1),
+        None => at,
+    };
+    (step, rest.filter(|&(forward, _)| can_step(after, forward)))
 }
 
 /// Pixel distance a held tab press must move before Kettle promotes the click
