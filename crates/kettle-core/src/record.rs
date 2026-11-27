@@ -2217,10 +2217,29 @@ mod tests {
             });
         }
         // `spawn` returns once the child has exec'd, so it runs beside the
-        // test, which holds the child between fork and exec meanwhile.
-        let spawner =
-            std::thread::spawn(move || command.spawn().and_then(|mut child| child.wait()));
-        ready_rx.read_exact(&mut [0]).unwrap();
+        // test, which holds the child between fork and exec meanwhile. The
+        // spawner owns the parent's write end of the readiness pipe and drops
+        // it once `spawn` returns, so a spawn that fails before the hook runs,
+        // as under a process limit, ends the wait below with EOF.
+        let spawner = std::thread::spawn(move || {
+            let spawned = command.spawn();
+            drop(ready_tx);
+            spawned.and_then(|mut child| child.wait())
+        });
+        let mut poll_fd = libc::pollfd {
+            fd: ready_rx.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: poll_fd is a live, exclusively writable pollfd and the count
+        // is one; sixty seconds only stops a hang.
+        let polled = unsafe { libc::poll(&mut poll_fd, 1, 60_000) };
+        assert_eq!(polled, 1, "the child never reached its pre_exec hook");
+        let mut byte = [0];
+        if ready_rx.read(&mut byte).unwrap() == 0 {
+            let error = spawner.join().unwrap().unwrap_err();
+            panic!("the forked child could not start: {error}");
+        }
         drop(first);
         let replacement = Recorder::start(&path, 100, 30, false);
         go_tx.write_all(b"g").unwrap();
