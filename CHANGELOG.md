@@ -1761,6 +1761,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   update leftovers. The app and `kettle update` remove bundles that earlier
   official updates provably displaced, and name any other leftover once,
   saying it is safe to delete (#951).
+- Linux: an update that would have to write into a directory its group or
+  other users can write, such as a `~/.local/share/doc/kettle` left `0775` by
+  umask `002`, now stops before downloading anything and names the directories
+  and the `chmod go-w` that fixes them, instead of failing part-way (#847).
 
 ## Older releases
 

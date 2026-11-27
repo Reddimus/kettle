@@ -244,6 +244,20 @@ files, Windows device names, and declared/actual size mismatches are rejected.
 Updates acquire an install-prefix lock and atomically replace each destination
 on its own filesystem.
 
+Each Linux replacement refuses a directory that anyone other than this user or
+root can write, unless it is sticky above an entry one of them owns. A
+group-writable `~/.local/share/doc/kettle` is one: Ubuntu's default umask `002`
+leaves directories like that under user private groups. So that this refusal
+never stops an update part-way, the update checks every directory it will
+write into before it downloads anything: the directory of each file in the
+install map, or the deepest one that exists above it when the update will create
+the rest. Files an older release installed and this one no longer ships are
+never written, so their directories are not checked. A directory that fails is named with its mode and the `chmod go-w`
+command that fixes it, and nothing is downloaded or changed. The check runs
+again after the download, before the first destination is touched, for files
+only the archive names. It is the same rule the writes apply, run earlier; a
+group the user alone belongs to is not trusted in its place.
+
 Linux archives contain
 `kettle-package-manifest.json`. Kettle binds its product/version/target and
 every regular file to an exact relative path, size, SHA-256, and Unix mode where

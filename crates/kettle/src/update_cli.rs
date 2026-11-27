@@ -19,6 +19,9 @@ pub fn run(assume_yes: bool, current: &str) -> i32 {
     if let Err(error) = kettle_update::prepare_managed_install_for_update() {
         if matches!(&error, UpdateError::UpdateLocked) {
             eprintln!("kettle update: another update is already running");
+        } else if matches!(&error, UpdateError::UnsafeInstallDirectory(_)) {
+            // The install is the official one; it only needs a permission fix.
+            eprintln!("kettle update: {error}");
         } else {
             eprintln!("kettle update: {error}");
             eprintln!(
