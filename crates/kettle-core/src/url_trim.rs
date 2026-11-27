@@ -75,7 +75,7 @@ fn trim_trailing_inner(s: &str, path: bool) -> &str {
         // separator (`/usr/lib/...`), as Ghostty reads a path's end, never
         // just enough of it to leave `..`, which would name the parent.
         // Callers do not open a path trimmed that way (see
-        // `trimmed_dot_run`). Each run is scanned once, so this stays linear.
+        // `dot_run_after`). Each run is scanned once, so this stays linear.
         let mut end = bytes.len();
         while end > kept {
             if bytes[end - 1] != b'.' {
@@ -97,19 +97,26 @@ fn trim_trailing_inner(s: &str, path: bool) -> &str {
     &s[..kept]
 }
 
-/// The length of `raw` up to the end of the dots trimming took off it, when
-/// it took two or more (`/tmp/a..` trimmed to `/tmp/a`, `/tmp/...` to
-/// `/tmp/`). The name may end in those dots, or a sentence may trail off
-/// after it, and the shorter path names another file, so a caller opens
-/// the exact name only where a closing quote marks it and nothing
-/// otherwise. `None` when trimming took at most one dot: a single dot ends
-/// a sentence.
-pub(crate) fn trimmed_dot_run(raw: &str, trimmed: &str) -> Option<usize> {
-    let dots = raw[trimmed.len()..]
-        .bytes()
-        .take_while(|&b| b == b'.')
-        .count();
-    (dots >= 2).then_some(trimmed.len() + dots)
+/// Whether two or more dots in a row end a name, among the punctuation
+/// trimming took off a match (`tail`) and the punctuation after it on the
+/// line (`rest`, read at most 16 characters ahead): `/tmp/a..`,
+/// `/tmp/report.pdf,..`. The name may hold those dots or a sentence may
+/// trail off after it, and the shorter name is another file, so a caller
+/// opens no shortened target. `Some` with the length of `tail` up to the
+/// end of its last such run, 0 when the run follows the match; `None` when
+/// there is none: a single dot ends a sentence.
+pub(crate) fn dot_run_after(tail: &str, rest: &str) -> Option<usize> {
+    if let Some(at) = tail.rfind("..") {
+        let more = tail[at + 2..].bytes().take_while(|&b| b == b'.').count();
+        return Some(at + 2 + more);
+    }
+    let after = rest
+        .char_indices()
+        .take(16)
+        .take_while(|&(_, c)| ",;:?!.\"'`)]}>*".contains(c))
+        .last()
+        .map_or("", |(at, c)| &rest[..at + c.len_utf8()]);
+    (after.contains("..") || (tail.ends_with('.') && after.starts_with('.'))).then_some(0)
 }
 
 /// The index of a bracket's pair: `()`, `[]` or `{}`.
@@ -271,22 +278,28 @@ mod tests {
                 assert_eq!(trim_path_trailing(&candidate), trimmed, "{candidate}");
             }
         }
-        // Two or more dots trimmed off leave the name uncertain.
-        use super::trimmed_dot_run;
-        for (raw, exact) in [
-            ("/tmp/a..", Some(8)),
-            ("/tmp/a...)", Some(9)),
-            ("/tmp/...", Some(8)),
-            ("/tmp/a.", None),
-            ("/tmp/a.)", None),
-            ("/tmp/a.,.", None),
-            ("/tmp/..", None),
-            ("/tmp/a", None),
+        // Two or more dots trimmed off, or right after, leave the name
+        // uncertain; one ends a sentence.
+        use super::dot_run_after;
+        for (raw, rest, run) in [
+            ("/tmp/a..", "", Some(2)),
+            ("/tmp/a...)", " x", Some(3)),
+            ("/tmp/...", "", Some(3)),
+            ("/tmp/report.pdf,..", "", Some(3)),
+            ("/tmp/report.pdf", ",.. x", Some(0)),
+            ("/tmp/a", "?..", Some(0)),
+            ("/tmp/a.", "", None),
+            ("/tmp/a.)", " x", None),
+            ("/tmp/a.,.", "", None),
+            ("/tmp/..", "", None),
+            ("/tmp/a", ". next", None),
+            ("/tmp/a", &format!("{}..", ",".repeat(20)), None),
         ] {
+            let trimmed = trim_path_trailing(raw);
             assert_eq!(
-                trimmed_dot_run(raw, trim_path_trailing(raw)),
-                exact,
-                "{raw}"
+                dot_run_after(&raw[trimmed.len()..], rest),
+                run,
+                "{raw}{rest}"
             );
         }
         // The run takes linear work however long it is.

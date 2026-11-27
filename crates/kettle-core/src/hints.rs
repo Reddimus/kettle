@@ -140,9 +140,12 @@ pub(crate) fn has_link_path_context(text: &str) -> bool {
     }
     let text = text.split(':').next().unwrap_or(text);
     let parts: Vec<_> = text.split('/').collect();
+    // Dots after the extension leave it the name's (`"docs/report.pdf.."`,
+    // which only a closing quote right after them lets through).
     parts.len() >= 3
         || parts.last().is_some_and(|name| {
-            name.rsplit_once('.')
+            name.trim_end_matches('.')
+                .rsplit_once('.')
                 .is_some_and(|(_, ext)| ext.chars().any(char::is_alphabetic))
         })
 }
@@ -578,21 +581,24 @@ fn detect_line(
             } else {
                 (m.start(), m.as_str())
             };
-            // A path that lost two or more dots to trimming may name a file
-            // ending in them: the exact name opens where a closing quote
-            // marks it, and otherwise the hint copies the text as printed.
+            // A path ending in two or more dots may name a file ending in
+            // them: the exact name opens where a closing quote marks it, and
+            // otherwise the hint copies the text as printed.
             let mut uncertain = false;
             let trimmed = if *kind == Kind::Path {
                 let trimmed = crate::url_trim::trim_path_trailing(raw);
-                match crate::url_trim::trimmed_dot_run(raw, trimmed) {
-                    Some(exact)
-                        if exact == raw.len() && quote_closes_at(line, &runs, m_start, m.end()) =>
+                let tail = &raw[trimmed.len()..];
+                match crate::url_trim::dot_run_after(tail, &line[m.end()..]) {
+                    Some(run)
+                        if run > 0
+                            && trimmed.len() + run == raw.len()
+                            && quote_closes_at(line, &runs, m_start, m.end()) =>
                     {
                         raw
                     }
-                    Some(exact) => {
+                    Some(run) => {
                         uncertain = true;
-                        &raw[..exact]
+                        &raw[..trimmed.len() + run]
                     }
                     None => trimmed,
                 }
@@ -603,7 +609,11 @@ fn detect_line(
             let fragment = (cut.0 && m_start == 0) || (cut.1 && m.end() == line.len());
             // A scheme with nothing after it (`see https://...`) is no URL,
             // and no piece of it is a path either.
-            if *kind == Kind::Url && !fragment && !crate::links::names_a_target(trimmed) {
+            if *kind == Kind::Url
+                && !fragment
+                && (!crate::links::names_a_target(trimmed)
+                    || crate::links::url_loses_a_dot_run(raw, trimmed, &line[m.end()..]))
+            {
                 taken.fill(m_start, m.end());
                 continue;
             }
@@ -897,6 +907,22 @@ mod tests {
                 (text, true),
                 "{line}"
             );
+        }
+        // Dots after other punctuation, and a file link losing a dot run
+        // off its name, are no target to open either. A web link's dots are
+        // prose, after its path or its host.
+        let spans = detect(&["see /tmp/report.pdf,.."]);
+        assert!(spans.iter().all(|span| !span.bounded), "{spans:?}");
+        let spans = detect(&["see file:///tmp/a.."]);
+        assert!(spans.iter().all(|span| span.kind != Kind::Url), "{spans:?}");
+        for (line, url) in [
+            (
+                "see https://example.test/docs...",
+                "https://example.test/docs",
+            ),
+            ("see https://example.test..", "https://example.test"),
+        ] {
+            assert_eq!(detect(&[line])[0].text, url, "{line}");
         }
         // One dot ends a sentence.
         let spans = detect(&["see /tmp/a."]);

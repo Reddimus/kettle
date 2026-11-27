@@ -451,7 +451,8 @@ closing bracket that closes nothing the link opened. A path ending in two or
 more dots, such as `/tmp/a..` or `/usr/lib/...`, may name a file whose name
 ends in them, so it is not a link and quick select only copies it, unless a
 closing quote right after the dots makes them part of the name (`"/tmp/a.."`
-links `/tmp/a..`).
+links `/tmp/a..`). Dots after other punctuation count too (`report.pdf,..`),
+and a `file://` link ending in them is no link either.
 
 ## Themes
 

@@ -94,6 +94,19 @@ pub(crate) fn names_a_target(url: &str) -> bool {
     }
 }
 
+/// Whether a detected URL ends in a dot run that trimming would take off a
+/// local file's name (`file:///tmp/a..`), which names another file once
+/// trimmed: `raw` is the match, `trimmed` it trimmed, `rest` the line after
+/// it. Dots after a web URL end a sentence (#927): after its path they are
+/// not the host, and after a bare host they are its empty labels or the
+/// root of DNS, so the same host answers.
+pub(crate) fn url_loses_a_dot_run(raw: &str, trimmed: &str, rest: &str) -> bool {
+    trimmed
+        .get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file://"))
+        && crate::url_trim::dot_run_after(&raw[trimmed.len()..], rest).is_some()
+}
+
 /// Whether the text after a URL's `scheme:` is `//` and an authority with
 /// a host, past any user info and port: not `//`, `///x`, `//?q`, `//#f`
 /// or `//:8080/x`.
@@ -162,12 +175,14 @@ fn path_candidates(text: &str) -> impl Iterator<Item = (usize, usize, &str)> {
     path_re().find_iter(text).filter_map(move |m| {
         let raw = m.as_str();
         let mut matched = crate::url_trim::trim_path_trailing(raw);
-        // Two or more dots trimmed off may belong to the name (`/tmp/a..`)
-        // or trail off a sentence, and the shorter path names another file.
-        // A quote right after them marks them as the name's; otherwise the
+        // Two or more dots ending it may belong to the name (`/tmp/a..`) or
+        // trail off a sentence, and the shorter path names another file. A
+        // quote right after them marks them as the name's; otherwise the
         // path is no link.
-        if let Some(exact) = crate::url_trim::trimmed_dot_run(raw, matched) {
-            if exact == raw.len() && crate::hints::quote_closes_at(text, &runs, m.start(), m.end())
+        if let Some(run) = crate::url_trim::dot_run_after(&raw[matched.len()..], &text[m.end()..]) {
+            if run > 0
+                && matched.len() + run == raw.len()
+                && crate::hints::quote_closes_at(text, &runs, m.start(), m.end())
             {
                 matched = raw;
             } else {
@@ -368,8 +383,9 @@ pub fn links_with_cwd(term: &Term<EventProxy>, cwd: Option<&str>) -> Vec<Link> {
                 continue;
             }
             // A scheme with nothing after it is no link, and its query is
-            // not a local path (`https://?q=/etc/hosts`).
-            if !names_a_target(matched) {
+            // not a local path (`https://?q=/etc/hosts`). Nor is a file link
+            // that trimming would cut a dot run off.
+            if !names_a_target(matched) || url_loses_a_dot_run(raw, matched, &text[m.end()..]) {
                 cover(start, raw.len(), &mut covered);
                 continue;
             }
@@ -1230,12 +1246,15 @@ mod tests {
             "see /tmp/notes...",
             "(see /tmp/a..).",
             "/tmp/....",
+            "see /tmp/report.pdf,..",
+            "see /tmp/report.pdf?..",
         ] {
             assert!(found(line).is_empty(), "{line}: {:?}", found(line));
         }
         for (line, uri) in [
             ("ls \"/tmp/a..\"", "file:///tmp/a.."),
             ("ls '/tmp/...' now", "file:///tmp/..."),
+            ("ls \"docs/report.pdf..\"", "file:///work/docs/report.pdf.."),
             ("see /tmp/a.", "file:///tmp/a"),
             ("see /tmp/a.b..c", "file:///tmp/a.b..c"),
         ] {
@@ -1243,22 +1262,17 @@ mod tests {
         }
     }
 
-    /// Trimming a URL's end never changes which host it opens: a path,
-    /// query or fragment after the host keeps it intact, and trimming the
-    /// host itself drops only dots, which separate its labels, or
-    /// characters no host may end in.
+    /// Trimming a URL's end never changes which host it opens. A path,
+    /// query or fragment after the host stops the trim before it. A bare
+    /// host loses only dots, which leave its labels as they were (a last dot
+    /// names the root of DNS, and more are empty labels), or a character no
+    /// host ends in. A `file://` link losing a dot run is no link: the dots
+    /// may be its file's.
     #[test]
     fn trimming_a_url_never_changes_its_host() {
         let host_of = |url: &str| {
             let rest = &url[url.find("//").unwrap() + 2..];
             rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())].to_string()
-        };
-        let labels = |host: &str| {
-            host.trim_end_matches(|c| ":;,'\"`*)]}".contains(c))
-                .split('.')
-                .filter(|label| !label.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
         };
         for host in [
             "example.com",
@@ -1267,18 +1281,45 @@ mod tests {
             "[::1]",
             "例え.テスト",
         ] {
+            let name = host.strip_suffix('.').unwrap_or(host);
             for tail in [
                 ".", "..", "...", ",", ").", ":", ";", "'", "\"", "*", "`", "..).", "]..",
             ] {
-                let url = format!("https://{host}{tail}");
-                let trimmed = crate::url_trim::trim_trailing(&url);
-                assert_eq!(labels(&host_of(trimmed)), labels(host), "{url}");
                 for after in ["/a..", "/?q=a..", "/#f..", ":8080/x.."] {
                     let url = format!("https://{host}{after}{tail}");
                     let trimmed = crate::url_trim::trim_trailing(&url);
                     assert_eq!(host_of(trimmed), host_of(&url), "{url}");
                 }
+                let url = format!("https://{host}{tail}");
+                let trimmed = crate::url_trim::trim_trailing(&url);
+                assert_eq!(host_of(trimmed), name, "{url}");
             }
+        }
+        let found = |line: &str| {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>()
+        };
+        for line in [
+            "see file:///tmp/a..",
+            "see file:///tmp/...",
+            "see file:///tmp/a,..",
+        ] {
+            assert!(found(line).is_empty(), "{line}: {:?}", found(line));
+        }
+        for (line, uri) in [
+            ("see https://example.test.", "https://example.test"),
+            ("see https://example.test..", "https://example.test"),
+            ("see www.example.test...", "https://www.example.test"),
+            (
+                "see https://example.test/docs...",
+                "https://example.test/docs",
+            ),
+            ("see file:///tmp/a.", "file:///tmp/a"),
+        ] {
+            assert_eq!(found(line), [uri], "{line}");
         }
     }
 
