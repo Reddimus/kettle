@@ -68,10 +68,10 @@ pub(crate) fn names_a_target(url: &str) -> bool {
         return rest.starts_with(char::is_alphanumeric) && authority_has_host(url);
     }
     match url.split_once(':') {
-        // An authority or a path before any query: not `file://?q=/x`.
+        // A path before any query: not `file://?q=/x` or `file://localhost`.
         Some((scheme, rest)) if scheme.eq_ignore_ascii_case("file") => rest
             .strip_prefix("//")
-            .is_some_and(|rest| !rest.starts_with(['?', '#']) && !rest.is_empty()),
+            .is_some_and(|rest| rest[..rest.find(['?', '#']).unwrap_or(rest.len())].contains('/')),
         Some((_, rest)) => names_a_host(rest),
         None => false,
     }
@@ -1827,6 +1827,8 @@ mod tests {
             "see https://?q=/etc/hosts",
             "see https:///etc/hosts",
             "see file://?q=/etc/hosts",
+            "see file://localhost",
+            "see file://localhost?q=/etc/hosts",
             "see www.example@/etc/hosts",
         ] {
             let term = term_with(line.len(), &[line], &[]);
@@ -1841,6 +1843,10 @@ mod tests {
                 "https://www.example.com@x.test/",
             ),
             ("see file:///etc/hosts.", "file:///etc/hosts"),
+            (
+                "see file://localhost/etc/hosts",
+                "file://localhost/etc/hosts",
+            ),
         ] {
             let term = term_with(line.len(), &[line], &[]);
             let found = links_with_cwd(&term, Some("/work"));

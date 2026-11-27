@@ -1651,6 +1651,7 @@ mod tests {
             "see file://...",
             "see https://?q=/etc/hosts",
             "see file://?q=/etc/hosts",
+            "see file://localhost?q=/etc/hosts",
             "see www.example@/etc/hosts",
         ] {
             let spans = detect(&[line]);
