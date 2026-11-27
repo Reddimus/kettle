@@ -28,7 +28,7 @@ pub use install::{
     InstallDisposition, InstallOutcome, ManagedInstall, ProcessStart, RunningInstallGuard,
     detect_managed_install, install_update, is_pending_update_helper_invocation, marker_json,
     prepare_managed_install_for_update, prepare_process_start, run_pending_update_helper,
-    write_atomic_file,
+    tidy_update_leftovers, write_atomic_file,
 };
 pub use semver::Version;
 pub use snapshot::InstallSnapshot;

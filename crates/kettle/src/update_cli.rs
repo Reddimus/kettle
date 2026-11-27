@@ -11,6 +11,11 @@ fn missing_artifact_message(has_asset: bool, tag: &str, release_url: &str) -> Op
 }
 
 pub fn run(assume_yes: bool, current: &str) -> i32 {
+    // Leftovers from earlier updates: remove the provable ones, name the rest
+    // once (#951).
+    if let Some(notice) = kettle_update::tidy_update_leftovers() {
+        eprintln!("kettle update: {notice}");
+    }
     if let Err(error) = kettle_update::prepare_managed_install_for_update() {
         if matches!(&error, UpdateError::UpdateLocked) {
             eprintln!("kettle update: another update is already running");
@@ -107,6 +112,20 @@ mod tests {
         assert!(message.contains("no package for this platform"));
         assert!(message.contains("https://example.invalid/releases/tag/v4.0.0"));
         assert!(super::missing_artifact_message(true, "v4.0.0", "ignored").is_none());
+    }
+
+    /// #951: `kettle update` is where a user managing updates reads about
+    /// leftovers, before anything else it prints.
+    #[test]
+    fn update_names_leftovers_before_checking_the_feed() {
+        let source = kettle_test_support::production_source(include_str!("update_cli.rs"));
+        let tidy = source
+            .find("kettle_update::tidy_update_leftovers()")
+            .expect("kettle update tidies leftovers");
+        let prepare = source
+            .find("kettle_update::prepare_managed_install_for_update()")
+            .expect("kettle update prepares the install");
+        assert!(tidy < prepare);
     }
 
     #[test]

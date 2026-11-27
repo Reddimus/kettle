@@ -775,6 +775,27 @@ pub fn prepare_process_start() -> Result<ProcessStart, UpdateError> {
     }
 }
 
+/// Clear update leftovers that startup had to leave, and describe the rest.
+///
+/// Returns a notice, at most once for a given set of leftovers, naming what is
+/// still there and saying it is safe to delete. Only macOS has leftovers that
+/// need this, the displaced bundles beside `kettle.app`; elsewhere it is `None`.
+///
+/// Unlike [`prepare_process_start`], this may run a signature check, and its
+/// notice is meant to be read. Call it from the app and from `kettle update`,
+/// never from a path every command shares, such as `--version` or `kettle ctl`.
+pub fn tidy_update_leftovers() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let executable = std::env::current_exe().ok()?;
+        crate::macos::tidy_leftovers_beside(&executable)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 /// Take the update lock for a best-effort startup recovery pass.
 ///
 /// `Busy` and `Unavailable` both mean "carry on without it", and both are

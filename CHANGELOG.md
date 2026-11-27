@@ -1757,6 +1757,11 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - A tab dragged onto a tab-strip overflow arrow and held there scrolls the
   strip, so it can be moved past the tabs shown.
 
+- macOS: `kettle --version`, `--help` and `kettle ctl` no longer warn about
+  update leftovers. The app and `kettle update` remove bundles that earlier
+  official updates provably displaced, and name any other leftover once,
+  saying it is safe to delete (#951).
+
 ## Older releases
 
 - [5.x](docs/changelog/CHANGELOG-5.x.md)

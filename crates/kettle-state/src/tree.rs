@@ -8,7 +8,7 @@
 //! every name below it is resolved relative to an open descriptor, so a rename
 //! of any ancestor cannot redirect the walk.
 
-use std::ffi::{CStr, CString, OsStr};
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd as _, FromRawFd as _, IntoRawFd as _};
@@ -172,6 +172,26 @@ fn remove_tree_at(
 pub fn directory_is_empty(directory: &File) -> io::Result<bool> {
     let mut stream = DirectoryStream::open(directory)?;
     Ok(stream.next_name()?.is_none())
+}
+
+/// The names in an open directory other than `.` and `..`, in listing order.
+///
+/// Reads through a fresh descriptor for the held directory, like
+/// [`directory_is_empty`], so the answer is about the directory the caller
+/// opened, and the caller's own descriptor offset is untouched. A directory with
+/// more than `max_entries` names returns [`io::ErrorKind::InvalidData`] rather
+/// than an unbounded list.
+pub fn directory_entry_names(directory: &File, max_entries: usize) -> io::Result<Vec<OsString>> {
+    use std::os::unix::ffi::OsStringExt as _;
+    let mut stream = DirectoryStream::open(directory)?;
+    let mut names = Vec::new();
+    while let Some(name) = stream.next_name()? {
+        if names.len() == max_entries {
+            return Err(limit_error("too many entries"));
+        }
+        names.push(OsString::from_vec(name.into_bytes()));
+    }
+    Ok(names)
 }
 
 fn remove_contents(
@@ -561,5 +581,23 @@ mod tests {
         assert!(directory_is_empty(&held).unwrap());
         fs::write(tree.join("child"), b"x").unwrap();
         assert!(!directory_is_empty(&held).unwrap());
+    }
+
+    #[test]
+    fn lists_the_held_directory_within_a_bound() {
+        let root = crate::test_tempdir();
+        let tree = root.path().join("tree");
+        fs::create_dir(&tree).unwrap();
+        let held = open_dir(&tree);
+        assert!(directory_entry_names(&held, 0).unwrap().is_empty());
+        fs::write(tree.join("b"), b"x").unwrap();
+        fs::create_dir(tree.join("a")).unwrap();
+        // Listing through the held descriptor survives the name moving away.
+        fs::rename(&tree, root.path().join("moved")).unwrap();
+        let mut names = directory_entry_names(&held, 2).unwrap();
+        names.sort();
+        assert_eq!(names, [OsString::from("a"), OsString::from("b")]);
+        let error = directory_entry_names(&held, 1).expect_err("two names exceed a bound of one");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 }

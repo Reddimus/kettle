@@ -396,6 +396,34 @@ The second is the one to rely on, because two processes can disagree about
 where a lock file lives if they inherited different environments, and cannot
 disagree about the directory in front of them.
 
+A name is not authority to delete: anyone who can write `/Applications` can
+rename someone else's folder to look like a leftover. Each update therefore
+records the staging directory it creates, with its device and inode, in a
+private transaction record under the state directory, and the sweep removes
+only what such a record names. That sweep runs in every kettle process,
+`--version`, `--help` and each `kettle ctl` call included, so it says nothing
+about what it leaves.
+
+A leftover can lose its record for good. 5.6.0 and older wrote none, and the
+sweep drops a record whose directory no longer matches it. The app and
+`kettle update` therefore make one more pass. They remove a
+`.kettle-update-previous-*` folder when all of these hold:
+
+- it belongs to this user, has mode `0700` and no extended ACL, as every update
+  since 5.6.0 creates it, so nobody else can have reached inside it;
+- it holds exactly one entry, a `kettle.app` directory of this user's;
+- that bundle's signature is intact and names kettle's bundle identifier and
+  team, the same proof the live install has to give;
+- its signed `Info.plist` records a version older than the running build.
+
+The most a wrong answer can cost is an obsolete official kettle the user owned.
+Anything else stays where it is. The app names what is left once, in a log line
+and a desktop notification, and so does `kettle update` on stderr: the full
+paths, and that the folders are safe to delete by hand. A private record under
+the state directory keeps the same set from being named again, and keeps the
+build that refused a folder from checking it again; a newer build checks it once
+more. A new leftover earns a new notice.
+
 Kettle writes no lock or bookkeeping file into `/Applications`. The update lock
 lives under `$XDG_STATE_HOME/kettle` (or `~/.local/state/kettle`), one per
 install. That is partly hygiene and partly necessity: `/Applications` is

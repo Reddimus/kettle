@@ -1324,6 +1324,15 @@ fn main() -> anyhow::Result<()> {
         std::env::var("KETTLE_RECORD_RAW_INPUT").ok().as_deref(),
     );
     let activation_identity = recording_launch_identity(&recording);
+    // Update leftovers the startup sweep had to leave (#951). The app may
+    // remove the ones it can prove are its own and names the rest once. This
+    // runs here, after every command-line exit, so `--version`, `--help` and
+    // `kettle ctl` neither pay for the check nor print the notice.
+    let leftover_notice = kettle_update::tidy_update_leftovers();
+    if let Some(notice) = leftover_notice.as_deref() {
+        log::warn!("{notice}");
+    }
+    let startup_update_warning = startup_update_warning.or(leftover_notice);
     let startup_notification_queued = queue_startup_update_recovery(
         startup_update_warning.as_deref(),
         || {
@@ -2698,6 +2707,37 @@ mod tests {
         assert!(
             queue_at < activation_at,
             "the warning must be queued before an Activated outcome can return"
+        );
+    }
+
+    /// #951: the update-leftover pass may run a signature check and returns a
+    /// notice meant to be read, so only the app runs it, after every
+    /// command-line exit. `--version` and `--help` exit inside `Cli::parse`.
+    #[test]
+    fn only_the_app_tidies_update_leftovers() {
+        let src = super::production_source();
+        let call = "kettle_update::tidy_update_leftovers()";
+        assert_eq!(src.matches(call).count(), 1, "one call, in the GUI path");
+        let tidy_at = src.find(call).unwrap();
+        for exit in [
+            "let mut cli = Cli::parse();",
+            "Cmd::Ctl(args) =>",
+            "if cli.update {",
+            "if cli.check_update {",
+            "if cli.check_config {",
+        ] {
+            let exit_at = src.find(exit).unwrap_or_else(|| panic!("{exit} not found"));
+            assert!(
+                exit_at < tidy_at,
+                "{exit} must exit before leftovers are tidied"
+            );
+        }
+        let queue_at = src
+            .find("let startup_notification_queued = queue_startup_update_recovery(")
+            .expect("GUI startup queues the recovery warning");
+        assert!(
+            tidy_at < queue_at,
+            "the leftover notice must be ready before the startup notification is queued"
         );
     }
 
