@@ -1108,8 +1108,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - A one-column terminal grid shows a wide character as a blank instead of
   crashing, and narrowing a grid to one column no longer hangs.
 
-- A restored row that follows a wrapped line no longer paints its background
-  across the empty rest of the row.
+- A restored row no longer paints its background across the empty rest of the
+  row when it follows a wrapped line or a narrower pane wraps it.
 
 - A restored line keeps its soft wrap when the row it wraps onto holds only
   blanks, so copying it adds no line break.
