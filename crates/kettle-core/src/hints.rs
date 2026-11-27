@@ -330,8 +330,12 @@ fn quoted_path_len(body: &str, quote: char) -> Option<usize> {
     }
     let name = segments[last];
     let directory = name.is_empty();
+    // An extension of any length (`.swiftinterface`): ASCII letters and
+    // digits, in words joined by `-` or `_` (`.code-workspace`).
     let extension = name.rsplit_once('.').is_some_and(|(_, extension)| {
-        (1..=12).contains(&extension.len()) && extension.bytes().all(|b| b.is_ascii_alphanumeric())
+        extension
+            .split(['-', '_'])
+            .all(|word| !word.is_empty() && word.bytes().all(|b| b.is_ascii_alphanumeric()))
     });
     // Ends like a name, not prose punctuation; Unicode `\w` again, so a
     // decomposed name (`café` as `cafe\u{301}`) ends in a word character.
@@ -1281,6 +1285,38 @@ mod tests {
             assert!(
                 spans.iter().all(|span| !span.text.contains(' ')),
                 "{line}: {spans:?}"
+            );
+        }
+    }
+
+    /// A quoted path's extension may be long or hyphenated, as real ones
+    /// are (`.swiftinterface`, `.code-workspace`).
+    #[test]
+    fn a_quoted_path_with_a_long_extension_is_whole() {
+        for path in [
+            "docs/annual report.swiftinterface",
+            "docs/annual report.documentation",
+            "a/b/annual report.swiftinterface",
+            "docs/my app.code-workspace",
+            "docs/my app.sublime-project",
+            "docs/my dir/.DS_Store",
+        ] {
+            let spans = detect(&[&format!("\"{path}\"")]);
+            assert_eq!(spans.len(), 1, "{path}: {spans:?}");
+            assert_eq!(spans[0].text, path);
+            assert!(spans[0].bounded, "{path}");
+        }
+        // Not an extension: an empty word, or punctuation ending prose.
+        for body in [
+            "docs/a b.-x",
+            "docs/a b.x--y",
+            "docs/a b.x-",
+            "docs/see the end.",
+        ] {
+            let spans = detect(&[&format!("\"{body}\"")]);
+            assert!(
+                spans.iter().all(|span| !span.text.contains(' ')),
+                "{body}: {spans:?}"
             );
         }
     }

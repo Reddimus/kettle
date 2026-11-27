@@ -1482,6 +1482,32 @@ mod tests {
         }
     }
 
+    /// A quoted relative path with a space links whole whatever the length
+    /// of its extension.
+    #[test]
+    fn a_quoted_path_with_a_long_extension_is_one_link() {
+        for (path, uri) in [
+            (
+                "docs/annual report.swiftinterface",
+                "file:///work/docs/annual%20report.swiftinterface",
+            ),
+            (
+                "a/b/annual report.documentation",
+                "file:///work/a/b/annual%20report.documentation",
+            ),
+            (
+                "docs/my app.code-workspace",
+                "file:///work/docs/my%20app.code-workspace",
+            ),
+        ] {
+            let line = format!("open \"{path}\" now");
+            let term = term_with(line.len(), &[&line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert_eq!(found.len(), 1, "{line}: {found:?}");
+            assert_eq!(found[0].uri, uri, "{line}");
+        }
+    }
+
     /// A link ending in a wide character covers both of its cells, so the
     /// whole glyph underlines and clicks.
     #[test]

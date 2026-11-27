@@ -1652,6 +1652,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - Text that trails off after a bare scheme, such as `see https://...` or `see www...`, is no longer offered as a link or a quick-select URL, and a web link with no host is refused.
 - URLs printed with an uppercase scheme, such as `HTTPS://`, `FILE://` or `WWW.`, are detected as links and quick-select URLs.
 - A path ending in a dotfile, such as `docs/.env` or a quoted `"docs/my dir/.env"`, is a link, and quick select no longer offers only the part after the space.
+- A quoted path with a space whose extension is long or hyphenated, such as `"docs/annual report.swiftinterface"` or `"docs/my app.code-workspace"`, is a link.
 - Sessions: session files are checked for trust before restoring commands,
   sessions that restore would reject are not autosaved, and repeated restore
   failures no longer turn off saving.
