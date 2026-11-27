@@ -1744,6 +1744,13 @@ mod tests {
                 &[("file:///tmp/c.txt", 28, 37)],
                 &[(Kind::Path, "/tmp/c.txt", true)],
             ),
+            // Inside a shell's single quotes a backslash is a backslash, so
+            // the `'` after it closes the string, and the later path links.
+            (
+                r#"export A='C:\work\';B=/tmp/c.txt"#,
+                &[("file:///tmp/c.txt", 22, 31)],
+                &[(Kind::Path, "/tmp/c.txt", true)],
+            ),
         ];
         for &(line, links, hints) in corpus {
             let term = term_fed(240, 1, line.as_bytes());
@@ -2296,6 +2303,23 @@ mod tests {
             r#"{"msg":"a\\","file":"/tmp/c.txt"}"#,
         ] {
             assert_eq!(found(line), ["file:///tmp/c.txt"], "{line}");
+        }
+    }
+
+    /// Inside a shell's single quotes a backslash is a backslash, so the
+    /// next `'` closes the string and a later path on the line links.
+    #[test]
+    fn a_single_quote_closes_after_a_backslash() {
+        for line in [
+            r#"export A='C:\work\';B=/tmp/c.txt"#,
+            r#"x='a\';y=/tmp/c.txt"#,
+        ] {
+            let term = term_with(line.chars().count(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"))
+                .into_iter()
+                .map(|link| link.uri)
+                .collect::<Vec<_>>();
+            assert_eq!(found, ["file:///tmp/c.txt"], "{line}");
         }
     }
 
