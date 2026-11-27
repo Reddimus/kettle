@@ -1118,6 +1118,9 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - Restored output keeps blinking text's blink attribute.
 
+- Restored output keeps the colors of the blank a wide character leaves at the
+  end of a row it did not fit, and the row after it keeps its columns.
+
 - Screen readers can highlight a command palette or picker result by pressing
   or focusing it, and act on the highlighted result with the picker's Choose
   button. Selecting a result never runs it. Pressing a quick-select label acts

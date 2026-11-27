@@ -82,7 +82,17 @@ pub fn snapshot_from<T: EventListener>(
         });
         'cells: for col in 0..last.map_or(0, |col| col + 1) {
             let cell = &grid[Point::new(Line(row), Column(col))];
-            if crate::grid_text::is_spacer(cell.flags) {
+            // Replay writes a wide character's second half, and the blank
+            // before one that did not fit, from the character itself. That
+            // blank comes from the next row only when that row still starts
+            // with the character, in the same style; any other is saved as
+            // the blank it shows, so the next row keeps its columns.
+            if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+                || (cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) && row + 1 < end && {
+                    let next = &grid[Point::new(Line(row + 1), Column(0))];
+                    next.flags.contains(Flags::WIDE_CHAR) && cell_style(next) == cell_style(cell)
+                })
+            {
                 continue;
             }
             let style = cell_style(cell);
@@ -481,6 +491,43 @@ mod tests {
         script.extend_from_slice(b" \r\nb\r\n");
         let (_, restored, _) = round_trip(&script);
         assert_eq!(saved_cell(&restored, 2, 0).c, 'b');
+    }
+
+    /// The blank a wide character leaves at the end of a row it did not fit
+    /// keeps that row's attributes. The snapshot skipped it, so replay drew it
+    /// in the next row's attributes, and when the next row no longer started
+    /// with the wide character, moved that row's first cell into it.
+    #[test]
+    fn restored_leading_wide_spacers_keep_their_style() {
+        let mut script = b"\x1b[7;38;5;196;48;5;22;4m".to_vec();
+        script.extend_from_slice(&[b'a'; 39]);
+        script.extend_from_slice("\u{4e16}".as_bytes());
+        script.extend_from_slice(b"\x1b[2;1H\x1b[0;48;5;22m\x1b[2Kz");
+        // The usual case: the next row still starts with the wide character.
+        let mut kept = b"\x1b[38;5;196;48;5;22m".to_vec();
+        kept.extend_from_slice(&[b'a'; 39]);
+        kept.extend_from_slice("\u{4e16}b\r\n".as_bytes());
+        for script in [&script, &kept] {
+            let (source, restored, rows) = round_trip(script);
+            let style = Flags::INVERSE | Flags::UNDERLINE | Flags::WRAPLINE;
+            for k in 0..rows {
+                for col in 0..40 {
+                    let before = saved_cell(&source, k, col);
+                    let after = saved_cell(&restored, k, col);
+                    let label = format!("{script:?} row {k} column {col}");
+                    assert_eq!(after.c, before.c, "{label}");
+                    assert_eq!(after.fg, before.fg, "{label}");
+                    assert_eq!(after.bg, before.bg, "{label}");
+                    assert_eq!(after.flags & style, before.flags & style, "{label}");
+                }
+            }
+        }
+        let (_, restored, _) = round_trip(&kept);
+        assert!(
+            saved_cell(&restored, 0, 39)
+                .flags
+                .contains(Flags::LEADING_WIDE_CHAR_SPACER)
+        );
     }
 
     /// Soft-wrapped rows, a leading wide spacer and a row of blanks come back
