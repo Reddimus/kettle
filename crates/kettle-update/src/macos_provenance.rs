@@ -214,13 +214,16 @@ impl Leftover {
     }
 }
 
-/// What the last notice named, and which kettle version made the checks
-/// behind it.
+/// What the last notice named, which of those the proof refused, and which
+/// kettle version made the checks.
 #[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReportedLeftovers {
     pub(crate) checked_by: String,
     pub(crate) leftovers: Vec<Leftover>,
+    /// Only a proof that ran and said no; one that could not run is retried.
+    #[serde(default)]
+    pub(crate) refused: Vec<Leftover>,
 }
 
 /// The last notice's record, or an empty one when the record is missing,
@@ -246,12 +249,17 @@ pub(crate) fn load_reported(path: &Path) -> ReportedLeftovers {
         if bytes.len() as u64 > MAX_REPORT_BYTES
             || reported.checked_by.len() > 64
             || reported.leftovers.len() > MAX_REPORTED_LEFTOVERS
-            || !reported.leftovers.iter().all(|leftover| {
-                // NAME_MAX: any entry the directory listing could have produced.
-                leftover.name.len() <= 255
-                    && (leftover.name.starts_with(STAGED_PREFIX)
-                        || leftover.name.starts_with(PREVIOUS_PREFIX))
-            })
+            || reported.refused.len() > MAX_REPORTED_LEFTOVERS
+            || !reported
+                .leftovers
+                .iter()
+                .chain(&reported.refused)
+                .all(|leftover| {
+                    // NAME_MAX: any entry the directory listing could have produced.
+                    leftover.name.len() <= 255
+                        && (leftover.name.starts_with(STAGED_PREFIX)
+                            || leftover.name.starts_with(PREVIOUS_PREFIX))
+                })
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -269,6 +277,7 @@ pub(crate) fn store_reported(
     path: &Path,
     checked_by: &str,
     leftovers: &[Leftover],
+    refused: &[Leftover],
 ) -> io::Result<()> {
     if leftovers.is_empty() {
         return match std::fs::remove_file(path) {
@@ -279,6 +288,7 @@ pub(crate) fn store_reported(
     let reported = ReportedLeftovers {
         checked_by: checked_by.to_string(),
         leftovers: leftovers[..leftovers.len().min(MAX_REPORTED_LEFTOVERS)].to_vec(),
+        refused: refused[..refused.len().min(MAX_REPORTED_LEFTOVERS)].to_vec(),
     };
     kettle_state::atomic_replace(
         path,
@@ -386,7 +396,7 @@ mod tests {
             "the same name on another directory is another leftover"
         );
 
-        store_reported(&path, "6.0.0", std::slice::from_ref(&leftover)).unwrap();
+        store_reported(&path, "6.0.0", std::slice::from_ref(&leftover), &[]).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
         let loaded = load_reported(&path);
         assert_eq!(loaded.checked_by, "6.0.0");
@@ -399,15 +409,14 @@ mod tests {
                 inode: index as u64,
             })
             .collect::<Vec<_>>();
-        store_reported(&path, "6.0.0", &many).unwrap();
-        assert_eq!(
-            load_reported(&path).leftovers,
-            many[..MAX_REPORTED_LEFTOVERS]
-        );
+        store_reported(&path, "6.0.0", &many, &many).unwrap();
+        let loaded = load_reported(&path);
+        assert_eq!(loaded.leftovers, many[..MAX_REPORTED_LEFTOVERS]);
+        assert_eq!(loaded.refused, many[..MAX_REPORTED_LEFTOVERS]);
 
         // A record someone else could have written, or one that names anything
         // but a leftover, is no record at all: the cost is one more notice.
-        store_reported(&path, "6.0.0", std::slice::from_ref(&leftover)).unwrap();
+        store_reported(&path, "6.0.0", std::slice::from_ref(&leftover), &[]).unwrap();
         std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o644))
             .unwrap();
         assert_eq!(load_reported(&path), ReportedLeftovers::default());
@@ -424,9 +433,9 @@ mod tests {
             assert_eq!(load_reported(&path), ReportedLeftovers::default());
         }
 
-        store_reported(&path, "6.0.0", &[]).unwrap();
+        store_reported(&path, "6.0.0", &[], &[]).unwrap();
         assert!(!path.exists(), "an empty set leaves no record");
-        store_reported(&path, "6.0.0", &[]).unwrap();
+        store_reported(&path, "6.0.0", &[], &[]).unwrap();
     }
 
     #[test]

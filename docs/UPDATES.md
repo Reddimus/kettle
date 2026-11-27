@@ -465,13 +465,27 @@ sweep drops a record whose directory no longer matches it. The app and
   team, the same proof the live install has to give;
 - its signed `Info.plist` records a version older than the running build.
 
+`codesign` reads a bundle by pathname, more than once per check, and every path
+through `/Applications` runs through a directory an administrator can rename
+entries in. So the bundle is not checked where it lies. Through the folder held
+open since the checks above, it is moved into a fresh private directory under
+the state directory, on the same volume, and checked and removed there. Every
+directory on that path must belong to this user or root and be writable by
+nobody else, so only root or this user could swap the bundle while `codesign`
+and PlistBuddy read it. Its identity is compared with the held descriptor
+before the checks and after them, and a bundle that changed is left alone. A
+bundle that fails a check goes back into its folder. When the state directory
+is on another volume, or is not private, nothing moves and the folder is named
+instead.
+
 The most a wrong answer can cost is an obsolete official kettle the user owned.
 Anything else stays where it is. The app names what is left once, in a log line
 and a desktop notification, and so does `kettle update` on stderr: the full
 paths, and that the folders are safe to delete by hand. A private record under
 the state directory keeps the same set from being named again, and keeps the
 build that refused a folder from checking it again; a newer build checks it once
-more. A new leftover earns a new notice.
+more. A check that could not run, such as a tool that failed to start, is not a
+refusal and runs again at the next launch. A new leftover earns a new notice.
 
 Kettle writes no lock or bookkeeping file into `/Applications`. The update lock
 lives under `$XDG_STATE_HOME/kettle` (or `~/.local/state/kettle`), one per
