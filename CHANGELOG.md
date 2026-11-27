@@ -1473,6 +1473,8 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   comes back when the selection is cleared. ⌘-click and Ctrl+click still open
   it.
 
+- Double-clicking a URL or path that wraps onto the next row selects all of it, from either row, instead of nothing.
+
 - Starting a recording into a directory could fail with "resource
   temporarily unavailable" when a new pane opened at the same moment as
   recording retention removed an old file. Kettle now takes the next file

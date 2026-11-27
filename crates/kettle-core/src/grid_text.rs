@@ -166,7 +166,7 @@ pub struct LogicalLine {
 }
 
 /// Whether grid line `line` exists and ends in a soft wrap into the line below.
-fn soft_wraps(grid: &Grid<Cell>, line: i32, cols: usize) -> bool {
+pub(crate) fn soft_wraps(grid: &Grid<Cell>, line: i32, cols: usize) -> bool {
     let top = -(grid.history_size() as i32);
     let bottom = grid.screen_lines() as i32 - 1;
     cols > 0

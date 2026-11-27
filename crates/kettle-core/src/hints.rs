@@ -567,6 +567,31 @@ pub fn detect(rows: &[&str]) -> Vec<HintSpan> {
 /// `end` is the last column on that first row. A hard line break ends a line.
 pub fn detect_rows(grid: &Grid<Cell>, lines: &[i32], cols: usize) -> Vec<HintSpan> {
     let mut out = Vec::new();
+    detect_logical_lines(grid, lines, cols, |mut span, cells| {
+        let (row, start) = cells[0];
+        let end = cells
+            .iter()
+            .rev()
+            .find(|(r, _)| *r == row)
+            .map_or(start, |&(_, col)| col);
+        span.row = row;
+        span.start = start;
+        span.end = through_spacer(grid, lines[row], end, cols);
+        out.push(span);
+    });
+    out.sort_by(|a, b| a.row.cmp(&b.row).then(a.start.cmp(&b.start)));
+    out
+}
+
+/// Detect targets on each soft-wrapped logical line of `lines` and hand each
+/// one to `found` with, for every byte of its text, the index into `lines`
+/// and the grid column that byte came from.
+fn detect_logical_lines(
+    grid: &Grid<Cell>,
+    lines: &[i32],
+    cols: usize,
+    mut found: impl FnMut(HintSpan, &[(usize, usize)]),
+) {
     let mut text = String::new();
     let mut pos_of_byte = Vec::new();
     let mut col_of_byte = Vec::new();
@@ -582,7 +607,7 @@ pub fn detect_rows(grid: &Grid<Cell>, lines: &[i32], cols: usize) -> Vec<HintSpa
             &mut pos_of_byte,
         );
         // Detect over the joined text with byte offsets standing in for
-        // columns, then map each span back to its first row and columns.
+        // columns; `found` maps each span back to rows and columns.
         col_of_byte.clear();
         col_of_byte.extend(0..=text.len());
         spans.clear();
@@ -593,44 +618,66 @@ pub fn detect_rows(grid: &Grid<Cell>, lines: &[i32], cols: usize) -> Vec<HintSpa
             (read.cut_before, read.cut_after),
             &mut spans,
         );
-        for mut span in spans.drain(..) {
-            let (row, start) = pos_of_byte[span.start];
-            let end = pos_of_byte[..=span.end]
-                .iter()
-                .rev()
-                .find(|(r, _)| *r == row)
-                .map_or(start, |&(_, col)| col);
-            // A wide character's spacer cell is part of the target too.
-            let wide = end + 1 < cols
-                && grid[alacritty_terminal::index::Point::new(
-                    alacritty_terminal::index::Line(lines[row]),
-                    alacritty_terminal::index::Column(end),
-                )]
-                .flags
-                .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR);
-            span.row = row;
-            span.start = start;
-            span.end = end + usize::from(wide);
-            out.push(span);
+        for span in spans.drain(..) {
+            let cells = &pos_of_byte[span.start..=span.end];
+            found(span, cells);
         }
         first = read.next;
     }
-    out.sort_by(|a, b| a.row.cmp(&b.row).then(a.start.cmp(&b.start)));
-    out
+}
+
+/// `col` on grid line `line`, or the spacer cell after it when it holds a wide
+/// character: a target covers both of a wide character's cells.
+fn through_spacer(grid: &Grid<Cell>, line: i32, col: usize, cols: usize) -> usize {
+    let wide = col + 1 < cols
+        && grid[Point::new(Line(line), Column(col))]
+            .flags
+            .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR);
+    col + usize::from(wide)
 }
 
 /// The complete structured token under one grid cell, as its first and last
-/// cells in grid coordinates (inclusive, wide spacers included).
+/// cells in grid coordinates (inclusive, wide spacers included). A token the
+/// terminal soft-wrapped across rows is found from any of them, so its first
+/// and last cells can be on different rows. Detection reads the clicked row's
+/// logical line, at most [`MAX_LOGICAL_ROWS`](crate::grid_text::MAX_LOGICAL_ROWS)
+/// rows of it around the click.
 pub fn selection_at(grid: &Grid<Cell>, line: i32, col: usize) -> Option<(Point, Point)> {
-    detect_rows(grid, &[line], grid.columns())
-        .into_iter()
-        .find(|span| span.start <= col && col <= span.end)
-        .map(|span| {
-            (
-                Point::new(Line(line), Column(span.start)),
-                Point::new(Line(line), Column(span.end)),
-            )
-        })
+    use crate::grid_text::{MAX_LOGICAL_ROWS, soft_wraps};
+    let cols = grid.columns();
+    let top = -(grid.history_size() as i32);
+    let bottom = grid.screen_lines() as i32 - 1;
+    if !(top..=bottom).contains(&line) {
+        return None;
+    }
+    let wraps_into_next = |line: i32| soft_wraps(grid, line, cols);
+    let rows = |first: i32, last: i32| (last - first) as usize + 1;
+    // Half the rows above the click, the rest below, then any rows the line
+    // did not use below go above.
+    let (mut first, mut last) = (line, line);
+    while first > top && rows(first, last) <= MAX_LOGICAL_ROWS / 2 && wraps_into_next(first - 1) {
+        first -= 1;
+    }
+    while last < bottom && rows(first, last) < MAX_LOGICAL_ROWS && wraps_into_next(last) {
+        last += 1;
+    }
+    while first > top && rows(first, last) < MAX_LOGICAL_ROWS && wraps_into_next(first - 1) {
+        first -= 1;
+    }
+    let lines: Vec<i32> = (first..=last).collect();
+    let clicked = Point::new(Line(line), Column(col));
+    let mut token = None;
+    detect_logical_lines(grid, &lines, cols, |_, cells| {
+        let (start_row, start_col) = cells[0];
+        let (end_row, end_col) = cells[cells.len() - 1];
+        let start = Point::new(Line(lines[start_row]), Column(start_col));
+        let end_col = through_spacer(grid, lines[end_row], end_col, cols);
+        let end = Point::new(Line(lines[end_row]), Column(end_col));
+        if token.is_none() && start <= clicked && clicked <= end {
+            token = Some((start, end));
+        }
+    });
+    token
 }
 
 /// Default label alphabet — home-row first so the common (few) targets are
@@ -844,6 +891,62 @@ mod tests {
 
         // No hint at all — None.
         assert!(smart_selection_at("plain prose with nothing structured", 5).is_none());
+    }
+
+    /// Write `text` into `grid` from `line`, soft-wrapping each full row.
+    fn write_wrapped(grid: &mut Grid<Cell>, line: i32, text: &str) {
+        use alacritty_terminal::term::cell::Flags;
+        let cols = grid.columns();
+        for (index, ch) in text.chars().enumerate() {
+            let row = line + (index / cols) as i32;
+            grid[Point::new(Line(row), Column(index % cols))].c = ch;
+            if index % cols == cols - 1 && index + 1 < text.chars().count() {
+                grid[Point::new(Line(row), Column(cols - 1))]
+                    .flags
+                    .insert(Flags::WRAPLINE);
+            }
+        }
+    }
+
+    /// A URL the terminal soft-wrapped onto the next row is one token: a
+    /// double-click on either half selects all of it.
+    #[test]
+    fn smart_selection_follows_a_soft_wrap() {
+        use alacritty_terminal::term::cell::Flags;
+        let mut grid: Grid<Cell> = Grid::new(3, 20, 0);
+        write_wrapped(&mut grid, 0, "go https://example.com/very-long-path ok");
+        let url = Some((
+            Point::new(Line(0), Column(3)),
+            Point::new(Line(1), Column(16)),
+        ));
+        for (line, col) in [(0, 3), (0, 11), (0, 19), (1, 0), (1, 2), (1, 16)] {
+            assert_eq!(selection_at(&grid, line, col), url, "({line}, {col})");
+        }
+        assert_eq!(selection_at(&grid, 0, 0), None);
+        assert_eq!(selection_at(&grid, 1, 18), None);
+
+        // A hard line break ends a token.
+        grid[Point::new(Line(0), Column(19))]
+            .flags
+            .remove(Flags::WRAPLINE);
+        assert_eq!(selection_columns(&grid, 0, 11), Some((3, 19)));
+    }
+
+    /// In a logical line longer than one detection reads, the clicked row
+    /// still sees the rows on both sides of it.
+    #[test]
+    fn smart_selection_reads_around_the_click_in_a_long_wrapped_line() {
+        let cols = 10;
+        let mut text = "x".repeat(cols * 30);
+        text.replace_range(cols * 25 - 4..cols * 25 + 8, " /tmp/a/b/c ");
+        let mut grid: Grid<Cell> = Grid::new(40, cols, 0);
+        write_wrapped(&mut grid, 0, &text);
+        let path = Some((
+            Point::new(Line(24), Column(7)),
+            Point::new(Line(25), Column(6)),
+        ));
+        assert_eq!(selection_at(&grid, 24, 8), path);
+        assert_eq!(selection_at(&grid, 25, 2), path);
     }
 
     #[test]
