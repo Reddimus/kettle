@@ -1650,6 +1650,7 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 - A path on screen whose name holds a literal `%2e`, such as `/tmp/100%2e.pdf`, is a link.
 - A link holding an invisible character, such as a no-break or zero-width space or a control that reverses text, is refused, and quick select copies such a path rather than opening it.
 - Text that trails off after a bare scheme, such as `see https://...` or `see www...`, is no longer offered as a link or a quick-select URL, and a web link with no host is refused.
+- URLs printed with an uppercase scheme, such as `HTTPS://`, `FILE://` or `WWW.`, are detected as links and quick-select URLs.
 - Sessions: session files are checked for trust before restoring commands,
   sessions that restore would reject are not autosaved, and repeated restore
   failures no longer turn off saving.

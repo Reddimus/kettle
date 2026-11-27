@@ -44,7 +44,7 @@ fn res() -> &'static [(Kind, Regex)] {
         vec![
             (
                 Kind::Url,
-                Regex::new(r#"(?:https?://|ftp://|file://|www\.)[^\s\x00-\x1f<>"]+"#).unwrap(),
+                Regex::new(r#"(?i:https?://|ftp://|file://|www\.)[^\s\x00-\x1f<>"]+"#).unwrap(),
             ),
             (
                 Kind::Path,
@@ -1423,6 +1423,23 @@ mod tests {
         assert_eq!(h[0].text, "https://rust-lang.org", "no trailing ).");
         // The URL's path-looking substring is not also a separate hint.
         assert!(h.iter().all(|s| s.kind == Kind::Url));
+    }
+
+    /// An uppercase or mixed-case scheme is a URL hint with its text as
+    /// printed, not a path.
+    #[test]
+    fn uppercase_schemes_are_url_hints() {
+        for url in [
+            "HTTPS://example.com/a",
+            "Http://example.com/a",
+            "FTP://host/file",
+            "FILE:///etc/hosts",
+            "WWW.example.com/a",
+        ] {
+            let spans = detect(&[&format!("see {url} now")]);
+            assert_eq!(spans.len(), 1, "{url}: {spans:?}");
+            assert_eq!((spans[0].kind, spans[0].text.as_str()), (Kind::Url, url));
+        }
     }
 
     /// A URL trimmed down to a bare scheme or `www` names nothing: no hint

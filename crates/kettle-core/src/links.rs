@@ -28,7 +28,10 @@ pub struct Link {
 
 fn url_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r#"(https?://|ftp://|file://|www\.)[^\s\x00-\x1f<>"]+"#).unwrap())
+    // A scheme is case-insensitive (RFC 3986), as `www.` is to a reader.
+    RE.get_or_init(|| {
+        Regex::new(r#"(?i:https?://|ftp://|file://|www\.)[^\s\x00-\x1f<>"]+"#).unwrap()
+    })
 }
 
 /// Whether a detected URL, trimmed of trailing punctuation, still names
@@ -68,9 +71,13 @@ fn names_a_host(rest: &str) -> bool {
     !host.is_empty()
 }
 
-/// Normalize a detected URL for opening, leaving its displayed text alone.
+/// Normalize a detected URL for opening, leaving its displayed text alone:
+/// `www.x.test` and `WWW.x.test` open as `https://` and the text as shown.
 pub fn normalize_url(text: &str) -> String {
-    if text.starts_with("www.") {
+    if text
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("www."))
+    {
         format!("https://{text}")
     } else {
         text.to_string()
@@ -1590,6 +1597,35 @@ mod tests {
         assert_eq!(
             path_match_to_file_uri("/tmp/my café.pdf", None).as_deref(),
             Some("file:///tmp/my%20caf%C3%A9.pdf")
+        );
+    }
+
+    /// A scheme is case-insensitive: an uppercase or mixed-case URL links
+    /// as printed, and `WWW.` gains `https://` as `www.` does.
+    #[test]
+    fn uppercase_schemes_are_links() {
+        for (line, uri) in [
+            ("see HTTPS://example.com/a", "HTTPS://example.com/a"),
+            ("see Http://example.com/a", "Http://example.com/a"),
+            ("see hTTpS://example.com/a.", "hTTpS://example.com/a"),
+            ("see FTP://host/file", "FTP://host/file"),
+            ("see FILE:///etc/hosts", "FILE:///etc/hosts"),
+            ("see WWW.example.com/a", "https://WWW.example.com/a"),
+            ("see Www.example.com/a", "https://Www.example.com/a"),
+        ] {
+            let term = term_with(line.len(), &[line], &[]);
+            let found = links_with_cwd(&term, Some("/work"));
+            assert_eq!(found.len(), 1, "{line}: {found:?}");
+            assert_eq!(found[0].uri, uri, "{line}");
+            assert!(is_safe_url(uri), "{uri}");
+        }
+        assert_eq!(super::normalize_url("WWW.x.test"), "https://WWW.x.test");
+        assert_eq!(super::normalize_url("wwwx.test"), "wwwx.test");
+        assert_eq!(super::normalize_url("w\u{e9}"), "w\u{e9}");
+        #[cfg(unix)]
+        assert_eq!(
+            super::local_file_path("FILE:///etc/hosts"),
+            Some(std::path::PathBuf::from("/etc/hosts"))
         );
     }
 
