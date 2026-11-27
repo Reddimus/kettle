@@ -428,7 +428,11 @@ drive mapping. State and lock files, recordings, remote-command payloads,
 terminal logs, screenshots, pasted images, and runtime/GPU/crash diagnostics
 share these primitives. Advisory locks let callers serialize compound
 operations; configuration persistence holds one across the complete read,
-validate, backup, and replacement transaction.
+validate, backup, and replacement transaction. The kettle-state lock guards
+and recordings unlock explicitly instead of relying on close: a child forked
+meanwhile, such as a new pane's shell between fork and exec, holds a copy of
+every descriptor, and flock(2) keeps a lock those copies share until one of
+them unlocks or the last one closes.
 Windows lock creation requests DELETE access and shares deletion from the
 first handle while retaining the private creation checks. Retirement reopens
 that held object and uses POSIX deletion while the exclusive lock remains
