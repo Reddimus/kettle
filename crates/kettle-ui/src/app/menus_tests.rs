@@ -2403,9 +2403,12 @@ fn the_menu_names_the_output_row_under_the_pointer_in_scrolled_back_history() {
 }
 
 /// A real interactive Bash at `SEL> `, running Kettle's shipped hooks after
-/// the user's `prompt_command`, or `None` where no Bash is installed.
+/// the user's `prompt_command`, or `None` where no Bash is installed. The
+/// directory holds its rcfile and lives as long as the pane.
 #[cfg(unix)]
-fn integrated_bash(prompt_command: &str) -> Option<(WindowState, u64)> {
+fn integrated_bash(
+    prompt_command: &str,
+) -> Option<(WindowState, u64, kettle_test_support::PrivateTempDir)> {
     let Some(bash) = ["/opt/homebrew/bin/bash", "/usr/local/bin/bash", "/usr/bin/bash", "/bin/bash"]
         .into_iter()
         .find(|path| std::path::Path::new(path).is_file())
@@ -2413,14 +2416,30 @@ fn integrated_bash(prompt_command: &str) -> Option<(WindowState, u64)> {
         eprintln!("bash not installed; real-shell output selection skipped");
         return None;
     };
-    let hooks = concat!(env!("CARGO_MANIFEST_DIR"), "/../../shell-integration/kettle.bash");
-    let hooks = format!("'{}'", hooks.replace('\'', "'\\''"));
-    Some(shell_window(
-        &format!(
-            "PS1='SEL> ' PROMPT_COMMAND={prompt_command} HISTFILE=/dev/null INPUTRC=/dev/null exec {bash} --noprofile --rcfile {hooks} -i"
+    let quoted = |path: &str| format!("'{}'", path.replace('\'', "'\\''"));
+    let hooks = quoted(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../shell-integration/kettle.bash"
+    ));
+    // Debian and Ubuntu Bash read /etc/bash.bashrc before the --rcfile, even
+    // with --noprofile, and it sets PS1 and may set PROMPT_COMMAND. Set them in
+    // the rcfile, after it, and only then source the hooks, as a user's
+    // ~/.bashrc would.
+    let dir = crate::test_tempdir();
+    let rcfile = dir.path().join("bashrc");
+    std::fs::write(
+        &rcfile,
+        format!(
+            "PS1='SEL> '\nPROMPT_COMMAND={prompt_command}\nHISTFILE=/dev/null\nsource {hooks}\n"
         ),
+    )
+    .unwrap();
+    let rcfile = quoted(rcfile.to_str().unwrap());
+    let (ws, pane) = shell_window(
+        &format!("INPUTRC=/dev/null exec {bash} --noprofile --rcfile {rcfile} -i"),
         |term| bash_at_prompt(term, 0),
-    ))
+    );
+    Some((ws, pane, dir))
 }
 
 /// The `SEL> ` prompt is on the cursor's row and the shell is at it, after
@@ -2472,7 +2491,7 @@ fn copied_output(term: &kettle_core::Terminal, at: Option<u64>) -> Option<String
 #[cfg(unix)]
 #[test]
 fn select_command_output_leaves_out_the_bash_prompt_after_an_unterminated_line() {
-    let Some((ws, pane)) = integrated_bash("") else {
+    let Some((ws, pane, _rcfile)) = integrated_bash("") else {
         return;
     };
     let term = &ws.mux.panes[&pane].term;
@@ -2501,7 +2520,7 @@ fn select_command_output_leaves_out_the_bash_prompt_after_an_unterminated_line()
 #[cfg(unix)]
 #[test]
 fn select_command_output_keeps_output_right_of_the_cursor_when_the_prompt_starts_below() {
-    let Some((ws, pane)) = integrated_bash("echo") else {
+    let Some((ws, pane, _rcfile)) = integrated_bash("echo") else {
         return;
     };
     let term = &ws.mux.panes[&pane].term;
