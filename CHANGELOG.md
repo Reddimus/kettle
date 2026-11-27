@@ -1273,7 +1273,13 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
   text nearly vanished. The highlight now extends as far as the
   letters are drawn, for the current and other matches and for focused and
   unfocused selections, and its outline follows. Nothing changes with
-  `bidi = false` or in lines without right-to-left text.
+  `bidi = false` or in lines without Arabic or right-to-left text.
+
+- Selections and search matches now cover all of the ligature ﷽ (U+FDFD),
+  which Arabic fonts draw many cells wide.
+
+- Arabic text highlighted and drawn across another search match no longer
+  leaves its ink past that match unhighlighted.
 
 - Closing the search bar no longer moves the text. When the prompt was above
   the bottom of the window, as after `clear`, closing it pulled lines from

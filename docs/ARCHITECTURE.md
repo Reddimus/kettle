@@ -4203,7 +4203,10 @@ and presents the frame's own damage.
 `kettle-core::bidi` chooses Arabic presentation forms in logical order and
 reports their visual joining sides only at RTL levels. U+0640 tatweel also
 participates; joining characters from other scripts do not. Lam-alef remains
-two cells. Each row is independent, including across soft wraps.
+two cells. Each row is independent, including across soft wraps. A
+zero-width joiner stored with a cell is join causing, as in text shapers: the
+letter on either side of it takes its joined form even when the letter on the
+other side cannot join, and then only that one cell reports a joining side.
 
 Grid and bidi Legacy rows carry these sides in `GridGlyphCell`, whose full
 metadata participates in the shaped-row key. `arabic_join::JoinedRow` collects
@@ -4222,18 +4225,23 @@ reuses these positioned masks and connector samples in cursor colour in both
 renderers; its cache distinguishes natural masks from stretched samples.
 
 A wide final still overhangs its open side, and a wide isolated letter its
-right, so highlight fills in bidi rows follow the drawn text. After shaping,
-the pane walk measures each row holding highlighted right-to-left cells once
+right, so highlight fills in bidi rows follow the drawn text. Arabic text that
+is not strong right-to-left counts too: the bismillah ligature U+FDFD is a
+bidi neutral that Arabic faces draw many cells wide, so it can sit in a row
+without a layout or in a layout's left-to-right text. After shaping, the pane
+walk measures each row holding highlighted right-to-left or Arabic cells once
 with `batching::drawn_cell_spans`: the same grid emit through a source that
 reads raster placements and never rasterizes into or evicts from the atlas.
-`terminal::HighlightReach` takes each run of highlighted visual cells
+A row without cell metadata reports each glyph at the column its text starts
+in. `terminal::HighlightReach` takes each run of highlighted visual cells
 (selection and search together) and widens the fills at its ends over the
-right-to-left text drawn past them, inside both the pane rect that clips its
-quads and the pixel columns its glyph scissor keeps; two runs reaching into
-one gap meet halfway. Selection runs carry the x their widened sides moved
-to, and the outline traces those, joining runs only where moved sides meet.
-Underlines, links and cursors stay on the cell grid, and rows without a bidi
-layout are untouched.
+right-to-left or Arabic text drawn past them, inside both the pane rect that
+clips its quads and the pixel columns its glyph scissor keeps; text drawn
+across a whole run reaches on past it, in that run's fill, and two runs
+reaching into one gap meet halfway. Selection runs carry the x their widened
+sides moved to, and the outline traces those, joining runs only where moved
+sides meet. Underlines, links and cursors stay on the cell grid, and other
+left-to-right text, `bidi = false` and the alternate screen are untouched.
 
 This repairs connector gaps, not proportional glyph widths, fallback
 baselines, or contextual mark shaping. Preferring a metric-compatible Arabic

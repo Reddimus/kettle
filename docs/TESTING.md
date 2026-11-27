@@ -2334,13 +2334,19 @@ and another search match and focused and unfocused selections, in Grid and
 Legacy at 1x and 2x over fractional padding. Each named face draws sad wider
 than its cell, and the test fails if a case does not overhang. The fill must
 cover exactly the pixel columns the word is drawn over, cells included.
+`highlights_cover_an_arabic_ligature_outside_right_to_left_text` does the
+same for U+FDFD, a bidi neutral drawn many cells wide, in a row without a
+layout and shown left to right before Arabic text; a face that draws it
+within about a cell prints `ARABIC_LIGATURE_SKIP`.
 `highlights_off_bidi_rows_stay_on_the_grid` keeps every fill on cell edges
-with `bidi = false`, on the alternate screen and in rows without
+with `bidi = false`, on the alternate screen and in rows without Arabic or
 right-to-left text, and `a_selection_outline_follows_the_arabic_overhang`
 requires the outline of a low-contrast selection at the widened edge, not
 the cell edge. `HighlightReach` and the outline's pixel spans have unit
 tests that need no GPU or font: two runs reaching into one gap meet at its
-middle, and runs whose reach meets trace one perimeter.
+middle, text drawn across a whole run reaches on past it, and runs whose
+reach meets trace one perimeter. The U+FDFD test also draws the ligature
+across another one-cell match and requires its ink past that match covered.
 `emoji_ink_is_fitted_without_changing_grid_widths_or_baselines` checks actual
 glyph instances using the bundled font in both renderers and both 2027 modes;
 it reports `EMOJI_SIZING_GPU_SKIP` without an adapter.

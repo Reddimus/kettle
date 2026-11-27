@@ -145,6 +145,55 @@ fn joiners_stored_as_marks_force_or_break_a_join() {
 }
 
 #[test]
+fn a_joiner_joins_the_letter_on_either_side_that_can_join() {
+    // A zero-width joiner is itself join causing (Unicode core spec 9.2,
+    // R2 to R4): the letter beside it takes its joined form whatever is on
+    // the joiner's other side, as text shapers draw it. A letter that cannot
+    // join stays isolated, so only one side reports the join, and the
+    // renderer bridges only cells that both join.
+    let right = Joins {
+        left: false,
+        right: true,
+    };
+    let left = Joins {
+        left: true,
+        right: false,
+    };
+    for (cells, forms, joins) in [
+        // Alef joins only the letter before it: beh after the joiner is final.
+        (
+            [
+                BidiCell::new('ا', CellKind::Narrow, &['\u{200D}']),
+                BidiCell::new('ب', CellKind::Narrow, &[]),
+            ],
+            [Some('\u{FE8D}'), Some('\u{FE90}')],
+            [Joins::default(), right],
+        ),
+        // Hebrew has no joining forms.
+        (
+            [
+                BidiCell::new('א', CellKind::Narrow, &['\u{200D}']),
+                BidiCell::new('ب', CellKind::Narrow, &[]),
+            ],
+            [None, Some('\u{FE90}')],
+            [Joins::default(), right],
+        ),
+        (
+            [
+                BidiCell::new('ب', CellKind::Narrow, &['\u{200D}']),
+                BidiCell::new('א', CellKind::Narrow, &[]),
+            ],
+            [Some('\u{FE91}'), None],
+            [left, Joins::default()],
+        ),
+    ] {
+        let map = row_bidi(&cells).expect("a right-to-left row has a map");
+        assert_eq!([map.display_char(0), map.display_char(1)], forms);
+        assert_eq!([map.joins(0), map.joins(1)], joins);
+    }
+}
+
+#[test]
 fn explicit_bidi_controls_cannot_reorder_a_row() {
     // An override stored as a mark is not a base character at all.
     let marked = [
