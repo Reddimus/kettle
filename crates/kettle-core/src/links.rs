@@ -99,9 +99,10 @@ pub(crate) fn names_a_target(url: &str) -> bool {
 /// prose. For a `file://` link: a dot run, which may be its file's
 /// (`file:///tmp/a..`), or a dot taken off a name made only of dots, which
 /// names another folder (`file:///tmp/%2e.` is `/tmp/..`, trimmed `/tmp/.`).
-/// For a bare host whose last label is a number: a dot run, as the trimmed
-/// host reads as an IPv4 address and the written one does not
-/// (`http://127.1..`, trimmed to loopback). Otherwise dots after a web URL
+/// For a bare host whose last label is a number, the dots ending the host
+/// itself: a dot run, as the trimmed host reads as an IPv4 address and the
+/// written one does not (`http://127.1..`, trimmed to loopback); after a
+/// port they end no host (`http://127.0.0.1:8080...`). Otherwise dots after a web URL
 /// end a sentence (#927): after its path they are not the host, and after
 /// a named host they are its empty labels or the root of DNS, so the same
 /// host answers.
@@ -125,7 +126,10 @@ pub(crate) fn url_loses_a_dot_run(raw: &str, trimmed: &str, rest: &str) -> bool 
         return false;
     }
     let host = after.rsplit_once('@').map_or(after, |(_, host)| host);
-    let host = host.split_once(':').map_or(host, |(name, _)| name);
+    // Dots after a port, or after an IPv6 literal's bracket, end no host.
+    if host.contains([':', ']']) {
+        return false;
+    }
     let label = host.trim_end_matches('.').rsplit('.').next().unwrap_or("");
     let hex = label
         .get(..2)
@@ -1401,6 +1405,16 @@ mod tests {
             ("see file:///tmp/a.", "file:///tmp/a"),
             ("see http://127.1.", "http://127.1"),
             ("see http://127.0.0.1/x...", "http://127.0.0.1/x"),
+            // Dots after a port end no host.
+            (
+                "Listening on http://127.0.0.1:8080...",
+                "http://127.0.0.1:8080",
+            ),
+            (
+                "Waiting for http://192.168.1.10:3000...",
+                "http://192.168.1.10:3000",
+            ),
+            ("Waiting for http://[::1]:8080...", "http://[::1]:8080"),
         ] {
             assert_eq!(found(line), [uri], "{line}");
         }
