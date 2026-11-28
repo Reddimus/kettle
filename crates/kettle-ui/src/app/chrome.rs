@@ -340,13 +340,10 @@ impl App {
                 if i == active && !recording_notice.is_empty() {
                     full_label = format!("{recording_notice} {full_label}");
                 }
-                // A lone title-bar tab stands for the window's title: its
-                // go-to-tab key would go nowhere.
-                let hint = if ws.macos_titlebar_tabs && n == 1 {
-                    None
-                } else {
-                    tab_goto_hint(&self.cfg.keybinds, i)
-                };
+                // Horizontal tabs omit inline go-to-tab hints so titles stay
+                // centered and uncluttered; hovering a tab shows its shortcut
+                // in the tooltip, and `{n}` in `tab-format` remains available.
+                let hint: Option<String> = None;
                 let cell_w = self.overlay_text_cell_width(ws);
                 let cell_w = if ws.macos_titlebar_tabs {
                     cell_w
@@ -1320,7 +1317,7 @@ pub(super) fn strip_tooltip_target(
         ws.hovered_new_tab.then_some(NewTabHoverTarget::Plus)
     };
     let Some(target) = target else {
-        return cut_tab_title_tooltip(ws, bar, context);
+        return tab_title_tooltip(ws, bar, context);
     };
     let shortcut = chrome_button_shortcut(bindings, target);
     let text = new_tab_tooltip(Some(target), tr, shortcut.as_deref())?;
@@ -1333,10 +1330,12 @@ pub(super) fn strip_tooltip_target(
     strip(target, text, rect)
 }
 
-/// The tab under the pointer, off its close button, when the strip shows
-/// its title shortened: the tooltip names the whole title. A lone title-bar
-/// title stands for the window and has none.
-fn cut_tab_title_tooltip(
+/// The tab under the pointer, off its close button, when hovering it has
+/// something to reveal: on a multi-tab strip with a go-to-tab binding, the
+/// full title followed by that shortcut; otherwise, the full title when the
+/// strip shortened it. A lone title-bar title stands for the window and has
+/// none.
+fn tab_title_tooltip(
     ws: &WindowState,
     bar: &TabBar,
     context: &StripTooltipContext<'_>,
@@ -1350,15 +1349,25 @@ fn cut_tab_title_tooltip(
     if seg.close.2 > 0.0 && rect_contains(seg.close, x, y) {
         return None;
     }
-    kettle_render::tab_segment_label_cut(
+    let full_title = seg.path.as_deref().unwrap_or(&seg.title);
+    let shortcut = (bar.segments.len() > 1)
+        .then(|| tab_goto_hint(context.bindings, seg.idx))
+        .flatten();
+    let text = if let Some(key) = shortcut {
+        format!("{full_title}  {key}")
+    } else if kettle_render::tab_segment_label_cut(
         seg,
         context.tab_format,
         context.tab_cell_width,
         &bar.recording_notice,
-    )
-    .then(|| ChromeTooltip {
+    ) {
+        full_title.to_owned()
+    } else {
+        return None;
+    };
+    Some(ChromeTooltip {
         target: crate::tooltip::TooltipTarget::TabTitle(seg.idx),
-        text: seg.path.as_deref().unwrap_or(&seg.title).to_owned(),
+        text,
         anchor: Some(seg.rect),
         rect: tab_title_region(seg),
     })
@@ -2302,10 +2311,10 @@ pub(super) fn titlebar_tear_off_grab_x(
     f64::from(tab.0) + in_tab.clamp(f64::from(margin), f64::from((tab.2 - margin).max(margin)))
 }
 
-/// The shortcut shown on tab `index`: whatever key the bindings give "go to
-/// tab N" (Cmd+N on macOS and Alt+N elsewhere by default, or the user's own),
-/// so the tab bar teaches the shortcut on every platform. Only the first nine
-/// tabs have one.
+/// The shortcut shown in the tooltip for tab `index`: whatever key the
+/// bindings give "go to tab N" (Cmd+N on macOS and Alt+N elsewhere by
+/// default, or the user's own), so the tab bar teaches the shortcut on every
+/// platform. Only the first nine tabs have one.
 pub(super) fn tab_goto_hint(
     bindings: &kettle_config::keybinds::Bindings,
     index: usize,
