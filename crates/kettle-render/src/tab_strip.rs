@@ -703,8 +703,13 @@ pub(crate) fn header_hairline_rects(bar: &TabBar, band: Rect4, scale: f32) -> Ve
     let (x, y, w, h) = band;
     let thickness = scale.round().max(1.0).min(h);
     let top = y + h - thickness;
+    let mut rects = Vec::new();
+    if bar.header_height > 0.0 && bar.header_height < h {
+        rects.push((x, y + bar.header_height - thickness, w, thickness));
+    }
     if inset_pill_tabs(bar) {
-        return vec![(x, top, w, thickness)];
+        rects.push((x, top, w, thickness));
+        return rects;
     }
     let gap = bar
         .segments
@@ -713,13 +718,15 @@ pub(crate) fn header_hairline_rects(bar: &TabBar, band: Rect4, scale: f32) -> Ve
         .map(|tab| (tab.rect.0.max(x), (tab.rect.0 + tab.rect.2).min(x + w)))
         .filter(|(start, end)| end > start);
     match gap {
-        Some((start, end)) => [(x, start), (end, x + w)]
-            .into_iter()
-            .filter(|(left, right)| right > left)
-            .map(|(left, right)| (left, top, right - left, thickness))
-            .collect(),
-        None => vec![(x, top, w, thickness)],
+        Some((start, end)) => rects.extend(
+            [(x, start), (end, x + w)]
+                .into_iter()
+                .filter(|(left, right)| right > left)
+                .map(|(left, right)| (left, top, right - left, thickness)),
+        ),
+        None => rects.push((x, top, w, thickness)),
     }
+    rects
 }
 
 /// The fills behind the new-tab controls at rest. A plain strip's `▾` sits
@@ -3603,6 +3610,72 @@ mod inset_pill_tests {
             assert_eq!(
                 titlebar_tab_text_scale(28.0 * scale, 24.0 * 1.25 * scale, scale, false),
                 tab_text_scale(28.0 * scale, 24.0 * 1.25 * scale)
+            );
+        }
+    }
+
+    #[test]
+    fn two_row_gnome_header_draws_two_hairlines_and_keeps_pills_in_row_two() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let header_h = 46.0 * scale;
+            let row_h = 36.0 * scale;
+            let total_h = header_h + row_h;
+            let w = 1000.0 * scale;
+            let mut bar = TabBar::hidden();
+            bar.in_titlebar = true;
+            bar.linux_header = true;
+            bar.height = total_h;
+            bar.header_height = header_h;
+            bar.band = (0.0, 0.0, w, total_h);
+            bar.header_title_rect = Some((120.0 * scale, 0.0, 760.0 * scale, header_h));
+            for i in 0..2 {
+                let r = (i as f32 * 500.0 * scale, header_h, 500.0 * scale, row_h);
+                bar.segments.push(crate::TabSeg {
+                    idx: i,
+                    rect: r,
+                    title_rect: r,
+                    hint: None,
+                    close: (r.0 + r.2 - row_h, header_h, row_h, row_h),
+                    title: format!("tab {i}"),
+                    path: None,
+                    active: i == 0,
+                    activity: TabActivity::Normal,
+                });
+            }
+            let thickness = scale.round();
+            assert_eq!(
+                header_hairline_rects(&bar, bar.band, scale),
+                vec![
+                    (0.0, header_h - thickness, w, thickness),
+                    (0.0, total_h - thickness, w, thickness),
+                ]
+            );
+            let theme = kettle_config::Theme::by_name("TokyoNight Night");
+            let strip = theme.palette[0];
+            let accent = Rgb::new(0xff, 0x00, 0xff);
+            let quads = horizontal_tab_quads(
+                &bar,
+                bar.band,
+                &theme,
+                (theme.background, 0.86),
+                strip,
+                accent,
+                TabBarPos::Top,
+                scale,
+            );
+            assert_eq!(quads.separator.len(), 2, "{scale}x");
+            assert!(!quads.surface.is_empty(), "{scale}x");
+            let pill0 = tab_pill_rect(bar.segments[0].rect, scale);
+            assert!(pill0.1 > header_h);
+            for q in &quads.surface {
+                assert!(
+                    q.pos[1] >= pill0.1 - 0.01 && q.pos[1] + q.size[1] <= pill0.1 + pill0.3 + 0.01
+                );
+            }
+            assert_eq!(
+                sample(&quads.chrome, 250.0 * scale, header_h * 0.5),
+                Some(color(strip)),
+                "{scale}x: Row 1 stays uniform header chrome"
             );
         }
     }

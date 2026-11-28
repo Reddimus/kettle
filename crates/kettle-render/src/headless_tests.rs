@@ -9241,3 +9241,86 @@ fn titlebar_pill_accent_stays_clear_of_enlarged_title() {
     }
 }
 }
+
+parity_scene! {
+fn gnome_two_row_header_renders_title_hairlines_and_inset_pills() {
+    let _serialized = gpu_test_guard();
+    for scale in [1.0_f32, 2.0] {
+        for theme_name in ["TokyoNight Night", "Kettle Day"] {
+            let mut cfg = gpu_test_config();
+            cfg.background_opacity = 1.0;
+            cfg.theme = cfg.theme_by_name(theme_name);
+            let (w, h) = ((640.0 * scale) as u32, (200.0 * scale) as u32);
+            let Some(mut renderer) =
+                crate::visual_parity_tests::renderer_with(&cfg, w, h, scale, false).unwrap()
+            else {
+                eprintln!("two-row gnome header check skipped: no GPU adapter");
+                return;
+            };
+            let header_h = 46.0 * scale;
+            let row_h = 36.0 * scale;
+            let total_h = header_h + row_h;
+            let half_w = w as f32 * 0.5;
+            let mut tabs = TabBar::hidden();
+            tabs.height = total_h;
+            tabs.header_height = header_h;
+            tabs.in_titlebar = true;
+            tabs.linux_header = true;
+            tabs.band = (0.0, 0.0, w as f32, total_h);
+            tabs.header_title_rect = Some((100.0 * scale, 0.0, w as f32 - 200.0 * scale, header_h));
+            for i in 0..2 {
+                let r = (i as f32 * half_w, header_h, half_w, row_h);
+                tabs.segments.push(TabSeg {
+                    idx: i,
+                    rect: r,
+                    title_rect: (r.0 + 8.0 * scale, header_h, r.2 - 16.0 * scale, row_h),
+                    hint: None,
+                    close: (0.0, 0.0, 0.0, 0.0),
+                    title: if i == 0 { "active-shell" } else { "second-shell" }.into(),
+                    path: None,
+                    active: i == 0,
+                    activity: TabActivity::Normal,
+                });
+            }
+            let snap = snapshot_of(20, 2, b"");
+            let mut terminal = pane(&snap, w, h);
+            terminal.rect = (0.0, total_h, w as f32, h as f32 - total_h);
+            terminal.terminal = terminal.rect;
+            let frame = capture_with_tabs(&mut renderer, &cfg, &[terminal], &focused(true), &tabs);
+            let case = format!("{theme_name} @{scale}x");
+            assert_eq!(
+                renderer.header_title_buffer.lines[0].text(),
+                "active-shell",
+                "{case}: Row 1 title missing"
+            );
+            let title_box = tabs.header_title_rect.unwrap();
+            let strip = resolve_chrome_bg(&cfg, &cfg.theme, None);
+            assert!(
+                glyph_ink(&frame, title_box, strip).is_some(),
+                "{case}: Row 1 header title ink missing"
+            );
+            let pill = crate::tab_strip::tab_pill_rect(tabs.segments[0].rect, scale);
+            let accent = crate::tab_strip::tab_pill_accent_rect(pill, scale, false).unwrap();
+            let px = frame.get_pixel((accent.0 + accent.2 * 0.5) as u32, accent.1 as u32);
+            assert_ne!(
+                Rgb::new(px[0], px[1], px[2]),
+                strip,
+                "{case}: Row 2 active pill accent missing"
+            );
+            let thickness = scale.round();
+            let line = crate::tab_strip::header_hairline(strip, cfg.theme.background, cfg.theme.foreground);
+            for (label, line_y) in [
+                ("row1-row2", (header_h - thickness) as u32),
+                ("row2-pane", (total_h - thickness) as u32),
+            ] {
+                let p = frame.get_pixel(5.min(w - 1), line_y);
+                assert_eq!(
+                    Rgb::new(p[0], p[1], p[2]),
+                    line,
+                    "{case}: missing {label} hairline at y={line_y}"
+                );
+            }
+        }
+    }
+}
+}

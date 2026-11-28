@@ -1819,15 +1819,15 @@ impl Renderer {
             // *and* there's an active segment to copy from.
             if let Some(active_seg) = tabbar.segments.iter().find(|s| s.active)
                 && let Some((ghost_x, ghost_y)) = {
-                    let (seg_x, _, seg_w, seg_h) = active_seg.rect;
+                    let (seg_x, seg_y, seg_w, seg_h) = active_seg.rect;
                     // Clamp the ghost so the box doesn't slide entirely off
                     // either end of the strip — same idea as
                     // `context_menu_geometry`'s anchor clamp. A vertical bar
                     // rides the cursor's y down a fixed column; a horizontal
-                    // one rides x along a fixed row.
+                    // one rides x along its segment row.
                     tabbar
                         .drag_cursor_x
-                        .map(|cx| ((cx - seg_w * 0.5).clamp(0.0, (sw - seg_w).max(0.0)), by))
+                        .map(|cx| ((cx - seg_w * 0.5).clamp(0.0, (sw - seg_w).max(0.0)), seg_y))
                         .or_else(|| {
                             tabbar.drag_cursor_y.map(|cy| {
                                 (seg_x, (cy - seg_h * 0.5).clamp(0.0, (sh - seg_h).max(0.0)))
@@ -1894,13 +1894,15 @@ impl Renderer {
             // horizontal line for vertical bars).
             if let Some((ix, iy, iw, ih)) = tabbar.insert_marker {
                 let accent = self.ui_accent(cfg, theme);
-                // Dock-target highlight: wash the whole latched band in
-                // translucent accent plus a border on the pane-facing edge.
-                // Without it the marker line is the ONLY latch signal off
-                // Windows (the torn-window alpha trick is Windows-only), and on
-                // Linux that reads as "nothing happened". Presence is derived
-                // from `insert_marker` so the two signals cannot drift apart.
-                let (bx0, by0, bw0, bh0) = tabbar.band;
+                // Dock-target highlight: wash the tab-strip row in translucent
+                // accent plus a border on the pane-facing edge (below the
+                // header row when a two-row GNOME header carries tabs).
+                let (bx0, by0, bw0, bh0) = (
+                    tabbar.band.0,
+                    tabbar.band.1 + tabbar.header_height,
+                    tabbar.band.2,
+                    (tabbar.band.3 - tabbar.header_height).max(0.0),
+                );
                 if bw0 > 0.0 && bh0 > 0.0 {
                     over.push(rect(
                         bx0,
@@ -2797,9 +2799,10 @@ impl Renderer {
                 layout
             });
 
+        let tab_row_h = tabbar.tab_row_height();
         let (tab_metrics, tab_cw, tab_ch) = if tabbar.in_titlebar {
             let text_scale = tab_strip::titlebar_tab_text_scale(
-                tabbar.height,
+                tab_row_h,
                 metrics.line_height,
                 self.scale,
                 tab_strip::inset_pill_tabs(tabbar),
@@ -2824,7 +2827,7 @@ impl Renderer {
         let control_box = [tabbar.new_tab, tabbar.new_tab_menu]
             .into_iter()
             .filter(|button| button.2 > 0.0 && button.3 > 0.0)
-            .fold((tabbar.height, tabbar.height), |(w, h), button| {
+            .fold((tab_row_h, tab_row_h), |(w, h), button| {
                 (w.min(button.2), h.min(button.3))
             });
         let control_metrics =
@@ -2833,7 +2836,7 @@ impl Renderer {
         let close_metrics = tab_strip::control_glyph_metrics(
             tab_metrics,
             TAB_CLOSE_GLYPH_SCALE,
-            (tabbar.height, tabbar.height),
+            (tab_row_h, tab_row_h),
         );
         let close_ch = close_metrics.line_height;
         // Tab-bar text: one buffer per segment + the `+` button.
@@ -2910,11 +2913,24 @@ impl Renderer {
                 }
                 buf.shape_until_scroll(&mut self.font_system, false);
             }
+            if !tabbar.lone_title
+                && let Some(title_rect) = tabbar.header_title_rect
+                && title_rect.2 > 0.0
+                && let Some(active) = tabbar.segments.iter().find(|s| s.active)
+            {
+                self.prepare_header_title_in(
+                    active,
+                    title_rect.2,
+                    &cfg.tab_format,
+                    &tabbar.recording_notice,
+                    &family,
+                );
+            }
             // Shared `✕` glyph buffer for every tab's close button.
             // Sized once; positioned per-tab via TextArea below.
             self.tab_close_buffer.set_metrics(close_metrics);
             self.tab_close_buffer
-                .set_size(Some(tabbar.height), Some(tabbar.height));
+                .set_size(Some(tab_row_h), Some(tab_row_h));
             // Constant glyph, shaped once per font family.
             let close_glyph = if cfg.tab_bar_pos.is_vertical() {
                 "✕"
@@ -2935,7 +2951,7 @@ impl Renderer {
             // `+` button glyph.
             self.tabbar_buffer.set_metrics(control_metrics);
             self.tabbar_buffer
-                .set_size(Some(tabbar.new_tab.2), Some(tabbar.height));
+                .set_size(Some(tabbar.new_tab.2), Some(tab_row_h));
             // Constant glyph, shaped once per font family.
             if self.tabbar_text != NEW_TAB_PLUS_GLYPH {
                 self.tabbar_buffer.set_text(
@@ -2954,7 +2970,7 @@ impl Renderer {
             if tabbar.new_tab_menu.2 > 0.0 && !tab_strip::main_menu_icon(tabbar) {
                 self.new_tab_arrow_buffer.set_metrics(control_metrics);
                 self.new_tab_arrow_buffer
-                    .set_size(Some(tabbar.new_tab_menu.2), Some(tabbar.height));
+                    .set_size(Some(tabbar.new_tab_menu.2), Some(tab_row_h));
                 // Constant glyph, shaped once per font family.
                 let glyph = NEW_TAB_MENU_GLYPH;
                 if self.new_tab_arrow_text != glyph {
@@ -4762,8 +4778,8 @@ impl Renderer {
             }
         }
         if have_tabs {
-            let ty = tabbar.y as i32;
-            let tb = (tabbar.y + tabbar.height) as i32;
+            let ty = tabbar.tab_row_y() as i32;
+            let tb = (tabbar.tab_row_y() + tabbar.tab_row_height()) as i32;
             let close_w = self
                 .tab_close_buffer
                 .layout_runs()
@@ -4968,6 +4984,29 @@ impl Renderer {
                     scale: 1.0,
                     bounds: text_bounds_for_rect(s.close),
                     default_color: GColor::rgb(close_fg.r, close_fg.g, close_fg.b),
+                    custom_glyphs: &[],
+                });
+            }
+            if !tabbar.lone_title
+                && let Some(title_rect) = tabbar.header_title_rect
+                && title_rect.2 > 0.0
+                && !tabbar.segments.is_empty()
+            {
+                let ink = self
+                    .chrome_colors
+                    .tab_text(fg, chrome_strip_bg, overlay.window_focused);
+                let (left, top) = header_title::header_title_origin(
+                    title_rect,
+                    self.header_title_width,
+                    header_title::header_title_metrics(self.scale).line_height,
+                );
+                areas.push(TextArea {
+                    buffer: &self.header_title_buffer,
+                    left,
+                    top,
+                    scale: 1.0,
+                    bounds: text_bounds_for_rect(title_rect),
+                    default_color: gc(ink),
                     custom_glyphs: &[],
                 });
             }
@@ -6004,6 +6043,7 @@ impl Renderer {
             prepared_text_areas_damage_key(&card_areas).hash(&mut h);
             self.pane_titlebar_texts.hash(&mut h);
             self.tab_texts.hash(&mut h);
+            self.header_title_key.hash(&mut h);
             for segment in &tabbar.segments {
                 segment.hint.as_ref().map(|(_, text)| text).hash(&mut h);
             }

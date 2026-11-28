@@ -137,7 +137,7 @@ pub(crate) fn fit_header_title(
 /// What the shaped title was fitted from: the tab's title and path, the
 /// label format and notice, the lane's width, the display's scale, and the
 /// face it was shaped in. A frame with the same key reuses the shaping.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Hash)]
 pub(crate) struct HeaderTitleKey {
     title: String,
     path: Option<String>,
@@ -159,6 +159,19 @@ impl Renderer {
         notice: &str,
         fallback: &str,
     ) {
+        self.prepare_header_title_in(seg, seg.title_rect.2, format, notice, fallback);
+    }
+
+    /// Shape `seg`'s active title into `header_title_buffer`, fitted to
+    /// `lane_width` in GNOME's title face, and note its width.
+    pub(crate) fn prepare_header_title_in(
+        &mut self,
+        seg: &TabSeg,
+        lane_width: f32,
+        format: &str,
+        notice: &str,
+        fallback: &str,
+    ) {
         let loaded = match self.header_title_face {
             Some(loaded) => loaded,
             None => {
@@ -174,7 +187,7 @@ impl Renderer {
             path: seg.path.clone(),
             format: format.to_owned(),
             notice: notice.to_owned(),
-            lane: seg.title_rect.2.to_bits(),
+            lane: lane_width.to_bits(),
             scale: self.scale.to_bits(),
             family: if loaded {
                 HEADER_TITLE_FAMILY.to_owned()
@@ -187,7 +200,7 @@ impl Renderer {
         }
         let emoji = self.emoji_family;
         let (fonts, scratch) = (&mut self.font_system, &mut self.header_title_scratch);
-        let fitted = fit_header_title(seg, format, notice, seg.title_rect.2, |text| {
+        let fitted = fit_header_title(seg, format, notice, lane_width, |text| {
             measure_line(fonts, scratch, text, &attrs, emoji, metrics)
         });
         self.header_title_width = measure_line(
