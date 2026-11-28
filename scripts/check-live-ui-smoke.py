@@ -324,15 +324,26 @@ class StableProcessHandle:
             library.mach_port_deallocate.argtypes = [ctypes.c_uint, ctypes.c_uint]
             library.mach_port_deallocate.restype = ctypes.c_int
             port = ctypes.c_uint()
+            token = (ctypes.c_uint32 * 8)()
             # A process in its exit teardown loses its task name a moment
             # before kill(0) stops answering for it, and a zombie answers
             # kill(0) until it is reaped. Neither is a live process: wait out
-            # the teardown, and count a zombie as gone.
+            # the teardown, and count a zombie as gone. An exec replaces the
+            # task, so a name taken just before one answers no query after
+            # it; the live process is looked up again.
             deadline = time.monotonic() + 0.5
             while True:
                 result = library.task_name_for_pid(task_self, pid, ctypes.byref(port))
+                retained = "task name"
                 if result == 0:
-                    break
+                    count = ctypes.c_uint(8)
+                    # TASK_AUDIT_TOKEN. Its pidversion field distinguishes a
+                    # reused PID.
+                    result = library.task_info(port.value, 15, token, ctypes.byref(count))
+                    library.mach_port_deallocate(task_self, port.value)
+                    if result == 0:
+                        break
+                    retained = "audit token"
                 try:
                     os.kill(pid, 0)
                 except ProcessLookupError:
@@ -345,16 +356,9 @@ class StableProcessHandle:
                     raise ProcessLookupError(pid)
                 if time.monotonic() >= deadline:
                     raise RuntimeError(
-                        f"could not retain Darwin task name for {pid}: kern_return={result}"
+                        f"could not retain Darwin {retained} for {pid}: kern_return={result}"
                     )
                 time.sleep(0.01)
-            token = (ctypes.c_uint32 * 8)()
-            count = ctypes.c_uint(8)
-            # TASK_AUDIT_TOKEN. Its pidversion field distinguishes a reused PID.
-            result = library.task_info(port.value, 15, token, ctypes.byref(count))
-            library.mach_port_deallocate(task_self, port.value)
-            if result != 0:
-                raise RuntimeError(f"could not retain Darwin audit token for {pid}")
             identity = tuple(int(value) for value in token)
             return cls(pid=pid, identity=identity, audit_token=identity)
         raise RuntimeError(
@@ -368,6 +372,8 @@ class StableProcessHandle:
                 signal.pidfd_send_signal(self.pidfd, signal_number)
                 return True
             if self.audit_token is not None:
+                if signal_number == 0:
+                    return self.matches_current()
                 import ctypes
 
                 library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
@@ -8768,6 +8774,95 @@ def darwin_zombie_selftest() -> None:
         child.wait()
 
 
+def darwin_exec_between_lookups_selftest() -> None:
+    """A process that execs between the task-name lookup and the audit-token
+    query is still that live process: the stable handle retains it, with the
+    identity it has after the exec, instead of failing to retain it."""
+    if platform.system() != "Darwin":
+        return
+    import ctypes
+
+    child = subprocess.Popen(
+        [
+            "/bin/sh",
+            "-c",
+            'trap "exec sleep 30" USR1; echo ready; while :; do sleep 0.01; done',
+        ],
+        stdout=subprocess.PIPE,
+        start_new_session=True,
+    )
+
+    def command() -> str:
+        sampled = run(["ps", "-o", "comm=", "-p", str(child.pid)], timeout=5)
+        return Path(sampled.stdout.strip()).name
+
+    def exec_child() -> None:
+        child.send_signal(signal.SIGUSR1)
+        deadline = time.monotonic() + 5
+        while command() != "sleep":
+            assert time.monotonic() < deadline, "the child never ran its exec"
+            time.sleep(0.01)
+
+    class ExecBeforeFirstQuery:
+        """`task_info` that has the child exec before its first call goes on."""
+
+        def __init__(self, function) -> None:
+            self.function = function
+            self.pending = True
+
+        @property
+        def argtypes(self):
+            return self.function.argtypes
+
+        @argtypes.setter
+        def argtypes(self, value) -> None:
+            self.function.argtypes = value
+
+        @property
+        def restype(self):
+            return self.function.restype
+
+        @restype.setter
+        def restype(self, value) -> None:
+            self.function.restype = value
+
+        def __call__(self, *args):
+            if self.pending:
+                self.pending = False
+                exec_child()
+            return self.function(*args)
+
+    class ExecBetweenLookups(ctypes.CDLL):
+        def __getattr__(self, name):
+            function = super().__getattr__(name)
+            if name == "task_info":
+                function = ExecBeforeFirstQuery(function)
+                setattr(self, name, function)
+            return function
+
+    original_cdll = ctypes.CDLL
+    try:
+        assert child.stdout is not None and child.stdout.readline() == b"ready\n"
+        ctypes.CDLL = ExecBetweenLookups  # type: ignore[misc]
+        try:
+            handle = StableProcessHandle.open(child.pid)
+        finally:
+            ctypes.CDLL = original_cdll  # type: ignore[misc]
+        assert command() == "sleep", "the injected exec did not run"
+        try:
+            assert handle.matches_current(), (
+                "the handle kept the identity from before the exec"
+            )
+        finally:
+            handle.close()
+    finally:
+        ctypes.CDLL = original_cdll  # type: ignore[misc]
+        child.kill()
+        child.wait()
+        if child.stdout is not None:
+            child.stdout.close()
+
+
 def darwin_process_environment_selftest() -> None:
     import ctypes
     from types import SimpleNamespace
@@ -8908,6 +9003,7 @@ def live_helper_selftest() -> None:
     image_paste_helpers.composer_readiness_selftest(sys.modules[__name__])
     darwin_process_environment_selftest()
     darwin_zombie_selftest()
+    darwin_exec_between_lookups_selftest()
     wayland_clipboard_providers_are_reusable_selftest()
     assert "mapped_writes" in STEADY_UPLOAD_QUIET_KEYS, "a blink must not write through the mapped ring"
     import inspect
@@ -10363,36 +10459,45 @@ def live_helper_selftest() -> None:
             run_root.mkdir()
             record = run_root / "nvim.pid"
 
-            def require_rejected_record(kind: str) -> None:
-                started = time.monotonic()
-                rejected = subprocess.run(
-                    [sys.executable, "-c", wsl_cleanup_code, str(fixture_root), "pidfile"],
-                    capture_output=True,
-                    text=True,
-                    timeout=2,
-                    check=False,
-                )
+            def require_rejected_record(kind: str, reason: str) -> None:
+                # A record the cleanup opened blocking would hang it for good,
+                # so the timeout only catches a hang; the reason shows the
+                # record was refused where it was opened, not by a slow
+                # interpreter start or a later failure.
+                try:
+                    rejected = subprocess.run(
+                        [sys.executable, "-c", wsl_cleanup_code, str(fixture_root), "pidfile"],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired as error:
+                    raise AssertionError(
+                        f"a {kind} WSL PID record blocked before rejection"
+                    ) from error
                 assert rejected.returncode != 0, (
                     f"a {kind} WSL PID record was accepted: {rejected.stdout!r}"
                 )
-                assert time.monotonic() - started < 2, (
-                    f"a {kind} WSL PID record blocked before rejection"
+                assert reason in rejected.stderr, (
+                    f"a {kind} WSL PID record was not refused as {reason!r}: "
+                    f"{rejected.stderr!r}"
                 )
 
             os.mkfifo(record, 0o600)
-            require_rejected_record("FIFO")
+            require_rejected_record("FIFO", "unsafe pid record")
             record.unlink()
 
             target = fixture_root / "target.pid"
             target.write_text(f"{os.getpid()}\n", encoding="ascii")
             record.symlink_to(target)
-            require_rejected_record("symlink")
+            require_rejected_record("symlink", f"[Errno {errno.ELOOP}]")
             record.unlink()
 
             endpoint = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             try:
                 endpoint.bind(str(record))
-                require_rejected_record("Unix socket")
+                require_rejected_record("Unix socket", f"[Errno {errno.ENXIO}]")
             finally:
                 endpoint.close()
                 record.unlink(missing_ok=True)
@@ -19623,7 +19728,7 @@ def run_text_presentation(kettle: str, root: Path) -> Path:
         "\n".join(
             [
                 "agent-server = full",
-                "tab-bar = never",
+                "tab-bar = off",
                 "status-bar = off",
                 "scrollbar = never",
                 "restore-session = false",
@@ -19763,6 +19868,54 @@ def run_text_presentation(kettle: str, root: Path) -> Path:
 STEADY_UPLOAD_QUIET_KEYS = ("buffer_writes", "texture_writes", "text_prepares", "mapped_writes")
 
 
+def require_live_renderer(log: Path, expected: str) -> None:
+    choices = re.findall(
+        r"renderer: (GPU|CPU, presenting with [^\r\n]+)(?=\r?$)",
+        log.read_text(encoding="utf-8", errors="replace"),
+        re.M,
+    )
+    if not choices or not (choices[-1] == expected or choices[-1].startswith(expected + ",")):
+        raise SystemExit(f"live renderer must be {expected}, found {choices}: {log}")
+
+
+def run_cpu_idle(kettle: str, out: Path) -> None:
+    cfg = out / "cpu-idle.cfg"
+    write_fixture_config(
+        cfg,
+        "renderer = cpu\nrestore-session = false\nrecord = false\n"
+        "check-for-updates = false\nstatus-bar = off\ncursor-blink = false\n",
+    )
+    log = out / "cpu-idle.log"
+    with LiveKettle(
+        kettle, cfg, log, extra_args=["-e", "/bin/sh"],
+        extra_env={"PS1": "$ ", "ENV": None, "RUST_LOG": "info"},
+    ) as live:
+        require_live_renderer(log, "CPU")
+
+        def frames() -> int:
+            return int(live.json_ctl("ui_geometry")["render_uploads"]["frames_presented"])
+
+        # Wait for a real initial paint and a quiet interval after the prompt.
+        deadline = time.monotonic() + 10.0
+        before = frames()
+        while time.monotonic() < deadline:
+            time.sleep(0.2)
+            after = frames()
+            if before > 0 and after == before:
+                break
+            before = after
+        else:
+            raise SystemExit(f"CPU idle smoke: no initial stable frame: {before}")
+        time.sleep(1.0)
+        after = frames()
+        require_live_renderer(log, "CPU")
+        (out / "cpu-idle.json").write_text(
+            json.dumps({"before": before, "after": after}, indent=2) + "\n"
+        )
+        if after != before:
+            raise SystemExit(f"CPU idle smoke: unchanged window presented {after - before} extra frames")
+
+
 def run_steady_uploads(kettle: str, root: Path, screenshots_only: bool = False) -> Path:
     """A window whose content is not changing writes nothing to the GPU.
 
@@ -19793,6 +19946,7 @@ def run_steady_uploads(kettle: str, root: Path, screenshots_only: bool = False) 
         cfg,
         "\n".join(
             [
+                "renderer = gpu",
                 "agent-server = full",
                 "restore-session = false",
                 "update-check = false",
@@ -19917,13 +20071,15 @@ def run_steady_uploads(kettle: str, root: Path, screenshots_only: bool = False) 
     # prompt after a second of quiet (async prompt segments, a slow first load
     # after a build), and that is output, not a steady window.
     extra_args = [] if os.name == "nt" else ["-e", "/bin/sh"]
+    log = out / "kettle.log"
     with LiveKettle(
         kettle,
         cfg,
-        out / "kettle.log",
+        log,
         extra_args=extra_args,
-        extra_env={"PS1": "$ ", "ENV": None},
+        extra_env={"PS1": "$ ", "ENV": None, "RUST_LOG": "info"},
     ) as live:
+        require_live_renderer(log, "GPU")
         before = settled(live, "phase A")
         for index in range(5):
             live.screenshot(out / f"a-{index}.png")
@@ -21412,6 +21568,15 @@ def live_session_failure_reason() -> Optional[str]:
     system = platform.system()
     if system == "Windows":
         return None
+    if not hasattr(os, "waitid"):
+        # Watching a launched Kettle exit without reaping it needs os.waitid,
+        # which macOS Pythons before 3.13 lack. Without it the startup probe and
+        # the cleanup both fail and leave the launched Kettle running, so refuse
+        # before launching anything.
+        return (
+            f"Python {platform.python_version()} has no os.waitid, "
+            "which watching the launched Kettle needs (use Python 3.13 or newer)"
+        )
     if system == "Darwin":
         try:
             manager = subprocess.run(
@@ -21676,6 +21841,8 @@ def main() -> int:
         print(f"split-exit-resize smoke: OK artifacts={out}")
     if args.case in ("steady-uploads", "all"):
         out = run_steady_uploads(args.kettle, root, args.screenshots_only)
+        if sys.platform.startswith("linux"):
+            run_cpu_idle(args.kettle, out)
         print(f"steady-uploads smoke: OK artifacts={out}")
     if args.case in ("program-keys", "all"):
         out = run_program_keys(args.kettle, root)

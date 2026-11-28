@@ -1,7 +1,7 @@
 use super::settings::{SettingsTextKind, settings_text_items};
 use super::{
     Rect4, SettingsControl, SettingsHit, SettingsOverlay, SettingsRow, display_width,
-    settings_control_height, settings_layout,
+    settings_control_height, settings_layout, settings_switch_size,
 };
 use kettle_i18n::{Language, Text, Translator};
 
@@ -137,10 +137,23 @@ fn reset_yields_in_order_without_overlap_at_any_width() {
                     disjoint(row.label_rect, row.chip_rect, &context);
                     disjoint(row.description_rect, row.chip_rect, &context);
                     let inner = row.rect.2;
-                    assert!(
-                        row.chip_rect.2 + 0.01 >= (8.0 * cw + 20.0).min(inner * 0.48),
-                        "{context}: the value chip lost its minimum"
-                    );
+                    let switch = matches!(data.control, SettingsControl::Toggle(_));
+                    let control_h = settings_control_height(line / scale) * scale;
+                    if switch {
+                        let (track_w, track_h) =
+                            settings_switch_size(settings_control_height(line / scale));
+                        let (track_w, track_h) = (track_w * scale, track_h * scale);
+                        assert!(
+                            (row.chip_rect.2 - track_w.min(inner)).abs() < 0.01
+                                && (row.chip_rect.3 - track_h).abs() < 0.01,
+                            "{context}: the switch is not its fixed size"
+                        );
+                    } else {
+                        assert!(
+                            row.chip_rect.2 + 0.01 >= (8.0 * cw + 20.0).min(inner * 0.48),
+                            "{context}: the value chip lost its minimum"
+                        );
+                    }
                     for item in items.iter().filter(|item| match item.kind {
                         SettingsTextKind::Label(i)
                         | SettingsTextKind::Value(i)
@@ -173,7 +186,7 @@ fn reset_yields_in_order_without_overlap_at_any_width() {
                     inside(row.rect, reset.rect, &context);
                     disjoint(reset.rect, row.chip_rect, &context);
                     disjoint(reset.rect, row.label_rect, &context);
-                    assert_eq!(reset.rect.3, row.chip_rect.3, "{context}");
+                    assert!((reset.rect.3 - control_h).abs() < 0.01, "{context}");
                     assert!(reset.rect.3 >= 24.0 * scale, "{context}");
                     assert!(reset.rect.2 >= 24.0 * scale, "{context}");
                     assert_eq!(
@@ -225,7 +238,8 @@ fn reset_yields_in_order_without_overlap_at_any_width() {
 }
 
 /// Every control is one height, at least 24 points at 1x and 2x, and a
-/// row's chip keeps its width while its value changes.
+/// row's chip keeps its width while its value changes. A switch is its
+/// fixed track, centred on the same slot.
 #[test]
 fn controls_share_one_height_and_keep_their_width() {
     for (scale, cw, line) in [
@@ -236,10 +250,11 @@ fn controls_share_one_height_and_keep_their_width() {
     ] {
         let control_h = settings_control_height(line / scale) * scale;
         assert!(control_h >= 24.0 * scale, "{line}");
+        let (track_w, track_h) = settings_switch_size(settings_control_height(line / scale));
         for (control, narrow, wide, cols) in [
             (SettingsControl::Choice, "Light", "Follow system", 13),
             (SettingsControl::Value, "9 px", "99 px", 5),
-            (SettingsControl::Toggle(true), "On", "Off", 3),
+            (SettingsControl::Toggle(true), "On", "Desactivado", 3),
         ] {
             let set = |value: &str| SettingsOverlay {
                 rows: vec![
@@ -265,11 +280,28 @@ fn controls_share_one_height_and_keep_their_width() {
                 first.rows[0].chip_rect, second.rows[0].chip_rect,
                 "{control:?} {line}: the chip moved with its value"
             );
-            assert!(first.rows[0].chip_rect.2 >= 8.0 * cw + 20.0, "{control:?}");
+            let switch = matches!(control, SettingsControl::Toggle(_));
+            if switch {
+                let chip = first.rows[0].chip_rect;
+                assert_eq!(
+                    (chip.2, chip.3),
+                    (track_w * scale, track_h * scale),
+                    "{line}"
+                );
+                let slot = first.rows[0].rect.1 + scale;
+                assert!(
+                    (chip.1 + chip.3 / 2.0 - (slot + control_h / 2.0)).abs() < 0.01,
+                    "{line}: the switch is not centred on its slot"
+                );
+            } else {
+                assert!(first.rows[0].chip_rect.2 >= 8.0 * cw + 20.0, "{control:?}");
+            }
             for layout in [&first, &second] {
                 assert_eq!(layout.search_rect.3, control_h);
                 for row in &layout.rows {
-                    assert_eq!(row.chip_rect.3, control_h, "{control:?} {line}");
+                    if !(switch && row.index == 0) {
+                        assert_eq!(row.chip_rect.3, control_h, "{control:?} {line}");
+                    }
                 }
             }
         }

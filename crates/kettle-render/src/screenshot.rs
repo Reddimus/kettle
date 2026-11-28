@@ -154,6 +154,8 @@ pub(crate) struct ScreenshotCaptureTarget {
     gpu: kettle_core::GraphicsReservation,
     staging: wgpu::Buffer,
     staging_gpu: kettle_core::GraphicsReservation,
+    /// The queue that will copy into `staging`.
+    queue: wgpu::Queue,
     width: u32,
     height: u32,
     unpadded_bytes_per_row: u32,
@@ -260,6 +262,7 @@ struct ScreenshotPersistenceJob {
     rgba: Vec<u8>,
     format: wgpu::TextureFormat,
     premultiplied: bool,
+    cpu_readback: Option<kettle_core::GraphicsReservation>,
 }
 
 pub(crate) const MAX_SCREENSHOT_PERSISTENCE_JOBS: usize = 2;
@@ -647,6 +650,7 @@ fn finish_live_screenshot_capture(job: ScreenshotJob) -> Result<ScreenshotPersis
         rgba,
         format,
         premultiplied,
+        cpu_readback: None,
     })
 }
 
@@ -660,6 +664,7 @@ fn finish_live_screenshot_persistence(
         rgba,
         format,
         premultiplied,
+        cpu_readback: _cpu_readback,
     } = job;
     if request.is_cancelled() {
         return Err("screenshot request was cancelled".to_string());
@@ -924,24 +929,36 @@ pub(crate) fn create_screenshot_file(
     Ok(CreatedScreenshotFile { file: Some(file) })
 }
 
+fn screenshot_crop_rect(
+    width: u32,
+    height: u32,
+    crop: Option<(f32, f32, f32, f32)>,
+) -> Result<[u32; 4], String> {
+    let Some((cx, cy, cw, ch)) = crop else {
+        return Ok([0, 0, width, height]);
+    };
+    let cx = cx.max(0.0) as u32;
+    let cy = cy.max(0.0) as u32;
+    let x_end = cx.saturating_add(cw.max(1.0) as u32).min(width);
+    let y_end = cy.saturating_add(ch.max(1.0) as u32).min(height);
+    if cx >= x_end || cy >= y_end {
+        return Err("screenshot crop is outside the surface".to_string());
+    }
+    Ok([cx, cy, x_end, y_end])
+}
+
 pub(crate) fn crop_screenshot(
     width: u32,
     height: u32,
     rgba: Vec<u8>,
     crop: Option<(f32, f32, f32, f32)>,
 ) -> Result<(u32, u32, Vec<u8>), String> {
-    let Some((cx, cy, cw, ch)) = crop else {
+    if crop.is_none() {
         return Ok((width, height, rgba));
-    };
-    let cx = cx.max(0.0) as u32;
-    let cy = cy.max(0.0) as u32;
-    let x_end = cx.saturating_add(cw.max(1.0) as u32).min(width);
-    let y_end = cy.saturating_add(ch.max(1.0) as u32).min(height);
-    let cropped_w = x_end.saturating_sub(cx);
-    let cropped_h = y_end.saturating_sub(cy);
-    if cropped_w == 0 || cropped_h == 0 {
-        return Err("screenshot crop is outside the surface".to_string());
     }
+    let [cx, cy, x_end, y_end] = screenshot_crop_rect(width, height, crop)?;
+    let cropped_w = x_end - cx;
+    let cropped_h = y_end - cy;
     let capacity = u64::from(cropped_w)
         .checked_mul(u64::from(cropped_h))
         .and_then(|pixels| pixels.checked_mul(4))
@@ -971,12 +988,55 @@ pub(crate) fn crop_screenshot(
     Ok((cropped_w, cropped_h, cropped))
 }
 
+/// Convert only the requested pixels. The scene can be wider than the window
+/// (Wayland scale rounding) or temporarily smaller during a resize.
+fn cpu_screenshot_pixels(
+    budget: &kettle_core::GraphicsBudget,
+    [width, height]: [u32; 2],
+    scene: &[u32],
+    stride: u32,
+    crop: Option<(f32, f32, f32, f32)>,
+) -> Result<(u32, u32, Vec<u8>, kettle_core::GraphicsReservation), String> {
+    let size_error =
+        || "screenshot target size overflow or exceeds the 256 MiB capture limit".to_string();
+    screenshot_target_bytes(width, height).ok_or_else(size_error)?;
+    let [x, y, end_x, end_y] = screenshot_crop_rect(width, height, crop)?;
+    let (width, height) = (end_x - x, end_y - y);
+    let bytes = screenshot_target_bytes(width, height).ok_or_else(size_error)?;
+    let reservation = budget.reserve_transient_cpu(bytes).ok_or_else(|| {
+        format!("graphics budget exhausted while copying a {bytes}-byte screenshot")
+    })?;
+    let stride = stride as usize;
+    let mut rgba = Vec::new();
+    rgba.try_reserve_exact(bytes)
+        .map_err(|error| format!("could not allocate a {bytes}-byte screenshot: {error}"))?;
+    if stride != 0 {
+        for (index, src) in scene
+            .chunks_exact(stride)
+            .skip(y as usize)
+            .take(height as usize)
+            .enumerate()
+        {
+            let end = (end_x as usize).min(stride);
+            let src = src.get(x as usize..end).unwrap_or(&[]);
+            for &pixel in src {
+                rgba.extend_from_slice(&crate::cpu_raster::unpack(pixel));
+            }
+            rgba.resize((index + 1) * width as usize * 4, 0);
+        }
+    }
+    rgba.resize(bytes, 0);
+    Ok((width, height, rgba, reservation))
+}
+
 impl Renderer {
     /// Poll unretired screenshot work even when no frame or new capture can
     /// be admitted. The caller must schedule the returned delay while idle.
     pub fn poll_screenshot_retirements(&self) -> Option<std::time::Duration> {
         self.screenshot_retirements.poll_with(|| {
-            let _ = self.gpu.device.poll(wgpu::PollType::Poll);
+            if let Some(gpu) = self.device.gpu() {
+                let _ = gpu.device.poll(wgpu::PollType::Poll);
+            }
         })
     }
 
@@ -1035,7 +1095,11 @@ impl Renderer {
         let Some(prepared) = prepared else {
             return;
         };
-        let submission = self.gpu.queue.submit(std::iter::once(encoder.finish()));
+        // Only a GPU frame encodes, so only a GPU renderer gets here.
+        let Some(gpu) = self.device.gpu() else {
+            return;
+        };
+        let submission = gpu.queue.submit(std::iter::once(encoder.finish()));
         self.dispatch_prepared_screenshot(Some(prepared), submission);
     }
 
@@ -1049,10 +1113,17 @@ impl Renderer {
         };
         match prepared {
             Ok(prepared) => {
+                let Some(gpu) = self.device.gpu() else {
+                    Self::complete_screenshot_error(
+                        prepared.request,
+                        "a GPU screenshot was prepared on a CPU renderer".to_string(),
+                    );
+                    return;
+                };
                 let job = ScreenshotJob {
-                    device: self.gpu.device.clone(),
-                    gpu_lost: self.gpu.gpu_lost.clone(),
-                    gpu_fault: self.gpu.gpu_fault.clone(),
+                    device: gpu.device.clone(),
+                    gpu_lost: gpu.gpu_lost.clone(),
+                    gpu_fault: gpu.gpu_fault.clone(),
                     submission,
                     prepared,
                 };
@@ -1100,6 +1171,10 @@ impl Renderer {
         // reservation fails, `gpu` drops while no command buffer can yet refer
         // to the capture texture; accounting can therefore never end before a
         // submitted use of the resource retires.
+        let gpu_context = self
+            .device
+            .gpu()
+            .ok_or_else(|| "a CPU renderer has no GPU capture target".to_string())?;
         let staging_gpu = self
             .graphics_budget
             .reserve_transient_gpu(staging_bytes)
@@ -1108,7 +1183,7 @@ impl Renderer {
                     "GPU graphics budget exhausted while creating a {staging_bytes}-byte screenshot staging buffer"
                 )
             })?;
-        let texture = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+        let texture = gpu_context.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("kettle-screenshot-scene"),
             size: wgpu::Extent3d {
                 width: size[0],
@@ -1123,7 +1198,7 @@ impl Renderer {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let staging = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        let staging = gpu_context.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("kettle-screenshot-readback"),
             size: buffer_size,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
@@ -1135,6 +1210,7 @@ impl Renderer {
             gpu,
             staging,
             staging_gpu,
+            queue: gpu_context.queue.clone(),
             width: size[0],
             height: size[1],
             unpadded_bytes_per_row,
@@ -1175,7 +1251,7 @@ impl Renderer {
             staging: capture.staging,
             _capture_texture: capture.texture,
             gpu: {
-                let queue = self.gpu.queue.clone();
+                let queue = capture.queue;
                 ScreenshotGpuGuard::new(
                     ScreenshotReservations {
                         _capture_gpu: capture.gpu,
@@ -1194,6 +1270,60 @@ impl Renderer {
             format,
             premultiplied,
             request,
+        }
+    }
+
+    /// Read the CPU scene directly from its borrowed buffer into the PNG job.
+    pub(crate) fn dispatch_cpu_screenshot(
+        &self,
+        request: ScreenshotRequest,
+        size: [u32; 2],
+        scene: &[u32],
+        stride: u32,
+    ) {
+        let mut request = request;
+        let job =
+            match cpu_screenshot_pixels(&self.graphics_budget, size, scene, stride, request.crop) {
+                Ok((width, height, rgba, reservation)) => {
+                    request.crop = None;
+                    ScreenshotPersistenceJob {
+                        request,
+                        width,
+                        height,
+                        rgba,
+                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        premultiplied: true,
+                        cpu_readback: Some(reservation),
+                    }
+                }
+                Err(error) => {
+                    Self::complete_screenshot_error(request, error);
+                    return;
+                }
+            };
+        let pool = match ScreenshotPersistencePool::shared() {
+            Ok(pool) => pool,
+            Err(error) => {
+                Self::complete_screenshot_error(
+                    job.request,
+                    format!("screenshot persistence workers unavailable: {error}"),
+                );
+                return;
+            }
+        };
+        match pool.try_submit(job) {
+            Ok(()) => {}
+            Err(ScreenshotPersistenceSubmitError::Busy(job)) => Self::complete_screenshot_error(
+                job.request,
+                "screenshot persistence workers are busy; retry after an earlier save finishes"
+                    .to_string(),
+            ),
+            Err(ScreenshotPersistenceSubmitError::Disconnected(job)) => {
+                Self::complete_screenshot_error(
+                    job.request,
+                    "screenshot persistence workers disconnected".to_string(),
+                );
+            }
         }
     }
 
@@ -1282,5 +1412,53 @@ pub(crate) fn unpremultiply_rgba8(pixels: &mut [u8], srgb_encoded: bool) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cpu_readback_tests {
+    use super::*;
+
+    #[test]
+    fn cpu_screenshot_charges_until_the_pixels_leave_the_worker() {
+        let budget = kettle_core::GraphicsBudget::independent(Default::default()).unwrap();
+        let limit = budget.limits().transient_cpu_bytes;
+        let full = budget.reserve_transient_cpu(limit).unwrap();
+        let scene = [0x8011_2233, 0x4044_5566, 0xffff_ffff, 0xffab_cdef];
+        let crop = Some((1.0, 0.0, 2.0, 3.0));
+        assert!(matches!(
+            cpu_screenshot_pixels(&budget, [3, 3], &scene, 2, crop),
+            Err(error) if error.contains("graphics budget exhausted")
+        ));
+        drop(full);
+        let (width, height, rgba, reservation) =
+            cpu_screenshot_pixels(&budget, [3, 3], &scene, 2, crop).unwrap();
+        assert_eq!((width, height), (2, 3));
+        assert_eq!(
+            rgba,
+            [
+                0x44, 0x55, 0x66, 0x40, 0, 0, 0, 0, 0xab, 0xcd, 0xef, 0xff, 0, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0,
+            ]
+        );
+        let job = ScreenshotPersistenceJob {
+            request: ScreenshotRequest {
+                out_path: "unused.png".into(),
+                output_policy: ScreenshotOutputPolicy::UserSelected,
+                crop: None,
+                completion: None,
+                cancellation: None,
+                recovery_wake: None,
+            },
+            width,
+            height,
+            rgba,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            premultiplied: true,
+            cpu_readback: Some(reservation),
+        };
+        assert!(budget.reserve_transient_cpu(limit - 23).is_none());
+        drop(job);
+        assert!(budget.reserve_transient_cpu(limit).is_some());
     }
 }

@@ -92,6 +92,7 @@ mod pane_partition;
 mod paste_image;
 #[cfg(target_os = "linux")]
 mod portal_settings;
+mod profile_inventory;
 mod quick_terminal;
 mod runtime_diagnostics;
 mod search_input;
@@ -99,6 +100,7 @@ mod session;
 mod session_content;
 mod settings;
 mod text_editor;
+mod tooltip;
 mod typed_echo;
 // In-app release checker. It notifies of a newer release, or installs one under
 // `update-policy = auto`. Kept a private mod (its spawn fn references the

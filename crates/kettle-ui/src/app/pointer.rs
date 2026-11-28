@@ -201,6 +201,27 @@ impl App {
             })
     }
 
+    /// Overlay-scrollbar hover-brighten: point `scrollbar_hover` at the pane
+    /// whose bar is under the pointer, repainting only on the enter/leave
+    /// edge so it costs nothing while the pointer is elsewhere. A drag holds
+    /// the hover it started with until its release. The hover is the physical
+    /// pointer's (`scrollbar_hover_pointer`), so with the pointer outside the
+    /// window no bar is hovered.
+    pub(super) fn update_scrollbar_hover(&self, ws: &mut WindowState) {
+        if ws.scrollbar_drag_offset.is_some() {
+            return;
+        }
+        let area = self.area(ws);
+        let hover = scrollbar_hover_pointer(ws)
+            .and_then(|(px, py)| self.scrollbar_pane_at(ws, area, px, py));
+        if hover != ws.scrollbar_hover {
+            ws.scrollbar_hover = hover;
+            if let Some(w) = &ws.window {
+                w.request_redraw();
+            }
+        }
+    }
+
     pub(super) fn px_to_point(
         &self,
         ws: &WindowState,
@@ -234,12 +255,14 @@ impl App {
         )
     }
 
+    /// The structured token under viewport cell (`row`, `col`), as its first
+    /// and last cells in grid coordinates.
     pub(super) fn smart_selection_for_cell(
         &self,
         ws: &WindowState,
         row: usize,
         col: usize,
-    ) -> Option<(usize, usize)> {
+    ) -> Option<(kettle_core::Point, kettle_core::Point)> {
         use kettle_core::Dimensions;
         let pane = ws.mux.panes.get(&ws.mux.active_focus()?)?;
         let term = pane.term.term.lock().ok()?;
@@ -253,8 +276,8 @@ impl App {
         kettle_core::hints::selection_at(term.grid(), point.line.0, col)
     }
 
-    /// Install a `Simple` selection from `(row, start)` to
-    /// `(row, end)` inclusive in the focused pane. Returns true if the
+    /// Install a `Simple` selection from grid point `start` to `end`
+    /// inclusive in the focused pane. Returns true if the
     /// selection was set, false if there's no focused pane or the lock
     /// failed (in which case the caller falls through to its normal
     /// `begin_selection` path).
@@ -262,9 +285,8 @@ impl App {
         &mut self,
         ws: &mut WindowState,
         area: Rect,
-        row: usize,
-        start: usize,
-        end: usize,
+        start: kettle_core::Point,
+        end: kettle_core::Point,
     ) -> bool {
         // `area` is unused but kept in the signature to mirror
         // `begin_selection`'s API; future viewport-aware variants may
@@ -277,24 +299,14 @@ impl App {
         let Ok(mut t) = pane.term.term.lock() else {
             return false;
         };
-        // The click `row` is viewport-relative; convert both ends to
-        // grid-absolute so a double-click word-select while scrolled back
-        // selects (and copies) the row the user actually clicked.
-        let off = t.grid().display_offset();
-        let anchor = viewport_point_to_grid(
-            kettle_core::Point::new(kettle_core::Line(row as i32), kettle_core::Column(start)),
-            off,
-        );
-        let end_pt = viewport_point_to_grid(
-            kettle_core::Point::new(kettle_core::Line(row as i32), kettle_core::Column(end)),
-            off,
-        );
+        // Both ends are grid-absolute already, so a double-click while
+        // scrolled back selects (and copies) the token the user clicked.
         let mut sel = kettle_core::Selection::new(
             kettle_core::SelectionType::Simple,
-            anchor,
+            start,
             kettle_core::Side::Left,
         );
-        sel.update(end_pt, kettle_core::Side::Right);
+        sel.update(end, kettle_core::Side::Right);
         t.selection = Some(sel);
         // Like Semantic, a smart selection resolves on press; the
         // caller treats `selecting=false` so motion doesn't extend it.
@@ -481,7 +493,7 @@ impl App {
             && !held.alt_key()
             && let Some((row, col)) = cell
             && let Some((start, end)) = self.smart_selection_for_cell(ws, row, col)
-            && self.apply_smart_selection(ws, area, row, start, end)
+            && self.apply_smart_selection(ws, area, start, end)
         {
             smart_selected = true;
         }
@@ -589,7 +601,8 @@ impl App {
     /// wherever focus has gone since, so no program is left holding half a
     /// click and no other gets a release it never had the press for. The
     /// newest press owns the drag, so a gesture of Kettle's own started
-    /// since takes it. Hover goes to the focused pane.
+    /// since takes it. Hover goes to the focused pane, and only while the
+    /// pointer is over that pane's terminal.
     pub(super) fn report_mouse(
         &mut self,
         ws: &mut WindowState,
@@ -625,8 +638,12 @@ impl App {
         let Some(rect) = self.focused_terminal(ws, self.area(ws)) else {
             return MouseReport::Declined;
         };
-        // Motion over a lane is the lane's: only a drag the program's own
-        // press began follows the pointer there (above).
+        // Motion outside the pane is not the program's, and motion over a
+        // lane is the lane's: only a drag the program's own press began
+        // follows the pointer there (above).
+        if !hover_reaches_pane(motion, rect, (ws.cursor.x as f32, ws.cursor.y as f32)) {
+            return MouseReport::Declined;
+        }
         if motion && self.preview_lane_under_pointer(ws) {
             return MouseReport::Declined;
         }
@@ -1024,6 +1041,39 @@ impl App {
     }
 }
 
+/// Whether a mouse event that no held button owns reaches the focused
+/// pane's program, with `terminal` that pane's terminal and the pointer at
+/// `(x, y)`. Plain motion does only while the pointer is over the pane, as
+/// xterm reports none for a pointer outside its window: moving over the tab
+/// bar, the status bar or another split reports nothing, rather than motion
+/// pinned to the pane's edge cell. A press is not held back here, and a drag
+/// the program's own press began is not decided here: it follows the pointer
+/// anywhere, at the nearest edge cell.
+pub(super) fn hover_reaches_pane(motion: bool, terminal: Rect, (x, y): (f32, f32)) -> bool {
+    !motion || rect_contains(terminal, x, y)
+}
+
+#[cfg(test)]
+mod hover_report_tests {
+    use super::hover_reaches_pane;
+
+    /// Motion is the program's only inside its pane's terminal, its first
+    /// row and column included; past any edge it reports nothing. A press is
+    /// never held back here.
+    #[test]
+    fn plain_motion_reaches_the_program_only_over_its_pane() {
+        let terminal = (100.0, 40.0, 640.0, 384.0);
+        for inside in [(100.0, 40.0), (420.0, 200.0), (739.9, 423.9)] {
+            assert!(hover_reaches_pane(true, terminal, inside), "{inside:?}");
+        }
+        // The tab bar above, the status bar below, a split to either side.
+        for outside in [(420.0, 16.0), (420.0, 424.0), (99.0, 200.0), (740.0, 200.0)] {
+            assert!(!hover_reaches_pane(true, terminal, outside), "{outside:?}");
+            assert!(hover_reaches_pane(false, terminal, outside), "{outside:?}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod selection_point_tests {
     use super::*;
@@ -1144,6 +1194,124 @@ pub(super) fn pane_scrollbar(
 /// Whether the pointer is on a scrollbar's hit strip, edges included.
 pub(super) fn scrollbar_hit_contains((x, y, w, h): Rect, px: f32, py: f32) -> bool {
     px >= x && px <= x + w && py >= y && py <= y + h
+}
+
+/// Where the scrollbar hover looks: the physical pointer, never a control
+/// client's cursor, and nowhere once the pointer has left the window. A drag
+/// captured past the window's edge can end with a release before any move
+/// reports where the pointer is; the last position seen inside, which
+/// `ws.cursor` still holds, must not light the bar under it.
+pub(super) fn scrollbar_hover_pointer(ws: &WindowState) -> Option<(f32, f32)> {
+    ws.native_pointer.map(|p| (p.x as f32, p.y as f32))
+}
+
+#[cfg(test)]
+mod scrollbar_hover_pointer_tests {
+    use super::scrollbar_hover_pointer;
+    use winit::dpi::PhysicalPosition;
+
+    /// The hover follows the physical pointer, not a control client's
+    /// cursor, and finds nothing after the pointer left the window, though
+    /// the last cursor position it had is kept.
+    #[test]
+    fn the_scrollbar_hover_reads_only_the_physical_pointer() {
+        let mut ws = crate::window_state::WindowState::new(1, crate::mux::Mux::new());
+        ws.cursor = PhysicalPosition::new(795.0, 300.0);
+        ws.native_pointer = Some(PhysicalPosition::new(795.0, 300.0));
+        assert_eq!(scrollbar_hover_pointer(&ws), Some((795.0, 300.0)));
+        ws.cursor = PhysicalPosition::new(20.0, 40.0);
+        assert_eq!(
+            scrollbar_hover_pointer(&ws),
+            Some((795.0, 300.0)),
+            "ctl moves"
+        );
+        // `CursorLeft`: the pointer is gone, the stale cursor stays.
+        ws.cursor = PhysicalPosition::new(795.0, 300.0);
+        ws.native_pointer = None;
+        assert_eq!(scrollbar_hover_pointer(&ws), None);
+    }
+}
+
+/// End a scrollbar drag, if one is live. Says whether one was: the bar it
+/// held wide narrows back on the frame this asks for, and the cursor it held
+/// as the arrow, and the hover it froze, must be worked out again where the
+/// pointer is now. The frozen hover goes with the drag, so a release off the
+/// bar leaves it narrow.
+pub(super) fn end_scrollbar_drag(ws: &mut WindowState) -> bool {
+    if ws.scrollbar_drag_offset.take().is_none() {
+        return false;
+    }
+    ws.scrollbar_hover = None;
+    if let Some(window) = &ws.window {
+        window.request_redraw();
+    }
+    true
+}
+
+#[cfg(test)]
+mod scrollbar_release_tests {
+    use super::end_scrollbar_drag;
+
+    /// A release ends a live drag once and says so, so its caller works the
+    /// cursor out again; with no drag live it changes nothing.
+    #[test]
+    fn a_release_ends_a_scrollbar_drag_once_and_says_so() {
+        let mut ws = crate::window_state::WindowState::new(1, crate::mux::Mux::new());
+        ws.scrollbar_hover = Some(7);
+        assert!(!end_scrollbar_drag(&mut ws), "no drag to end");
+        assert_eq!(ws.scrollbar_hover, Some(7), "a hover with no drag stays");
+        ws.scrollbar_drag_offset = Some(4.0);
+        assert!(end_scrollbar_drag(&mut ws), "the drag ended");
+        assert_eq!(ws.scrollbar_drag_offset, None);
+        assert!(!end_scrollbar_drag(&mut ws), "it ends once");
+    }
+}
+
+/// Whether a primary press on a pane's scrollbar strip grabs the bar: the
+/// pane has `history` to scroll, so the bar is drawn, and its program does
+/// not take the press first. A program reporting the mouse (`track`) gets it,
+/// unless Shift keeps it Kettle's or the pane is read-only, as `send_mouse_to`
+/// decides.
+pub(super) fn scrollbar_grabs_press(
+    history: usize,
+    track: input::MouseTracking,
+    shift: bool,
+    read_only: bool,
+) -> bool {
+    history > 0 && (track == input::MouseTracking::Off || shift || read_only)
+}
+
+#[cfg(test)]
+mod scrollbar_press_tests {
+    use super::scrollbar_grabs_press;
+    use crate::input::MouseTracking;
+
+    /// The bar takes a press once there is history; a program in mouse mode
+    /// takes it first, unless Shift is held or the pane is read-only.
+    #[test]
+    fn a_press_grabs_the_scrollbar_only_where_the_program_does_not_take_it() {
+        assert!(!scrollbar_grabs_press(0, MouseTracking::Off, false, false));
+        assert!(scrollbar_grabs_press(1, MouseTracking::Off, false, false));
+        for (mode, track) in [
+            (1000, MouseTracking::Click),
+            (1002, MouseTracking::Drag),
+            (1003, MouseTracking::Motion),
+        ] {
+            assert!(!scrollbar_grabs_press(40, track, false, false), "{mode}");
+            assert!(
+                scrollbar_grabs_press(40, track, true, false),
+                "{mode}: Shift"
+            );
+            assert!(
+                scrollbar_grabs_press(40, track, false, true),
+                "{mode}: read-only"
+            );
+            assert!(
+                !scrollbar_grabs_press(0, track, true, true),
+                "{mode}: no history"
+            );
+        }
+    }
 }
 
 /// A press or drag at `py` on `bar`: where the pointer holds the thumb and
@@ -1529,6 +1697,17 @@ pub(super) fn selection_copy_owner(selecting: bool, pane_id: Option<u64>) -> Opt
 }
 
 pub(super) fn clear_selection_gesture(ws: &mut WindowState) {
+    // A single press installs an anchor in case it becomes a drag.
+    // Once the gesture ends, retain only a selection that covers cells.
+    if let Some(pane) = ws.selecting_pane.and_then(|id| ws.mux.panes.get(&id))
+        && let Ok(mut term) = pane.term.term.lock()
+        && term
+            .selection
+            .as_ref()
+            .is_some_and(|selection| selection.to_range(&term).is_none())
+    {
+        term.selection = None;
+    }
     ws.selection_hint_plain = false;
     ws.selecting = false;
     ws.selecting_pane = None;
@@ -1770,6 +1949,75 @@ impl App {
         Some(Self::resize_cursor_for(seams[i].dir))
     }
 
+    /// Whether the pointer is dragging a scrollbar, or is on one a primary
+    /// press would grab: the pane under it has history to scroll, and its
+    /// program does not take the press first (`scrollbar_grabs_press`).
+    fn scrollbar_takes_pointer(&self, ws: &WindowState) -> bool {
+        if ws.scrollbar_drag_offset.is_some() {
+            return true;
+        }
+        let area = self.area(ws);
+        let Some(pane) = self.scrollbar_pane_at(ws, area, ws.cursor.x as f32, ws.cursor.y as f32)
+        else {
+            return false;
+        };
+        let Some(p) = ws.mux.panes.get(&pane) else {
+            return false;
+        };
+        let Ok(term) = p.term.term.lock() else {
+            return false;
+        };
+        let (track, _) = input::mouse_tracking(*term.mode());
+        scrollbar_grabs_press(
+            term.grid().history_size(),
+            track,
+            ws.mods.shift_key(),
+            p.read_only,
+        )
+    }
+
+    /// The I-beam over a modal's text field: the palette's, a picker's, title
+    /// edit's or a Settings value's, wherever a press places its caret, and
+    /// open Settings' search box, which a press focuses. The find bar's
+    /// editor has its own (`search_hover`).
+    fn modal_text_hover_icon(&self, ws: &WindowState) -> Option<CursorIcon> {
+        let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        let field = self
+            .modal_text_press_rect(ws)
+            .is_some_and(|rect| rect_contains(rect, x, y));
+        // Only Settings itself takes the press: not a dialog or a menu over
+        // it, and not while it edits a value or captures a key.
+        let search = matches!(
+            top_modal(ws),
+            Some(KeyModal::Settings | KeyModal::SettingsSearch)
+        ) && self.settings_pointer_hit(ws, (x, y))
+            == Some(kettle_render::SettingsHit::Search);
+        (field || search).then_some(CursorIcon::Text)
+    }
+
+    /// What of open Settings is at `(x, y)`, as `settings_mouse` finds it.
+    fn settings_pointer_hit(
+        &self,
+        ws: &WindowState,
+        (x, y): (f32, f32),
+    ) -> Option<kettle_render::SettingsHit> {
+        let set = self.settings_overlay_projection(ws)?;
+        let surface = ws.renderer.as_ref().map_or((800.0, 600.0), |r| {
+            let (w, h) = r.surface_size();
+            (w as f32, h as f32)
+        });
+        let layout = kettle_render::settings_layout(
+            &set,
+            (self.menu_cell(ws).0, self.overlay_text_line_height(ws)),
+            surface,
+            self.overlay_text_cell_width(ws),
+            ws.window
+                .as_ref()
+                .map_or(1.0, |window| window.scale_factor() as f32),
+        );
+        Some(layout.pointer_hit((x, y), None))
+    }
+
     /// Set the OS mouse-cursor icon, deduped against the last value pushed
     /// to the window. Called on CursorMoved (position changes the
     /// hit-test) and on ModifiersChanged (the modifier state gates the
@@ -1798,8 +2046,9 @@ impl App {
         // Browser / iTerm2 / Ghostty convention: the OS cursor turns into
         // a "pointing hand" while the user holds the same modifier that
         // would open a URL on click (Ctrl on Linux/Windows, Cmd on
-        // macOS — winit's `super_key` maps Cmd) and the pointer sits on
-        // a clickable link. Otherwise show the standard text-I-beam, the
+        // macOS — winit's `super_key` maps Cmd; with `link-single-click`
+        // none is needed) and the pointer sits on a clickable link
+        // (`link_click_opens`). Otherwise show the standard text-I-beam, the
         // affordance every modern terminal uses for "this surface accepts
         // mouse selection."
         //
@@ -1816,8 +2065,14 @@ impl App {
         // `tab_bar()`).
         let bar = self.tab_bar(ws);
         let (new_tab_hover, hover_changed) = hover_tab_bar(ws, &bar);
+        self.sync_lane_control_hover(ws);
+        self.sync_toast_control_hover(ws);
+        self.sync_tooltip(ws, &bar);
         let (cursor_x, cursor_y) = (ws.cursor.x as f32, ws.cursor.y as f32);
-        let control_hover = window_control_at(&bar, cursor_x, cursor_y);
+        // A modal owns the pointer: chrome under it takes no press, so it
+        // shows no hover either (`chrome_pointer`).
+        let modal = self.pointer_modal_open(ws);
+        let control_hover = window_control_at(&bar, cursor_x, cursor_y).filter(|_| !modal);
         if control_hover != ws.hovered_window_control {
             ws.hovered_window_control = control_hover;
             if let Some(window) = &ws.window {
@@ -1829,12 +2084,14 @@ impl App {
             window.request_redraw();
         }
         let close_hover = tab_close_hover_icon(ws.hovered_close_idx.is_some());
-        let new_tab_hover_icon = new_tab_hover.is_some().then_some(CursorIcon::Pointer);
+        let new_tab_hover_icon = (new_tab_hover.is_some() || ws.hovered_scroll_arrow.is_some())
+            .then_some(CursorIcon::Pointer);
         let confirm_hover = if self.confirm_button_hovered(ws) {
             Some(CursorIcon::Pointer)
         } else {
             None
         };
+        let modal_text_hover = self.modal_text_hover_icon(ws);
         let search_hover = self.search_geometry(ws).and_then(|geometry| {
             let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
             geometry
@@ -1872,6 +2129,7 @@ impl App {
                     .map(|view| view.overlay),
             )
             .chain(self.update_toast_projection(ws))
+            .filter(|_| !modal)
             .find_map(|toast| {
                 let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
                 toast.geometry.hit_test(x, y).map(|hit| match hit {
@@ -1889,6 +2147,7 @@ impl App {
             .or(close_hover)
             .or(new_tab_hover_icon)
             .or(confirm_hover)
+            .or(modal_text_hover)
             .or(search_hover)
             .or(media_receipt_hover);
         // The jump button under the pointer, where a press would reach it:
@@ -1912,9 +2171,16 @@ impl App {
             .or_else(|| self.lane_cursor_icon(ws))
             .or_else(|| self.split_seam_hover_icon(ws))
             .unwrap_or_else(|| {
-                let want_pointer = self.hovered_link_at_cursor(ws).is_some();
+                // The hand promises a click opens the link: only with the
+                // open modifier held, or `link-single-click` on.
+                let want_pointer = self.hovered_link_at_cursor(ws).is_some()
+                    && link_click_opens(self.cfg.link_single_click, ws.mods);
                 if want_pointer {
                     CursorIcon::Pointer
+                } else if self.scrollbar_takes_pointer(ws) {
+                    // A scrollbar is a control, not text: the arrow, as
+                    // over the chrome.
+                    CursorIcon::Default
                 } else {
                     CursorIcon::Text
                 }

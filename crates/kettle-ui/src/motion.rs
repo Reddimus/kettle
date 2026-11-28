@@ -1,9 +1,40 @@
 //! System motion preferences and explicit user overrides.
 
+#[cfg(any(target_os = "linux", all(test, unix)))]
+mod gnome_local;
+
+/// A desktop setting as its watch last read it.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Reading<T> {
+    /// No answer yet: the watcher is still connecting or reading.
+    Pending,
+    /// No answer to be had: no portal or `gsettings`, one without the key,
+    /// a value of the wrong type, or a portal that went away.
+    Unavailable,
+    Value(T),
+}
+
+// Only the Linux chain and the Unix tests of its local GNOME read use these.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+impl<T> Reading<T> {
+    /// This reading, or where it is unavailable, `other`'s.
+    pub(crate) fn or_else(self, other: impl FnOnce() -> Self) -> Self {
+        match self {
+            Self::Unavailable => other(),
+            reading => reading,
+        }
+    }
+}
+
 #[cfg(any(target_os = "linux", test))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Preference {
+    /// The desktop has not answered yet, and motion waits for it. Each
+    /// portal call gives up after two seconds.
     #[default]
+    Pending,
+    /// The desktop has no motion preference, so motion is allowed.
     Unknown,
     Normal,
     Reduced,
@@ -19,8 +50,36 @@ impl Preference {
         }
     }
 
+    /// The portal's `reduced-motion`, or where the portal has none, GNOME's
+    /// `enable-animations`, which older GNOME portals do not translate.
+    pub(crate) fn resolve(portal: Reading<u32>, gnome: impl FnOnce() -> Reading<bool>) -> Self {
+        match portal {
+            Reading::Value(value) => Self::from_portal(value),
+            Reading::Pending => Self::Pending,
+            Reading::Unavailable => match gnome() {
+                Reading::Value(true) => Self::Normal,
+                Reading::Value(false) => Self::Reduced,
+                Reading::Pending => Self::Pending,
+                Reading::Unavailable => Self::Unknown,
+            },
+        }
+    }
+
+    /// The Linux preference: the portal's `reduced-motion`; where it has
+    /// none, GNOME's `enable-animations` through the portal; and where the
+    /// portal has neither, GNOME's own (`gnome_local`), so a session with no
+    /// portal still follows GNOME.
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    pub(crate) fn linux(
+        portal: Reading<u32>,
+        gnome_portal: impl FnOnce() -> Reading<bool>,
+        gnome_local: impl FnOnce() -> Reading<bool>,
+    ) -> Self {
+        Self::resolve(portal, || gnome_portal().or_else(gnome_local))
+    }
+
     fn allows(self) -> bool {
-        self == Self::Normal
+        matches!(self, Self::Normal | Self::Unknown)
     }
 }
 
@@ -37,6 +96,16 @@ pub(crate) struct SystemMotion {
     watch: crate::portal_settings::Watch,
     #[cfg(target_os = "linux")]
     buttons: crate::portal_settings::ButtonWatch,
+    /// GNOME's `enable-animations`, watched once the portal turns out to
+    /// have no `reduced-motion`.
+    #[cfg(target_os = "linux")]
+    animations: std::sync::OnceLock<crate::portal_settings::AnimationsWatch>,
+    /// GNOME's `enable-animations` read with `gsettings`, once neither
+    /// portal watch has an answer.
+    #[cfg(target_os = "linux")]
+    local: std::sync::OnceLock<gnome_local::LocalWatch>,
+    #[cfg(target_os = "linux")]
+    wake: kettle_core::Waker,
 }
 
 impl SystemMotion {
@@ -45,7 +114,14 @@ impl SystemMotion {
         {
             Self {
                 watch: crate::portal_settings::Watch::start(wake.clone(), None, "reduced-motion"),
-                buttons: crate::portal_settings::ButtonWatch::start(wake, None, "button-layout"),
+                buttons: crate::portal_settings::ButtonWatch::start(
+                    wake.clone(),
+                    None,
+                    "button-layout",
+                ),
+                animations: std::sync::OnceLock::new(),
+                local: std::sync::OnceLock::new(),
+                wake,
             }
         }
         #[cfg(not(target_os = "linux"))]
@@ -53,6 +129,50 @@ impl SystemMotion {
             let _ = wake;
             Self {}
         }
+    }
+
+    /// Start watching what `allows` will read: GNOME's setting through the
+    /// portal as soon as the portal has said it has no `reduced-motion`, and
+    /// GNOME's own once the portal has neither, so the first motion after
+    /// that does not wait for GNOME's answer.
+    pub(crate) fn prepare(&self) {
+        #[cfg(target_os = "linux")]
+        if self.watch.reading() == Reading::Unavailable
+            && self.animations().reading() == Reading::Unavailable
+        {
+            self.local();
+        }
+    }
+
+    /// GNOME's own switch, read only in a GNOME session, with the first
+    /// `gsettings` on `PATH` that starts, which the reader's thread looks
+    /// for.
+    #[cfg(target_os = "linux")]
+    fn local(&self) -> &gnome_local::LocalWatch {
+        self.local.get_or_init(|| {
+            if !gnome_local::gnome_like(std::env::var_os("XDG_CURRENT_DESKTOP").as_deref()) {
+                return gnome_local::LocalWatch::unavailable();
+            }
+            let path = std::env::var_os("PATH");
+            gnome_local::LocalWatch::start(
+                move || {
+                    gnome_local::gsettings_candidates(path.as_deref())
+                        .map(|file| file.map(gnome_local::gsettings_get))
+                },
+                self.wake.clone(),
+            )
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn animations(&self) -> &crate::portal_settings::AnimationsWatch {
+        self.animations.get_or_init(|| {
+            crate::portal_settings::AnimationsWatch::start(
+                self.wake.clone(),
+                None,
+                "enable-animations",
+            )
+        })
     }
 
     pub(crate) fn button_layout(&self) -> crate::window_buttons::ButtonLayout {
@@ -80,10 +200,12 @@ impl SystemMotion {
         }
         #[cfg(target_os = "linux")]
         {
-            self.watch
-                .value()
-                .map_or(Preference::Unknown, Preference::from_portal)
-                .allows()
+            Preference::linux(
+                self.watch.reading(),
+                || self.animations().reading(),
+                || self.local().reading(),
+            )
+            .allows()
         }
         #[cfg(windows)]
         {
@@ -124,15 +246,60 @@ mod tests {
         }
     }
 
+    /// A desktop that has no motion preference allows motion. Only an
+    /// answer still on its way holds motion back.
     #[test]
-    fn an_unavailable_system_does_not_start_motion() {
-        assert!(!Preference::default().allows());
+    fn a_desktop_without_a_motion_preference_allows_motion() {
+        assert!(Preference::Unknown.allows());
+        assert!(Preference::Normal.allows());
+        assert!(!Preference::Reduced.allows());
+        assert!(!Preference::Pending.allows());
+        assert_eq!(Preference::default(), Preference::Pending);
+        let none = || Reading::Unavailable;
+        assert_eq!(
+            Preference::resolve(Reading::Unavailable, none),
+            Preference::Unknown
+        );
+        assert!(allowed(kettle_config::ReduceMotion::Auto, || {
+            Preference::resolve(Reading::Unavailable, none).allows()
+        }));
         assert!(allowed(kettle_config::ReduceMotion::Auto, || {
             Preference::from_portal(0).allows()
         }));
         assert!(!allowed(kettle_config::ReduceMotion::Auto, || {
             Preference::from_portal(1).allows()
         }));
+    }
+
+    /// The portal's `reduced-motion` decides when it answers; where it has
+    /// none, GNOME's `enable-animations` does, and GNOME is not asked first.
+    #[test]
+    fn gnome_animations_stand_in_for_a_portal_without_reduced_motion() {
+        let unasked = || -> Reading<bool> { panic!("GNOME was asked") };
+        assert_eq!(
+            Preference::resolve(Reading::Value(1), unasked),
+            Preference::Reduced
+        );
+        assert_eq!(
+            Preference::resolve(Reading::Value(0), unasked),
+            Preference::Normal
+        );
+        assert_eq!(
+            Preference::resolve(Reading::Pending, unasked),
+            Preference::Pending
+        );
+        for (gnome, expected) in [
+            (Reading::Value(false), Preference::Reduced),
+            (Reading::Value(true), Preference::Normal),
+            (Reading::Pending, Preference::Pending),
+            (Reading::Unavailable, Preference::Unknown),
+        ] {
+            assert_eq!(
+                Preference::resolve(Reading::Unavailable, || gnome),
+                expected,
+                "{gnome:?}"
+            );
+        }
     }
 
     #[test]

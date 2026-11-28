@@ -935,7 +935,7 @@ fn wrap_preview(
     (lines, spans)
 }
 
-fn wrap(text: &str, columns: usize) -> Vec<String> {
+pub(crate) fn wrap(text: &str, columns: usize) -> Vec<String> {
     let mut result = Vec::new();
     for paragraph in text.split('\n') {
         let mut rest = paragraph.trim();
@@ -1342,17 +1342,27 @@ pub(crate) fn button_colors(
     let mix = if dialog.pressed_idx == Some(index) {
         0.18
     } else if dialog.hover_idx == Some(index) {
-        0.09
+        BUTTON_HOVER_MIX
     } else {
         0.0
     };
+    let fill = button_mix(base, mix);
+    (fill, color::with_min_contrast(theme.foreground, fill, 4.5))
+}
+
+/// How far a button under the pointer moves its fill toward black or white.
+pub(crate) const BUTTON_HOVER_MIX: f64 = 0.09;
+
+/// `base` moved `mix` of the way toward black where it is light and toward
+/// white where it is dark: a button's hover and press fill.
+pub(crate) fn button_mix(base: kettle_config::Rgb, mix: f64) -> kettle_config::Rgb {
+    use super::color;
     let target = if color::relative_luminance(base) > 0.4 {
         kettle_config::Rgb::new(0, 0, 0)
     } else {
         kettle_config::Rgb::new(255, 255, 255)
     };
-    let fill = color::over(base, target, mix, false);
-    (fill, color::with_min_contrast(theme.foreground, fill, 4.5))
+    color::over(base, target, mix, false)
 }
 
 #[cfg(test)]

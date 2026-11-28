@@ -153,6 +153,31 @@ pub(crate) fn starfield_time(
     }
 }
 
+/// The playback clock of an animated background that `started` then: how
+/// far it has played, stopped at `held` while reduced motion holds it. A
+/// background that starts while held (a wallpaper decoded since) shows its
+/// first frame.
+pub(crate) fn background_clock(
+    held: Option<std::time::Instant>,
+    started: std::time::Instant,
+) -> std::time::Duration {
+    held.unwrap_or_else(std::time::Instant::now)
+        .saturating_duration_since(started)
+}
+
+/// The start of an animated background's clock once a hold from `held`
+/// ends at `now`: moved on by the part of the hold the background lived
+/// through, so it plays on from the frame it held. One that started during
+/// the hold (a wallpaper decoded since) starts now, on its first frame.
+pub(crate) fn resumed_clock(
+    started: std::time::Instant,
+    held: std::time::Instant,
+    now: std::time::Instant,
+) -> std::time::Instant {
+    let paused = now.saturating_duration_since(held.max(started));
+    started.checked_add(paused).unwrap_or(now)
+}
+
 fn admit_bg_frames(
     decoded: Vec<bg_image::BgFrame>,
     budget: &kettle_core::GraphicsBudget,
@@ -202,11 +227,34 @@ impl Renderer {
     /// reuse the GIF's edge-trigger + wake machinery unchanged.
     const STARFIELD_FPS: u64 = 10;
 
-    /// Whether the selected background should advance proactively. Focus gates
-    /// `when-focused`; the event loop separately suppresses hidden-window wakes.
-    /// Other repaints still select the time-correct frame.
+    /// `reduce-motion` for animated backgrounds, which the event loop sets
+    /// before it schedules or draws a frame. Held back, the starfield and an
+    /// animated image keep the frame they showed at `now` and ask for no
+    /// frames; allowed again, they play on from that frame, and an image
+    /// decoded during the hold starts on its first.
+    pub fn set_background_motion(&mut self, allowed: bool, now: std::time::Instant) {
+        match (allowed, self.background_held) {
+            (false, None) => self.background_held = Some(now),
+            (true, Some(held)) => {
+                self.background_held = None;
+                self.starfield_started = resumed_clock(self.starfield_started, held, now);
+                if let Some(cache) = self.bg_image_cache.as_mut() {
+                    cache.started = resumed_clock(cache.started, held, now);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether the selected background should advance proactively. Reduced
+    /// motion stops it, and focus gates `when-focused`; the event loop
+    /// separately suppresses hidden-window wakes. Other repaints still select
+    /// the time-correct frame, which reduced motion holds still.
     pub fn background_is_animating(&self, cfg: &Config, window_focused: bool) -> bool {
         use kettle_config::BackgroundType;
+        if self.background_held.is_some() {
+            return false;
+        }
         // Shared focus/Off gate.
         let enabled = match cfg.background_animation {
             kettle_config::BackgroundAnimation::Off => false,
@@ -250,11 +298,15 @@ impl Renderer {
         ) {
             // Wake at the next fps-cap boundary.
             let frame = Self::starfield_frame_ms();
-            let into = self.starfield_started.elapsed().as_millis() % frame;
+            let into =
+                background_clock(self.background_held, self.starfield_started).as_millis() % frame;
             return Some(((frame - into) as u64).max(16));
         }
         let c = self.bg_image_cache.as_ref()?;
-        bg_image::bg_next_frame_ms(&c.gaps, c.started.elapsed().as_millis())
+        bg_image::bg_next_frame_ms(
+            &c.gaps,
+            background_clock(self.background_held, c.started).as_millis(),
+        )
     }
 
     /// The animated background's currently-displayed frame index, or `None`
@@ -275,7 +327,10 @@ impl Renderer {
             // Quantize continuous time to the fps cap so the edge-trigger fires
             // once per displayed step.
             let frame = Self::starfield_frame_ms();
-            return Some((self.starfield_started.elapsed().as_millis() / frame) as usize);
+            return Some(
+                (background_clock(self.background_held, self.starfield_started).as_millis() / frame)
+                    as usize,
+            );
         }
         let c = self.bg_image_cache.as_ref()?;
         if c.frames.len() <= 1 {
@@ -283,7 +338,7 @@ impl Renderer {
         }
         Some(bg_image::bg_current_frame(
             &c.gaps,
-            c.started.elapsed().as_millis(),
+            background_clock(self.background_held, c.started).as_millis(),
         ))
     }
 

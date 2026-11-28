@@ -242,6 +242,18 @@ date. Recheck that before upgrading a crate or dropping a patch.
   - Private mode 1048 saves the cursor as DECSC does when set and restores
     it as DECRC does when reset, sharing their saved state. Upstream ignored
     the mode.
+
+  No row of a one-column grid has room for a wide character. Printing one
+  writes a blank in the current attributes in its cell, as Ghostty does, and
+  the cursor moves on as after a narrow character; a cluster that a selector
+  would widen keeps its narrow cell. Narrowing the grid to one column blanks
+  each wide character the same way and drops its spacer. Upstream writes the
+  spacer one column past the end of the row and panics, and its reflow moves
+  the character to the next row, meets it again there, and adds rows until
+  memory runs out. Alacritty itself never sizes a terminal below
+  `MIN_COLUMNS` (2). Upstream `master` at `791efff6` (2026-11-18) still has
+  both bugs. `grid/tests.rs` and `term/mod.rs` cover them, and the
+  compact-history fuzz now includes one-column grids.
 - Kettle's DEC mode 2027 (on by default in Kettle) stores bounded Unicode 18 extended graphemes
   with their leading cell and recorded width. Its streaming boundary context
   is independent of retained scalars; official property inputs, 853 boundary
@@ -254,19 +266,31 @@ date. Recheck that before upgrading a crate or dropping a patch.
   `unicode-width = "=0.2.3"` constraint aligns product, vendor-validation
   and fuzz width data at Unicode 18. These are local additions to the pinned package.
   - Cluster widths share a pure calculator and bounded streaming accumulator:
-    Mc spacing marks, Indic conjuncts and positive-width joined scalars reserve
-    up to two cells; adjacent VS16 widens a contributing registered variation
-    base, while adjacent VS15 narrows a contributing two-cell variation base.
+    Mc spacing marks except the generated Virama/Invisible_Stacker intersection,
+    Indic conjuncts and positive-width joined scalars reserve up to two cells.
+    Final viramas add no column, without changing InCb segmentation. Adjacent
+    VS16 widens a contributing registered variation base, while adjacent VS15 narrows a contributing two-cell variation base.
     A second capped total preserves preceding contributions (including Prepend
     number signs) when VS15 narrows a base after width saturation. Intervening
     scalars clear selector eligibility even beyond the retained-text cap, and
     unattached skin-tone modifiers start their own two-cell clusters. Emoji
-    ZWJ sequences, regional pairs and scalar mode retain their width rules.
+    ZWJ sequences and regional pairs retain their width rules. In mode 2027,
+    GCB=Prepend, A8FA and the Khmer 17A4/17D8 singletons contribute one cell;
+    the cluster cap stays two and scalar mode is unchanged. Width contribution
+    is separate from shaping-base eligibility. `grapheme_shaping_base_offset`
+    admits A8FA for stored GRAPHEME cells' prefix/cursor anchors, while the
+    existing `grapheme_base_offset` keeps scalar-width selection for raw text
+    and emoji classification. This follows stored metadata, not the current
+    mode bit. Before the first shaping base,
+    bounded retention reserves three slots for that base and two later
+    presentation scalars, keeping the first base out of tail replacement.
     Late widening/shrinking reuses cell flags and spacers, respects autowrap,
     insertion and DECSLRM, and never fabricates VS16 for script text.
   - `scripts/generate-grapheme-tables.py` additionally generates joining Mc
     ranges from General_Category in the pinned GraphemeBreakProperty comments,
-    Emoji_Modifier_Base from `emoji-data.txt`, and variation bases from
+    their Virama/Invisible_Stacker intersection from the licensed, pinned
+    Unicode 18 `IndicSyllabicCategory.txt`, Emoji_Modifier_Base from
+    `emoji-data.txt`, and variation bases from
     `tests/unicode18/emoji-variation-bases.txt`. The latter is a compact offline
     extraction of all 371 bases of Unicode 18 `emoji-variation-sequences.txt`,
     using the locally cached `unicode-width` 0.2.3 generated

@@ -384,6 +384,9 @@ impl App {
                     Some(ACCESSIBILITY_NOTIFICATION_DISMISS_ID) => Some(2),
                     _ => None,
                 },
+                // A click on the body does what Show does, or dismisses a
+                // toast with nowhere to go: it lights too.
+                hovered: self.toast_control_hover(ws, &geometry, true),
             },
             source: toast.source,
             show,
@@ -568,13 +571,13 @@ impl App {
         });
         let paused = hovered || ws.notification_toast_focus.is_some();
         let motion = self.motion_allowed();
-        let (expired, fading, wake) = {
+        let (expired, redraw, wake) = {
             let toast = ws.notification_toasts.visible_mut()?;
+            let drawn = toast.clock.opacity(motion);
             toast.clock.tick(now, view.is_some(), paused);
-            let remaining = toast.clock.remaining();
             (
-                remaining.is_zero(),
-                motion && remaining <= std::time::Duration::from_millis(150),
+                toast.clock.remaining().is_zero(),
+                toast.clock.needs_frame(drawn, motion),
                 toast.clock.wake_after(motion),
             )
         };
@@ -585,8 +588,7 @@ impl App {
                 .then_some(std::time::Duration::from_millis(16));
         }
         if view.is_some()
-            && !paused
-            && fading
+            && redraw
             && let Some(window) = &ws.window
         {
             window.request_redraw();

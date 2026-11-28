@@ -1017,3 +1017,105 @@ fn echo_settle_releases_a_real_panes_split_echo_at_the_wake_of_its_second_public
     ws.mux.panes.insert(id, closed);
     ws.mux.kill_children();
 }
+
+/// The resize chip does not change while it is up, so it asks for no frames
+/// of its own: the scheduler wakes once, when it expires, to erase it.
+/// It used to redraw the same frame at about 30 fps for its 750 ms.
+#[test]
+fn the_static_resize_chip_wakes_once_at_its_expiry() {
+    use std::time::{Duration, Instant};
+    use super::RESIZE_OVERLAY_DURATION;
+    let shown = Instant::now();
+    assert_eq!(
+        super::resize_chip_wait(Some(shown), shown),
+        Some(RESIZE_OVERLAY_DURATION)
+    );
+    assert_eq!(
+        super::resize_chip_wait(Some(shown), shown + Duration::from_millis(700)),
+        Some(Duration::from_millis(50))
+    );
+    for gone in [RESIZE_OVERLAY_DURATION, Duration::from_secs(5)] {
+        assert_eq!(super::resize_chip_wait(Some(shown), shown + gone), None);
+    }
+    assert_eq!(super::resize_chip_wait(None, shown), None);
+    let src = production_source();
+    let wait = src
+        .split("fn about_to_wait_inner(")
+        .nth(1)
+        .expect("about_to_wait_inner");
+    let redraw = wait
+        .split("if (bell_active")
+        .nth(1)
+        .and_then(|rest| rest.split("let blink_wait").next())
+        .expect("redraw block");
+    assert!(
+        !redraw.contains("resize_chip"),
+        "the chip must not request a redraw every turn"
+    );
+    let animation = wait
+        .split("let mut wait = animation_wait(")
+        .nth(1)
+        .and_then(|rest| rest.split(");").next())
+        .expect("animation wait");
+    assert!(
+        !animation.contains("resize_chip"),
+        "the chip must not join the 30 fps animation tick"
+    );
+    assert!(wait.contains("if let Some(next) = resize_chip_wait {"));
+}
+
+/// Under `auto` the system's motion preference is asked for from the first
+/// turn of the event loop, so the first bell, toast fade or slide does not
+/// wait on the desktop's first answer, which holds motion back.
+#[test]
+fn the_motion_preference_is_asked_for_from_the_first_turn() {
+    let src = production_source();
+    let wait = src
+        .split("fn about_to_wait_inner(")
+        .nth(1)
+        .expect("about_to_wait_inner");
+    let asked = wait
+        .find("self.watch_system_motion();")
+        .expect("asked on every turn");
+    let toasts = wait.find("self.tick_update_toast(ws, now)").unwrap();
+    assert!(asked < toasts, "before anything that moves");
+    let watch = src
+        .split("fn watch_system_motion(&self) {")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("watch_system_motion");
+    assert!(watch.contains("self.cfg.reduce_motion == kettle_config::ReduceMotion::Auto"));
+    assert!(watch.contains(".prepare();"));
+}
+
+/// Reduced motion reaches the renderer before it schedules or draws an
+/// animated background: the scheduler and every frame pass
+/// `motion_allowed`, so the starfield and an animated image hold still and
+/// ask for no wakes.
+#[test]
+fn reduced_motion_reaches_the_background_before_it_is_scheduled_or_drawn() {
+    let src = production_source();
+    let wait = src
+        .split("fn about_to_wait_inner(")
+        .nth(1)
+        .expect("about_to_wait_inner");
+    let synced = wait
+        .find("self.sync_background_motion(renderer, now);")
+        .expect("the scheduler passes reduced motion");
+    assert!(synced < wait.find(".bg_anim_interval_ms(").unwrap());
+    assert!(synced < wait.find(".bg_current_frame_index(").unwrap());
+    let redraw = src
+        .split("fn redraw(&mut self, ws: &mut WindowState) {")
+        .nth(1)
+        .expect("redraw");
+    let drawn = redraw
+        .find("self.sync_background_motion(renderer, std::time::Instant::now());")
+        .expect("each frame passes reduced motion");
+    assert!(drawn < redraw.find(".render_frame_with_status_and_pre_present(").unwrap());
+    let sync = src
+        .split("fn sync_background_motion(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("sync_background_motion");
+    assert!(sync.contains("renderer.set_background_motion(self.motion_allowed(), now);"));
+}

@@ -28,8 +28,8 @@ your `PATH`.
 
 A single-tab window hides the tab strip by default. Creating another tab shows
 it; set `tab-bar = always` to keep it visible. Horizontal and vertical strips
-expose their tab titles, selected tab, Close buttons, New Tab, and New Tab Options
-to screen readers. The menu button beside `+` opens shell choices and shortcuts.
+expose their tab titles, selected tab and Close buttons to screen readers as a
+tab list, with New Tab and New Tab Options in a toolbar beside it. The menu button beside `+` opens shell choices and shortcuts.
 On macOS, where the tabs sit in the title bar, they split the title bar evenly, a lone tab included, and leave an empty lane before the controls for moving the window; when they no longer fit, the strip scrolls. A gear before the joined `+ ▾` button opens
 Settings, as `Cmd+,` does. The dropdown keeps shell choices, profiles, layouts
 and SSH; Settings and other app commands remain in the macOS menu bar.
@@ -78,8 +78,8 @@ host entries.
 
 ## 3. Change settings — no file editing required
 
-Press **`Ctrl + ,`** (or **right-click → Settings…**) to open the **Settings**
-panel. Use the keyboard:
+Press **Cmd+,** on macOS or **Ctrl+,** elsewhere (or **right-click →
+Settings…**) to open the **Settings** panel. Use the keyboard:
 
 - **↑ / ↓** — move between options
 - **← / →** — change the highlighted option (font size, theme opacity,
@@ -147,12 +147,20 @@ macOS leaves `Option+Arrow` to the terminal, so split focus lives on
 the same thing and stays bound. `Ctrl+Shift+N` / `Ctrl+Shift+P` cycles panes on
 every platform.
 
+Right-click a tab for Rename Tab…, Duplicate Tab, Move Tab Left and Right,
+Close Tab and Close Other Tabs; each acts on that tab, even when another tab
+is active.
 Right-click a terminal to reach Copy, Paste and Select All first. A link adds
 Open Link and Copy Link before those actions. Split, Pane, Tab, Window, Title,
 Group and Appearance commands live in submenus. Click a category or press Right
-to enter it; Left or Escape returns to its parent. Hovering a category also
-opens it. Menus and the command palette show native shortcut symbols on macOS
-(for example, ⌘V and ⇧⌘D); other platforms keep Ctrl+Shift+V notation.
+to enter it; Left or Escape returns to its parent. Resting the pointer on a
+category for a fifth of a second also opens it, and an open submenu stays put
+while the pointer heads for it across the other categories, closing a moment
+after the pointer leaves the menu. Moving the
+pointer off the menu, or out of the window, clears its highlight unless a
+submenu is open; the next Down or Up starts again from the top or the bottom.
+Menus and the command palette show native shortcut symbols on macOS (for
+example, ⌘V and ⇧⌘D); other platforms keep Ctrl+Shift+V notation.
 
 Pasting text that contains a newline or a control character other than tab
 asks for confirmation when the receiving program has not enabled bracketed

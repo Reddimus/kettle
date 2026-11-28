@@ -71,8 +71,8 @@ fn pane_reads_keep_history_compact() {
 
     let matches = crate::search::search(&term, "19937");
     assert_eq!(matches.len(), 1);
-    assert_eq!(row_text(term.grid(), matches[0].line), "19937");
-    assert_eq!(matches[0].start_col, 0);
+    assert_eq!(row_text(term.grid(), matches[0].start.line), "19937");
+    assert_eq!(matches[0].start.column, 0);
 
     let mut budget = usize::MAX;
     let restored = crate::restore::snapshot(&term, 100, &mut budget);

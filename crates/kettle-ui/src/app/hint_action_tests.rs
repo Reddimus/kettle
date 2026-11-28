@@ -58,6 +58,24 @@ fn a_copied_file_previews_the_first_a_lane_can_show() {
     );
 }
 
+/// A macOS screenshot copied in Finder previews: its default name holds
+/// the narrow no-break space macOS writes before AM and PM, a space, as
+/// its OSC 8 link from `ls --hyperlink` does too.
+#[test]
+fn a_copied_macos_screenshot_previews() {
+    let root = tempfile::tempdir().unwrap();
+    let shot = root
+        .path()
+        .join("Screenshot 2026-11-26 at 10.00.00\u{202f}AM.png");
+    assert_eq!(
+        copied_preview(std::slice::from_ref(&shot), None, None, None),
+        Some(CopiedPreview::File(shot.clone()))
+    );
+    let url = kettle_core::links::file_url_for_path(&shot).expect("a file URL");
+    assert!(url.contains("%E2%80%AFAM.png"), "{url}");
+    assert!(kettle_core::links::is_safe_url(&url));
+}
+
 /// Copied text previews when it is one path or `file://` link to a file a
 /// lane can show; quotes or a shell's escapes around a path are undone.
 #[cfg(unix)]
@@ -607,14 +625,18 @@ fn file_links_are_gated_by_their_pane() {
         "a b.pdf"
     );
     assert_eq!(link_display_name("file:///home/me/proj/", 48), "proj");
-    // Untrusted names cannot reorder the prompt or push its warning away.
+    // Untrusted names cannot reorder the prompt or push its warning away. A
+    // name hiding a character is no local file, so the link shows as
+    // written: escaped, or with the character itself replaced.
+    for uri in [
+        "file:///home/me/invoice%E2%80%AEfdp.exe",
+        "file:///tmp/a%E2%80%8Bb.pdf",
+    ] {
+        assert_eq!(link_display_name(uri, 48), uri);
+    }
     assert_eq!(
-        link_display_name("file:///home/me/invoice%E2%80%AEfdp.exe", 48),
-        "invoice\u{FFFD}fdp.exe"
-    );
-    assert_eq!(
-        link_display_name("file:///tmp/a%E2%80%8Bb.pdf", 48),
-        "a\u{FFFD}b.pdf"
+        link_display_name("file:///home/me/invoice\u{202E}fdp.exe", 48),
+        "file:///home/me/invoice\u{FFFD}fdp.exe"
     );
     let width = |text: &str| unicode_width::UnicodeWidthStr::width(text);
     let long = link_display_name(&format!("file:///tmp/{}-end.pdf", "x".repeat(200)), 25);
@@ -797,6 +819,10 @@ fn a_path_hint_resolves_to_a_safe_local_file_url() {
             "café/menú.png",
             "file:///home/me/proj/caf%C3%A9/men%C3%BA.png",
         ),
+        // A name holding dots is no climb: the exact quoted `"/tmp/a.."`
+        // opens as it links.
+        ("/tmp/a..", "file:///tmp/a.."),
+        ("/tmp/.../x.txt", "file:///tmp/.../x.txt"),
     ] {
         assert_eq!(url(text).as_deref(), Some(expected), "{text}");
         assert!(

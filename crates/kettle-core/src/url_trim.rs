@@ -17,12 +17,16 @@
 //! Naively keeping the trailing `)` here would leave the `)` glued to the
 //! URL — also wrong.
 //!
-//! The rule that works for both: strip a `)` (or `]` / `}`) only when the
-//! candidate substring has *more closes than opens* of the matching pair.
-//! - `https://en.wikipedia.org/wiki/Foo_(bar)` → 1 open, 1 close, balanced
-//!   → keep the `)`. ✓
-//! - `https://rust-lang.org)` (from `(https://rust-lang.org).`) → 0 opens,
-//!   1 close, unbalanced → strip. ✓
+//! The rule that works for both: strip a `)` (or `]` / `}`) only when no
+//! open of its pair before it is still unclosed, pairing each close with the
+//! nearest unclosed open before it, left to right.
+//! - `https://en.wikipedia.org/wiki/Foo_(bar)` → the `)` closes `(bar` →
+//!   keep it. ✓
+//! - `https://rust-lang.org)` (from `(https://rust-lang.org).`) → no open
+//!   before the `)` → strip. ✓
+//! - `https://x.test/?q=a)b(c)` → the first `)` has no open, but the last
+//!   closes `(c` → keep it. Counting opens and closes over the whole URL
+//!   would blame the last one for the stray first one.
 
 /// Strip URL-tail prose punctuation, bracket-balance-aware. Pure; byte-
 /// level (the punctuation chars and the pairs we count are all
@@ -38,60 +42,90 @@ pub(crate) fn trim_path_trailing(s: &str) -> &str {
 
 fn trim_trailing_inner(s: &str, path: bool) -> &str {
     let bytes = s.as_bytes();
-    let mut opens = [0usize; 3];
-    let mut closes = [0usize; 3];
-    for &byte in bytes {
-        match byte {
-            b'(' => opens[0] += 1,
-            b'[' => opens[1] += 1,
-            b'{' => opens[2] += 1,
-            b')' => closes[0] += 1,
-            b']' => closes[1] += 1,
-            b'}' => closes[2] += 1,
-            _ => {}
-        }
-    }
-    let mut end = bytes.len();
-    while end > 0 {
-        if path
-            && [".", ".."].iter().any(|part| {
-                let prefix = &s[..end];
-                prefix == *part
-                    || prefix
-                        .strip_suffix(part)
-                        .is_some_and(|base| base.ends_with(['/', '\\']))
-            })
-        {
-            break;
-        }
-        let last = bytes[end - 1];
-        let strip = match last {
+    // Whether a close pairs with an open depends only on what precedes it,
+    // so one pass finds the end: just after the last byte that is neither
+    // trailing punctuation nor a close with no open to pair with.
+    let mut unclosed = [0usize; 3];
+    let mut kept = 0;
+    for (at, &byte) in bytes.iter().enumerate() {
+        let keep = match byte {
+            b'(' | b'[' | b'{' => {
+                unclosed[pair(byte)] += 1;
+                true
+            }
+            b')' | b']' | b'}' => {
+                let open = &mut unclosed[pair(byte)];
+                let paired = *open > 0;
+                *open = open.saturating_sub(1);
+                paired
+            }
             // A backtick is never part of a URL (it must be percent-encoded),
             // and a trailing `*` closes Markdown emphasis far more often than
             // it ends a URL: `` `https://x.test/a` `` and `**https://x.test**`.
-            b'.' | b',' | b';' | b':' | b'\'' | b'"' | b'`' | b'*' => true,
-            b')' | b']' | b'}' => {
-                let pair = match last {
-                    b')' => 0,
-                    b']' => 1,
-                    b'}' => 2,
-                    _ => unreachable!(),
-                };
-                if closes[pair] > opens[pair] {
-                    closes[pair] -= 1;
-                    true
-                } else {
-                    false
-                }
-            }
-            _ => false,
+            b'.' | b',' | b';' | b':' | b'\'' | b'"' | b'`' | b'*' => false,
+            _ => true,
         };
-        if !strip {
-            break;
+        if keep {
+            kept = at + 1;
         }
-        end -= 1;
     }
-    &s[..end]
+    if path {
+        // A last component of `.` or `..` names a directory, so it stays.
+        // Any longer run of dots goes whole, after a name (`notes...`) or a
+        // separator (`/usr/lib/...`), as Ghostty reads a path's end, never
+        // just enough of it to leave `..`, which would name the parent.
+        // Callers do not open a path trimmed that way (see
+        // `dot_run_after`). Each run is scanned once, so this stays linear.
+        let mut end = bytes.len();
+        while end > kept {
+            if bytes[end - 1] != b'.' {
+                end -= 1;
+                continue;
+            }
+            let dots = bytes[..end]
+                .iter()
+                .rev()
+                .take_while(|&&b| b == b'.')
+                .count();
+            let start = end - dots;
+            if dots <= 2 && (start == 0 || matches!(bytes[start - 1], b'/' | b'\\')) {
+                return &s[..end];
+            }
+            end = start;
+        }
+    }
+    &s[..kept]
+}
+
+/// Whether two or more dots in a row end a name, among the punctuation
+/// trimming took off a match (`tail`) and the punctuation after it on the
+/// line (`rest`, read at most 16 characters ahead): `/tmp/a..`,
+/// `/tmp/report.pdf,..`. The name may hold those dots or a sentence may
+/// trail off after it, and the shorter name is another file, so a caller
+/// opens no shortened target. `Some` with the length of `tail` up to the
+/// end of its last such run, 0 when the run follows the match; `None` when
+/// there is none: a single dot ends a sentence.
+pub(crate) fn dot_run_after(tail: &str, rest: &str) -> Option<usize> {
+    if let Some(at) = tail.rfind("..") {
+        let more = tail[at + 2..].bytes().take_while(|&b| b == b'.').count();
+        return Some(at + 2 + more);
+    }
+    let after = rest
+        .char_indices()
+        .take(16)
+        .take_while(|&(_, c)| ",;:?!.\"'`)]}>*".contains(c))
+        .last()
+        .map_or("", |(at, c)| &rest[..at + c.len_utf8()]);
+    (after.contains("..") || (tail.ends_with('.') && after.starts_with('.'))).then_some(0)
+}
+
+/// The index of a bracket's pair: `()`, `[]` or `{}`.
+fn pair(byte: u8) -> usize {
+    match byte {
+        b'(' | b')' => 0,
+        b'[' | b']' => 1,
+        _ => 2,
+    }
 }
 
 #[cfg(test)]
@@ -187,6 +221,92 @@ mod tests {
             trim_trailing("https://example.com)))"),
             "https://example.com"
         );
+    }
+
+    /// A trailing close that pairs with an open before it stays, even after
+    /// a stray close earlier in the URL (legal in a query): counting the
+    /// whole URL would strip the wrong one.
+    #[test]
+    fn a_stray_close_earlier_does_not_strip_a_paired_one() {
+        for url in [
+            "https://example.com/search?q=a)b(c)",
+            "https://example.com/a?x=1]y[z]",
+            "https://example.com/a?x=1}y{z}",
+            "https://例.test/路)b(径)",
+        ] {
+            assert_eq!(trim_trailing(url), url);
+            assert_eq!(trim_trailing(&format!("{url}.")), url, "{url}.");
+        }
+        // Only the close with no open before it goes.
+        assert_eq!(
+            trim_trailing("https://x.test/a)b(c))"),
+            "https://x.test/a)b(c)"
+        );
+        // `(bar)` pairs its own close, so the last `)` has none left.
+        assert_eq!(
+            trim_trailing("https://en.wikipedia.org/wiki/Foo_(bar)?x=)"),
+            "https://en.wikipedia.org/wiki/Foo_(bar)?x="
+        );
+        assert_eq!(super::trim_path_trailing("./a)b(c)"), "./a)b(c)");
+        assert_eq!(super::trim_path_trailing("./a)b(c))."), "./a)b(c)");
+    }
+
+    /// A last path component of `.` or `..` names a directory and stays. A
+    /// longer run of dots is an ellipsis, as after a name, and goes whole:
+    /// trimming `...` only down to `..` would name the parent directory.
+    #[test]
+    fn a_dot_run_ending_a_path_never_becomes_its_parent() {
+        use super::trim_path_trailing;
+        for (path, trimmed) in [
+            (".", "."),
+            ("..", ".."),
+            ("/tmp/.", "/tmp/."),
+            ("/tmp/..", "/tmp/.."),
+            (r"C:\x\..", r"C:\x\.."),
+            ("...", ""),
+            ("/tmp/...", "/tmp/"),
+            ("foo/....", "foo/"),
+            (r"C:\x\...", r"C:\x\"),
+            ("/usr/lib/...", "/usr/lib/"),
+            ("dir/notes...", "dir/notes"),
+            ("/tmp/a..", "/tmp/a"),
+            ("/tmp/a.", "/tmp/a"),
+        ] {
+            assert_eq!(trim_path_trailing(path), trimmed, "{path}");
+            for tail in [",", ").", "\".", ";:"] {
+                let candidate = format!("{path}{tail}");
+                assert_eq!(trim_path_trailing(&candidate), trimmed, "{candidate}");
+            }
+        }
+        // Two or more dots trimmed off, or right after, leave the name
+        // uncertain; one ends a sentence.
+        use super::dot_run_after;
+        for (raw, rest, run) in [
+            ("/tmp/a..", "", Some(2)),
+            ("/tmp/a...)", " x", Some(3)),
+            ("/tmp/...", "", Some(3)),
+            ("/tmp/report.pdf,..", "", Some(3)),
+            ("/tmp/report.pdf", ",.. x", Some(0)),
+            ("/tmp/a", "?..", Some(0)),
+            ("/tmp/a.", "", None),
+            ("/tmp/a.)", " x", None),
+            ("/tmp/a.,.", "", None),
+            ("/tmp/..", "", None),
+            ("/tmp/a", ". next", None),
+            ("/tmp/a", &format!("{}..", ",".repeat(20)), None),
+        ] {
+            let trimmed = trim_path_trailing(raw);
+            assert_eq!(
+                dot_run_after(&raw[trimmed.len()..], rest),
+                run,
+                "{raw}{rest}"
+            );
+        }
+        // The run takes linear work however long it is.
+        let long = format!("a/{}", ".".repeat(1_000_000));
+        assert_eq!(trim_path_trailing(&long), "a/");
+        let long = format!("a/b{}", ".".repeat(1_000_000));
+        assert_eq!(trim_path_trailing(&long), "a/b");
     }
 
     #[test]

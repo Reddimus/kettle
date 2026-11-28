@@ -1,4 +1,5 @@
 use super::{gpu_kind_text, modal_accessibility_projection, settings_footer_note, settings_hints};
+use crate::settings::SettingsApply;
 use kettle_i18n::{Language, Translator};
 
 const EN: Translator = Translator::new(Language::En);
@@ -85,6 +86,38 @@ fn settings_accessibility_names_follow_the_ui_language() {
     );
 }
 
+/// While a search lists results from every category, screen readers name
+/// the dialog as its title reads, "Search results", not by the category the
+/// stored row belongs to; with no query they name the open category again.
+#[test]
+fn the_settings_dialog_is_named_search_results_while_searching() {
+    let dialog = |query: &str, tr: &Translator| {
+        let overlay = kettle_render::Overlay {
+            settings: Some(kettle_render::SettingsOverlay {
+                categories: vec![
+                    tr.text(kettle_i18n::Text::SettingsCategoryAppearance)
+                        .into(),
+                ],
+                search_query: query.into(),
+                ..Default::default()
+            }),
+            ..kettle_render::Overlay::default()
+        };
+        modal_accessibility_projection(&overlay, (800.0, 600.0), (8.0, 16.0), 1.0, tr)
+            .nodes
+            .iter()
+            .find(|(_, node)| node.role() == accesskit::Role::Dialog)
+            .and_then(|(_, node)| node.label().map(str::to_string))
+            .unwrap()
+    };
+    assert_eq!(dialog("qqzzxx", &EN), "Settings, Search results");
+    assert_eq!(
+        dialog("qqzzxx", &ES),
+        "Configuración, Resultados de la búsqueda"
+    );
+    assert_eq!(dialog("", &EN), "Settings, Appearance");
+}
+
 #[test]
 fn gpu_kinds_translate_and_unknown_kinds_pass_through() {
     assert_eq!(gpu_kind_text(&EN, "Integrated"), "Integrated");
@@ -101,7 +134,7 @@ fn notes_follow_the_ui_language() {
             None,
             Some("completion-overlay"),
             false,
-            false,
+            SettingsApply::None,
             false,
             None
         )
@@ -172,7 +205,7 @@ fn agent_previews_note_explains_the_effective_policy() {
             None,
             Some("agent-display"),
             false,
-            false,
+            SettingsApply::None,
             false,
             Some(Text::SettingsNoteAgentPreviews)
         )
@@ -186,7 +219,7 @@ fn agent_previews_note_explains_the_effective_policy() {
             None,
             Some("font-size"),
             false,
-            false,
+            SettingsApply::None,
             false,
             Some(Text::SettingsNoteAgentPreviews)
         ),
@@ -235,7 +268,7 @@ fn claude_code_note_names_why_new_panes_get_no_plugin() {
             None,
             Some("agent-display-claude-code"),
             false,
-            false,
+            SettingsApply::None,
             false,
             Some(Text::SettingsNoteClaudeCodeForbidden)
         )
@@ -278,7 +311,7 @@ fn codex_note_names_why_new_panes_get_no_codex() {
             None,
             Some("agent-display-codex"),
             false,
-            false,
+            SettingsApply::None,
             false,
             Some(Text::SettingsNoteCodexNewPanes)
         )
@@ -482,7 +515,15 @@ fn agent_display_reloads_widen_the_live_policy_once() {
 #[test]
 fn ordinary_rows_have_no_note_and_dependencies_are_contextual() {
     assert_eq!(
-        settings_footer_note(&EN, None, Some("font-size"), false, false, false, None),
+        settings_footer_note(
+            &EN,
+            None,
+            Some("font-size"),
+            false,
+            SettingsApply::None,
+            false,
+            None
+        ),
         None
     );
     assert_eq!(
@@ -491,7 +532,7 @@ fn ordinary_rows_have_no_note_and_dependencies_are_contextual() {
             None,
             Some("completion-overlay"),
             false,
-            false,
+            SettingsApply::None,
             false,
             None
         )
@@ -499,7 +540,16 @@ fn ordinary_rows_have_no_note_and_dependencies_are_contextual() {
         Some("Applies to new shells.")
     );
     assert_eq!(
-        settings_footer_note(&EN, None, Some("window-blur"), false, false, false, None).as_deref(),
+        settings_footer_note(
+            &EN,
+            None,
+            Some("window-blur"),
+            false,
+            SettingsApply::None,
+            false,
+            None
+        )
+        .as_deref(),
         Some("Blur requires background opacity below 100%. Applies to new windows.")
     );
 }
@@ -508,7 +558,16 @@ fn ordinary_rows_have_no_note_and_dependencies_are_contextual() {
 fn pending_notice_does_not_infer_gpu_changes_from_the_current_category() {
     let pending = "Restart Kettle or open a new window to apply pending changes.";
     for key in ["window-blur", "background-opacity", "gpu", "gpu-backend"] {
-        let note = settings_footer_note(&EN, None, Some(key), false, true, false, None).unwrap();
+        let note = settings_footer_note(
+            &EN,
+            None,
+            Some(key),
+            false,
+            SettingsApply::NewWindow,
+            false,
+            None,
+        )
+        .unwrap();
         assert_eq!(note.lines().last(), Some(pending));
         // A blur/opacity edit followed by a switch to Graphics has the
         // same pending flag; an active adapter does not identify its cause.
@@ -517,7 +576,7 @@ fn pending_notice_does_not_infer_gpu_changes_from_the_current_category() {
             Some("Active GPU: Test (Integrated, Vulkan)"),
             Some(key),
             false,
-            true,
+            SettingsApply::NewWindow,
             false,
             None,
         )
@@ -531,7 +590,7 @@ fn pending_notice_does_not_infer_gpu_changes_from_the_current_category() {
             Some("Active GPU: Test"),
             Some("gpu"),
             false,
-            false,
+            SettingsApply::None,
             false,
             None
         )
@@ -541,9 +600,40 @@ fn pending_notice_does_not_infer_gpu_changes_from_the_current_category() {
 }
 
 #[test]
+fn a_saved_renderer_change_requires_restarting_even_on_another_settings_page() {
+    for (tr, expected) in [
+        (&EN, "Restart Kettle to apply graphics changes."),
+        (&ES, "Reiniciar Kettle para aplicar los cambios gráficos."),
+    ] {
+        for key in ["renderer", "window-blur"] {
+            let note = settings_footer_note(
+                tr,
+                None,
+                Some(key),
+                false,
+                SettingsApply::Restart,
+                false,
+                None,
+            )
+            .unwrap();
+            assert_eq!(note.lines().last(), Some(expected));
+            assert!(!note.contains(tr.text(kettle_i18n::Text::SettingsNoteRestart)));
+        }
+    }
+}
+
+#[test]
 fn pending_changes_are_never_hidden_by_an_appearance_hint() {
-    let note =
-        settings_footer_note(&EN, None, Some("window-blur"), false, true, false, None).unwrap();
+    let note = settings_footer_note(
+        &EN,
+        None,
+        Some("window-blur"),
+        false,
+        SettingsApply::NewWindow,
+        false,
+        None,
+    )
+    .unwrap();
     assert!(note.contains("below 100%"));
     assert!(note.contains("pending changes"));
     let note = settings_footer_note(
@@ -551,7 +641,7 @@ fn pending_changes_are_never_hidden_by_an_appearance_hint() {
         Some("Active GPU: Test (Integrated, Vulkan)"),
         Some("gpu"),
         false,
-        true,
+        SettingsApply::NewWindow,
         false,
         None,
     )
@@ -667,20 +757,53 @@ fn the_settings_hints_fit_a_default_window_in_every_language() {
     }
 }
 
-/// The Language row says a change waits for a restart; once the saved
-/// language differs from the running one, every row says so, ahead of the
-/// general restart note, which a new window would satisfy.
+/// The Language row's description says a change waits for a restart, so
+/// its footer repeats nothing while the choice is the running language.
+/// Once the saved language differs from the running one, every row says
+/// so, ahead of the general restart note, which a new window would satisfy.
 #[test]
 fn a_language_change_waits_for_a_restart() {
-    assert_eq!(
-        settings_footer_note(&EN, None, Some("language"), false, false, false, None).as_deref(),
-        Some("Applies when Kettle restarts.")
+    for tr in [EN, ES] {
+        assert_eq!(
+            settings_footer_note(
+                &tr,
+                None,
+                Some("language"),
+                false,
+                SettingsApply::None,
+                false,
+                None
+            ),
+            None
+        );
+    }
+    assert!(
+        EN.text(kettle_i18n::Text::SettingsDescriptionFieldLanguage)
+            .contains("restarting Kettle")
     );
     assert_eq!(
-        settings_footer_note(&ES, None, Some("language"), false, false, true, None).as_deref(),
+        settings_footer_note(
+            &ES,
+            None,
+            Some("language"),
+            false,
+            SettingsApply::None,
+            true,
+            None
+        )
+        .as_deref(),
         Some("Reiniciar Kettle para cambiar el idioma.")
     );
-    let note = settings_footer_note(&EN, None, Some("font-size"), false, true, true, None).unwrap();
+    let note = settings_footer_note(
+        &EN,
+        None,
+        Some("font-size"),
+        false,
+        SettingsApply::NewWindow,
+        true,
+        None,
+    )
+    .unwrap();
     assert_eq!(
         note.lines().collect::<Vec<_>>(),
         [
@@ -731,17 +854,35 @@ fn unavailable_blur_drops_the_blur_hint() {
     for tr in [EN, ES] {
         for key in ["window-blur", "background-opacity"] {
             assert_eq!(
-                settings_footer_note(&tr, None, Some(key), false, false, false, None).as_deref(),
+                settings_footer_note(
+                    &tr,
+                    None,
+                    Some(key),
+                    false,
+                    SettingsApply::None,
+                    false,
+                    None
+                )
+                .as_deref(),
                 Some(tr.text(Text::SettingsNoteBlur)),
                 "{key}"
             );
             assert_eq!(
-                settings_footer_note(&tr, None, Some(key), true, false, false, None),
+                settings_footer_note(&tr, None, Some(key), true, SettingsApply::None, false, None),
                 None,
                 "{key}"
             );
             assert_eq!(
-                settings_footer_note(&tr, None, Some(key), true, true, false, None).as_deref(),
+                settings_footer_note(
+                    &tr,
+                    None,
+                    Some(key),
+                    true,
+                    SettingsApply::NewWindow,
+                    false,
+                    None
+                )
+                .as_deref(),
                 Some(tr.text(Text::SettingsNoteRestart)),
                 "{key}"
             );
@@ -752,7 +893,7 @@ fn unavailable_blur_drops_the_blur_hint() {
                 None,
                 Some("completion-overlay"),
                 true,
-                false,
+                SettingsApply::None,
                 false,
                 None
             )
@@ -837,4 +978,25 @@ fn the_settings_projection_carries_reset_and_stable_widths() {
     ] {
         assert!(mouse.contains(wiring), "{wiring}");
     }
+}
+
+/// While the search field holds a query the panel's title says it lists
+/// search results, rather than naming the category it opened on.
+#[test]
+fn the_settings_title_says_search_results_while_searching() {
+    use kettle_i18n::Text;
+    assert_eq!(
+        super::settings_title(&EN, Text::SettingsCategoryAppearance, ""),
+        "Appearance"
+    );
+    assert_eq!(
+        super::settings_title(&EN, Text::SettingsCategoryAppearance, "font"),
+        "Search results"
+    );
+    assert_eq!(
+        super::settings_title(&ES, Text::SettingsCategoryGraphics, "qqzz"),
+        "Resultados de la búsqueda"
+    );
+    let source = include_str!("modals.rs");
+    assert!(source.contains("title: settings_title(tr, active.name, nav.query.text()),"));
 }

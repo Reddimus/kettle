@@ -207,6 +207,7 @@ fn context_menu_hover_preserves_text_damage_key() {
         panel_w_clamped: 240.0,
         panel_h_clamped: 120.0,
         a11y_label: None,
+        status: None,
         picker_header_height: 0.0,
         picker_footer: None,
     };
@@ -611,7 +612,7 @@ fn bg_image_cache_keys_on_blur_and_frees_on_disable() {
     // Animated backgrounds advance on the media clock, gated for proactive
     // waking on focus (battery), and never index out of bounds.
     assert!(
-        src.contains("bg_image::bg_current_frame(&c.gaps, c.started.elapsed().as_millis())")
+        src.contains("background_clock(held, c.started).as_millis(),")
             && src.contains("idx.min(c.frames.len() - 1)"),
         "animated bg must pick the clock frame, bounded to the frame count"
     );
@@ -629,7 +630,7 @@ fn wallpaper_draws_behind_quads_in_its_own_pass() {
     // A dedicated pipeline exists and is constructed. It draws with the
     // image pipeline the renderer shares, but keeps its own layer.
     assert!(
-        src.contains("bg_imgs: imgpipe::ImagePipeline,") && src.contains("let bg_imgs = shared"),
+        src.contains("bg_imgs: ImageLayer,") && src.contains("let bg_imgs = shared"),
         "the wallpaper must have its own ImagePipeline field + construction"
     );
     // The wallpaper items go to bg_img_items, inline images stay in img_items.
@@ -664,7 +665,7 @@ fn a_renderer_builds_its_quad_and_image_layers_from_shared_pipelines() {
     let src = super::production_source();
     let with_gpu = src
         .split_once("    fn with_gpu(\n")
-        .and_then(|(_, rest)| rest.split_once("        Ok(Renderer {"))
+        .and_then(|(_, rest)| rest.split_once("    pub(crate) fn with_cpu("))
         .map(|(body, _)| body)
         .expect("with_gpu builds the renderer");
     assert!(

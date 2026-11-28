@@ -208,6 +208,15 @@ impl App {
                     kettle_render::avoid_hint_labels(&mut status, pane, &hint_bounds);
                     pane_statuses.push(status);
                 }
+            } else if let Some(status) = no_hints_status(
+                &ws.no_hints_notice,
+                ws.mux.active_focus(),
+                pane,
+                status_cell,
+                std::time::Instant::now(),
+                tr,
+            ) {
+                pane_statuses.push(status);
             } else if let Some(status) =
                 self.selection_hint_status(ws, pane, status_cell, std::time::Instant::now())
             {
@@ -347,7 +356,10 @@ impl App {
         // Project the settings overlay (independent of search, like
         // the confirm dialog). Values are read from the live Config so the
         // panel reflects the current state (incl. external reloads).
-        let settings_overlay = self.settings_overlay_projection(ws);
+        let settings_overlay = self.settings_overlay_projection(ws).map(|mut set| {
+            set.hover = self.settings_hover(ws, &set);
+            set
+        });
         // Terminator parity: only a LIVE drag with a latched target paints a
         // hint. An armed-but-unmoved press is still a click, and a live drag
         // over a seam has no target to preview.
@@ -802,6 +814,7 @@ impl App {
             return;
         }
         let overlay = self.overlay(ws, reuse_pane_snapshots);
+        remember_picker_scroll(ws, overlay.context_menu.as_ref());
         // Search and completion state are semantic accessibility state. Reuse
         // the exact projection this frame will draw instead of rebuilding the
         // full overlay twice for the accessibility key and tree. Snapshot reuse
@@ -809,7 +822,8 @@ impl App {
         // must not be stranded by a run of context-menu hover frames.
         self.publish_accessibility_if_due(ws, &overlay);
         let area = self.area(ws);
-        let tabbar = self.tab_bar(ws);
+        let mut tabbar = self.tab_bar(ws);
+        self.attach_lane_tooltip(ws, &mut tabbar);
         // Build status bar BEFORE the &mut renderer borrow
         // since `build_status_bar` reads ws.mux / self.cfg
         // immutably.
@@ -1045,6 +1059,7 @@ impl App {
             live_decorated,
             live_fullscreen,
         ));
+        self.sync_background_motion(renderer, std::time::Instant::now());
         // Any frame while the window server blinks the cursor ends that blink.
         // The frame presents in one Core Animation transaction with hiding the
         // layer, so the screen never shows new content under a stale cursor,
@@ -1110,6 +1125,12 @@ impl App {
                     let _ = proxy.send_event(UserEvent::CardsTipClaimed(claimed));
                 },
             );
+        }
+        // The Settings hover the window shows, for the next pointer move to
+        // compare with (`track_settings_hover`). A frame the gate held back,
+        // or one that did not present, leaves the one still on screen.
+        if presented {
+            ws.settings_hover = overlay.settings.as_ref().and_then(|set| set.hover);
         }
         // C1 records only a presented scene. Reuse that scene immediately,
         // before any renderer setter can invalidate it, and with the same cfg.
@@ -1215,6 +1236,14 @@ impl App {
                         // the next acquire.
                         ws.frame_recovery
                             .schedule_transient_retry(std::time::Instant::now());
+                    }
+                    FrameOutcome::Paced => {
+                        debug_assert!(!presented);
+                        // A CPU window's compositor still shows the last
+                        // frame, so nothing was drawn and the damage stays.
+                        // The presenter tick asks for the redraw once the
+                        // frame callback comes (`tick_cpu_presenter`).
+                        ws.output_pacer.paced();
                     }
                     FrameOutcome::Occluded => {
                         debug_assert!(!presented);

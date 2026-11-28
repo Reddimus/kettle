@@ -189,6 +189,8 @@ fn every_spanish_message_has_a_review_status() {
                     key.as_str(),
                     "hint_legend"
                         | "hint_legend_plain"
+                        // Also the polite status a screen reader hears.
+                        | "hint_none"
                         | "link_open_click"
                         | "link_open_command_click"
                         | "link_open_control_click"
@@ -206,6 +208,7 @@ fn every_spanish_message_has_a_review_status() {
                         | "osc52_blocked_read_by"
                         | "osc52_blocked_write_by"
                         | "mouse_override_hint"
+                        | "mouse_override_menu_hint"
                         | "font_size_chip"
                         // The notification toast's Show button is named by
                         // it when the tab has no title, and its overflow line
@@ -285,11 +288,11 @@ fn the_mouse_override_hint_does_not_name_the_product() {
         include_str!("../locales/es.toml"),
     ] {
         let table: toml::Table = catalogue.parse().unwrap();
-        let text = table["mouse_override_hint"]
-            .as_str()
-            .expect("mouse_override_hint is a plain message");
-        assert!(text.contains("Shift"), "{text}");
-        assert!(!text.to_lowercase().contains("kettle"), "{text}");
+        for key in ["mouse_override_hint", "mouse_override_menu_hint"] {
+            let text = table[key].as_str().expect("plain Shift hint message");
+            assert!(text.contains("Shift"), "{text}");
+            assert!(!text.to_lowercase().contains("kettle"), "{text}");
+        }
     }
 }
 
@@ -457,7 +460,7 @@ fn settings_descriptions_are_short_and_translated() {
         }
     }
     assert_eq!(
-        descriptions, 67,
+        descriptions, 68,
         "every curated field and keybind has its own description"
     );
 }

@@ -30,7 +30,7 @@ LIMIT = 16 * 1024 * 1024
 ADOPTED_BATCH = 32
 ADOPTED_BATCHES = 32
 ADOPTED_INVENTORY_BYTES = 64 * 1024
-GPU_CONFIG = 'gpu-backend = gl\ngpu-force-software = true\n'
+RENDERER_CONFIG = 'renderer = auto\n'
 SOURCES = [
     'https://wayland.pages.freedesktop.org/weston/toc/running-weston.html',
     'https://gitlab.freedesktop.org/wayland/weston/-/raw/13.0/man/weston.man',
@@ -110,6 +110,7 @@ def make_environment(capture, root):
     environment = {'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8',
                    'TZ': 'UTC', 'TERM': 'xterm-256color',
                    'LIBGL_ALWAYS_SOFTWARE': '1', 'GALLIUM_DRIVER': 'llvmpipe',
+                   '__EGL_VENDOR_LIBRARY_FILENAMES': '/usr/share/glvnd/egl_vendor.d/50_mesa.json',
                    'XDG_SESSION_TYPE': 'wayland', 'GDK_BACKEND': 'wayland',
                    'WINIT_UNIX_BACKEND': 'wayland',
                    'RUST_LOG': 'info', 'NO_AT_BRIDGE': '1',
@@ -162,17 +163,6 @@ def verify_fonts(listing, expected):
     return sorted(actual)
 
 
-def verify_gpu(text):
-    text = text.replace('\r\n', '\n')
-    fields = dict(re.findall(r'^([^:\n]+):\s*([^\n]+)$', text, re.M))
-    if (not re.match(r'^llvmpipe\b', fields.get('Adapter', ''), re.I)
-            or fields.get('Adapter type') != 'Cpu' or fields.get('Backend') != 'Gl'
-            or fields.get('Backend fallback') != 'no'
-            or fields.get('Driver info', '') in ('', '<unknown>')):
-        raise RuntimeError('GPU diagnostic must report actual GL llvmpipe CPU and driver version')
-    return fields
-
-
 def verify_weston(text):
     text = text.replace('\r\n', '\n')
     backend = re.findall(r'Loading module [^\n]*[/\\](headless-backend\.so)[\'\"]?', text)
@@ -185,16 +175,12 @@ def verify_weston(text):
     return {'backend': backend[-1], 'renderer': renderer[-1], 'gl_version': version[-1]}
 
 
-def verify_live(text, gpu):
+def verify_live(text):
     if 'Fallback to loading from known font dir paths.' in text:
         raise RuntimeError('live fontdb fell back to system font directories')
-    choices = re.findall(r'(?:using software adapter|selected GPU) (.+) \(([^\n]+)\)', text)
-    if not choices:
-        raise RuntimeError('live Kettle did not report its selected adapter')
-    for adapter, backend in choices:
-        if adapter != gpu['Adapter'] or backend not in ('GL', 'Software, GL'):
-            raise RuntimeError(f'live adapter differs from verified llvmpipe: {adapter} ({backend})')
-    return choices
+    choices = re.findall(r'renderer: (CPU, presenting with [^\r\n]+|GPU)(?=\r?$)', text, re.M)
+    if not choices or any(choice != 'CPU, presenting with wl_shm (Wayland)' for choice in choices):
+        raise RuntimeError(f'live Kettle must use the CPU renderer with wl_shm: {choices}')
 
 
 class Native:
@@ -529,19 +515,19 @@ def wait_ready(native, processes, paths, timeout):
     raise RuntimeError('private compositor/bus startup timed out')
 
 
-def guarded_smoke(smoke, gpu, directory, native):
+def guarded_smoke(smoke, directory, native):
     """Keep the original helper's PTY ownership and cleanup; retain every log."""
     class Guarded(smoke.LiveKettle):
         def __enter__(self):
             with self.cfg.open('a', encoding='utf-8') as config:
-                config.write('\n' + GPU_CONFIG)
+                config.write('\n' + RENDERER_CONFIG)
             try:
                 live = super().__enter__()
             except BaseException:
                 self.retain_and_drain()
                 raise
             try:
-                verify_live(read_text(self.log), gpu)
+                verify_live(read_text(self.log))
                 return live
             except BaseException:
                 # __enter__ failures do not receive a with-statement __exit__.
@@ -549,9 +535,9 @@ def guarded_smoke(smoke, gpu, directory, native):
                 raise
 
         def screenshot(self, path):
-            verify_live(read_text(self.log), gpu)
+            verify_live(read_text(self.log))
             result = super().screenshot(path)
-            verify_live(read_text(self.log), gpu)
+            verify_live(read_text(self.log))
             return result
 
         def __exit__(self, *args):
@@ -575,7 +561,8 @@ def guarded_smoke(smoke, gpu, directory, native):
             index = len(list(directory.glob('fixture-*.log')))
             target = directory / f'fixture-{index:03d}.log'
             if self.log.exists():
-                target.write_text(read_text(self.log), encoding='utf-8')
+                # As read: no newline translation (Windows would double a CRLF).
+                target.write_text(read_text(self.log), encoding='utf-8', newline='')
             with (directory / 'fixtures.jsonl').open('a', encoding='utf-8') as output:
                 output.write(json.dumps({'log': target.name, 'pid': self.proc.pid if self.proc else None,
                                          'cleanup': getattr(self, '_termination_receipt', None)}) + '\n')
@@ -626,17 +613,13 @@ def run_session(capture, smoke, native, environment, root, directory, argv, kett
             'kettle': native.query('kettle-version', [kettle, '--version']).strip(),
             'packages': native.query('package-versions', ['dpkg-query', '-W',
                 '-f=${Package} ${Version}\n', 'weston', 'libgl1-mesa-dri',
-                'libegl-mesa0', 'mesa-vulkan-drivers', 'fontconfig', 'libfontconfig1',
+                'libegl-mesa0', 'fontconfig', 'libfontconfig1',
                 'dbus-daemon']).strip()}
         fonts = configure_fonts(root)
         (directory / 'fonts.conf').write_bytes((root / 'fonts.conf').read_bytes())
         listing = native.query('font-list', ['fc-list', '--format', '%{file}\n'])
         manifest['font_files_sha256'] = fonts
         manifest['font_inventory'] = verify_fonts(listing, fonts)
-        config = root / 'gpu.cfg'
-        config.write_text('record = false\nrestore-session = false\ncheck-for-updates = false\n'
-                          + GPU_CONFIG, encoding='utf-8')
-        (directory / 'gpu.cfg').write_bytes(config.read_bytes())
         # No activation programs or inherited system/session bus configuration.
         bus_config = root / 'dbus.conf'
         bus_config.write_text('<busconfig><type>session</type><listen>'
@@ -660,11 +643,10 @@ def run_session(capture, smoke, native, environment, root, directory, argv, kett
         wait_ready(native, [bus, weston], [root / 'bus', Path(environment['WAYLAND_DISPLAY'])],
                    startup_timeout)
         manifest['weston'] = verify_weston(read_text(weston.path))
-        manifest['gpu'] = verify_gpu(native.query('gpu-info', [kettle, '--config', str(config), '--gpu-info']))
         save(directory / 'manifest.json', manifest)
         sys.argv = ['capture-ui-states.py', *argv]
         with file_limit(), bounded(run_timeout):
-            code = capture.main(smoke_loader=lambda: guarded_smoke(smoke, manifest['gpu'], directory, native))
+            code = capture.main(smoke_loader=lambda: guarded_smoke(smoke, directory, native))
         if code != 0:
             raise RuntimeError(f'UI-state capture/comparison returned {code}')
         # A compositor/bus crash after the socket appeared must not count as pass.
@@ -720,7 +702,7 @@ def main(argv=None, *, system=platform.system):
     directory = Path(tempfile.mkdtemp(prefix='run-', dir=diagnostics.resolve()))
     print(f'UI Wayland diagnostics: {directory}', flush=True)
     # Short private paths avoid AF_UNIX's 108-byte limit even in long worktrees.
-    root = Path(tempfile.mkdtemp(prefix='kettle-ui-wayland-', dir='/tmp'))
+    root = Path(tempfile.mkdtemp(prefix='kw-', dir=tempfile.gettempdir()))
     previous_umask = os.umask(0o077)
     old_handlers = {}
     try:

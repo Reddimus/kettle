@@ -20,9 +20,10 @@ impl MenuOrigin {
     pub(super) fn shell_items(
         self,
         shells: Option<&[kettle_core::term::ShellChoice]>,
+        profiles: Option<&[String]>,
         tr: &kettle_i18n::Translator,
     ) -> Vec<ContextMenuItem> {
-        let mut items = App::shell_menu_items(shells, tr);
+        let mut items = App::shell_menu_items(shells, profiles, tr);
         if matches!(self, Self::NewTab { compact: true })
             && let Some(end) = items.iter().position(|item| {
                 matches!(
@@ -341,21 +342,13 @@ impl App {
     /// `enabled` flag is computed from current state: Copy needs a
     /// selection, Select Command Output a right-click on a command's output
     /// (`clicked_row`), the split rows need an unzoomed tab, and Ungroup needs
-    /// any pane in the active tab to be in a group. `show_context_menu` runs the list
-    /// through `filter_disabled`, which hides disabled rows and the
-    /// separators they would orphan (Terminator-style) instead of greying
-    /// them out. That cuts visual clutter and leaves every visible row
-    /// actionable.
+    /// any pane in the active tab to be in a group. `show_context_menu`
+    /// hides most disabled rows. Copy remains visible and dimmed.
     pub(super) fn context_menu_items(
         &mut self,
         ws: &mut WindowState,
         clicked_row: Option<u64>,
     ) -> Vec<ContextMenuItem> {
-        let has_selection = ws
-            .mux
-            .focused()
-            .and_then(|p| p.term.term.lock().ok().map(|t| t.selection.is_some()))
-            .unwrap_or(false);
         let has_group = ws
             .mux
             .tab_pane_ids(ws.mux.active)
@@ -381,22 +374,11 @@ impl App {
             .unwrap_or(false);
         use kettle_i18n::Text as T;
         let tr = self.ui_text;
+        let [copy, paste, select_all] = terminal_edit_menu_rows(ws, tr);
         let mut items = vec![
-            ContextMenuItem::Item {
-                label: tr.text(T::MenuCopy),
-                action: Action::Copy,
-                enabled: has_selection,
-            },
-            ContextMenuItem::Item {
-                label: tr.text(T::MenuPaste),
-                action: Action::Paste,
-                enabled: true,
-            },
-            ContextMenuItem::Item {
-                label: tr.text(T::MenuSelectAll),
-                action: Action::SelectAll,
-                enabled: true,
-            },
+            copy,
+            paste,
+            select_all,
             // iTerm2, Terminal.app and Konsole keep find and clear one
             // right-click away, not behind a submenu.
             ContextMenuItem::Item {
@@ -567,25 +549,7 @@ impl App {
     }
 
     pub(super) fn append_profile_submenu_items(&self, items: &mut Vec<ContextMenuItem>) {
-        let profile_names = kettle_config::Config::list_profiles();
-        if profile_names.is_empty() {
-            return;
-        }
-        items.push(ContextMenuItem::Separator);
-        let inner: Vec<ContextMenuItem> = profile_names
-            .into_iter()
-            .map(|name| ContextMenuItem::ProfileChoice {
-                label: name.clone(),
-                profile: name,
-            })
-            .collect();
-        items.push(ContextMenuItem::Submenu {
-            label: self
-                .ui_text
-                .text(kettle_i18n::Text::MenuProfile)
-                .to_string(),
-            items: inner,
-        });
+        append_profile_choices(items, self.profile_inventory.snapshot(), &self.ui_text);
     }
 
     /// Append a "Theme…" entry that opens the searchable theme picker, which
@@ -781,7 +745,9 @@ impl App {
         self.append_preferences_submenu_items(&mut items);
         let mut items = grouped_terminal_menu(items, tr);
         let shift_over_tracking = shift_menu_hint_due(ws, offer_copied, in_focused_pane, &self.cfg);
-        let info_columns = self.context_menu_info_columns(ws, &items);
+        let (sw, _) = self.context_menu_surface(ws);
+        let (cw, _) = self.menu_cell(ws);
+        let info_columns = context_menu_info_columns(sw, cw);
         prepend_mouse_override_row(&mut items, shift_over_tracking, info_columns, tr);
         self.show_context_menu(ws, items, px, py);
     }
@@ -854,6 +820,7 @@ impl App {
         self.release_held_buttons(ws, |_| true);
         ws.card_press = None;
         ws.scrollback_pill_press = None;
+        ws.cancel_strip_presses();
         ws.last_mouse_cell = None;
         ws.tab_drag_active = false;
         ws.tab_drag_press = None;
@@ -872,13 +839,12 @@ impl App {
             self.abandon_torn_drag(Some(ws));
         }
 
-        // Terminator menu UX: every visible row is actionable.
         let items = filter_disabled(items);
         let highlight = items.iter().position(item_is_dispatchable).unwrap_or(0);
         let (cw, ch) = self.menu_cell(ws);
         let row_h = kettle_render::menu::row_height(ch);
         let sep_h = kettle_render::menu::SEP_H;
-        let panel_h: f32 = items
+        let natural_h: f32 = items
             .iter()
             .map(|it| match it {
                 ContextMenuItem::Separator => sep_h,
@@ -894,9 +860,13 @@ impl App {
                 | ContextMenuItem::UrlItem { .. }
                 | ContextMenuItem::Media { .. }
                 | ContextMenuItem::Preview { .. }
+                | ContextMenuItem::CloseOtherTabs { .. }
                 | ContextMenuItem::Info { .. } => row_h,
             })
             .sum();
+        // As tall as it will be drawn, so placement flips on the real size.
+        let (sw, sh) = self.context_menu_surface(ws);
+        let panel_h = natural_h.min(context_menu_height_limit(sh, row_h));
         // Dropdown parity: the width budget includes each row's
         // right-aligned shortcut hint (+2 spacer columns) — the same formula
         // the renderer's `menu_row_chars` uses, kept in lockstep.
@@ -908,7 +878,6 @@ impl App {
             .max()
             .unwrap_or(0) as f32;
         let panel_w = kettle_render::menu::panel_width(max_columns, cw);
-        let (sw, sh) = self.context_menu_surface(ws);
         if !context_menu_surface_can_fit_row((sw, sh), (cw, ch)) {
             ws.context_menu = None;
             if let Some(window) = &ws.window {
@@ -917,7 +886,18 @@ impl App {
             return;
         }
         let panel = clamp_context_menu_panel((panel_w, panel_h), (sw, sh));
-        let anchor = clamp_context_menu_anchor((px, py), panel, (sw, sh));
+        // A pointer's menu always fits: it slides onto the window.
+        let Some(placement) = place_context_menu(MenuAnchor::point(px, py), panel, (sw, sh), row_h)
+        else {
+            ws.context_menu = None;
+            return;
+        };
+        let anchor = placement.origin;
+        // Opened under the pointer, as a right-click opens it.
+        let at_pointer = (px, py) == (ws.cursor.x as f32, ws.cursor.y as f32);
+        ws.context_menu_session =
+            ContextMenuSession::opened(placement.max_h, at_pointer.then_some((px, py)));
+        ws.context_menu_session.anchor = Some(MenuAnchor::point(px, py));
         let anchor_scale = ws
             .window
             .as_ref()
@@ -939,6 +919,64 @@ impl App {
         }
     }
 
+    /// Place the open menu's own panel for the text line `anchor`, below the
+    /// line or above it, never over it (`place_context_menu`). When not one
+    /// complete row fits beside the line, the menu closes.
+    pub(super) fn place_context_menu_at_line(&self, ws: &mut WindowState, anchor: MenuAnchor) {
+        ws.context_menu_session.root_max_h = None;
+        let root = ws
+            .context_menu
+            .as_ref()
+            .map(|menu| menu.drill_stack.first().map(ContextMenuLevel::as_state));
+        let geometry = match &root {
+            Some(Some(level)) => self.context_menu_level_geometry(ws, level, true),
+            Some(None) => self.context_menu_geometry(ws),
+            None => None,
+        };
+        let Some((_, panel)) = geometry else {
+            return;
+        };
+        let (_, cell_h) = self.menu_cell(ws);
+        let row_h = kettle_render::menu::row_height(cell_h);
+        let surface = self.context_menu_surface(ws);
+        let placement = place_context_menu(anchor, panel, surface, row_h);
+        if let Some(placement) = placement {
+            ws.context_menu_session.root_max_h = placement.max_h;
+            ws.context_menu_session.line = true;
+            ws.context_menu_session.anchor = Some(anchor);
+            if let Some(menu) = ws.context_menu.as_mut()
+                && place_menu_root(menu, placement.origin)
+            {
+                ws.context_menu_session.pointer.cancel_pending();
+                ws.accessibility_pending = true;
+            }
+            self.reclamp_context_menu(ws, surface);
+        } else {
+            ws.context_menu = None;
+        }
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
+    /// The text line a menu opened from the keyboard at `point` stays beside.
+    pub(super) fn text_line_anchor(&self, ws: &WindowState, (x, y): (f32, f32)) -> MenuAnchor {
+        let (_, cell_h) = self.menu_cell(ws);
+        MenuAnchor::line(x, y - cell_h * 0.5, y + cell_h * 0.5)
+    }
+
+    /// After a resize, place a menu opened from the keyboard beside the text
+    /// cursor's line again, wherever the reflow moved it.
+    pub(super) fn follow_line_menu(&self, ws: &mut WindowState) {
+        if ws.context_menu.is_none() || !ws.context_menu_session.line {
+            return;
+        }
+        if let Some(point) = self.keyboard_menu_point(ws) {
+            let line = self.text_line_anchor(ws, point);
+            self.place_context_menu_at_line(ws, line);
+        }
+    }
+
     /// The surface a menu opens on, in physical pixels.
     fn context_menu_surface(&self, ws: &WindowState) -> (f32, f32) {
         ws.renderer
@@ -948,22 +986,6 @@ impl App {
                 (w as f32, h as f32)
             })
             .unwrap_or((800.0, 600.0))
-    }
-
-    /// How many columns an Info line may take in a menu of `items`, measured
-    /// as `show_context_menu` measures the panel.
-    fn context_menu_info_columns(&self, ws: &WindowState, items: &[ContextMenuItem]) -> usize {
-        let items = filter_disabled(items.to_vec());
-        let hints = self.menu_item_hints(&items);
-        let widest = items
-            .iter()
-            .zip(hints.iter())
-            .map(|(item, hint)| context_menu_item_columns(item, hint))
-            .max()
-            .unwrap_or(0);
-        let (cw, _) = self.menu_cell(ws);
-        let (sw, _) = self.context_menu_surface(ws);
-        context_menu_info_columns(widest, sw, cw)
     }
 
     /// The renderer's FRACTIONAL cell metrics, for menu geometry. `cell_px`
@@ -989,18 +1011,12 @@ impl App {
 
     /// The new-tab `▾` dropdown's rows — the detected
     /// shells, then Windows Terminal's bottom section (Settings / Command
-    /// palette / Keyboard shortcuts / Help / About) behind a separator. Pure over the shell list so the
-    /// menu shape is unit-testable.
+    /// palette / Keyboard shortcuts / Help / About) behind a separator. Pure
+    /// over the cached shell and profile lists so the menu shape is
+    /// unit-testable.
     pub(super) fn new_tab_menu_items(
         shells: &[kettle_core::term::ShellChoice],
-        tr: &kettle_i18n::Translator,
-    ) -> Vec<ContextMenuItem> {
-        Self::new_tab_menu_with_profiles(shells, &kettle_config::Config::list_profiles(), tr)
-    }
-
-    pub(super) fn new_tab_menu_with_profiles(
-        shells: &[kettle_core::term::ShellChoice],
-        profiles: &[String],
+        profiles: Option<&[String]>,
         tr: &kettle_i18n::Translator,
     ) -> Vec<ContextMenuItem> {
         use kettle_i18n::Text as T;
@@ -1012,15 +1028,7 @@ impl App {
         items.push(ContextMenuItem::Separator);
         items.push(ContextMenuItem::Submenu {
             label: tr.text(T::MenuNewWindowProfile).to_string(),
-            items: profile_launch_entries(profiles, tr)
-                .into_iter()
-                .map(|(label, action)| ContextMenuItem::DynamicItem {
-                    label: label.shown(tr).to_string(),
-                    action,
-                    enabled: true,
-                    toggle: None,
-                })
-                .collect(),
+            items: profile_launch_items(profiles, tr),
         });
         for (label, action) in [
             (T::MenuSaveLayout, Action::SaveLayout),
@@ -1056,6 +1064,138 @@ impl App {
             enabled: true,
         });
         items
+    }
+
+    /// Open the menu of tab `idx` at the pointer `(px, py)`, as a right-click
+    /// on the tab does. Its rows act on that tab, whichever tab is active.
+    pub(super) fn open_tab_menu(&mut self, ws: &mut WindowState, idx: usize, px: f32, py: f32) {
+        // Find stays open under it, as under the terminal's menu.
+        self.close_modals_for_context_menu(ws);
+        let tab = ws.mux.tab_anchor_panes(idx);
+        if tab.is_empty() {
+            return;
+        }
+        let items = tab_menu_items(ws.mux.tabs.len(), self.ui_text);
+        self.show_context_menu(ws, items, px, py);
+        // Opening a menu resets both, so name and target it afterwards.
+        ws.context_menu_session.tab = Some(tab);
+        ws.context_menu_a11y_label = Some(
+            self.ui_text
+                .text(kettle_i18n::Text::MenuA11yTab)
+                .to_string(),
+        );
+    }
+
+    /// Run a tab menu's row on the tab holding the panes `tab`, if it is
+    /// still open (`step_tab_menu_row`). Rename and Duplicate bring the tab
+    /// forward first, since they show it; moving or closing it leaves the
+    /// active tab alone.
+    fn act_on_menu_tab(
+        &mut self,
+        ws: &mut WindowState,
+        tab: &[u64],
+        dispatch: TabMenuDispatch,
+        event_loop: &ActiveEventLoop,
+    ) {
+        let pre = self.focus_key(ws);
+        match step_tab_menu_row(&mut ws.mux, tab, dispatch) {
+            TabMenuStep::Gone => {
+                // The tab closed while its menu was open. The menu is gone
+                // too, and nothing else would repaint it away.
+                if let Some(window) = &ws.window {
+                    window.request_redraw();
+                }
+                return;
+            }
+            TabMenuStep::Close(idx) => {
+                // The question the tab's ✕ asks, about this tab.
+                let (panes, busy) = tab_close_scope(ws, idx);
+                if self.confirm_close(
+                    ws,
+                    panes,
+                    busy,
+                    ConfirmAction::CloseTabHolding(ws.mux.tab_anchor_panes(idx)),
+                ) {
+                    return;
+                }
+                if ws.mux.close_tab_at(idx) {
+                    self.fire_tab_close_event(ws, idx);
+                    self.save_session(ws);
+                    self.request_window_close(ws.seq);
+                    return;
+                }
+                self.fire_tab_close_event(ws, idx);
+                self.note_focus_change(ws, pre);
+            }
+            TabMenuStep::CloseOthers(idx) => {
+                // One question for them all, about everything that would
+                // close (`confirm_close`'s rule over the other tabs' panes).
+                // The question, and the close, are about these panes only.
+                let keep = ws.mux.tab_anchor_panes(idx);
+                let others = other_tabs_panes(ws, idx);
+                let (panes, busy) = other_tabs_close_scope(ws, idx);
+                if panes == 0 {
+                    // The other tabs went while the menu was up. The menu
+                    // is gone too, and nothing else would repaint it away.
+                    if let Some(window) = &ws.window {
+                        window.request_redraw();
+                    }
+                    return;
+                }
+                if self.confirm_close(
+                    ws,
+                    panes,
+                    busy,
+                    ConfirmAction::CloseOtherTabs {
+                        keep: keep.clone(),
+                        panes: others.clone(),
+                    },
+                ) {
+                    return;
+                }
+                self.close_other_tabs_now(ws, &keep, &others);
+            }
+            TabMenuStep::Moved(moved) => {
+                if moved {
+                    self.save_session(ws);
+                }
+            }
+            TabMenuStep::Run(action) => {
+                ws.reveal_active_tab();
+                self.note_focus_change(ws, pre);
+                self.handle_action(ws, action, event_loop);
+            }
+        }
+        self.resize_all(ws);
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Close the panes `others` outside the tab holding the panes `keep`,
+    /// which becomes the active tab, as Close Other Tabs and its confirmation
+    /// do: those it asked about, and none that opened since. Nothing closes
+    /// when that tab is gone.
+    pub(super) fn close_other_tabs_now(
+        &mut self,
+        ws: &mut WindowState,
+        keep: &[u64],
+        others: &[u64],
+    ) {
+        let pre = self.focus_key(ws);
+        if let Some(idx) = ws.mux.tab_index_of_any_pane(keep) {
+            for closed in ws.mux.close_tabs_except(idx, others) {
+                match closed {
+                    crate::mux::BulkClosed::Tab(closed) => self.fire_tab_close_event(ws, closed),
+                    crate::mux::BulkClosed::Pane(pane) => self.fire_pane_close_event(ws, pane),
+                }
+            }
+            self.note_focus_change(ws, pre);
+            self.save_session(ws);
+        }
+        if let Some(window) = &ws.window {
+            window.request_redraw();
+        }
     }
 
     /// The About panel — version + git hash, update
@@ -1115,10 +1255,11 @@ impl App {
 
     pub(super) fn shell_menu_items(
         shells: Option<&[kettle_core::term::ShellChoice]>,
+        profiles: Option<&[String]>,
         tr: &kettle_i18n::Translator,
     ) -> Vec<ContextMenuItem> {
         match shells {
-            Some(shells) => Self::new_tab_menu_items(shells, tr),
+            Some(shells) => Self::new_tab_menu_items(shells, profiles, tr),
             None => vec![ContextMenuItem::info(
                 tr.text(kettle_i18n::Text::MenuDetectingShells),
             )],
@@ -1156,7 +1297,7 @@ impl App {
         origin: MenuOrigin,
         anchor: (f32, f32),
     ) {
-        let items = origin.shell_items(shells, &self.ui_text);
+        let items = origin.shell_items(shells, self.profile_inventory.snapshot(), &self.ui_text);
         self.show_context_menu(ws, items, anchor.0, anchor.1);
         if let Some(menu) = ws.context_menu.as_mut() {
             menu.origin = origin;
@@ -1173,7 +1314,7 @@ impl App {
         let next = ws
             .context_menu
             .as_ref()
-            .map(|m| next_context_menu_highlight(&m.items, m.highlight, delta));
+            .map(|m| menu_step(m, &mut ws.context_menu_session.pointer, delta));
         if let Some(next) = next {
             self.set_context_menu_highlight(ws, next);
         }
@@ -1194,6 +1335,7 @@ impl App {
         };
         let (_, panel_h) = context_menu_content_geometry(&menu.items, panel_h, row_h, sep_h);
         menu.highlight = next;
+        ws.context_menu_session.pointer.keyboard_moved();
         menu.scroll_offset = context_menu_scroll_for_highlight(
             &menu.items,
             menu.scroll_offset,
@@ -1256,47 +1398,139 @@ impl App {
         )
     }
 
-    /// Set `menu.highlight` to whichever row the cursor is
-    /// over right now; no-op when the cursor is outside the panel or
-    /// on a separator. Called from `CursorMoved`. Requests a redraw
-    /// only when the highlight actually changed so we don't churn the
-    /// GPU on every sub-pixel motion event.
+    /// Move the menu's hover to whatever the cursor is over right now
+    /// (`menu_pointer_moved` decides what that lights). Called from
+    /// `CursorMoved`. Requests a redraw only when the hover changed
+    /// something, so sub-pixel motion does not churn the GPU.
     pub(super) fn update_menu_highlight_from_cursor(&mut self, ws: &mut WindowState) {
+        ws.context_menu_session.pointer.moved_in_window();
         if let Some(delta) = self.context_menu_scroll_edge(ws) {
             self.scroll_context_menu(ws, delta);
             return;
         }
-        let index = if let Some(index) = self.menu_row_at_cursor(ws) {
-            index
-        } else {
-            let Some((depth, index)) = self.parent_menu_row_at_cursor(ws) else {
-                return;
-            };
-            let Some(menu) = ws.context_menu.as_mut() else {
-                return;
-            };
-            if menu.drill_stack[depth].highlight == index {
-                return;
-            }
-            while menu.drill_stack.len() > depth {
-                menu.leave_submenu();
-            }
-            index
-        };
+        let panels = self.context_menu_panels(ws);
+        let hit = self.context_menu_pointer_hit(ws, &panels);
+        let at = (ws.cursor.x as f32, ws.cursor.y as f32);
         let Some(menu) = ws.context_menu.as_mut() else {
             return;
         };
-        let changed = menu.highlight != index;
-        menu.highlight = index;
-        let submenu = matches!(menu.items.get(index), Some(ContextMenuItem::Submenu { .. }));
-        if submenu {
-            self.enter_context_submenu(ws, index);
-        } else if !changed {
+        let effect = menu_pointer_moved(
+            menu,
+            &mut ws.context_menu_session.pointer,
+            hit,
+            &panels,
+            at,
+            std::time::Instant::now(),
+        );
+        self.apply_menu_hover(ws, effect);
+    }
+
+    /// The pointer left the window, so it is over no row of the menu.
+    pub(super) fn context_menu_pointer_left(&self, ws: &mut WindowState) {
+        ws.context_menu_session.pointer.left_window();
+        let at = (ws.cursor.x as f32, ws.cursor.y as f32);
+        let Some(menu) = ws.context_menu.as_mut() else {
             return;
+        };
+        let effect = menu_pointer_moved(
+            menu,
+            &mut ws.context_menu_session.pointer,
+            MenuHit::Outside,
+            &[],
+            at,
+            std::time::Instant::now(),
+        );
+        self.apply_menu_hover(ws, effect);
+    }
+
+    /// Look at the hover again when a waiting submenu is due to open or give
+    /// way, and return how long until the next such moment. A pointer at
+    /// rest sends no events, so only this wake can open its submenu.
+    pub(super) fn context_menu_pointer_tick(
+        &self,
+        ws: &mut WindowState,
+        now: std::time::Instant,
+    ) -> Option<std::time::Duration> {
+        if ws.context_menu.is_none() {
+            ws.context_menu_session.pointer.cancel_pending();
+            return None;
+        }
+        if ws
+            .context_menu_session
+            .pointer
+            .deadline()
+            .is_some_and(|due| due <= now)
+        {
+            let panels = self.context_menu_panels(ws);
+            // Off the window, the last position in it is no hit.
+            let hit = ws
+                .context_menu_session
+                .pointer
+                .due_hit(self.context_menu_pointer_hit(ws, &panels));
+            let at = (ws.cursor.x as f32, ws.cursor.y as f32);
+            if let Some(menu) = ws.context_menu.as_mut() {
+                let effect = menu_pointer_moved(
+                    menu,
+                    &mut ws.context_menu_session.pointer,
+                    hit,
+                    &panels,
+                    at,
+                    now,
+                );
+                self.apply_menu_hover(ws, effect);
+            }
+        }
+        ws.context_menu_session.pointer.deadline().map(|due| {
+            due.saturating_duration_since(now)
+                .max(std::time::Duration::from_millis(1))
+        })
+    }
+
+    /// Carry out what a hover asked for.
+    fn apply_menu_hover(&self, ws: &mut WindowState, effect: MenuHoverEffect) {
+        match effect {
+            MenuHoverEffect::None => return,
+            MenuHoverEffect::Redraw => {}
+            MenuHoverEffect::OpenSubmenu(index) => self.enter_context_submenu(ws, index),
         }
         ws.reuse_pane_snapshots_once = true;
         if let Some(w) = &ws.window {
             w.request_redraw();
+        }
+    }
+
+    /// Each open level's panel, the menu itself first and the deepest last.
+    fn context_menu_panels(&self, ws: &WindowState) -> Vec<kettle_render::Rect4> {
+        let Some(menu) = ws.context_menu.as_ref() else {
+            return Vec::new();
+        };
+        let rect = |((x, y), (w, h)): ((f32, f32), (f32, f32))| (x, y, w, h);
+        menu.drill_stack
+            .iter()
+            .enumerate()
+            .filter_map(|(depth, parent)| {
+                self.context_menu_level_geometry(ws, &parent.as_state(), depth == 0)
+            })
+            .chain(self.context_menu_geometry(ws))
+            .map(rect)
+            .collect()
+    }
+
+    /// What the cursor is over in the open menu, given its `panels`.
+    fn context_menu_pointer_hit(
+        &self,
+        ws: &WindowState,
+        panels: &[kettle_render::Rect4],
+    ) -> MenuHit {
+        let (x, y) = (ws.cursor.x as f32, ws.cursor.y as f32);
+        if let Some(index) = self.menu_row_at_cursor(ws) {
+            MenuHit::Row(index)
+        } else if let Some((depth, index)) = self.parent_menu_row_at_cursor(ws) {
+            MenuHit::ParentRow { depth, index }
+        } else if panels.iter().any(|panel| rect_contains(*panel, x, y)) {
+            MenuHit::Panel
+        } else {
+            MenuHit::Outside
         }
     }
 
@@ -1337,6 +1571,13 @@ impl App {
             }
             ContextMenuClick::Action(action) => {
                 ws.context_menu = None;
+                // A tab's menu acts on that tab, not the active one.
+                if let Some(tab) = ws.context_menu_session.tab.take()
+                    && let Some(dispatch) = tab_menu_dispatch(&action)
+                {
+                    self.act_on_menu_tab(ws, &tab, dispatch, event_loop);
+                    return;
+                }
                 // From the terminal menu, Select Command Output selects the
                 // output under the right-click, captured when the menu opened.
                 match (action, ws.context_menu_output_row.take()) {
@@ -1399,6 +1640,13 @@ impl App {
                 }
                 if let Some(window) = &ws.window {
                     window.request_redraw();
+                }
+            }
+            ContextMenuClick::CloseOtherTabs => {
+                ws.context_menu = None;
+                if let Some(tab) = ws.context_menu_session.tab.take() {
+                    self.act_on_menu_tab(ws, &tab, TabMenuDispatch::CloseOthers, event_loop);
+                    return;
                 }
             }
             ContextMenuClick::MoveTabToWindow { window, panes } => {
@@ -1500,13 +1748,17 @@ impl App {
         &self,
         ws: &WindowState,
     ) -> Option<((f32, f32), (f32, f32))> {
-        self.context_menu_level_geometry(ws, ws.context_menu.as_ref()?)
+        let menu = ws.context_menu.as_ref()?;
+        self.context_menu_level_geometry(ws, menu, menu.drill_stack.is_empty())
     }
 
+    /// One level's geometry; `root` is the menu's own panel, which may be
+    /// held shorter (`ContextMenuSession::root_max_h`).
     fn context_menu_level_geometry(
         &self,
         ws: &WindowState,
         menu: &ContextMenuState,
+        root: bool,
     ) -> Option<((f32, f32), (f32, f32))> {
         let (cw, ch) = self.menu_cell(ws);
         let row_h = kettle_render::menu::row_height(ch);
@@ -1535,9 +1787,11 @@ impl App {
         if !context_menu_surface_can_fit_row((surface_w, surface_h), (cw, ch)) {
             return None;
         }
-        let max_h = (surface_h - kettle_render::menu::PANEL_BREATHING)
-            .max(row_h)
-            .min((surface_h - 8.0).max(1.0));
+        let max_h = context_menu_height_limit(surface_h, row_h);
+        let max_h = match ws.context_menu_session.root_max_h {
+            Some(cap) if root => max_h.min(cap.max(row_h)),
+            _ => max_h,
+        };
         let panel_h = natural_h.min(max_h);
         // Dropdown parity: include the right-aligned hint budget —
         // kept in lockstep with `show_context_menu` and the renderer's
@@ -1572,9 +1826,10 @@ impl App {
             .map(|menu| {
                 menu.drill_stack
                     .iter()
-                    .filter_map(|parent| {
+                    .enumerate()
+                    .filter_map(|(depth, parent)| {
                         let (_, panel) =
-                            self.context_menu_level_geometry(ws, &parent.as_state())?;
+                            self.context_menu_level_geometry(ws, &parent.as_state(), depth == 0)?;
                         let anchor = scale_context_menu_anchor(
                             parent.anchor,
                             parent.anchor_scale,
@@ -1624,13 +1879,17 @@ impl App {
     /// state. Splits the labels (owned `String`) from the dispatch
     /// actions so the renderer stays Action-agnostic.
     pub(super) fn context_menu_overlay(&self, ws: &WindowState) -> Option<ContextMenu> {
-        self.context_menu_level_overlay(ws, ws.context_menu.as_ref()?)
+        let menu = ws.context_menu.as_ref()?;
+        let mut overlay = self.context_menu_level_overlay(ws, menu, menu.drill_stack.is_empty())?;
+        overlay.highlight = menu_shown_highlight(menu, &ws.context_menu_session.pointer);
+        Some(overlay)
     }
 
     fn context_menu_level_overlay(
         &self,
         ws: &WindowState,
         menu: &ContextMenuState,
+        root: bool,
     ) -> Option<ContextMenu> {
         // Dropdown parity: per-row shortcut hints from the LIVE keybind
         // map (computed per frame; the map only changes on reload).
@@ -1644,7 +1903,7 @@ impl App {
         // Terminator menu UX: pass through the scroll state + clamped panel
         // geometry the renderer needs to draw only the visible slice.
         let (panel_w_clamped, panel_h_clamped) = self
-            .context_menu_level_geometry(ws, menu)
+            .context_menu_level_geometry(ws, menu, root)
             .map(|(_, panel)| panel)
             .unwrap_or((0.0, 0.0));
         let (cell_w, _) = self.menu_cell(ws);
@@ -1664,6 +1923,7 @@ impl App {
                 .as_ref()
                 .and_then(|m| m.origin.label(&self.ui_text))
                 .or_else(|| ws.context_menu_a11y_label.clone()),
+            status: None,
             picker_header_height: 0.0,
             picker_footer: None,
         })
@@ -1675,7 +1935,10 @@ impl App {
             .map(|menu| {
                 menu.drill_stack
                     .iter()
-                    .filter_map(|parent| self.context_menu_level_overlay(ws, &parent.as_state()))
+                    .enumerate()
+                    .filter_map(|(depth, parent)| {
+                        self.context_menu_level_overlay(ws, &parent.as_state(), depth == 0)
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -1700,6 +1963,8 @@ impl App {
         if !menu.enter_submenu(index) {
             return;
         }
+        ws.context_menu_session.pointer.cancel_pending();
+        ws.context_menu_session.pointer.keyboard_moved();
         let surface = ws
             .renderer
             .as_ref()
@@ -1730,7 +1995,8 @@ impl App {
         let (_, ch) = self.menu_cell(ws);
         let row_h = kettle_render::menu::row_height(ch);
         for (depth, parent) in menu.drill_stack.iter().enumerate().rev() {
-            let ((x, y), (w, h)) = self.context_menu_level_geometry(ws, &parent.as_state())?;
+            let ((x, y), (w, h)) =
+                self.context_menu_level_geometry(ws, &parent.as_state(), depth == 0)?;
             if px < x || px >= x + w || py < y || py >= y + h {
                 continue;
             }
@@ -1749,6 +2015,7 @@ impl App {
     /// Esc / `h` semantics: pop a drilled-in submenu back to its parent, or
     /// close the menu when at the top level.
     pub(super) fn context_menu_back(&mut self, ws: &mut WindowState) {
+        ws.context_menu_session.pointer.cancel_pending();
         if ws
             .context_menu
             .as_mut()
@@ -1781,11 +2048,10 @@ impl App {
         // command, theme / profile choice, new-tab ▾ shell). The mapper +
         // dispatcher also own the close-or-keep decision, so a submenu Enter
         // keeps the menu open.
-        let chosen = ws.context_menu.as_ref().and_then(|m| {
-            m.items
-                .get(m.highlight)
-                .and_then(|it| item_to_click(it, m.highlight))
-        });
+        let chosen = ws
+            .context_menu
+            .as_ref()
+            .and_then(|m| menu_activate_click(m, &ws.context_menu_session.pointer));
         self.reset_blink_phase(ws);
         match chosen {
             Some(click) => self.dispatch_context_menu_click(ws, click, event_loop),
@@ -1892,6 +2158,9 @@ impl App {
         // highlighted action, and bare letters dispatch mnemonics /
         // typeahead. Any other key is swallowed so a stray keypress doesn't
         // leak into the focused pane while the menu is expecting nav input.
+        // Keys act at once: a submenu waiting on the pointer's dwell or aim
+        // no longer does.
+        ws.context_menu_session.pointer.cancel_pending();
         if self.cfg.vim_menu_nav && self.context_menu_vim_key(ws, key, event_loop) {
             return;
         }
@@ -1906,7 +2175,12 @@ impl App {
                 self.step_context_menu_highlight(ws, -1);
             }
             Key::Named(NamedKey::ArrowRight) => {
-                if let Some(index) = ws.context_menu.as_ref().map(|menu| menu.highlight) {
+                // Nothing is lit while the pointer is away, so nothing opens.
+                if let Some(index) = ws
+                    .context_menu
+                    .as_ref()
+                    .map(|menu| menu_shown_highlight(menu, &ws.context_menu_session.pointer))
+                {
                     self.enter_context_submenu(ws, index);
                 }
                 if let Some(window) = &ws.window {
@@ -2135,6 +2409,131 @@ pub(super) fn link_menu_rows(
     rows
 }
 
+/// The rows of a tab's menu, for a window of `tabs` tabs. A lone tab has
+/// nowhere to move and no other tabs to close.
+pub(super) fn tab_menu_items(tabs: usize, tr: kettle_i18n::Translator) -> Vec<ContextMenuItem> {
+    use kettle_i18n::Text as T;
+    let row = |label, action, enabled| ContextMenuItem::Item {
+        label: tr.text(label),
+        action,
+        enabled,
+    };
+    let others = tabs > 1;
+    let mut items = vec![
+        row(T::MenuRenameTab, Action::EditTabTitle, true),
+        row(T::MenuDuplicateTab, Action::DuplicateTab, true),
+        ContextMenuItem::Separator,
+        row(T::MenuMoveTabLeft, Action::MoveTabLeft, others),
+        row(T::MenuMoveTabRight, Action::MoveTabRight, others),
+        ContextMenuItem::Separator,
+        row(T::MenuCloseTab, Action::CloseTab, true),
+    ];
+    if others {
+        items.push(ContextMenuItem::CloseOtherTabs {
+            label: tr.text(T::MenuCloseOtherTabs),
+        });
+    }
+    filter_disabled(items)
+}
+
+/// The tab whose segment of `bar` holds the point `(x, y)`, for a right-click
+/// that opens that tab's menu.
+pub(super) fn tab_menu_segment(bar: &TabBar, x: f32, y: f32) -> Option<usize> {
+    if !tab_bar_pointer_region_contains(bar, x, y) {
+        return None;
+    }
+    bar.segments
+        .iter()
+        .find(|segment| rect_contains(segment.rect, x, y))
+        .map(|segment| segment.idx)
+}
+
+/// How a tab menu's row reaches its tab.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum TabMenuDispatch {
+    /// Close it, asking first as its ✕ does.
+    Close,
+    /// Close every other tab, asking first as closing them would.
+    CloseOthers,
+    /// Move it this many places along the bar.
+    Move(i32),
+    /// Make it the active tab, then run the action.
+    Activate(Action),
+}
+
+/// What a tab menu's row does once it has found its tab, or that it has not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum TabMenuStep {
+    /// The tab is gone: the row does nothing.
+    Gone,
+    /// Close tab `idx`, asking first as its ✕ does.
+    Close(usize),
+    /// Close every tab but `idx`, asking first.
+    CloseOthers(usize),
+    /// The tab was moved, or had nowhere to go.
+    Moved(bool),
+    /// The tab is the active one now: run the action on it.
+    Run(Action),
+}
+
+/// Find the tab holding the panes `tab` in `mux`, wherever it has moved
+/// since the menu opened, and do the row's part on it: move it, or make it
+/// the active tab for an action that shows it. A tab whose panes have all
+/// gone is gone, and the row leaves every other tab alone.
+pub(super) fn step_tab_menu_row(
+    mux: &mut Mux,
+    tab: &[u64],
+    dispatch: TabMenuDispatch,
+) -> TabMenuStep {
+    let Some(idx) = mux.tab_index_of_any_pane(tab) else {
+        return TabMenuStep::Gone;
+    };
+    match dispatch {
+        TabMenuDispatch::Close => TabMenuStep::Close(idx),
+        TabMenuDispatch::CloseOthers => TabMenuStep::CloseOthers(idx),
+        TabMenuDispatch::Move(delta) => TabMenuStep::Moved(mux.nudge_tab(idx, delta)),
+        TabMenuDispatch::Activate(action) => {
+            if idx != mux.active {
+                mux.active = idx;
+                mux.touch_active_tab_seen();
+            }
+            TabMenuStep::Run(action)
+        }
+    }
+}
+
+/// Close a tab's menu once its tab is gone, as when its last shell exits,
+/// so the popup does not stay up with rows that act on nothing. True when it
+/// closed one.
+pub(super) fn dismiss_orphaned_tab_menu(ws: &mut WindowState) -> bool {
+    let orphaned = ws.context_menu.is_some()
+        && ws
+            .context_menu_session
+            .tab
+            .as_deref()
+            .is_some_and(|tab| ws.mux.tab_index_of_any_pane(tab).is_none());
+    if orphaned {
+        ws.context_menu = None;
+        ws.context_menu_session.tab = None;
+        ws.accessibility_pending = true;
+    }
+    orphaned
+}
+
+/// How a tab's menu runs `action` on its tab; `None` for an action that is
+/// not one of its rows.
+pub(super) fn tab_menu_dispatch(action: &Action) -> Option<TabMenuDispatch> {
+    match action {
+        Action::CloseTab => Some(TabMenuDispatch::Close),
+        Action::MoveTabLeft => Some(TabMenuDispatch::Move(-1)),
+        Action::MoveTabRight => Some(TabMenuDispatch::Move(1)),
+        Action::EditTabTitle | Action::DuplicateTab => {
+            Some(TabMenuDispatch::Activate(action.clone()))
+        }
+        _ => None,
+    }
+}
+
 /// What a link row of the context menu does with its address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum UrlHow {
@@ -2175,6 +2574,8 @@ pub(super) enum ContextMenuClick {
         window: u64,
         panes: Arc<[u64]>,
     },
+    /// A tab's menu's Close Other Tabs, on the tab the menu was opened on.
+    CloseOtherTabs,
     /// Drill into a `Submenu` row by index. The click handler pushes
     /// the current items onto `drill_stack` + replaces them
     /// with the submenu's items.
@@ -2306,12 +2707,18 @@ pub(super) enum ContextMenuItem {
         target: PreviewMenuTarget,
         action: PreviewMenuAction,
     },
+    /// A tab's menu's Close Other Tabs, which no action runs: it closes every
+    /// other tab of the window, asking first as closing them would.
+    CloseOtherTabs {
+        label: &'static str,
+    },
     /// A static, non-dispatchable information line
-    /// (the About panel's version/update rows). Rendered like a disabled row
-    /// (dimmed), survives `filter_disabled`, never highlighted, claims no
-    /// mnemonic, and maps to no click.
+    /// (the Shift hint or About panel's version/update rows). Survives
+    /// `filter_disabled`, claims no mnemonic, and maps to no click.
     Info {
         label: String,
+        /// Paint instructions with the same contrast as shortcut labels.
+        secondary: bool,
         /// This line goes on with the sentence of the Info line above it,
         /// one the menu wrapped to its width. Assistive technology reads the
         /// whole sentence as that first line, and skips this one.
@@ -2324,6 +2731,7 @@ impl ContextMenuItem {
     pub(super) fn info(label: impl Into<String>) -> Self {
         Self::Info {
             label: label.into(),
+            secondary: false,
             continued: false,
         }
     }
@@ -2440,6 +2848,7 @@ pub(super) fn context_menu_item_columns(item: &ContextMenuItem, hint: &str) -> u
             (label, "", false)
         }
         ContextMenuItem::Info { label, .. } => (label, "", false),
+        ContextMenuItem::CloseOtherTabs { label } => (label, "", false),
         ContextMenuItem::Separator => return 0,
     };
     label.width()
@@ -2480,6 +2889,7 @@ pub(super) fn assign_mnemonics(
             ContextMenuItem::UrlItem { label, .. } => *label,
             ContextMenuItem::Media { label, .. } | ContextMenuItem::Preview { label, .. } => *label,
             // Info rows are non-dispatchable — no mnemonic to claim.
+            ContextMenuItem::CloseOtherTabs { label } => label,
             ContextMenuItem::Info { .. } => "",
             ContextMenuItem::Separator => "",
         })
@@ -2557,7 +2967,10 @@ pub(super) fn typeahead_match(items: &[ContextMenuItem], buf: &str) -> Option<us
         }
         ContextMenuItem::UrlItem { label, .. }
         | ContextMenuItem::Media { label, .. }
-        | ContextMenuItem::Preview { label, .. } => label.to_ascii_lowercase().starts_with(&needle),
+        | ContextMenuItem::Preview { label, .. }
+        | ContextMenuItem::CloseOtherTabs { label } => {
+            label.to_ascii_lowercase().starts_with(&needle)
+        }
         // Info rows aren't dispatchable, so typeahead skips them.
         _ => false,
     })
@@ -2839,6 +3252,7 @@ pub(super) fn item_is_dispatchable(item: &ContextMenuItem) -> bool {
             | ContextMenuItem::UrlItem { .. }
             // A card's or the viewer's media rows.
             | ContextMenuItem::Media { .. }
+            | ContextMenuItem::CloseOtherTabs { .. }
             | ContextMenuItem::Preview { .. } // ContextMenuItem::Info is deliberately absent: a static info line
                                               // (About panel) is not highlightable or clickable.
     )
@@ -2896,6 +3310,7 @@ pub(super) fn item_to_click(item: &ContextMenuItem, idx: usize) -> Option<Contex
             target: *target,
             action: *action,
         }),
+        ContextMenuItem::CloseOtherTabs { .. } => Some(ContextMenuClick::CloseOtherTabs),
         ContextMenuItem::Item { enabled: false, .. }
         | ContextMenuItem::DynamicItem { enabled: false, .. }
         | ContextMenuItem::Info { .. }
@@ -2945,6 +3360,14 @@ pub(super) fn clamp_context_menu_anchor(
     let x = req_x.clamp(margin, max_x);
     let y = req_y.clamp(margin, max_y);
     (x, y)
+}
+
+/// The tallest a menu's panel is drawn on a surface `surface_h` tall: room to
+/// breathe above and below, but never less than one complete row.
+pub(super) fn context_menu_height_limit(surface_h: f32, row_h: f32) -> f32 {
+    (surface_h - kettle_render::menu::PANEL_BREATHING)
+        .max(row_h)
+        .min((surface_h - 8.0).max(1.0))
 }
 
 pub(super) fn clamp_context_menu_panel(
@@ -3071,9 +3494,8 @@ pub(super) fn shift_menu_hint_due(
 
 /// Lead a grouped terminal menu with the Shift hint, as rows that do
 /// nothing, when Shift opened it over a program that has the mouse. The
-/// sentence is wrapped to `columns` (see `context_menu_info_columns`), one
-/// Info row per line, so it neither widens the menu nor loses its end to the
-/// ellipsis a row wider than the panel gets. Every line after the first is
+/// hint can widen the menu and wraps when it reaches the window's width
+/// limit, one Info row per line. Every line after the first is
 /// marked `continued`, so assistive technology reads the sentence once, whole.
 pub(super) fn prepend_mouse_override_row(
     items: &mut Vec<ContextMenuItem>,
@@ -3082,12 +3504,13 @@ pub(super) fn prepend_mouse_override_row(
     tr: kettle_i18n::Translator,
 ) {
     if shift_over_tracking {
-        let lines = wrap_menu_info(tr.text(kettle_i18n::Text::MouseOverrideHint), columns);
+        let lines = wrap_menu_info(tr.text(kettle_i18n::Text::MouseOverrideMenuHint), columns);
         let rows = lines
             .into_iter()
             .enumerate()
             .map(|(line, label)| ContextMenuItem::Info {
                 label,
+                secondary: true,
                 continued: line > 0,
             })
             .chain(std::iter::once(ContextMenuItem::Separator));
@@ -3095,13 +3518,10 @@ pub(super) fn prepend_mouse_override_row(
     }
 }
 
-/// The columns an Info line may take in a menu whose widest other row takes
-/// `widest_row`: that row's width, or the panel's minimum width if wider, but
-/// never more than a panel on a `surface_w`-pixel surface can show.
-pub(super) fn context_menu_info_columns(widest_row: usize, surface_w: f32, cell_w: f32) -> usize {
-    let natural = kettle_render::menu::panel_width(widest_row as f32, cell_w);
+/// The widest Info line the menu can fit within the surface.
+pub(super) fn context_menu_info_columns(surface_w: f32, cell_w: f32) -> usize {
     let (room, _) = clamp_context_menu_panel((f32::INFINITY, 0.0), (surface_w, 0.0));
-    kettle_render::menu::panel_columns(natural.min(room), cell_w).max(1)
+    kettle_render::menu::panel_columns(room, cell_w).max(1)
 }
 
 /// Break `text` at spaces into lines at most `columns` wide. A word wider
@@ -3122,6 +3542,40 @@ pub(super) fn wrap_menu_info(text: &str, columns: usize) -> Vec<String> {
         lines.push(line);
     }
     lines
+}
+
+pub(super) fn terminal_edit_menu_rows(
+    ws: &WindowState,
+    tr: kettle_i18n::Translator,
+) -> [ContextMenuItem; 3] {
+    use kettle_i18n::Text as T;
+    let has_selection = ws
+        .mux
+        .active_focus()
+        .and_then(|id| ws.mux.panes.get(&id))
+        .and_then(|pane| pane.term.term.lock().ok())
+        .is_some_and(|term| {
+            term.selection
+                .as_ref()
+                .is_some_and(|selection| selection.to_range(&term).is_some())
+        });
+    [
+        ContextMenuItem::Item {
+            label: tr.text(T::MenuCopy),
+            action: Action::Copy,
+            enabled: has_selection,
+        },
+        ContextMenuItem::Item {
+            label: tr.text(T::MenuPaste),
+            action: Action::Paste,
+            enabled: true,
+        },
+        ContextMenuItem::Item {
+            label: tr.text(T::MenuSelectAll),
+            action: Action::SelectAll,
+            enabled: true,
+        },
+    ]
 }
 
 /// Bound the terminal menu by categories, independently of optional commands.
@@ -3452,9 +3906,19 @@ pub(super) fn context_menu_row(item: &ContextMenuItem, hint: String) -> ContextM
                 ..Default::default()
             }
         }
-        // Dropdown parity: Info renders as a dimmed
-        // (disabled-style) static line.
-        ContextMenuItem::Info { label, .. } => ContextMenuRow {
+        ContextMenuItem::CloseOtherTabs { label } => ContextMenuRow {
+            toggle: None,
+            swatches: None,
+            matched_chars: None,
+            label: (*label).to_string(),
+            separator: false,
+            enabled: true,
+            hint: String::new(),
+            ..Default::default()
+        },
+        ContextMenuItem::Info {
+            label, secondary, ..
+        } => ContextMenuRow {
             toggle: None,
             swatches: None,
             matched_chars: None,
@@ -3462,6 +3926,7 @@ pub(super) fn context_menu_row(item: &ContextMenuItem, hint: String) -> ContextM
             separator: false,
             enabled: false,
             hint: String::new(),
+            informational: *secondary,
             ..Default::default()
         },
     }

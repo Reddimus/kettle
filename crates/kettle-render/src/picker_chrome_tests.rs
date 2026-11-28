@@ -35,6 +35,7 @@ fn row(index: usize) -> ContextMenuRow {
 fn picker(rows: usize, scroll_offset: usize) -> ContextMenu {
     let row_h = menu::row_height(CELL.1);
     ContextMenu {
+        status: None,
         picker_header_height: CELL.1 + menu::PICKER_HEADER_PAD,
         anchor: (176.0, 108.0),
         rows: (0..rows).map(row).collect(),
@@ -283,4 +284,94 @@ fn heading_rows_get_a_divider_above_and_are_not_options() {
         assert_eq!(menu_row_option(&menu.rows, row), Some(option));
     }
     assert_eq!(menu_option_row(&menu.rows, 6), None);
+}
+
+/// A picker row the pointer lights without selecting paints its own inset,
+/// the selection's shape at half its accent, and its label keeps the text
+/// contrast it has on the panel. The selected row, a disabled row and a
+/// separator never paint one.
+#[test]
+fn a_prelit_row_paints_a_fainter_inset_than_the_selection() {
+    use super::overlays::{MENU_SHADOW_LAYERS, menu_prelight_fill, menu_row_fill};
+    let rgba = |c: Rgb| {
+        [
+            c.r as f32 / 255.0,
+            c.g as f32 / 255.0,
+            c.b as f32 / 255.0,
+            1.0,
+        ]
+    };
+    let surfaces_of = |menu: &ContextMenu, theme: &Theme| {
+        menu_level_surfaces(
+            menu,
+            theme,
+            theme.accent,
+            CELL,
+            1.0,
+            &mut Colors::default(),
+            true,
+        )
+    };
+    let theme = Theme::by_name("TokyoNight Night");
+    let mut menu = picker(8, 0);
+    menu.highlight = 1;
+    menu.rows[4].prelit = true;
+    let surfaces = surfaces_of(&menu, &theme);
+    assert_eq!(
+        surfaces.len(),
+        MENU_SHADOW_LAYERS.len() + 3,
+        "shadow, panel, selection and prelight"
+    );
+    let rects = context_menu_row_rects(&menu, CELL);
+    let (selection, prelight) = (&surfaces[surfaces.len() - 2], &surfaces[surfaces.len() - 1]);
+    assert_eq!(prelight.size, selection.size, "the selection's inset");
+    assert_eq!(prelight.pos[0], selection.pos[0]);
+    assert_eq!(
+        prelight.pos[1] - rects[4].1.1,
+        selection.pos[1] - rects[1].1.1,
+        "on its own row"
+    );
+    let mut colors = Colors::default();
+    let fill = menu_prelight_fill(&theme, theme.accent, &mut colors, true);
+    assert_eq!(prelight.fill, rgba(fill));
+    assert_ne!(fill, theme.background);
+    assert_eq!(
+        menu_row_fill(&menu, 4, &theme, theme.accent, &mut colors, true),
+        fill
+    );
+    let distance = |c: Rgb| {
+        let b = theme.background;
+        (i32::from(c.r) - i32::from(b.r)).abs()
+            + (i32::from(c.g) - i32::from(b.g)).abs()
+            + (i32::from(c.b) - i32::from(b.b)).abs()
+    };
+    let selected = super::overlays::menu_selection_fill(&theme, theme.accent, &mut colors, true);
+    assert!(
+        distance(fill) < distance(selected),
+        "fainter than the selection"
+    );
+    for name in Theme::list() {
+        let theme = Theme::by_name(name);
+        let mut colors = Colors::default();
+        let fill = menu_prelight_fill(&theme, theme.accent, &mut colors, true);
+        let text = menu_row_text_color(&menu, &menu.rows[4], &theme, fill, &mut colors);
+        let floor = super::color::contrast_ratio(theme.foreground, theme.background)
+            .min(super::chrome::TEXT_CONTRAST);
+        let ratio = super::color::contrast_ratio(text, fill);
+        assert!(ratio + 0.01 >= floor, "{name}: {ratio:.2}:1 < {floor:.2}:1");
+    }
+    // The selected row paints the selection only; a disabled or separator
+    // row paints nothing for the pointer.
+    for (index, enabled, separator) in [(1, true, false), (4, false, false), (4, true, true)] {
+        let mut menu = picker(8, 0);
+        menu.highlight = 1;
+        menu.rows[index].prelit = true;
+        menu.rows[index].enabled = enabled;
+        menu.rows[index].separator = separator;
+        assert_eq!(
+            surfaces_of(&menu, &theme).len(),
+            MENU_SHADOW_LAYERS.len() + 2,
+            "row {index} enabled {enabled} separator {separator}"
+        );
+    }
 }

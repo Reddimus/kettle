@@ -13,6 +13,46 @@ pub(super) fn read_config_for_reload(
     Config::read_from_with_trust(path, trust).map(Some)
 }
 
+/// Read before changing active state, and retain the same bounded snapshot for reload.
+pub(super) fn stage_profile_switch(
+    path: std::path::PathBuf,
+    active: &mut Option<std::path::PathBuf>,
+    trust: &mut ConfigTrust,
+    prepared: &mut Option<(std::path::PathBuf, kettle_config::LoadedConfig)>,
+) -> std::io::Result<()> {
+    let loaded = read_config_for_reload(&path, ConfigTrust::VerifyDirectory)?.ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "profile no longer exists")
+    })?;
+    *active = Some(path.clone());
+    *trust = ConfigTrust::VerifyDirectory;
+    *prepared = Some((path, loaded));
+    Ok(())
+}
+
+pub(super) fn read_config_for_reload_or_prepared(
+    path: &std::path::Path,
+    trust: ConfigTrust,
+    prepared: &mut Option<(std::path::PathBuf, kettle_config::LoadedConfig)>,
+) -> std::io::Result<Option<kettle_config::LoadedConfig>> {
+    if let Some((loaded_path, loaded)) = prepared.take()
+        && loaded_path == path
+    {
+        return Ok(Some(loaded));
+    }
+    read_config_for_reload(path, trust)
+}
+
+/// What a Settings Reset did to the config file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ResetSaved {
+    /// The file already gave the default; nothing was written.
+    Unchanged,
+    Saved,
+    /// Saved and in place, so it reloads, but its directory could not be
+    /// synced: a power loss could bring back the old file.
+    NotDurable,
+}
+
 impl App {
     /// Reconcile the live theme with the theme picker after every event (see
     /// `theme_preview_change`).
@@ -56,6 +96,49 @@ impl App {
                     path.display()
                 );
                 false
+            }
+        }
+    }
+
+    /// Reset a setting in the config file in one atomic edit
+    /// (`kettle_config::reset_config_setting`): remove `keys`, and add
+    /// `fallback` where that alone does not satisfy `restores`. On `Err` the
+    /// file is as it was.
+    pub(super) fn reset_pref(
+        &self,
+        keys: &[&str],
+        fallback: &[(&str, &str)],
+        restores: impl Fn(&kettle_config::Config) -> bool,
+    ) -> Result<ResetSaved, ()> {
+        let Some(path) = self
+            .config_path
+            .clone()
+            .or_else(kettle_config::Config::default_path)
+        else {
+            log::warn!("reset_pref: no config path resolved");
+            return Err(());
+        };
+        match kettle_config::reset_config_setting(&path, keys, fallback, restores) {
+            Ok(None) => Ok(ResetSaved::Unchanged),
+            Ok(Some(saved)) => {
+                log::info!("reset_pref: reset {keys:?} in {}", path.display());
+                Ok(match saved.not_durable {
+                    None => ResetSaved::Saved,
+                    Some(error) => {
+                        log::warn!(
+                            "reset_pref: {} is saved but its directory did not sync: {error}",
+                            path.display()
+                        );
+                        ResetSaved::NotDurable
+                    }
+                })
+            }
+            Err(e) => {
+                log::warn!(
+                    "reset_pref: failed to reset {keys:?} in {}: {e}",
+                    path.display()
+                );
+                Err(())
             }
         }
     }
@@ -297,8 +380,23 @@ impl App {
     /// Make the profile at `path` the active config: what reloads read,
     /// what live reload watches, and what Lua reports.
     pub(super) fn switch_profile(&mut self, ws: &mut WindowState, path: std::path::PathBuf) {
-        self.config_path = Some(path);
-        self.config_trust = ConfigTrust::VerifyDirectory;
+        if let Err(error) = stage_profile_switch(
+            path.clone(),
+            &mut self.config_path,
+            &mut self.config_trust,
+            &mut self.prepared_profile_reload,
+        ) {
+            log::warn!("profile switch refused for {}: {error}", path.display());
+            fire_notify(
+                self.ui_text
+                    .text(kettle_i18n::Text::NotifyTitleConfigReloadRefused),
+                &self.ui_text.notify_body_config_reload_refused(
+                    &path.display().to_string(),
+                    &error.to_string(),
+                ),
+            );
+            return;
+        }
         self.reload_config(ws);
     }
 
@@ -337,7 +435,6 @@ impl App {
     /// Returns whether the configured font size changed, which controls whether
     /// each window keeps its session-local zoom.
     pub(super) fn load_reloaded_config(&mut self) -> bool {
-        #[cfg(target_os = "macos")]
         self.profile_inventory.refresh();
         self.refresh_config_watcher();
         let previous_config_font_size = self.cfg.font_size;
@@ -349,7 +446,11 @@ impl App {
         }
         let mut diagnostics = None;
         let (mut new, malformed) = match path {
-            Some(path) => match read_config_for_reload(&path, self.config_trust) {
+            Some(path) => match read_config_for_reload_or_prepared(
+                &path,
+                self.config_trust,
+                &mut self.prepared_profile_reload,
+            ) {
                 Ok(None) => (Config::default(), Vec::new()),
                 Ok(Some(loaded)) => {
                     let entries = loaded.diagnostics();

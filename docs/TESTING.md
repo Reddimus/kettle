@@ -9,15 +9,41 @@ runtime hosts. Windows CI retains compile and regression coverage, but does not
 produce a supported package. Record every skipped check and its reason.
 
 Profile/layout UI regression coverage lives in kettle-ui's `menu_text_tests`,
-`macos_menu::tests` and `picker_text_tests`: English/Spanish menu routes,
-profile lists including empty, native submenu dispatch order, and the shared
+`macos_menu::tests`, `app::profiles::tests` and `picker_text_tests`:
+English/Spanish menu routes, profile lists including empty, native submenu
+dispatch order, and the shared
 Save Layout prompt prefix/caret. A subprocess with a temporary `XDG_CONFIG_HOME`
 saves and reloads a split layout, checks picker discovery and validates the
 palette's profile discovery without changing the real config directory.
 The portable profile inventory regression blocks an injected enumerator while
 menu dispatch uses the empty startup cache and then the last completed cache.
 It checks coalesced refreshes and eventual latest results without reading owner
-profiles. Existing menu-model tests pass an explicit empty profile list.
+profiles. The shared blocked-enumerator fixture also exercises the production
+new-tab row snapshot and submenu activation, terminal profile rows and palette
+entries against the last completed cache. Refresh tests retain selected profile
+actions and parent navigation when profiles change. Launch-worker tests block
+validation before a stub process launcher, reject unlisted names, and check
+failure reporting without starting a profile process. Existing menu-model tests
+pass explicit profile slices, including empty lists. Run these portable cases
+with `cargo test -p kettle-ui app::profiles` and
+`cargo test -p kettle-ui profile_inventory_dispatch`.
+Profile-cache regressions cover one admitted launch
+validation under 64 repeated requests against a blocked injected enumerator,
+admission returning while the first injected child is still being reaped,
+exact-name/scan/spawn failures, first scan error versus successful empty,
+last-good cache retention (including unconsumed results), and pending/empty
+profile cycling. Palette tests use production list projection and geometry at
+328/358/720-pixel widths in EN/ES with long queries, pinned non-action status,
+Esc guidance, result scrolling, and ranked pointer/keyboard action identity.
+Renderer tests cover shared status/card surface bounds and text damage keys.
+Config tests use a private directory-path seam with real temporary directories
+for missing/empty/unavailable scans, validation/order, existing caps and Unix
+symlink/metadata failure behavior without changing process environment.
+
+Run the focused crate tests, Clippy and required repository gates on the changed
+source. Record physical regression controls and platform-specific results
+separately from portable tests. Catalogue parity, source checks and formatting
+do not establish compiled or live behavior.
 Native rendering, OS directory opening, actual profile/window launches and
 Spanish language acceptance still require a live UI pass.
 
@@ -128,6 +154,47 @@ Window-chrome regressions use `kettle-render`'s `solid_chrome_is_quiet`,
 traffic-light insets, 1x/1.5x/2x scaling, active-tab overflow, control hit corners,
 gaps, AccessKit bounds and the production `ui_geometry` serializer.
 `new_tab_tooltips_translate` checks English/Spanish labels and live shortcuts.
+`kettle-ui`'s `tooltip::tests` and `strip_tooltips_wait_for_a_rest` check
+tooltip timing: the 500 ms rest, the one-second warm spell, a press hiding the
+tooltip until the pointer leaves the control's place (a moment with no control
+to name, while the press is held or a dropdown is open, is no leave), and a
+single scheduler wake per deadline;
+`a_clicked_tab_title_rearms_after_the_pointer_crosses_its_close_button` checks
+that the place a press is held against is where its control is named;
+`the_tooltip_clock_follows_moves_presses_leaves` guards the wiring.
+`overflow_arrows_light_point_and_name_what_a_press_does` (`kettle-ui`) and
+`overflow_arrows_prelight_like_the_other_flat_buttons` (`kettle-render`) cover
+the arrows' hover, hand cursor, translated tooltips and anchor.
+`a_cut_tab_title_shows_whole_in_a_tooltip` (`kettle-ui`) and
+`a_tab_label_is_cut_only_when_the_strip_shortens_it` (`kettle-render`) cover
+the full-title tooltip, `a_long_tooltip_ends_in_an_ellipsis_beside_its_control`
+its line cap, `a_long_tooltip_takes_the_side_with_more_room_and_the_whole_width`
+its placement, and `narrow_tab_titles_keep_the_start_that_tells_them_apart`
+the end ellipsis below 16 columns.
+`every_lane_button_is_a_24_pixel_target`,
+`a_viewer_that_fitted_before_still_fits_with_full_targets`,
+`a_short_lanes_buttons_never_reach_its_resize_edge`,
+`a_minimum_bottom_gallery_keeps_its_edge_and_page_buttons`,
+`a_lane_keeps_room_for_full_button_targets` (`kettle-ui`),
+`a_hovered_lane_button_lights_its_chip`
+and `browsing_past_an_end_is_not_a_live_button` (`kettle-render`) and
+`moving_onto_a_lane_button_repaints_to_light_it` (`kettle-ui`) cover the media
+lane buttons' WCAG 2.5.8 targets and hover fill.
+`lane_button_tooltips_name_the_keys_the_lane_acts_on` checks every key a lane
+button's tooltip names against the lane's own key handling, and
+`lane_button_tooltips_share_the_clock_and_the_screen_reader_name` guards their
+timing and names; `the_fullscreen_viewer_names_no_key_that_does_something_else`
+ties the Esc a tooltip names to Esc's dispatch, and
+`a_lane_buttons_tooltip_is_named_only_on_the_button` keeps a video picture
+from naming its Play button. `the_toast_button_under_the_pointer_lights_alone`
+(`kettle-render`) and `toast_and_notice_buttons_light_under_the_pointer`
+(`kettle-ui`) cover the toast and notice buttons' hover, and
+`an_actionable_toast_body_lights_under_the_pointer` the notification toast's body.
+`a_tab_drag_resting_on_an_overflow_arrow_scrolls_the_strip` covers the
+400 ms drag auto-scroll, and `a_tab_drag_at_the_end_rests_on_nothing` and
+`the_last_drag_step_to_an_end_schedules_no_wake` that it schedules no wake
+where the tab can go no further; the drag itself needs a
+desktop.
 Full render/UI suites and clippy remain required; native focus changes,
 hover/press feedback, tooltip placement and Spanish acceptance need a desktop.
 
@@ -169,7 +236,7 @@ over a scrolled-back pane never lands on it; that leaving the window ends a
 press; and, with `App::area`'s `pane_area`, that the button and the label
 stay out of the search bar at every window size and bar placement.
 `accessibility_id_tests` checks that no two AccessKit ids collide.
-Checked live with Orca in a private headless GNOME session on Tower
+Checked live with Orca in a private headless GNOME session on Ubuntu 26.04
 (2026-11-14): Orca spoke "Viewing history" on the first Shift+PageUp from live
 output, not on the two that scrolled further, and again on the first
 Shift+PageUp after Ctrl+End returned to live output; AT-SPI showed one
@@ -293,6 +360,16 @@ its row into view on short surfaces. Underline probes exclude the surface's
 one-pixel focus outline while retaining interior underline and leak detection.
 The Git streaming helper checks that both output pipes close after success and
 consumer failure.
+
+`video_preview::tests::a_parent_timeout_does_not_wait_for_inherited_pipes`
+exercises physical timeout pipe cleanup after a retained direct child is stopped
+and reaped. Two sibling fixture children inherit one anonymous stdout pipe;
+the controlled holder acknowledges successful stdout writes before collection
+and after collection returns or its three-second observation window expires.
+Parent control EOF then releases the holder for stdout EOF and reader closure.
+This covers post-reap descriptor lifetime, not shell ancestry or total launch
+time. The existing stalled-helper, absolute-cutoff and retry tests retain
+real-launch and request-deadline coverage.
 
 The MCP stdio integration suite exercises Codex guidance, turn-end-only fallback,
 one artifact per hook, deduplication after primary display, stable replacement
@@ -508,6 +585,101 @@ macOS adds the Xcode icon compiler, modal shortcuts, native titlebar, Dock menu,
 agent CLI probes, and the comparator, standing, and A/V-sync self-tests.
 Other-OS legs are reported as not applicable.
 A current-OS pass still needs the other native CI legs before release.
+
+### Renderer backends
+
+`backend::cpu_tests` drives the CPU backend through the real frame path, with
+no GPU: draw order and scissors, the rasterizer and presenter seams, the
+translucent presentation pass, resize, screenshots, the glyph atlas's CPU
+copy and the CPU text layout. On Linux,
+`no_gpu_driver_is_loaded_by_a_cpu_renderer` renders in a fresh test process and
+fails when any Vulkan loader, Mesa, LLVM or NVIDIA library, or a `/dev/dri`
+node, is mapped. It runs the same check on a GPU child to prove the check sees
+a driver. `backend::text::parity_tests` renders the same text areas through
+glyphon on a headless device and through the CPU text path over a
+translucent frame, and fails when any channel differs by more than 2. Its
+cases cover Latin at several sizes and fractional positions, bold and italic,
+CJK, Arabic, colour emoji, custom glyphs, scaled areas, `TextBounds` and
+scissor clipping, translucent text and Spanish Settings strings. The CJK,
+Arabic and emoji cases need the host's Noto faces when `KETTLE_REQUIRE_GPU` is
+set. Run them with `cargo test -p kettle-render --lib backend::`.
+
+`backend::cpu_parity_tests` renders whole scenes (grid text with colours and
+box drawing, a selection, a translucent window, the starfield) on both
+backends through `headless_tests::capture` and fails when any channel differs
+by more than 2. It needs a GPU adapter (lavapipe in CI); set
+`KETTLE_CPU_PARITY_DUMP=<dir>` to save each pair as PNGs. The same module
+drives the window path through a fake `CpuSurface`: the frame is drawn into
+the presenter's buffer, `pre_present` runs once at the commit, and opacity,
+idle release, occlusion, resize and scale reach the presenter. It also covers
+the presenter's pacing contract: a held (deferred) frame runs `pre_present`
+only when `flush_held_frame` commits it; painted cards move only on a real
+commit, never on an unchanged or held frame; a frame built while the
+compositor still holds the last one is not drawn (`FrameOutcome::Paced`)
+until `cpu_frame_ready`, and a screenshot waits for the frame that is drawn;
+and a buffer rounded up past the window repeats its edge. The chrome scene
+compares a tab title, which only the CPU text compositor draws, and
+`screenshot_scenes_draw_the_same_on_the_cpu_and_the_gpu` renders the four
+`kettle --screenshot` scenes with `renderer = cpu` and `renderer = gpu`. On
+Linux the `--screenshot` integration tests (`bell_visual`, `menu_visual`,
+`scrollbar_visual`) use the default renderer, which is the CPU.
+`backend::cpu_draw::tests` checks that banding and the wallpaper cache leave
+pixels unchanged.
+
+`backend::cpu_damage_tests` (Linux) is the damage-tracking equivalence
+harness. It drives a real CPU window renderer through seeded random
+sessions of typing, cursor moves and blinks, selection drags, scrolling,
+resizes, themes, opacity, Settings, tab switches, splits, toasts, the
+search bar, small and large translucent image placements and a second large
+image drawn over the first, the starfield, font size, HiDPI scale, two tabs
+that look alike but show different pending cards and bidi rows, the
+bidi switch, bursts of output that land in one frame (URLs that soft-wrap
+over three rows and scroll the grid, sometimes after a clear or stopping
+mid-line), and a hovered link's underline over such a URL. Frames go to a fake surface that behaves as one of the
+presenters, with the presenter's own buffer-age history, and every pixel the
+renderer must repaint is filled with garbage first:
+
+- **Wayland** (odd seeds): up to three buffers that a model compositor holds
+  and releases; frame callbacks that come late, so attempts are paced and
+  drawn again, and drawn frames are sometimes held until a later flush or
+  commit; no commit for a frame with nothing new (`Unchanged`); and a
+  compositor that takes from each commit only what it damages.
+- **X11** (even seeds): one retained buffer, presents that send only their
+  rectangles, and other windows that cover and uncover random parts of the
+  window, whose pixels the model server then drops (`Expose`).
+
+After every frame drawn, the buffer must equal a full repaint of the same
+frame by a second rasterizer that draws only the frames drawn, byte for
+byte. Whenever no frame is held, the screen (the compositor's or the X
+server's copy) must equal it too, and the cards and bidi rows on screen must
+be the ones that frame painted. `KETTLE_DAMAGE_SEEDS` and
+`KETTLE_DAMAGE_STEPS` (default 4 and 80) lengthen the run. Negative controls
+require the harness to fail a presenter that ignores buffer age and an X11
+presenter that never sends exposed pixels again. Targeted tests check that a
+paced attempt leaves the image cache alone, that a second image never takes
+the cache from the first in mid-frame, that switching between tabs that
+look alike puts the new tab's card and bidi rows on screen, and that floods
+of wrapped URLs under a moving hover equal full repaints on both presenters. The module also
+checks that typing and a blink repaint a few cells at scale 1 and 2, and that
+`KETTLE_CPU_FULL_REPAINT`'s switch repaints every frame whole.
+`damage_frame_cost` (ignored) times a typed character and a blink at
+1600x1000 and 3840x2160 with and without damage tracking; run it with
+`--ignored --nocapture` in an optimized build.
+
+`cpu_present::tests` and `cpu_present::proto_tests` test the Linux presenter.
+The protocol tests run it against an in-process Wayland compositor
+(`cpu_present::test_wl`, wayland-server) that records each commit's pixels
+and damage and holds frame callbacks and buffers until the test lets them
+go. They need libwayland-client at run time and skip without it. The X11
+tests check that opaque frames on a depth-32 window are sent with alpha
+0xff, and that pixels another window covered and uncovered are sent again
+by an unchanged frame. They need an X server named by
+`KETTLE_TEST_X11_DISPLAY` (for example `Xvfb :91 -screen 0 640x480x24` and
+`KETTLE_TEST_X11_DISPLAY=:91`) with no compositing manager, and skip when
+that is unset. The depth-32 test needs the server's Composite extension
+(without it Xvfb offers no depth-32 visual). They read only that variable,
+never `DISPLAY` (the presenter's exposure watcher too), so they cannot draw
+on a desktop session.
 
 ### Host requirements and skipped tests
 
@@ -767,7 +939,10 @@ PTY probe checks the captured environment and original invocation in both a
 split and an empty mux, without a window or GPU.
 `remote_reconnect_replays_preserve_environment_and_invocation` repeats the
 probe after duplicate pane/tab, split, undo-close, and a live tab move, then
-checks another replay from each result. Session round-trip tests
+checks another replay from each result. The probe starts its success marker on a
+new PTY line so serial test-runner progress labels cannot split it across rows.
+Failure diagnostics retain at most 4096 viewport characters, PTY read progress,
+and the unreaped owned-child exit status before teardown. Session round-trip tests
 `remote_reconnect_session_restore_falls_back_to_configured_shell` and
 `remote_reconnect_environment_session_restore_omits_private_values` verify
 shell fallback for invocation-only and environment-only settings and ensure
@@ -1184,15 +1359,12 @@ Private Fontconfig configuration includes only `assets/fonts`, with no system
 config includes. The runner verifies `fc-list` against the repository TTF set
 and records every hash, including all four JetBrains Mono faces and the four
 bundled Fira Sans faces. Software-rendering environment settings are requests:
-the runner additionally requires Weston's actual headless/GL/llvmpipe log and
-version, a GL llvmpipe CPU adapter with driver details from `kettle --gpu-info`,
-and matching adapter selection in every live fixture log before and after
-screenshot. Fontdb's system-directory fallback also fails the run.
-An unknown or different adapter fails the run. The private GPU config requests
-GL/software for both diagnostics and live fixtures. Diagnostic parsers accept
-LF and CRLF line endings while retaining strict adapter/backend checks and
-the original raw diagnostic files. Portable regressions force CRLF input on
-every host; Windows CI also exercises the complete fixture path.
+the runner restricts GLVND to Mesa and checks Weston's actual headless
+GL/llvmpipe log and version. Each fixture uses `renderer = auto` and the runner separately verifies
+Kettle's CPU and `wl_shm` selection in its log before and after screenshots.
+A different renderer, a different presenter, or Fontdb's system-directory
+fallback fails the run. Diagnostic parsers accept LF and CRLF line endings
+and preserve the original raw logs.
 
 Startup defaults to 20 seconds (`--startup-timeout`, maximum 60); the matrix
 defaults to 900 seconds (`--run-timeout`, maximum 900). Native queries have
@@ -1228,16 +1400,17 @@ be disjoint. When `tests/ui-states/linux` exists, CI compares against it;
 otherwise it explicitly reports capture-only operation. Do not mix baselines
 from different compositors/font environments.
 
-The initial Linux pixel gate remains pending until the final merged build,
-after the font and C08 changes land. Capture its full matrix in the final CI
-environment, retain the build/commit and font/environment identity, and review
-all 80 PNGs before adding them under `tests/ui-states/linux` in an explained PR
-with before/after artifacts. Re-run CI with those baselines to establish the
-pixel gate. This environment preparation has not run Weston or captured pixels
-on native Linux; the first hosted Linux execution, artifact inspection and
-baseline promotion remain pending. No baseline is generated or accepted by
-headless fixture tests; capture-only CI does not prove pixel equality. Native
-geometry evidence must also identify the exact capture script/build used.
+The initial 80 Linux baselines are checked in under `tests/ui-states/linux`.
+[Their provenance](../tests/ui-states/README.md) records hosted CI run
+42383598778, its exact source and binary, bundled fonts, headless Weston GL and
+llvmpipe environment, and completed owned-process cleanup. That run's Linux
+capture passed; its unrelated Windows failures remain documented. CI now
+compares captures with these baselines. Review any baseline update in an
+explained PR with before/after artifacts, and re-run the comparison gate.
+Portable fixture tests do not establish pixel equality. This headless Linux
+gate also does not establish native GNOME/KDE behavior, macOS pixel parity,
+IME or accessibility acceptance. Native geometry and pixel evidence must
+identify the exact capture script, build and environment used.
 
 ## Diagram gate
 
@@ -1376,6 +1549,12 @@ Run the relevant recipe while iterating, then strict and full before release.
 error statuses, oversized declared and chunked bodies, truncated bodies,
 and exact signed artifact sizes. These transport checks supplement signature
 and archive validation; they do not prove public HTTPS availability.
+
+On Linux, `cargo test -p kettle-update` also checks that a directory on an
+update's write path that its group can write is refused before the download,
+naming the directory and its `chmod`, and again before the first replacement if
+it turns writable during the download. Run these under umask `002` as well as
+`022`.
 
 | Recipe | What it protects |
 | --- | --- |
@@ -1552,7 +1731,7 @@ Prerequisites beyond the desktop are included in the proof column.
 | Text presentation | `just text-presentation-smoke` | Text-style bullet uses a monochrome face | Linux/macOS |
 | Update toast | `just update-toast-smoke` | Presented-frame gating, seven-second expiry, terminal preservation, Details/About, dismissal and once-per-state restart receipts | Linux/macOS |
 | Split exit resize | `just split-exit-resize-smoke` | Exiting split restores survivor grid and tty winsize | Linux/macOS |
-| Steady uploads | `just steady-uploads-smoke` | Unchanged frames and cursor blink avoid GPU uploads; paced output uses mapped writes where available | Linux/macOS |
+| Steady uploads | `just steady-uploads-smoke` | Explicit wgpu frames and cursor blink avoid GPU uploads; paced output uses mapped writes where available. On Linux a separate CPU window stays idle | Linux/macOS |
 | Cursor blink layer | `just cursor-blink-layer-smoke` | Native layer handoff, idle behavior, and exits; `--pixels` needs Screen Recording | macOS |
 | Job control | `just job-control-smoke` | Shell editing across suspend/bg/fg/exit, alternate screen, and negative controls | Linux/macOS |
 | Zoom keybind | `just zoom-keybind-smoke` | App zoom chords resolve and change geometry | Linux/macOS |
@@ -1799,7 +1978,9 @@ the right column by position, since split rounding can make the left column
 wider, and verifies the final right-edge geometry as well as pane order.
 This control-plane check does not prove native pointer event delivery.
 
-The steady-upload case needs a focused window for blink and output phases.
+The steady-upload case requires a live wgpu renderer before reading upload
+counters. It needs a focused window for blink and output phases. A separate
+Linux CPU fixture checks that an unchanged window stops presenting.
 `--screenshots-only` runs the narrower screenshot phase for environments such
 as Xvfb without a window manager. Record that restriction.
 A screenshot-capability failure is distinct from a rendering failure.
@@ -2074,6 +2255,25 @@ after combining marks, ZWJ and VS15, and Prepend plus VS15 after width saturatio
 They exercise mode 2027, UTF-8 splits, cursor and spacer state, screen and DECSLRM
 edges, autowrap, insertion, ignored-control interruptions and discarded scalars.
 Core cases also check edge wrapping and selection, search and reflow columns.
+The final-width regressions retain all 32 Javanese/Grantha trailing-virama
+sequences and 17 singleton mismatches from the full mode-on measurement of
+candidate `35048`. They check the generated six-scalar Mc/virama exception,
+the non-excluded U+1B43 neighbor, Grantha's unchanged cluster boundaries, every
+UTF-8 split, mode-off compatibility, edge/margin/insert behavior, and A8FA's
+shaping-base eligibility. Saturated positive and zero-width prefixes must
+retain the first spacing base through later selectors and ZWJ tails, including
+attributes, hyperlinks, semantic navigation, search, selection and reflow.
+The `35048` measurements precede these fixes; source regressions do not replace
+a fresh full on/off native measurement of the rebuilt candidate. Unsupported
+tofu capability does not establish font coverage, and matching the reference
+on these cases does not establish universal Unicode column conformance.
+Portable renderer regressions derive scalar-mode snapshots and same-style row
+groups for A8FA before a selector plus Thai SARA AM, and before an unattached
+modifier. They check the original emoji classification, cover fresh-cursor
+overwrite, and keep A8FA as the shaping anchor of a stored cluster after mode
+2027 is disabled. These classification checks do not establish column or
+host-font raster coverage; the vendor and core width controls above check
+columns separately.
 Renderer tests exercise shaping metadata and row
 keys, plus real headless GPU pixels for both renderer settings, unsupported ZWJ
 fallback, monochrome presentation and cached cursor frames. Tests that cannot
@@ -2088,7 +2288,9 @@ and caret above the card. `submenu_covers_its_parents_selection_labels_and_shado
 checks that a submenu's panel and shadow cover its parent's selection and
 labels, `submenu_edge_hides_its_parents_selection_and_labels` that its bordered
 edge is opaque where it crosses them, and `an_open_menu_covers_a_toast_beneath_it`
-that menus cover toasts.
+that menus cover toasts. `picker_status_band_text_draws_inside_its_card` checks
+that a picker's pinned status lines show in the secondary text colour inside its
+card, where the shared menu text pass is cut out.
 `menu_visual` checks that the corners of everything the menu changed stay
 untouched. `kettle-ui`'s `painted_menu_rows_match_hit_testing_and_accessibility_bounds`
 holds pointer hit testing and screen-reader bounds to the renderer's painted
@@ -2132,13 +2334,19 @@ and another search match and focused and unfocused selections, in Grid and
 Legacy at 1x and 2x over fractional padding. Each named face draws sad wider
 than its cell, and the test fails if a case does not overhang. The fill must
 cover exactly the pixel columns the word is drawn over, cells included.
+`highlights_cover_an_arabic_ligature_outside_right_to_left_text` does the
+same for U+FDFD, a bidi neutral drawn many cells wide, in a row without a
+layout and shown left to right before Arabic text; a face that draws it
+within about a cell prints `ARABIC_LIGATURE_SKIP`.
 `highlights_off_bidi_rows_stay_on_the_grid` keeps every fill on cell edges
-with `bidi = false`, on the alternate screen and in rows without
+with `bidi = false`, on the alternate screen and in rows without Arabic or
 right-to-left text, and `a_selection_outline_follows_the_arabic_overhang`
 requires the outline of a low-contrast selection at the widened edge, not
 the cell edge. `HighlightReach` and the outline's pixel spans have unit
 tests that need no GPU or font: two runs reaching into one gap meet at its
-middle, and runs whose reach meets trace one perimeter.
+middle, text drawn across a whole run reaches on past it, and runs whose
+reach meets trace one perimeter. The U+FDFD test also draws the ligature
+across another one-cell match and requires its ink past that match covered.
 `emoji_ink_is_fitted_without_changing_grid_widths_or_baselines` checks actual
 glyph instances using the bundled font in both renderers and both 2027 modes;
 it reports `EMOJI_SIZING_GPU_SKIP` without an adapter.
@@ -2305,6 +2513,27 @@ modifiers. The full YAML retains each mismatch. Rerun the live suite before
 claiming updated scores or complete Unicode rendering conformance.
 
 
+The 2026-11-18 run measured the 6.0.0 candidate on Ubuntu 26.04.1 under Xvfb
+with software rendering, with ucs-detect 2.3.8 and `--ucs-all` in fresh panes
+in each mode. esctest passed 459 cases, kept the 41 upstream known-bug cases
+and failed exactly the 67 cases in `scripts/conformance-esctest-expected.txt`,
+with no new failures.
+
+| Measurement | Cases | Mode off | Mode on |
+| --- | ---: | ---: | ---: |
+| VS15 | 158 | 0.00% | 100.00% |
+| VS16 | 426 | 50.00% | 100.00% |
+| ZWJ emoji | 1,445 | 0.69% | 100.00% |
+| Regional-indicator pairs | 262 | 100.00% | 100.00% |
+| Single regional indicators | 26 | 0.00% | 100.00% |
+| Fitzpatrick modifiers | 5 | 100.00% | 100.00% |
+| Narrow codepoints | 36,254 | 99.94% | 100.00% |
+| Wide codepoints | 44,568 | 99.94% | 100.00% |
+| Language sequences | 25,043 | 94.35% | 100.00% |
+
+With mode 2027 off, Kettle keeps the legacy per-codepoint widths, so the
+cluster cases score as they did before.
+
 ## Manual / interactive checks
 
 Use these for behavior that fixtures or synthetic input cannot establish.
@@ -2390,6 +2619,13 @@ root-cause explanation for earlier unidentified intermittent failures.
   titlebars, menus, and the first content row after resize or fullscreen.
 - [ ] Check real minimize/restore, occlusion, window close, and focus changes.
   Verify other OS windows survive and keep working.
+- [ ] On Linux, run `cargo run --release -p kettle-render --example
+  cpu_present_live` on Wayland, then with `WAYLAND_DISPLAY` unset on X11, and
+  with `--softbuffer` for the Wayland fallback. It checks every frame of the
+  CPU presenter against a reference, resizes, switches between opaque and
+  translucent frames, floods presents, and samples PSS with two, one and no
+  buffers. It prints `CPU_PRESENT_RESULT` and exits 1 on any failure.
+  `--maximize` skips the resizes and measures at the maximized size.
 - [ ] Drag and tear off tabs with the native pointer, redock them, and cancel
   a gesture. Control-plane movement alone does not test that gesture.
 - [ ] On macOS, inspect decorated and borderless windows with blur on/off,
@@ -2452,8 +2688,8 @@ failure. Unix job control has no equivalent Windows acceptance leg.
   `Ctrl+Shift+S`. Both aliases show `from ~/.ssh/config`; typing a third name
   offers **Connect to "…"**; `-oX` shows the refusal row. Repeat with
   `ssh-config-hosts = false` (no aliases) and on Windows with `USERPROFILE`.
-  Run VoiceOver on macOS and Orca on Linux against the same fixture. Keep the
-  owner's real aliases out of screenshots and audit artifacts.
+  Run VoiceOver on macOS and Orca on Linux against the same fixture. Keep personal
+  SSH aliases out of screenshots and test artifacts.
 - [ ] Check Save and Remove with the same scratch `HOME` and a scratch
   `--config` file. Type `me@db.example.com`, press Down to the Save row and
   Enter: the name editor suggests `db.example.com`; Enter adds the
@@ -2955,7 +3191,8 @@ window fullscreen. Check the accessible names and toggle states for both size
 controls, including Spanish. Preserve the original pane focus and verify that
 player keys do not reach its terminal.
 
-Update-toast tests use injected clocks for foreground expiry and hover pauses,
+Update-toast tests use injected clocks for foreground expiry and hover pauses
+(a toast paused mid-fade is drawn whole and resumes with time to read it),
 and private cache fixtures for concurrent claims, restart persistence, abandoned
 claims, contention recovery and failed writes. An unreadable record must remain
 byte-identical. Native checks must retain terminal grid, cursor and
@@ -3021,7 +3258,12 @@ compare caret and selection placement with the shaped pointer stops, including
 long scrolled inputs, grapheme clusters, CJK and RTL. Fitting RTL text must keep
 all shaped clusters visible and retain its full selection width at every caret
 boundary, including Home and stale logical scroll offsets. Localized prefix/hint slot
-tests cover English and Spanish at narrow widths. Settings value-slot tests compare
+tests cover English and Spanish at narrow widths. Picker-header tests check the
+full, shortened and Esc-only hint at exact and fractional width boundaries,
+using the complete projected query even when it is scrolled. No picker fallback
+ellipsizes the final action. UI tests pass the actual localized palette, theme,
+layout and SSH hint strings through the renderer, preserving theme's Esc restore
+action. Unsupported hint shapes retain whole-or-drop behavior. Settings value-slot tests compare
 the editor's start with the fitted label and gap at terminal cell-width scales
 0.5, 1 and 2, including narrow panels and wide labels. These unit checks do not
 replace native IME candidate-window, pointer drag, clipboard and live-GPU checks
@@ -3275,7 +3517,20 @@ value is included in that name. Linux retains the value description used by
 AT-SPI, and Windows retains its separate name and value. The native macOS
 check opens Settings and reads these row names through the accessibility tree;
 it does not establish VoiceOver speech output. Control diagnostics retain the
-field name alone, including on macOS.
+field name alone, including on macOS. `settings_row_text_follows_each_platforms_reader`
+builds a row the macOS, AT-SPI and UI Automation ways on any host, so each
+platform's text keeps unit coverage off its own runner.
+`settings_switches_expose_their_checked_state` gives a switch row its checked
+state wherever the speech choice allows it (every platform but macOS) and no
+other row one, keeps each row's value, and checks that the accessibility key
+follows a switch's state. `settings_rows_report_their_place_among_all_rows`
+hands the projection to AccessKit's consumer and reads each row's position
+and set size as the AT-SPI and UIA adapters do, while browsing sections and
+in a search.
+`off_screen_settings_rows_stay_reachable_at_the_list_edges` checks that rows
+scrolled out of the panel pass AccessKit's common filter with Focus and Click,
+bounded as zero-height lines on the edge of the painted rows they left by, at
+1x and 2x, and that a section scrolled out whole still has bounds.
 
 ## Static text names on every platform
 
@@ -3286,6 +3541,85 @@ AT-SPI and UI Automation do: a label's from its value, any other node's from its
 label. They check the theme picker's footer text (with the lowest colour's
 number and the below-3:1 warning) and Settings' no-match line in English and
 Spanish. They do not run Orca or Narrator.
+
+## Accessibility tree semantics
+
+These `kettle-ui` tests check the generated tree and the action routing, not
+speech:
+
+- `picker_selection_requests_only_highlight_and_choose_acts` models the
+  requests AccessKit 0.25's adapters make when a screen reader selects,
+  deselects, picks, focuses or presses a node: macOS `setAccessibilitySelected:`
+  both ways and `AXPick`; AT-SPI `SelectChild`, `DeselectChild` and
+  `DeselectSelectedChild`; UIA `Select`, `AddToSelection` and
+  `RemoveFromSelection`; and the explicit `AXPress`, `DoAction` and `Invoke`.
+  It runs them against each option of the palette, the layout picker and the
+  SSH launcher's Save and Remove rows, with every option highlighted in turn.
+  Each only highlights its option. Only a press on the Choose button acts, on
+  the highlighted result. The button has no selected state, so no selection
+  request reaches it, and a Choose button bound to another result acts on
+  nothing.
+- `settings_selection_requests_never_change_a_row` runs the same modelled
+  requests against every Settings row, painted or scrolled out. Each only
+  selects its row. Only a press on the selected row's Change button changes
+  it, and a Change button queued for a row that is no longer selected changes
+  nothing. `settings_accessibility_click_dispatches_configure_and_retry` checks
+  that the Change button, not the row, reaches the global hotkey's configure
+  and retry.
+- `an_accessibility_selection_previews_its_theme_after_a_held_hover`: after
+  the pointer leaves a theme's row before its preview is due, a screen
+  reader's selection of another theme still previews it at once.
+- `the_change_button_names_space_only_where_space_changes_the_row`: the
+  Change button names Space as its key on a switch, a choice and a text row,
+  and no key on a value row, which may be a number that Space leaves alone.
+- `the_change_button_is_unavailable_while_a_chord_is_captured`: in the window
+  projection the Change button is disabled and offers no press while a
+  shortcut row captures a chord, and is available again afterwards.
+- `an_unpainted_reset_leaves_the_value_control_to_change`: in a panel too
+  narrow for the Reset chip, AccessKit's consumer hit test on the value control
+  finds the Change button. Reset stays in the tree as a zero-width line at the
+  control's left edge.
+- `the_accessibility_key_follows_what_picker_rows_are_bound_to`: changing only
+  an SSH host's target paints the same launcher row but changes its option ids
+  and the accessibility key, so the tree is published again. A row's whole
+  name counts too, and the key's source covers the other bound nodes.
+- `quick_select_labels_are_bound_to_their_quick_selects_purpose`: a label of
+  a plain quick select names nothing in a quick select for previews over the
+  same text, and the other way round.
+- `the_window_quick_select_tree_stays_valid_at_65536_targets` binds 65,536
+  quick-select labels through the window projection and hands the tree to
+  AccessKit's consumer. The list keeps its id and holds the 65,535 bound
+  labels the projection numbers.
+- `indexed_modal_lists_stop_short_of_the_next_kinds_ids`: a 70,000-row
+  context menu and quick select keep 65,535 rows each in the tree, every id
+  distinct, where row 65,535 of the menu would have taken the quick-select
+  list's id.
+- `quick_select_labels_offer_a_press_that_acts_on_their_target`: matching
+  quick-select labels have a Click action that runs `act_hint`. Dimmed labels
+  have none.
+- `a_hovered_link_offers_a_press_that_opens_it`: the hovered link's node has
+  a Click action that opens the link under the pointer through
+  `open_pane_link`. Its status text has none.
+- `picker_options_bind_to_their_result_not_their_fitted_label`: two layouts
+  whose long names fit to one painted label keep separate ids and whole spoken
+  names. After filtering, a Choose press queued for the one filtered out acts
+  on nothing. SSH rows bind to the host or target they act on.
+- `accessibility_requests_are_bound_to_their_targets`: after the layout
+  picker is filtered from dev and ops to ops, the id published for dev names
+  nothing while ops keeps its id. A quick-select label from an earlier session,
+  or one over other text, names nothing, and neither does a link node once
+  another link, or the same target painted elsewhere, is shown.
+- `every_modal_surface_is_a_modal_dialog`: the palette, the theme, layout and
+  SSH pickers, Settings and title editing each project one modal dialog.
+- `the_tab_list_holds_only_tabs_beside_a_toolbar_of_the_strips_buttons`: the
+  tab list's children are tabs only. New tab, the new-tab menu, the gear and
+  the GNOME header's Find, main menu and window buttons sit in a "Tab bar
+  controls" toolbar beside it, in screen order, in English and Spanish.
+- `the_find_bar_has_one_named_status`: the find bar's count and status are one
+  named polite status, in English and Spanish, bounded over both painted
+  rects, and absent when the bar shows neither.
+
+VoiceOver and Orca have not yet been run against these changes.
 
 ## Configured-session and desktop acceptance, 2026-11-01
 
@@ -3397,7 +3731,7 @@ For macOS publication acceptance, copy the previously published notarized app
 to a private writable folder and run that copy's own `kettle update --yes`
 against the production signed feed. Require the new version and source, verify
 the resulting terminal/worker identity and bundle trust, then require a second
-update to report that it is current. Preserve the original app and the owner's
+update to report that it is current. Preserve the original app and your existing
 installation. Record this separately from the candidate archive swap smoke.
 
 
@@ -3696,7 +4030,8 @@ desktop, verify repeated CLI/global/menu/palette toggles create one quick window
 focus returns on explicit hide, switching apps autohides without stealing focus,
 tabs and splits keep their processes while hidden, monitor selection and all
 five geometries work across mixed-DPI displays, and Reduce Motion disables the
-slide. Also check a taken hotkey, rebind/clear on reload, CapsLock/NumLock on X11,
+slide under `reduce-motion = auto` while `reduce-motion = off` still slides.
+Also check a taken hotkey, rebind/clear on reload, CapsLock/NumLock on X11,
 window-list/cycling exclusion, English/Spanish Settings, and Wayland/Windows
 desktop shortcuts. A GUI-free test run does not establish these native behaviors.
 
@@ -3754,9 +4089,12 @@ view. The old window-sized event leaves the surface suspended; the live-view
 completion commits one layout and releases suspension. A source guard connects
 the replay to the completion producer and its platform fallbacks. Native
 fullscreen exit without a later resize remains a required live acceptance check.
-The live macOS check is
-`launchctl asuser $(id -u) python3 scripts/check-conformance.py esctest`;
-it requires an unlocked desktop and cannot run in the sandbox.
+For live caption and fullscreen coverage, run `just native-titlebar-smoke`
+from an unlocked macOS desktop session with the smoke's required permissions.
+Automatic AppKit-tab and DPI transitions, and fullscreen exit without a later
+resize event, still require separate live checks. `just conformance-esctest`
+checks terminal escape sequences; it does not verify native fullscreen
+restoration.
 
 ## Cursor and selection regression checks
 
@@ -3828,10 +4166,18 @@ and Spanish layout still require live platform checks.
 ## Bounded session-output restore
 
 `kettle-core::restore::tests` covers primary-screen capture during alternate
-screen use, SGR and wide/grapheme replay, control/hyperlink stripping, per-pane
-line and row-byte caps, and content/divider/new-output ordering.
-`kettle-ui::session_content::tests` checks the serialized 8 MiB cap, private
-round trips, corrupt and mismatched sidecars, unsafe controls, and removal.
+screen use, SGR (blink included) and wide/grapheme replay, control/hyperlink
+stripping, per-pane line and row-byte caps, and content/divider/new-output
+ordering. Cell-by-cell round trips in a 40-by-10 pane check the columns after
+tabs, soft wraps onto rows of blanks, the tail of a row whose wrap scrolls, and
+the blank a wide character leaves at the end of a row it did not fit.
+In one-row, narrower and wider panes, restored rows match the saved pane
+resized to the same width, in text, colours, width and soft wraps, and a
+remote session's boundary keeps its lines through narrowing, widening and
+eviction. `kettle-ui::session_content::tests` checks the serialized 8 MiB
+cap, private round trips, corrupt and mismatched sidecars, unsafe controls,
+removal, and, on Unix, that remote output stays out of the saved file when the
+pane's width changes.
 Session writer tests cover output-disable cleanup. Config and Settings tests
 cover defaults, bounds, both key spellings and persisted values. Run the full
 `kettle-ui`, `kettle-core`, `kettle-state`, `kettle-config` and `kettle-i18n`
@@ -3849,7 +4195,20 @@ that Kettle Day keeps TokyoNight Day's surfaces, darkens each text colour
 without turning its hue, and credits its sources in its header. Portable
 tests cover portal value/filter policy and macOS appearance selection; Linux
 private-bus tests cover color-scheme snapshots,
-SettingChanged and owner loss using the shared reduced-motion transport.
+SettingChanged and owner loss using the shared reduced-motion transport, and
+the fallback to GNOME's `enable-animations` for a portal without
+`reduced-motion`. Portable tests pin that a desktop with neither allows motion
+and that only a pending first answer holds it back. Unix tests drive the local
+GNOME read with `/bin/sh` stand-ins for `gsettings`: its parsing and output
+cap, a `gsettings` its owner may not run (mode 0010) or that cannot start (a
+missing interpreter) skipped for a working one later in `PATH`, a search that
+runs again at the next refresh rather than keeping what cannot start, a
+deadline and a stop that hold across the whole search, including a held
+lookup in one `PATH` entry after which no other entry is looked at, an overrunning and a stopped read killed and reaped, a watch that follows
+a change and is dropped mid-read without leaving a child or thread, a drop
+that returns at once while the lookup is held and starts no child after it,
+a held lookup that stops counting as pending once the first answer's time is
+up, and a switch only GNOME itself reports holding motion back.
 Native acceptance still requires light/dark switching on macOS and Linux
 (Wayland and X11), including multiple windows, open overlays, custom side
 palettes, material/titlebar contrast, IME, and OSC 996/2031 subscribers.
@@ -3900,6 +4259,38 @@ IME candidate placement and startup rows. Exercise dropdowns, reorder, tear-off,
 redock, tab close/activity/bell marks and config reload, plus X11 and borderless
 fallbacks. Portable checks do not establish compositor or rendering acceptance.
 
+Profile-cache regressions include a cached cycle target deleted before selection,
+a failed read that preserves the active path and trust, and deletion after a
+successful read while the exact prepared snapshot is consumed. Blocked-worker
+coverage distinguishes pending from the first ready-empty completion, requires
+that first completion to publish readiness, and retains the last completed cache
+during later scans. Actual worker completions exercise additions, removals and
+empty results while an open deep menu keeps its rows, actions, saved parent
+anchors/highlights/scroll offsets, offscreen highlight, manual viewport and
+typeahead. The palette keeps its opening profiles and exact query/caret/selection;
+reopening takes the completed inventory. English and Spanish pending status is
+non-action menu information or a persistent palette band outside ranked results.
+Status wrapping uses the renderer's measured overlay advance and line height,
+independent of terminal cell-width and cell-height scaling. Portable font-shaping
+checks require each status line to fit its natural-font bounds; picker projections
+also cover narrowed and shortened physical cells, narrow widths and long queries.
+At short restored heights, the palette first drops supplementary key guidance,
+then uses the compact pending translation if the full explanation cannot fit.
+If even that band cannot fit beside the physical input header and one result,
+it omits the visual band and replaces the decorative input prefix with Esc.
+The full reopening explanation remains an accessible input description and polite
+status. This constrained-height fallback preserves the query, caret, selection,
+composition and ranked action indices; it does not insert ranked status rows.
+Short-window cases include pending discovery at 360x120 with 0-, 24- and 46-pixel
+top chrome and separate natural/scaled cell metrics. Standard-height pending
+palettes retain the full status and Run/Select/Cancel guidance; ready-state
+geometry is unchanged.
+Portable checks cover native menu pending-to-empty modeling and captured-name
+actions, plus palette keyboard/pointer index agreement; they do not prove AppKit
+tracking or physical UI behavior. Ordinary resize/navigation coverage remains
+separate. Required compilation, tests, source controls and native acceptance must
+run on the changed source before it is accepted.
+
 ### Wayland GlobalShortcuts portal
 
 `quick_terminal::portal` covers the portable mapping, repeat/lifecycle model,
@@ -3915,7 +4306,7 @@ one shared registration lock and takeover after owner exit.
 The optional `scripts/check-quick-terminal-portal.py --execute --binary PATH`
 starts a private bus and headless GNOME Shell. `--seed` preconfigures only private
 dconf for the returning-shortcut path; omit it to exercise the private dialog.
-Do not run these checks on the owner's desktop. The script replaces the entire
+Do not run these checks on your active desktop session. The script replaces the entire
 environment, including HOME, XDG directories, XDG_RUNTIME_DIR, TMPDIR and
 KETTLE_TEST_OS_CTL_DIR, and routes both D-Bus addresses to its private daemon.
 It excludes systemd service activation. Its `--self-test` checks isolation without

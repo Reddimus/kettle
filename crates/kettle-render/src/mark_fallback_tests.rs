@@ -5,6 +5,7 @@
 
 use crate::gpu_tests::gpu_test_guard;
 use crate::headless_tests::{capture, focused, pane, renderer, snapshot_of};
+use crate::visual_parity_tests::parity_scene;
 use crate::*;
 
 const W: u32 = 320;
@@ -69,11 +70,11 @@ fn ink_in(frame: &image::RgbaImage, rows: std::ops::Range<u32>, x0: u32, x1: u32
         .any(|y| (x0..x1).any(|x| *frame.get_pixel(x, y) != background))
 }
 
+parity_scene! {
 /// `Z\u{324}\u{308}` from the C08 fixture. JetBrains Mono lacks U+0324, so
 /// the cluster falls back to a face that has all three; San Francisco on
 /// macOS has GPOS but no mark anchors, and drew the diaeresis inside the
 /// capital with both marks off its right edge.
-#[test]
 fn stacked_marks_clear_a_capital_whose_font_does_not_anchor_them() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(W, H) else {
@@ -112,10 +113,11 @@ fn stacked_marks_clear_a_capital_whose_font_does_not_anchor_them() {
         "the frame must have ink below the baseline"
     );
 }
+}
 
+parity_scene! {
 /// `a\u{300}\u{316}` from the same fixture: the shaper composes `à` and the
 /// grave below stays a mark.
-#[test]
 fn a_grave_stack_keeps_ink_above_and_below() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(W, H) else {
@@ -142,6 +144,7 @@ fn a_grave_stack_keeps_ink_above_and_below() {
         "the grave below must hang under the baseline: {below:?} under {base:?}"
     );
     assert!((centre(&below) - centre(&base)).abs() <= 1.5);
+}
 }
 
 /// The original mixed input includes U+0316, which JetBrains Mono lacks.
@@ -269,10 +272,10 @@ fn anchored_fixture_covers_the_intended_shaping_cases() {
     }
 }
 
+parity_scene! {
 /// Marks the font anchors (mark-to-base with a zero offset, mark-to-base and
 /// mark-to-mark with offsets) or the shaper placed draw exactly as they did
 /// before fallback placement existed.
-#[test]
 fn marks_the_font_places_render_exactly_as_before() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(W, H) else {
@@ -299,10 +302,11 @@ fn marks_the_font_places_render_exactly_as_before() {
     );
     assert!(placed == unplaced, "font-placed marks must not move");
 }
+}
 
+parity_scene! {
 /// The bundled JetBrains Mono has no anchor on `#`, `1` or `@`, so this runs
 /// the same on every host.
-#[test]
 fn an_unanchored_bundled_mark_clears_its_base() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(W, H) else {
@@ -330,10 +334,11 @@ fn an_unanchored_bundled_mark_clears_its_base() {
         );
     }
 }
+}
 
+parity_scene! {
 /// Placement is worked out when a row is shaped and kept with it: a steady
 /// frame or a zoom reuses it, and only a reshaped row recomputes it.
-#[test]
 fn mark_placement_is_cached_with_the_shaped_row() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(W, H) else {
@@ -372,11 +377,12 @@ fn mark_placement_is_cached_with_the_shaped_row() {
     assert_eq!(row_shifts(&renderer, 0).len(), 1);
     assert_ne!(row_shifts(&renderer, 0), marker, "a new row is placed");
 }
+}
 
+parity_scene! {
 /// A row past the buffer's height, as while a pane shrinks ahead of its
 /// terminal, is shaped but not laid out. It is placed once it is laid out,
 /// though its content, and so its row key, never changed.
-#[test]
 fn a_row_laid_out_late_is_placed_then() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(W, H) else {
@@ -403,10 +409,11 @@ fn a_row_laid_out_late_is_placed_then() {
         "the accent must sit on the base: {mark:?} over {base:?}"
     );
 }
+}
 
+parity_scene! {
 /// A stack of unanchored marks stops a quarter line past its row instead of
 /// covering the rows above.
-#[test]
 fn a_tall_unanchored_stack_stays_near_its_row() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(W, H) else {
@@ -432,12 +439,13 @@ fn a_tall_unanchored_stack_stays_near_its_row() {
         );
     }
 }
+}
 
+parity_scene! {
 /// The focused block cursor's inverted glyph is drawn over the pane's. When
 /// the pane moved a mark, the inverted copy must move with it; otherwise the
 /// pane's mark shows in the text colour on the block, beside an inverted one
 /// left where the font drew it.
-#[test]
 fn the_block_cursor_inverts_a_moved_mark_where_the_pane_drew_it() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(W, H) else {
@@ -529,6 +537,7 @@ fn the_block_cursor_inverts_a_moved_mark_where_the_pane_drew_it() {
         }
     }
 }
+}
 
 /// Switching cursor pipelines must discard the previous cell's moved-mark
 /// bounds, or a nearby built-in cursor can acquire an oversized patch.
@@ -549,8 +558,8 @@ fn moved_mark_and_builtin_cursor_transitions_keep_the_current_patch() {
         };
         eprintln!(
             "MARK_BUILTIN_GPU: mapping={allow_mapping}, mapped={}, {:?}",
-            renderer.gpu.mapped_uploads(),
-            renderer.gpu.adapter_info()
+            renderer.gpu().mapped_uploads(),
+            renderer.gpu().adapter_info()
         );
         let mut snap = snapshot_of(32, 3, "#\u{301}\x1b[1;21H\u{2592}\x1b[1;1H".as_bytes());
         frame_of_snapshot(&mut renderer, &cfg, &snap);

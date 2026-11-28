@@ -74,6 +74,7 @@ pub(crate) fn app_source() -> String {
         include_str!("app/layout.rs"),
         include_str!("app/links.rs"),
         include_str!("app/media.rs"),
+        include_str!("app/menu_pointer.rs"),
         include_str!("app/menus.rs"),
         include_str!("app/modals.rs"),
         include_str!("app/notifications.rs"),
@@ -84,6 +85,7 @@ pub(crate) fn app_source() -> String {
         include_str!("app/pointer.rs"),
         include_str!("app/preview.rs"),
         include_str!("app/preview_model.rs"),
+        include_str!("app/profiles.rs"),
         include_str!("app/quick_terminal.rs"),
         include_str!("app/recording.rs"),
         include_str!("app/redraw.rs"),
@@ -131,6 +133,7 @@ mod actions;
 mod broadcast;
 mod clipboard;
 mod completion;
+mod cpu_window;
 mod ctl_snapshot;
 mod cursor;
 mod exit;
@@ -177,6 +180,7 @@ pub(crate) use keyboard::*;
 pub(crate) use layout::*;
 pub(crate) use links::*;
 use media::*;
+pub(crate) use menu_pointer::*;
 pub(crate) use menus::*;
 pub(crate) use modals::*;
 use notification_toast::*;
@@ -211,12 +215,14 @@ mod linux_titlebar_tests;
 mod selection_hint;
 use linux_titlebar::*;
 mod media;
+mod menu_pointer;
 mod menus;
 mod modals;
 mod notices;
 mod paste;
 mod pointer;
 mod preview;
+mod profiles;
 mod quick_terminal;
 mod search;
 mod sessions;
@@ -226,6 +232,7 @@ mod titlebar;
 mod titlebar_tabs_tests;
 mod update_toast;
 mod windowing;
+use profiles::{append_profile_choices, profile_launch_items};
 use titlebar::*;
 
 #[cfg(test)]
@@ -236,7 +243,6 @@ mod ctl_target_param_tests;
 
 #[derive(Debug, Clone)]
 pub enum UserEvent {
-    #[cfg(target_os = "macos")]
     ProfilesReady,
     Wakeup,
     SystemSettingsChanged(Arc<std::sync::atomic::AtomicBool>),
@@ -419,6 +425,12 @@ pub struct App {
     /// in `resumed`; `open_window` reuses it for the synchronous (no
     /// adapter/device request) renderer init of windows 2..N.
     gpu: Option<kettle_render::GpuContext>,
+    /// Window 1 draws on the CPU (`renderer`), so every window does, and
+    /// `gpu` stays `None`: no GPU driver is loaded.
+    cpu_rendering: bool,
+    /// The graphics settings window 1's renderer was built from. Settings
+    /// asks for a restart while the saved ones differ.
+    running_graphics: Option<crate::settings::GraphicsSettings>,
     /// The system fonts, loading on their own thread since `run_with`
     /// began. Window 1 takes them before its first spawn; later windows load their own.
     font_preload: Option<crate::font_preload::FontPreload>,
@@ -474,8 +486,8 @@ pub struct App {
     system_motion: std::sync::OnceLock<crate::motion::SystemMotion>,
     #[cfg(target_os = "linux")]
     agent_launches: kettle_ctl::agent_launch::LaunchScopes,
-    #[cfg(target_os = "macos")]
-    profile_inventory: crate::macos_menu::ProfileInventory,
+    profile_inventory: crate::profile_inventory::ProfileInventory,
+    profile_launch_gate: profiles::ProfileLaunchGate,
     proxy: EventLoopProxy<UserEvent>,
     pending_shell_action: PendingShellAction,
     /// Private, bounded bare-launch activation inbox. The IPC thread waits for
@@ -607,6 +619,7 @@ pub struct App {
     system_appearance: std::sync::OnceLock<crate::appearance::SystemAppearance>,
     /// Resolved non-default config file (explicit path or named profile).
     config_path: Option<std::path::PathBuf>,
+    prepared_profile_reload: Option<(std::path::PathBuf, kettle_config::LoadedConfig)>,
     /// Provenance paired with `config_path`; profile switching resets this to
     /// directory verification even when the process started with `--config`.
     config_trust: ConfigTrust,
@@ -747,7 +760,7 @@ impl ApplicationHandler<UserEvent> for App {
         if self.quick_terminal.wayland && self.quick_terminal.initial_focus {
             self.quick_terminal.previous = Default::default();
         }
-        if show_initial_quick && !self.quick_terminal.model.visible && self.gpu.is_some() {
+        if show_initial_quick && !self.quick_terminal.model.visible && self.renderers_ready() {
             self.toggle_quick_terminal(event_loop);
         }
         self.reconcile_quick_hotkey();
@@ -776,11 +789,7 @@ impl ApplicationHandler<UserEvent> for App {
         // change what the session holds.
         self.session_sweep.touch();
         match ev {
-            #[cfg(target_os = "macos")]
-            UserEvent::ProfilesReady => {
-                self.profile_inventory.complete();
-                self.sync_macos_menu(None);
-            }
+            UserEvent::ProfilesReady => self.profiles_ready(),
             UserEvent::CardsTipClaimed(claimed) => self.cards_tip_claimed(claimed),
             UserEvent::DesktopNotificationFailed => self.receive_failed_desktop_notifications(),
             UserEvent::GpusDetected(choices) => {
@@ -1192,6 +1201,10 @@ impl ApplicationHandler<UserEvent> for App {
                     earliest_deadline =
                         Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
                 }
+            }
+            if let Some(deadline) = Self::tick_cpu_presenter(&mut ws, now) {
+                earliest_deadline =
+                    Some(earliest_deadline.map_or(deadline, |current| current.min(deadline)));
             }
             let wait = self.about_to_wait_inner(&mut ws, event_loop);
             self.finish_window_dispatch(event_loop, seq, ws);

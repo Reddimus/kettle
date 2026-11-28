@@ -35,8 +35,8 @@ pub use private::{
 };
 #[cfg(unix)]
 pub use tree::{
-    TreeRemovalLimits, directory_is_empty, open_directory_for_tree_removal_at,
-    remove_directory_tree_at, remove_owned_readonly_tree_at,
+    TreeRemovalLimits, directory_entry_names, directory_is_empty,
+    open_directory_for_tree_removal_at, remove_directory_tree_at, remove_owned_readonly_tree_at,
 };
 
 /// Whether `path` still names the native file held by `file`.
@@ -100,12 +100,47 @@ impl Default for AtomicWriteOptions {
     }
 }
 
-/// Atomically and durably replace `destination` with `bytes`.
+/// Atomically and durably replace `destination` with `bytes`. An error
+/// after the replacement is in place, when its directory cannot be synced,
+/// is an error here too; [`atomic_replace_reporting`] tells the two apart.
 pub fn atomic_replace(
     destination: &Path,
     bytes: &[u8],
     options: AtomicWriteOptions,
 ) -> io::Result<()> {
+    match atomic_replace_reporting(destination, bytes, options)? {
+        Replaced::Durable => Ok(()),
+        Replaced::NotDurable(error) => Err(error),
+    }
+}
+
+/// What a replacement in place still lacks.
+#[derive(Debug)]
+pub enum Replaced {
+    /// In place and its directory synced: it survives a power loss.
+    Durable,
+    /// In place, so every read from now on sees it, but its directory could
+    /// not be synced: a power loss could still bring the old file back.
+    NotDurable(io::Error),
+}
+
+/// [`atomic_replace`], telling a failure before the replacement is in place
+/// (`Err`, `destination` as it was) from a failure to sync its directory
+/// once it is (`Ok(Replaced::NotDurable)`).
+pub fn atomic_replace_reporting(
+    destination: &Path,
+    bytes: &[u8],
+    options: AtomicWriteOptions,
+) -> io::Result<Replaced> {
+    atomic_replace_with_sync(destination, bytes, options, private::sync_guarded_parent)
+}
+
+fn atomic_replace_with_sync(
+    destination: &Path,
+    bytes: &[u8],
+    options: AtomicWriteOptions,
+    sync_parent: impl FnOnce(&private::PrivateParentGuard) -> io::Result<()>,
+) -> io::Result<Replaced> {
     let parent = destination.parent().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -240,8 +275,10 @@ pub fn atomic_replace(
         return Err(error);
     }
     drop(staged);
-    private::sync_guarded_parent(&parent_guard)?;
-    Ok(())
+    Ok(match sync_parent(&parent_guard) {
+        Ok(()) => Replaced::Durable,
+        Err(error) => Replaced::NotDurable(error),
+    })
 }
 
 /// Durably create `destination` without replacing an existing path.
@@ -665,6 +702,16 @@ fn schedule_stale_staged_reap(destination: &Path) {
 #[cfg(target_os = "macos")]
 pub fn clear_inherited_acl(file: &File) -> io::Result<()> {
     private::unix::macos_acl::clear_extended_acl(file)
+}
+
+/// Whether an open file or directory carries any extended ACL entry.
+///
+/// The read-only counterpart to [`clear_inherited_acl`], for a caller that has
+/// to refuse an object someone else may have been granted access to, rather
+/// than repair it. Clearing an entry does not undo what it already allowed.
+#[cfg(target_os = "macos")]
+pub fn has_extended_acl(file: &File) -> io::Result<bool> {
+    private::unix::macos_acl::has_any_extended_acl(file)
 }
 
 /// Why an atomic exchange did not fully succeed.
@@ -1602,6 +1649,34 @@ mod tests {
         assert_eq!(fs::read(target).unwrap(), b"original");
     }
 
+    /// Once the replacement is in place, failing to sync its directory is
+    /// not a failed replacement: every read sees the new bytes, and the
+    /// caller hears that they may not survive a power loss.
+    /// `atomic_replace` still reports it as an error.
+    #[test]
+    fn a_directory_sync_failure_after_publication_is_reported_apart() {
+        let dir = crate::test_tempdir();
+        let path = dir.path().join("config");
+        fs::write(&path, b"old").unwrap();
+        let replaced = atomic_replace_with_sync(
+            &path,
+            b"new",
+            AtomicWriteOptions::PRESERVE_PERMISSIONS,
+            |_| Err(io::Error::other("injected EIO")),
+        )
+        .unwrap();
+        assert!(
+            matches!(&replaced, Replaced::NotDurable(error) if error.to_string() == "injected EIO")
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert!(matches!(
+            atomic_replace_reporting(&path, b"newer", AtomicWriteOptions::PRESERVE_PERMISSIONS)
+                .unwrap(),
+            Replaced::Durable
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"newer");
+    }
+
     #[test]
     fn atomic_replace_creates_nested_parent_chain() {
         let dir = crate::test_tempdir();
@@ -1844,5 +1919,29 @@ mod tests {
                 .to_string_lossy()
                 .contains(".tmp.")
         }));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reports_an_extended_acl_without_changing_it() {
+        let root = test_tempdir();
+        let directory = root.path().join("acl");
+        fs::create_dir(&directory).unwrap();
+        let held = File::open(&directory).unwrap();
+        assert!(!has_extended_acl(&held).unwrap());
+        let applied = std::process::Command::new("/bin/chmod")
+            .arg("+a")
+            .arg("everyone allow list,search")
+            .arg(&directory)
+            .status()
+            .unwrap();
+        assert!(applied.success(), "could not set up the ACL");
+        assert!(has_extended_acl(&held).unwrap());
+        assert!(
+            has_extended_acl(&held).unwrap(),
+            "the check left the entry alone"
+        );
+        clear_inherited_acl(&held).unwrap();
+        assert!(!has_extended_acl(&held).unwrap());
     }
 }

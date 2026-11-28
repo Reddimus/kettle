@@ -343,9 +343,19 @@ impl App {
     }
 
     /// Open the in-app Settings overlay on its first row, over nothing else.
+    /// An open panel stays as it is: the app menu's Settings… (Cmd+,) on it
+    /// keeps its category, row and search, and what sits over it.
     pub(super) fn open_settings(&mut self, ws: &mut WindowState) {
+        if ws.settings_nav.is_some() {
+            return;
+        }
         self.close_all_modals(ws);
-        if let Some(choices) = crate::gpu_discovery::GPU_DISCOVERY.cached() {
+        if self.cpu_rendering {
+            // Listing adapters would load a GPU driver into a process that
+            // draws on the CPU; the GPU rows keep their configured values.
+            self.gpu_choices.clear();
+            self.gpu_discovery_pending = false;
+        } else if let Some(choices) = crate::gpu_discovery::GPU_DISCOVERY.cached() {
             self.gpu_choices = choices.clone();
             self.gpu_discovery_pending = false;
         } else {
@@ -358,7 +368,6 @@ impl App {
                 },
             );
         }
-        ws.settings_restart_pending = false;
         ws.settings_nav = Some(crate::settings::SettingsNav::default());
     }
 
@@ -1045,9 +1054,8 @@ impl App {
             }
             Action::CommandPalette | Action::ShowKeybinds => {
                 self.close_all_modals(ws);
-                ws.palette_profiles = kettle_config::Config::list_profiles();
                 ws.palette_bound_only = matches!(action, Action::ShowKeybinds);
-                ws.palette_input = Some((Default::default(), 0));
+                profiles::open_profile_palette(ws, self.profile_inventory.snapshot());
             }
             // Open the in-app settings overlay (Ctrl+, / right-click
             // → Settings / palette "Open settings").
@@ -1063,41 +1071,7 @@ impl App {
                 ws.pending_resize = true;
             }
             Action::LaunchProfile(name) => {
-                let tr = self.ui_text;
-                // Config and renderer state are application-wide. Isolate profile launches.
-                if kettle_config::Config::list_profiles().contains(&name) {
-                    let exe = std::env::current_exe().unwrap_or_else(|_| "kettle".into());
-                    if let Err(error) = std::thread::Builder::new()
-                        .name("kettle-profile".into())
-                        .spawn(move || {
-                            if let Err(error) = std::process::Command::new(exe)
-                                .arg(format!("--profile={name}"))
-                                .stdin(std::process::Stdio::null())
-                                .stdout(std::process::Stdio::null())
-                                .stderr(std::process::Stdio::null())
-                                .spawn()
-                                .and_then(|mut child| child.wait())
-                            {
-                                log::warn!("profile launch failed: {error}");
-                                fire_notify(
-                                    tr.text(kettle_i18n::Text::NotifyProfileLaunchFailed),
-                                    tr.text(kettle_i18n::Text::NotifyProfileLaunchFailedBody),
-                                );
-                            }
-                        })
-                    {
-                        log::warn!("profile reaper failed to start: {error}");
-                        fire_notify(
-                            tr.text(kettle_i18n::Text::NotifyProfileLaunchFailed),
-                            tr.text(kettle_i18n::Text::NotifyProfileLaunchFailedBody),
-                        );
-                    }
-                } else {
-                    fire_notify(
-                        tr.text(kettle_i18n::Text::NotifyProfileLaunchFailed),
-                        tr.text(kettle_i18n::Text::NotifyProfileLaunchFailedBody),
-                    );
-                }
+                super::profiles::launch_profile(&self.profile_launch_gate, name, self.ui_text);
             }
             Action::OpenProfilesDirectory => {
                 let path = kettle_config::Config::default_path()
@@ -1128,6 +1102,7 @@ impl App {
                 self.close_all_modals(ws);
                 ws.layout_picker_entries = crate::session::Session::list_layouts();
                 ws.layout_picker_input = Some((Default::default(), 0));
+                reset_picker_view(ws);
             }
             Action::OpenThemePicker => self.open_theme_picker(ws),
             Action::OpenMediaShelf => self.open_media_shelf(ws),
@@ -1169,17 +1144,21 @@ impl App {
                 let preview = matches!(action, Action::PreviewLink);
                 let targets = self.collect_hints(ws, preview);
                 if targets.is_empty() {
-                    // Nothing in the pane to preview: say so, as the plain
-                    // quick select's empty pane needs no word. A quick select
-                    // already open stays as it was.
+                    // Nothing in the pane to label: say so, a notification
+                    // for previews and a brief pane status for the plain
+                    // quick select. A quick select already open stays as it
+                    // was.
                     if preview {
                         let tr = self.ui_text;
                         fire_notify(
                             tr.text(kettle_i18n::Text::NotifyTitlePreviewNothing),
                             tr.text(kettle_i18n::Text::NotifyBodyPreviewNothing),
                         );
+                    } else {
+                        show_no_hints(ws, std::time::Instant::now());
                     }
                 } else {
+                    ws.no_hints_notice.dismiss();
                     self.close_all_modals(ws);
                     // The purpose goes with the targets it chose.
                     ws.hint_state = Some((targets, String::new()));
@@ -1201,11 +1180,15 @@ impl App {
                     self.open_preview_menu(ws, focus.pane, None);
                 } else {
                     // Not a click: the menu opens at the text cursor, where
-                    // the keyboard is.
-                    let (px, py) = self
-                        .keyboard_menu_point(ws)
-                        .unwrap_or((ws.cursor.x as f32, ws.cursor.y as f32));
+                    // the keyboard is, below or above its line but never over
+                    // it.
+                    let point = self.keyboard_menu_point(ws);
+                    let (px, py) = point.unwrap_or((ws.cursor.x as f32, ws.cursor.y as f32));
                     self.open_context_menu(ws, px, py, false);
+                    if let Some(point) = point {
+                        let line = self.text_line_anchor(ws, point);
+                        self.place_context_menu_at_line(ws, line);
+                    }
                 }
             }
             Action::UndoCloseTab => {
@@ -1628,38 +1611,38 @@ impl App {
             // key_next_profile + key_previous_profile): runtime cycle
             // through profile files at <config-dir>/profiles/.
             //
-            // Enumerates the profiles directory each dispatch (cheap;
-            // typically <10 entries), sorts deterministically, finds
+            // Uses the worker's sorted profile cache, finds
             // the current entry by basename match against the loaded
             // config-path, and loads the next/prev. Falls back to
             // log::info when no profiles directory or no entries.
             Action::NextProfile | Action::PrevProfile => {
-                // Delegate listing + name extraction to
-                // kettle-config so the same path math has a single
-                // home (and drift guards on it). Empty list → no-op
-                // with a one-line info nudge.
-                let names = kettle_config::Config::list_profiles();
-                if names.is_empty() {
-                    log::info!(
-                        "{action:?}: no profiles in <config-dir>/profiles/ — \
-                         create one with `kettle --print-default-config > \
-                         ~/.config/kettle/profiles/dev.config`"
-                    );
-                } else {
-                    let current = self
-                        .config_path
-                        .as_deref()
-                        .and_then(kettle_config::Config::profile_name_from_path);
-                    let next = pick_next_profile(
-                        current.as_deref(),
-                        &names,
-                        matches!(action, Action::NextProfile),
-                    );
-                    if let Some(p) = kettle_config::Config::path_for_profile(&next) {
-                        self.switch_profile(ws, p);
+                let current = self
+                    .config_path
+                    .as_deref()
+                    .and_then(kettle_config::Config::profile_name_from_path);
+                match profiles::profile_cycle(
+                    self.profile_inventory.snapshot(),
+                    current.as_deref(),
+                    matches!(action, Action::NextProfile),
+                ) {
+                    profiles::ProfileCycle::Unavailable => {
+                        log::info!("{action:?}: profile discovery is not ready");
+                    }
+                    profiles::ProfileCycle::Empty => {
+                        log::info!(
+                            "{action:?}: no profiles in <config-dir>/profiles/ — \
+                             create one with `kettle --print-default-config > \
+                             ~/.config/kettle/profiles/dev.config`"
+                        );
+                    }
+                    profiles::ProfileCycle::Next(next) => {
+                        if let Some(p) = kettle_config::Config::path_for_profile(&next) {
+                            self.switch_profile(ws, p);
+                        }
                     }
                 }
             }
+
             // Split-tree rotation (Terminator `rotate_cw` / `rotate_ccw`):
             // turn the active tab's whole layout a quarter turn. No-op on a
             // single-pane tab. Rotating changes every pane's rect, so the PTYs
@@ -1945,12 +1928,17 @@ pub(super) fn select_command_output(term: &kettle_core::Terminal, at: Option<u64
         .is_some_and(|rows| select_output_rows(&term.term, rows))
 }
 
-/// Select stable row ids `start..end` of `term` as whole rows, and scroll the
-/// first into view when it is off screen. `false`, changing nothing, when
-/// none of the rows is retained.
+/// Select stable row ids `start..end` of `term` as whole rows, except that a
+/// last row whose output stops at `end_column` is selected only up to it,
+/// and scroll the first into view when it is off screen. `false`, changing
+/// nothing, when none of the rows is retained.
 pub(super) fn select_output_rows(
     term: &kettle_core::term::SharedTerm,
-    (start, end): (u64, u64),
+    kettle_core::term::CommandOutput {
+        start,
+        end,
+        end_column,
+    }: kettle_core::term::CommandOutput,
 ) -> bool {
     use kettle_core::Dimensions as _;
     let Ok(mut t) = term.lock() else {
@@ -1969,10 +1957,17 @@ pub(super) fn select_output_rows(
         return false;
     };
     let first = first.max(-(history as i32));
+    let cut = last >= screen_lines as i32;
     let last = last.min(screen_lines as i32 - 1);
     if first > last || columns == 0 {
         return false;
     }
+    // The next prompt can follow output with no final newline on its last
+    // row; that row's output ends before the column D found the cursor at.
+    let last_column = match end_column {
+        Some(column) if !cut && column > 0 => column.min(columns) - 1,
+        _ => columns - 1,
+    };
     // Whole rows, from the first cell of the first to the last of the last.
     // Not `SelectionType::Lines`: the engine ends a copied line selection
     // with a newline, and widens it over a row the next prompt wrapped onto.
@@ -1982,7 +1977,7 @@ pub(super) fn select_output_rows(
         kettle_core::Side::Left,
     );
     selection.update(
-        kettle_core::Point::new(kettle_core::Line(last), kettle_core::Column(columns - 1)),
+        kettle_core::Point::new(kettle_core::Line(last), kettle_core::Column(last_column)),
         kettle_core::Side::Right,
     );
     t.selection = Some(selection);

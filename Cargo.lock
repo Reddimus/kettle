@@ -1097,6 +1097,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctor"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83cf0d42651b16c6dfe68685716d18480d18a9c39c62d76e8cf3eb6ed5d8bcbf"
+dependencies = [
+ "dtor",
+]
+
+[[package]]
 name = "cursor-icon"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1222,6 +1231,12 @@ checksum = "cd1511a7b6a56299bd043a9c167a6d2bfb37bf84a6dfceaba651168adfb43c87"
 dependencies = [
  "dtoa",
 ]
+
+[[package]]
+name = "dtor"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edf234dd1594d6dd434a8fb8cada51ddbbc593e40e4a01556a0b31c62da2775b"
 
 [[package]]
 name = "dugong"
@@ -2278,7 +2293,7 @@ dependencies = [
 
 [[package]]
 name = "kettle"
-version = "5.9.0"
+version = "6.0.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2314,7 +2329,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-config"
-version = "5.9.0"
+version = "6.0.0"
 dependencies = [
  "bitflags 2.13.2",
  "kettle-ctl",
@@ -2329,7 +2344,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-core"
-version = "5.9.0"
+version = "6.0.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -2354,7 +2369,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-ctl"
-version = "5.9.0"
+version = "6.0.0"
 dependencies = [
  "base64 0.23.1",
  "boon",
@@ -2370,7 +2385,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-i18n"
-version = "5.9.0"
+version = "6.0.0"
 dependencies = [
  "serde",
  "sys-locale",
@@ -2379,7 +2394,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-media"
-version = "5.9.0"
+version = "6.0.0"
 dependencies = [
  "kettle-test-support",
  "sha2",
@@ -2388,7 +2403,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-media-native"
-version = "5.9.0"
+version = "6.0.0"
 dependencies = [
  "block2 0.6.2",
  "kettle-media",
@@ -2409,7 +2424,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-media-render"
-version = "5.9.0"
+version = "6.0.0"
 dependencies = [
  "dugong",
  "dugong-graphlib",
@@ -2443,7 +2458,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-media-worker"
-version = "5.9.0"
+version = "6.0.0"
 dependencies = [
  "image",
  "kettle-media",
@@ -2456,7 +2471,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-remote"
-version = "5.9.0"
+version = "6.0.0"
 dependencies = [
  "criterion",
  "kettle-test-support",
@@ -2466,10 +2481,11 @@ dependencies = [
 
 [[package]]
 name = "kettle-render"
-version = "5.9.0"
+version = "6.0.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "as-raw-xcb-connection",
  "bytemuck",
  "crossbeam-channel",
  "glyphon",
@@ -2480,22 +2496,31 @@ dependencies = [
  "kettle-i18n",
  "kettle-state",
  "kettle-test-support",
+ "libc",
  "log",
+ "memmap2",
  "objc2-quartz-core 0.3.2",
  "pollster",
  "raw-window-handle",
  "read-fonts 0.37.0",
+ "rustix 1.1.6",
+ "softbuffer",
  "swash",
  "tempfile",
+ "tiny-xlib",
  "unicode-bidi",
  "unicode-segmentation",
  "unicode-width",
+ "wayland-client",
+ "wayland-server",
  "wgpu",
+ "winit",
+ "x11rb",
 ]
 
 [[package]]
 name = "kettle-state"
-version = "5.9.0"
+version = "6.0.0"
 dependencies = [
  "fs4",
  "getrandom 0.4.3",
@@ -2506,7 +2531,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-test-support"
-version = "5.9.0"
+version = "6.0.0"
 dependencies = [
  "log",
  "tempfile",
@@ -2515,7 +2540,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-ui"
-version = "5.9.0"
+version = "6.0.0"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -2576,7 +2601,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-update"
-version = "5.9.0"
+version = "6.0.0"
 dependencies = [
  "base64 0.23.1",
  "ed25519-dalek",
@@ -2602,7 +2627,7 @@ dependencies = [
 
 [[package]]
 name = "kettle-vt"
-version = "5.9.0"
+version = "6.0.0"
 dependencies = [
  "base64 0.23.1",
  "criterion",
@@ -4839,6 +4864,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eeb7109d23f319619d4cc0de5464613c8b7b1a09db2774a58101459cf6be2f10"
 
 [[package]]
+name = "softbuffer"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aac18da81ebbf05109ab275b157c22a653bb3c12cf884450179942f81bcbf6c3"
+dependencies = [
+ "as-raw-xcb-connection",
+ "bytemuck",
+ "fastrand",
+ "js-sys",
+ "memmap2",
+ "ndk",
+ "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "raw-window-handle",
+ "redox_syscall 0.5.18",
+ "rustix 1.1.6",
+ "tiny-xlib",
+ "tracing",
+ "wasm-bindgen",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-sys",
+ "web-sys",
+ "windows-sys 0.61.2",
+ "x11rb",
+]
+
+[[package]]
 name = "spirv"
 version = "0.4.0+sdk-1.4.341.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5165,6 +5221,19 @@ dependencies = [
  "arrayref",
  "bytemuck",
  "strict-num",
+]
+
+[[package]]
+name = "tiny-xlib"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a90a0ca3ee6a69f2ad28fd11621a4c3f03b371f366be500b64df260c4ffbafb4"
+dependencies = [
+ "as-raw-xcb-connection",
+ "ctor",
+ "libloading",
+ "pkg-config",
+ "tracing",
 ]
 
 [[package]]
@@ -5719,6 +5788,19 @@ dependencies = [
  "proc-macro2",
  "quick-xml 0.41.0",
  "quote",
+]
+
+[[package]]
+name = "wayland-server"
+version = "0.31.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0dde9c29be0f723a573977de51ee455bf3dfa03652730a74f9dd3b337e374d75"
+dependencies = [
+ "bitflags 2.13.2",
+ "downcast-rs",
+ "rustix 1.1.6",
+ "wayland-backend",
+ "wayland-scanner",
 ]
 
 [[package]]

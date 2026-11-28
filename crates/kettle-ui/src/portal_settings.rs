@@ -2,7 +2,7 @@
 use futures_lite::{StreamExt, future};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU8, AtomicU64, Ordering},
 };
 use std::time::Duration;
 use zbus::{Connection, Proxy, zvariant::OwnedValue};
@@ -12,6 +12,8 @@ const PATH: &str = "/org/freedesktop/portal/desktop";
 const INTERFACE: &str = "org.freedesktop.portal.Settings";
 const NAMESPACE: &str = "org.freedesktop.appearance";
 const UNKNOWN: u64 = u64::MAX;
+/// Not read yet, as distinct from `UNKNOWN`, which a failed read leaves.
+const PENDING: u64 = u64::MAX - 1;
 const TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_BODY_BYTES: usize = 4096;
 
@@ -25,7 +27,7 @@ pub(crate) trait SettingState: Send + Sync + 'static {
 impl SettingState for AtomicU64 {
     const NAMESPACE: &'static str = NAMESPACE;
     fn initial() -> Self {
-        Self::new(UNKNOWN)
+        Self::new(PENDING)
     }
     fn update(&self, value: OwnedValue, wake: &kettle_core::Waker) -> zbus::Result<()> {
         publish(self, Some(u32::try_from(value)?), wake);
@@ -33,6 +35,47 @@ impl SettingState for AtomicU64 {
     }
     fn clear(&self, wake: &kettle_core::Waker) {
         publish(self, None, wake);
+    }
+}
+
+/// GNOME's `enable-animations`, as the portal passes it through: one of the
+/// `ANIMATIONS_*` states.
+pub(crate) struct Animations(AtomicU8);
+
+pub(crate) type AnimationsWatch = Watch<Animations>;
+
+const ANIMATIONS_PENDING: u8 = 0;
+const ANIMATIONS_UNAVAILABLE: u8 = 1;
+const ANIMATIONS_OFF: u8 = 2;
+const ANIMATIONS_ON: u8 = 3;
+
+impl Animations {
+    fn publish(&self, value: u8, wake: &kettle_core::Waker) {
+        if self.0.swap(value, Ordering::AcqRel) != value {
+            wake();
+        }
+    }
+}
+
+impl SettingState for Animations {
+    const NAMESPACE: &'static str = "org.gnome.desktop.interface";
+    fn initial() -> Self {
+        Self(AtomicU8::new(ANIMATIONS_PENDING))
+    }
+    fn update(&self, value: OwnedValue, wake: &kettle_core::Waker) -> zbus::Result<()> {
+        let enabled = bool::try_from(value)?;
+        self.publish(
+            if enabled {
+                ANIMATIONS_ON
+            } else {
+                ANIMATIONS_OFF
+            },
+            wake,
+        );
+        Ok(())
+    }
+    fn clear(&self, wake: &kettle_core::Waker) {
+        self.publish(ANIMATIONS_UNAVAILABLE, wake);
     }
 }
 
@@ -115,6 +158,26 @@ impl<S: SettingState> Watch<S> {
 impl Watch {
     pub(crate) fn value(&self) -> Option<u32> {
         u32::try_from(self.state.load(Ordering::Acquire)).ok()
+    }
+
+    pub(crate) fn reading(&self) -> crate::motion::Reading<u32> {
+        use crate::motion::Reading;
+        match self.state.load(Ordering::Acquire) {
+            PENDING => Reading::Pending,
+            value => u32::try_from(value).map_or(Reading::Unavailable, Reading::Value),
+        }
+    }
+}
+
+impl AnimationsWatch {
+    pub(crate) fn reading(&self) -> crate::motion::Reading<bool> {
+        use crate::motion::Reading;
+        match self.state.0.load(Ordering::Acquire) {
+            ANIMATIONS_PENDING => Reading::Pending,
+            ANIMATIONS_OFF => Reading::Value(false),
+            ANIMATIONS_ON => Reading::Value(true),
+            _ => Reading::Unavailable,
+        }
     }
 }
 

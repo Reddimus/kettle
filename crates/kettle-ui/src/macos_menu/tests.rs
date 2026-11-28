@@ -1,5 +1,5 @@
 fn empty_menu_model(tr: &Translator, bindings: &Bindings, context: Context) -> Vec<Menu> {
-    menu_model_with_profiles(tr, bindings, context, &[])
+    menu_model_with_profiles(tr, bindings, context, Some(&[]))
 }
 
 use super::*;
@@ -31,7 +31,7 @@ fn titles(model: &[Menu]) -> Vec<Vec<&str>> {
                 .iter()
                 .map(|row| match row {
                     Row::Item { title, .. } => title.as_str(),
-                    Row::Services(title) | Row::Submenu { title, .. } => *title,
+                    Row::Info(title) | Row::Services(title) | Row::Submenu { title, .. } => *title,
                     Row::Separator => "|",
                 })
                 .collect()
@@ -500,7 +500,7 @@ fn shell_profiles_are_dynamic_and_native_dispatch_includes_submenus() {
     for language in [Language::En, Language::Es] {
         let tr = Translator::new(language);
         for names in [vec![], vec!["dev".into(), "ops".into()]] {
-            let menus = menu_model_with_profiles(&tr, &Bindings::new(), ready(), &names);
+            let menus = menu_model_with_profiles(&tr, &Bindings::new(), ready(), Some(&names));
             let actions = kettle_actions(&menus[1].rows);
             for action in [
                 Action::SaveLayout,
@@ -583,38 +583,20 @@ fn hint_menu_displays_its_control_shortcut_when_no_command_binding_exists() {
 
 #[test]
 fn profile_inventory_dispatch_stays_cached_during_blocked_refresh() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-        mpsc,
-    };
+    use crate::profile_inventory::test_support::BlockedInventory;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
-    let (entered_tx, entered) = mpsc::channel();
-    let (release, releases) = mpsc::channel();
-    let releases = std::sync::Mutex::new(releases);
-    let calls = Arc::new(AtomicUsize::new(0));
-    let count = calls.clone();
-    let completed = Arc::new(AtomicUsize::new(0));
-    let finished = completed.clone();
-    let (wakes, wake) = mpsc::channel();
-    let mut inventory = ProfileInventory::with_enumerator(
-        move || {
-            let call = count.fetch_add(1, Ordering::SeqCst);
-            entered_tx.send(call).unwrap();
-            let _ = releases
-                .lock()
-                .unwrap()
-                .recv_timeout(Duration::from_secs(5));
-            finished.fetch_add(1, Ordering::SeqCst);
-            vec![format!("profile{call}")]
-        },
-        move || {
-            let _ = wakes.send(());
-        },
-    )
-    .unwrap();
+    let fixture = BlockedInventory::new();
+    let BlockedInventory {
+        mut inventory,
+        calls,
+        completed,
+        entered,
+        release,
+        wake,
+    } = fixture;
     assert_eq!(entered.recv_timeout(Duration::from_secs(5)).unwrap(), 0);
-    // A blocked filesystem must not prevent dispatch using the empty startup cache.
+    // A blocked filesystem must not prevent dispatch using the pending startup model.
     for _ in 0..30 {
         let model = menu_model(
             &Translator::new(Language::En),
@@ -672,9 +654,106 @@ fn profile_inventory_dispatch_stays_cached_during_blocked_refresh() {
     inventory.complete();
     assert_eq!(inventory.profiles(), ["profile2"]);
     assert_eq!(calls.load(Ordering::SeqCst), 3);
-    let worker = inventory.worker.take().unwrap();
-    drop(inventory);
-    worker.join().unwrap();
+    BlockedInventory {
+        inventory,
+        calls,
+        completed,
+        entered,
+        release,
+        wake,
+    }
+    .join();
+}
+
+#[test]
+fn native_profile_model_distinguishes_pending_from_first_empty_completion() {
+    use crate::profile_inventory::test_support::BlockedInventory;
+    use std::time::Duration;
+
+    for language in [Language::En, Language::Es] {
+        let tr = Translator::new(language);
+        let mut fixture = BlockedInventory::with_results(|call| match call {
+            0 | 1 => Vec::new(),
+            2 => vec!["work".into()],
+            _ => vec!["home".into()],
+        });
+        fixture
+            .entered
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        let pending = menu_model(&tr, &Bindings::new(), ready(), &fixture.inventory);
+        let profile_rows = |model: &[Menu]| {
+            model[1]
+                .rows
+                .iter()
+                .find_map(|row| match row {
+                    Row::Submenu { title, rows } if *title == tr.text(T::MenuNewWindowProfile) => {
+                        Some(rows.clone())
+                    }
+                    _ => None,
+                })
+                .expect("expected profile submenu")
+        };
+        assert_eq!(
+            profile_rows(&pending),
+            vec![Row::Info(tr.text(T::MenuProfilesPending))]
+        );
+        assert!(kettle_actions(&profile_rows(&pending)).is_empty());
+        fixture.release.send(()).unwrap();
+        fixture.wake.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            fixture.inventory.complete(),
+            "first empty scan must synchronize the native model"
+        );
+        let ready_empty = menu_model(&tr, &Bindings::new(), ready(), &fixture.inventory);
+        assert!(matches!(profile_rows(&ready_empty).as_slice(), [Row::Item {
+            title, command: Command::Kettle(Action::OpenProfilesDirectory), ..
+        }] if title == tr.text(T::MenuNoProfiles)));
+        assert_eq!(
+            profile_rows(&pending),
+            vec![Row::Info(tr.text(T::MenuProfilesPending))]
+        );
+        for call in 1..=2 {
+            fixture.inventory.refresh();
+            assert_eq!(
+                fixture
+                    .entered
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap(),
+                call
+            );
+            assert!(
+                fixture.inventory.snapshot().is_some(),
+                "later refresh is never pending"
+            );
+            fixture.release.send(()).unwrap();
+            fixture.wake.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(fixture.inventory.complete(), call > 1);
+        }
+        let work = menu_model(&tr, &Bindings::new(), ready(), &fixture.inventory);
+        let captured = profile_rows(&work);
+        fixture.inventory.refresh();
+        assert_eq!(
+            fixture
+                .entered
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap(),
+            3
+        );
+        fixture.release.send(()).unwrap();
+        fixture.wake.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(fixture.inventory.complete());
+        let home = menu_model(&tr, &Bindings::new(), ready(), &fixture.inventory);
+        assert_eq!(
+            kettle_actions(&captured),
+            vec![&Action::LaunchProfile("work".into())]
+        );
+        assert_eq!(
+            kettle_actions(&profile_rows(&home)),
+            vec![&Action::LaunchProfile("home".into())]
+        );
+        fixture.join();
+    }
 }
 
 /// Rename and move-to-new-window are reachable from the Window menu, in both
@@ -867,7 +946,8 @@ fn menu_bar_follows_macos_conventions() {
             let title = match row {
                 Row::Item { title, .. } => title.as_str(),
                 Row::Submenu { title, .. } | Row::Services(title) => title,
-                Row::Separator => continue,
+                // A pending-profiles notice is a sentence, not a command title.
+                Row::Separator | Row::Info(_) => continue,
             };
             for (index, word) in title.split(' ').enumerate() {
                 if index > 0 && minor.contains(&word) {
@@ -1045,7 +1125,7 @@ fn broadcast_submenu_checks_the_scope_and_shows_the_chord_on_its_row() {
         (off, Action::ToggleBroadcastOff),
     ]);
     let broadcast_rows = |tr: &Translator, context: Context| {
-        let shell = menu_model_with_profiles(tr, &bindings, context, &[])
+        let shell = menu_model_with_profiles(tr, &bindings, context, Some(&[]))
             .into_iter()
             .nth(1)
             .expect("Shell menu");

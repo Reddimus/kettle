@@ -2,6 +2,7 @@
 """Portable regressions for live UI smoke orchestration and ownership checks."""
 
 import ast
+import contextlib
 import importlib.util
 import io
 import inspect
@@ -323,6 +324,36 @@ class LiveUiTests(unittest.TestCase):
                 release.set()
             self.assertTrue(stopped.wait(1), 'abandoned launcher did not stop its worker')
 
+    def test_steady_uploads_rejects_a_cpu_fallback_before_reading_counters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def live_factory(_kettle, cfg, log, **_options):
+                self.assertIn("renderer = gpu", cfg.read_text())
+                log.write_text("renderer: CPU, presenting with softbuffer (X11)\n")
+                return contextlib.nullcontext(object())
+
+            with patch.object(checker, "LiveKettle", side_effect=live_factory):
+                with self.assertRaisesRegex(SystemExit, "live renderer must be GPU"):
+                    checker.run_steady_uploads("fixture", Path(directory), screenshots_only=True)
+
+    def test_cpu_idle_rejects_extra_presents_after_a_real_frame(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Mock()
+            fixture.json_ctl.side_effect = [
+                {"render_uploads": {"frames_presented": count}} for count in (1, 1, 2)
+            ]
+
+            def live_factory(_kettle, cfg, log, **_options):
+                self.assertIn("renderer = cpu", cfg.read_text())
+                log.write_text("renderer: CPU, presenting with softbuffer (X11)\n")
+                return contextlib.nullcontext(fixture)
+
+            with (
+                patch.object(checker, "LiveKettle", side_effect=live_factory),
+                patch.object(checker.time, "sleep"),
+                self.assertRaisesRegex(SystemExit, "unchanged window presented 1 extra frames"),
+            ):
+                checker.run_cpu_idle("fixture", Path(directory))
+
     def test_steady_printing_warms_the_measured_text_and_rejects_queue_writes(self):
         # A renderer may legitimately rasterize new shaped text. Replaying the
         # warmed text must still reject queue uploads and missing mapped work.
@@ -394,6 +425,7 @@ class LiveUiTests(unittest.TestCase):
                 with (
                     tempfile.TemporaryDirectory() as directory,
                     patch.object(checker, "LiveKettle", return_value=fixture),
+                    patch.object(checker, "require_live_renderer"),
                     patch.object(checker, "focus_live_kettle_window"),
                     patch.object(checker.time, "monotonic", side_effect=lambda: now[0]),
                     patch.object(checker.time, "sleep", side_effect=sleep),
@@ -548,6 +580,186 @@ class LiveUiTests(unittest.TestCase):
         except OSError as error:
             self.fail(str(error))
         fake_os.close.assert_called_once_with(77)
+
+    def test_darwin_signal_zero_compares_full_identity_and_closes_temporary_handle(
+        self,
+    ):
+        import ctypes
+
+        token = (501, 502, 503, 504, 505, 123, 507, 508)
+        identities = [token] + [
+            token[:index] + (value + 1,) + token[index + 1 :]
+            for index, value in enumerate(token)
+        ]
+        for identity in identities:
+            with self.subTest(identity=identity):
+                retained = checker.StableProcessHandle(123, token, audit_token=token)
+                current = checker.StableProcessHandle(
+                    123, identity, audit_token=identity
+                )
+                with (
+                    patch.object(
+                        checker.StableProcessHandle, "open", return_value=current
+                    ) as opened,
+                    patch.object(current, "close", wraps=current.close) as close,
+                    patch.object(ctypes, "CDLL") as load,
+                    patch.object(checker.os, "kill") as numeric_signal,
+                ):
+                    self.assertIs(retained.signal(0), identity == token)
+                opened.assert_called_once_with(123)
+                close.assert_called_once_with()
+                load.assert_not_called()
+                numeric_signal.assert_not_called()
+
+    def test_darwin_signal_zero_returns_false_for_departed_identity(self):
+        import ctypes
+
+        token = (501, 502, 503, 504, 505, 123, 507, 508)
+        retained = checker.StableProcessHandle(123, token, audit_token=token)
+        library = Mock()
+        library.proc_signal_with_audittoken.return_value = checker.errno.EINVAL
+        with (
+            patch.object(
+                checker.StableProcessHandle, "open", side_effect=ProcessLookupError(123)
+            ) as opened,
+            patch.object(ctypes, "CDLL", return_value=library) as load,
+            patch.object(
+                ctypes, "get_errno", return_value=checker.errno.EINVAL
+            ) as get_errno,
+            patch.object(checker.os, "kill") as numeric_signal,
+        ):
+            try:
+                outcome = retained.signal(0)
+            except OSError as error:
+                outcome = ("raised", error.errno)
+            self.assertIs(
+                outcome, False, "a departed retained identity must report absence"
+            )
+        opened.assert_called_once_with(123)
+        load.assert_not_called()
+        get_errno.assert_not_called()
+        numeric_signal.assert_not_called()
+
+    def test_darwin_signal_zero_preserves_identity_uncertainty(self):
+        import ctypes
+
+        token = (501, 502, 503, 504, 505, 123, 507, 508)
+        for error in (
+            PermissionError(checker.errno.EPERM, "permission denied"),
+            OSError(checker.errno.EIO, "inspection failed"),
+            RuntimeError("task identity unavailable"),
+            ValueError("invalid identity"),
+        ):
+            with self.subTest(error=error):
+                retained = checker.StableProcessHandle(123, token, audit_token=token)
+                with (
+                    patch.object(
+                        checker.StableProcessHandle, "open", side_effect=error
+                    ) as opened,
+                    patch.object(ctypes, "CDLL") as load,
+                    patch.object(checker.os, "kill") as numeric_signal,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError, "could not verify retained process 123"
+                    ) as raised:
+                        retained.signal(0)
+                self.assertIs(raised.exception.__cause__, error)
+                opened.assert_called_once_with(123)
+                load.assert_not_called()
+                numeric_signal.assert_not_called()
+
+    def test_darwin_signal_zero_propagates_temporary_handle_close_failure(self):
+        import ctypes
+
+        token = (501, 502, 503, 504, 505, 123, 507, 508)
+        retained = checker.StableProcessHandle(123, token, audit_token=token)
+        current = checker.StableProcessHandle(123, token, audit_token=token)
+        error = RuntimeError("temporary handle close failed")
+        with (
+            patch.object(checker.StableProcessHandle, "open", return_value=current),
+            patch.object(current, "close", side_effect=error) as close,
+            patch.object(ctypes, "CDLL") as load,
+        ):
+            with self.assertRaises(RuntimeError) as raised:
+                retained.signal(0)
+        self.assertIs(raised.exception, error)
+        close.assert_called_once_with()
+        load.assert_not_called()
+
+    def test_darwin_nonzero_signal_keeps_exact_audit_token_transport(self):
+        import ctypes
+
+        token = (501, 502, 503, 504, 505, 123, 507, 508)
+        for status, error_number in (
+            (0, 0),
+            (22, checker.errno.ESRCH),
+            (22, checker.errno.EINVAL),
+            (22, checker.errno.EPERM),
+        ):
+            with self.subTest(status=status, error_number=error_number):
+                retained = checker.StableProcessHandle(123, token, audit_token=token)
+                library = Mock()
+                transport = library.proc_signal_with_audittoken
+                transport.return_value = status
+                with (
+                    patch.object(ctypes, "CDLL", return_value=library) as load,
+                    patch.object(
+                        ctypes, "get_errno", return_value=error_number
+                    ) as get_errno,
+                    patch.object(checker.StableProcessHandle, "open") as opened,
+                    patch.object(checker.os, "kill") as numeric_signal,
+                ):
+                    if error_number in (checker.errno.EINVAL, checker.errno.EPERM):
+                        with self.assertRaises(OSError) as raised:
+                            retained.signal(signal.SIGTERM)
+                        self.assertEqual(raised.exception.errno, error_number)
+                    else:
+                        self.assertIs(retained.signal(signal.SIGTERM), status == 0)
+                load.assert_called_once_with(
+                    "/usr/lib/libSystem.B.dylib", use_errno=True
+                )
+                transport.assert_called_once()
+                self.assertEqual(tuple(transport.call_args.args[0]), token)
+                self.assertEqual(transport.call_args.args[1], signal.SIGTERM)
+                self.assertEqual(
+                    transport.argtypes, [ctypes.POINTER(ctypes.c_uint32), ctypes.c_int]
+                )
+                self.assertIs(transport.restype, ctypes.c_int)
+                self.assertEqual(get_errno.call_count, int(status != 0))
+                opened.assert_not_called()
+                numeric_signal.assert_not_called()
+
+    def test_linux_signal_zero_keeps_pidfd_behavior(self):
+        import ctypes
+
+        for error in (
+            None,
+            ProcessLookupError(123),
+            PermissionError(checker.errno.EPERM, "denied"),
+        ):
+            with self.subTest(error=error):
+                retained = checker.StableProcessHandle(123, (123, 99), pidfd=77)
+                with (
+                    patch.object(
+                        checker.signal,
+                        "pidfd_send_signal",
+                        side_effect=error,
+                        create=True,
+                    ) as send,
+                    patch.object(checker.StableProcessHandle, "open") as opened,
+                    patch.object(ctypes, "CDLL") as load,
+                    patch.object(checker.os, "kill") as numeric_signal,
+                ):
+                    if isinstance(error, PermissionError):
+                        with self.assertRaises(PermissionError) as raised:
+                            retained.signal(0)
+                        self.assertIs(raised.exception, error)
+                    else:
+                        self.assertIs(retained.signal(0), error is None)
+                send.assert_called_once_with(77, 0)
+                opened.assert_not_called()
+                load.assert_not_called()
+                numeric_signal.assert_not_called()
 
     # The cleanup sends SIGSTOP and SIGKILL, which Windows does not define.
     @unittest.skipIf(sys.platform == "win32", "no SIGSTOP or SIGKILL on Windows")

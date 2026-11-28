@@ -69,6 +69,8 @@ class EnvironmentTests(unittest.TestCase):
             self.assertNotEqual(Path(environment['WAYLAND_DISPLAY']).parent,
                                 Path(environment['XDG_RUNTIME_DIR']))
             self.assertNotEqual(environment['FONTCONFIG_FILE'], '/owner/fonts.conf')
+            self.assertEqual(environment['__EGL_VENDOR_LIBRARY_FILENAMES'],
+                             '/usr/share/glvnd/egl_vendor.d/50_mesa.json')
             self.assertNotIn('/owner/', environment['DBUS_SESSION_BUS_ADDRESS'])
             self.assertEqual(environment['DBUS_SYSTEM_BUS_ADDRESS'], environment['DBUS_SESSION_BUS_ADDRESS'])
             for key in ('HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME',
@@ -77,19 +79,6 @@ class EnvironmentTests(unittest.TestCase):
                 if os.name != 'nt':
                     self.assertEqual(Path(environment[key]).stat().st_mode & 0o777, 0o700)
 
-
-    def test_crlf_gpu_fields_match_lf_without_admitting_invalid_adapters(self):
-        try:
-            actual = runner.verify_gpu(GPU.replace('\n', '\r\n'))
-        except RuntimeError as error:
-            self.fail(f'valid CRLF GPU diagnostics were refused: {error}')
-        self.assertEqual(actual, runner.verify_gpu(GPU))
-        for old, new in (('Backend: Gl', 'Backend: Vulkan'),
-                         ('Adapter type: Cpu', 'Adapter type: DiscreteGpu'),
-                         ('Backend fallback: no', 'Backend fallback: yes'),
-                         ('Driver info: OpenGL ES 3.2 Mesa 24.0.9', 'Driver info: <unknown>')):
-            with self.subTest(invalid=new), self.assertRaises(RuntimeError):
-                runner.verify_gpu(GPU.replace(old, new).replace('\n', '\r\n'))
 
     def test_crlf_weston_fields_match_lf_without_admitting_foreign_backends(self):
         self.assertEqual(runner.verify_weston(WESTON.replace('\n', '\r\n')),
@@ -100,14 +89,7 @@ class EnvironmentTests(unittest.TestCase):
 
 
 ADAPTER = 'llvmpipe (LLVM 18.1.8, 256 bits)'
-GPU = f'''Backend policy: GL
-Backend: Gl
-Backend fallback: no
-Adapter: {ADAPTER}
-Adapter type: Cpu
-Driver: llvmpipe
-Driver info: OpenGL ES 3.2 Mesa 24.0.9
-'''
+CPU_WL_SHM = 'renderer: CPU, presenting with wl_shm (Wayland)\n'
 WESTON = f'''Loading module '/usr/lib/x86_64-linux-gnu/libweston-13/headless-backend.so'
 Loading module '/usr/lib/x86_64-linux-gnu/libweston-13/gl-renderer.so'
 GL version: OpenGL ES 3.2 Mesa 24.0.9
@@ -180,8 +162,7 @@ class FakeNative:
             return self.queries[name]
         if name == 'font-list':
             return ''.join(str(p.resolve()) + '\n' for p in (runner.ROOT / 'assets/fonts').rglob('*.ttf'))
-        return {'source-head': 'a' * 40, 'source-diff': '', 'source-untracked': '',
-                'gpu-info': GPU}.get(name, 'fixture version\n')
+        return {'source-head': 'a' * 40, 'source-diff': '', 'source-untracked': ''}.get(name, 'fixture version\n')
 
     def acquire_scope(self):
         self.calls.append(('scope', []))
@@ -212,7 +193,7 @@ class FakeNative:
 
 
 class SessionTests(unittest.TestCase):
-    def session(self, configure=lambda native: None, live_adapter=ADAPTER, live_error=None,
+    def session(self, configure=lambda native: None, live_log=CPU_WL_SHM, live_error=None,
                 native_factory=FakeNative):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
@@ -233,7 +214,7 @@ class SessionTests(unittest.TestCase):
 
             def __enter__(self):
                 events.append(('enter', self.cfg.read_text()))
-                self.log.write_text(f'renderer: using software adapter {live_adapter} (GL)\n')
+                self.log.write_text(live_log)
                 if live_error == 'startup':
                     events.append(('cleanup-startup', None))
                     if hasattr(native, 'fixture_exited'):
@@ -245,7 +226,7 @@ class SessionTests(unittest.TestCase):
                 # A native screenshot would happen here. This fake never writes a PNG.
                 events.append(('screenshot', path.name))
                 if live_error == 'during-screenshot':
-                    self.log.write_text('renderer: selected GPU Intel UHD (Integrated, GL)\n')
+                    self.log.write_text(CPU_WL_SHM + 'renderer: GPU\n')
 
             def __exit__(self, *args):
                 events.append(('cleanup', None))
@@ -269,7 +250,7 @@ class SessionTests(unittest.TestCase):
                     with live.log.open('a') as log:
                         log.write('Fallback to loading from known font dir paths.\n')
                 if live_error == 'changed-adapter':
-                    live.log.write_text('renderer: selected GPU Intel UHD (Integrated, GL)\n')
+                    live.log.write_text('renderer: GPU\n')
                 if live_error == 'capture':
                     raise runner.DeadlineExpired('fixture capture deadline')
                 live.screenshot(out / f'{name}.{language}.{theme}.{size}.fixture')
@@ -302,7 +283,6 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(sum(event[0] == 'screenshot' for event in events), 80)
         self.assertEqual(sum(event[0] == 'cleanup' for event in events), 80)
         self.assertEqual(len(list(diagnostics.glob('fixture-*.log'))), 80)
-        self.assertEqual(manifest['gpu']['Adapter'], ADAPTER)
         self.assertEqual(manifest['weston']['renderer'], ADAPTER)
         primary = {Path(p).name for p in manifest['font_files_sha256'] if Path(p).parent.name == 'fonts'}
         self.assertEqual(primary, {'JetBrainsMonoNerdFont-Regular.ttf', 'JetBrainsMonoNerdFont-Bold.ttf',
@@ -312,7 +292,7 @@ class SessionTests(unittest.TestCase):
         for event, value in events:
             if event == 'enter':
                 self.assertIn('record = false', value)
-                self.assertIn('gpu-force-software = true', value)
+                self.assertIn('renderer = auto', value)
                 self.assertNotIn('agent-server', value)
         weston = next(argv for name, argv in native.calls if name == 'weston')
         self.assertIn('--backend=headless-backend.so', weston)
@@ -331,18 +311,6 @@ class SessionTests(unittest.TestCase):
         self.assertIn('font inventory', manifest['error'])
         self.assertTrue((diagnostics / 'manifest.json').exists())
 
-    def test_actual_hardware_unknown_version_or_fallback_never_reaches_capture(self):
-        for diagnostic in (GPU.replace(ADAPTER, 'Intel UHD'), GPU.replace('Cpu', 'IntegratedGpu'),
-                           GPU.replace('Gl', 'Vulkan'), GPU.replace('fallback: no', 'fallback: yes'),
-                           GPU.replace('OpenGL ES 3.2 Mesa 24.0.9', '<unknown>')):
-            with self.subTest(diagnostic=diagnostic):
-                def bad_gpu(native):
-                    native.queries['gpu-info'] = diagnostic
-                _, events, manifest, error, _ = self.session(bad_gpu)
-                self.assertIsNotNone(error)
-                self.assertEqual(events, [])
-                self.assertEqual(manifest['status'], 'failed')
-
     def test_wrong_compositor_backend_renderer_or_version_never_reaches_capture(self):
         for log in (WESTON.replace('headless-backend', 'x11-backend'),
                     WESTON.replace(ADAPTER, 'Intel UHD'),
@@ -357,21 +325,24 @@ class SessionTests(unittest.TestCase):
                 self.assertEqual(manifest['status'], 'failed')
                 self.assertEqual((diagnostics / 'weston.log').read_text(), log)
 
-    def test_live_adapter_mismatch_blocks_screenshot_but_runs_cleanup_and_retains_log(self):
-        _, events, manifest, error, diagnostics = self.session(live_adapter='Intel UHD')
-        self.assertIsNotNone(error)
-        self.assertEqual(manifest['status'], 'failed')
-        self.assertFalse(any(event == 'screenshot' for event, _ in events))
-        self.assertTrue(any(event == 'cleanup' for event, _ in events))
-        self.assertIn('Intel UHD', (diagnostics / 'fixture-000.log').read_text())
+    def test_wrong_live_renderer_or_presenter_blocks_screenshot_and_retains_log(self):
+        for log in ('renderer: GPU\n', 'renderer: CPU, presenting with softbuffer (Wayland)\n',
+                    'no renderer reported\n'):
+            with self.subTest(log=log):
+                _, events, manifest, error, diagnostics = self.session(live_log=log)
+                self.assertIsNotNone(error)
+                self.assertEqual(manifest['status'], 'failed')
+                self.assertFalse(any(event == 'screenshot' for event, _ in events))
+                self.assertTrue(any(event == 'cleanup' for event, _ in events))
+                self.assertEqual(log, (diagnostics / 'fixture-000.log').read_text())
 
-    def test_adapter_change_during_screenshot_fails_and_retains_diagnostics(self):
+    def test_renderer_change_during_screenshot_fails_and_retains_diagnostics(self):
         _, events, manifest, error, diagnostics = self.session(live_error='during-screenshot')
         self.assertIsNotNone(error)
         self.assertEqual(manifest['status'], 'failed')
         self.assertEqual(sum(event == 'screenshot' for event, _ in events), 1)
         self.assertTrue(any(event == 'cleanup' for event, _ in events))
-        self.assertIn('Intel UHD', (diagnostics / 'fixture-000.log').read_text())
+        self.assertIn('renderer: GPU', (diagnostics / 'fixture-000.log').read_text())
 
     def test_startup_and_capture_exceptions_preserve_logs_and_unwind(self):
         for error_type in ('startup', 'capture', 'changed-adapter', 'cleanup-timeout', 'fontdb-fallback'):

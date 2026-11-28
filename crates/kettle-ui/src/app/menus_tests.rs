@@ -108,6 +108,7 @@ fn new_tab_menu_items_has_wt_bottom_rows() {
     ];
     let items = App::new_tab_menu_items(
         &shells,
+        Some(&[]),
         &kettle_i18n::Translator::new(kettle_i18n::Language::En),
     );
     assert_eq!(
@@ -664,9 +665,10 @@ fn picker_overlay_projection_installs_the_vertical_context_menu() {
             &kettle_config::keybinds::defaults(),
             &kettle_i18n::Translator::new(kettle_i18n::Language::En),
             None,
-            &[], false, kettle_config::BroadcastDefault::default(),
+            Some(&[]), false, kettle_config::BroadcastDefault::default(),
         ),
         (480.0, 240.0),
+        (8.0, 16.0),
         (8.0, 16.0),
         0.0,
     )
@@ -684,6 +686,7 @@ fn picker_overlay_projection_installs_the_vertical_context_menu() {
     let menu = picker_context_menu(
         themes,
         (480.0, 240.0),
+        (8.0, 16.0),
         (8.0, 16.0),
         0.0,
     )
@@ -708,6 +711,12 @@ fn the_context_menu_carries_every_terminator_row() {
         .nth(1)
         .and_then(|b| b.split("\n    /// ").next())
         .expect("context_menu_items body");
+    let edit_rows = src
+        .split("fn terminal_edit_menu_rows(")
+        .nth(1)
+        .and_then(|body| body.split("\n}").next())
+        .expect("terminal_edit_menu_rows body");
+    let body = format!("{body}{edit_rows}");
     use kettle_i18n::{Language, Text as T, Translator};
     let en = Translator::new(Language::En);
     for (key, row, action) in [
@@ -1268,11 +1277,17 @@ fn context_menu_label_ellipsis_is_bounded_and_utf8_safe() {
 
 #[test]
 fn finding_short_menu_keeps_one_complete_row() {
-    let body = finding_body(include_str!("menus.rs"), "context_menu_level_geometry");
+    let limit = include_str!("menus.rs")
+        .split("fn context_menu_height_limit(")
+        .nth(1)
+        .and_then(|body| body.split("\n}\n").next())
+        .expect("the height limit");
     assert!(
-        body.contains(".max(row_h)"),
+        limit.contains(".max(row_h)"),
         "menu breathing room must yield to one complete row"
     );
+    let body = finding_body(include_str!("menus.rs"), "context_menu_level_geometry");
+    assert!(body.contains("context_menu_height_limit(surface_h, row_h)"));
 }
 
 #[test]
@@ -1307,7 +1322,7 @@ fn pending_shell_action_runs_the_latest_shortcut_on_completion() {
         (kettle_i18n::Language::Es, "Detectando shells…"),
     ] {
         let tr = kettle_i18n::Translator::new(language);
-        let items = App::shell_menu_items(None, &tr);
+        let items = App::shell_menu_items(None, Some(&[]), &tr);
         assert!(matches!(items.as_slice(), [ContextMenuItem::Info { label, .. }] if label == text));
     }
     assert_eq!(
@@ -1330,12 +1345,12 @@ fn pending_shell_action_runs_the_latest_shortcut_on_completion() {
 fn loading_shell_menu_survives_construction_and_can_refresh() {
     for language in [kettle_i18n::Language::En, kettle_i18n::Language::Es] {
         let tr = kettle_i18n::Translator::new(language);
-        let items = filter_disabled(App::shell_menu_items(None, &tr));
+        let items = filter_disabled(App::shell_menu_items(None, Some(&[]), &tr));
         assert_eq!(items.len(), 1, "the loading menu must have a visible row");
         assert!(!super::item_is_dispatchable(&items[0]));
         assert!(App::shell_menu_is_loading(&items, &tr));
         let shells = vec![("Test shell".into(), vec!["test-shell".into()])];
-        let ready = filter_disabled(App::shell_menu_items(Some(&shells), &tr));
+        let ready = filter_disabled(App::shell_menu_items(Some(&shells), Some(&[]), &tr));
         assert!(!App::shell_menu_is_loading(&ready, &tr));
         assert!(ready.iter().any(|item| matches!(item,
             ContextMenuItem::NewTabShell { argv, .. } if argv == &["test-shell"])));
@@ -1497,6 +1512,7 @@ fn ancestor_menu_press_survives_dismissal_and_dispatches() {
         panel_w_clamped: 160.0,
         panel_h_clamped: height,
         a11y_label: None,
+        status: None,
         picker_header_height: 0.0,
         picker_footer: None,
     };
@@ -1695,6 +1711,7 @@ fn painted_menu_rows_match_hit_testing_and_accessibility_bounds() {
         .enumerate()
         .map(|(line, label)| ContextMenuItem::Info {
             label: (*label).into(),
+            secondary: true,
             continued: line > 0,
         })
         .collect();
@@ -1734,6 +1751,7 @@ fn painted_menu_rows_match_hit_testing_and_accessibility_bounds() {
         panel_w_clamped: 200.0,
         panel_h_clamped: height,
         a11y_label: None,
+        status: None,
         picker_header_height: 0.0,
         picker_footer: None,
     };
@@ -2066,6 +2084,64 @@ fn shell_window(
     (ws, pane)
 }
 
+#[cfg(unix)]
+#[test]
+fn terminal_menu_copy_and_initial_focus_follow_the_current_selection() {
+    use kettle_core::{Column, Line, Point, Selection, SelectionType, Side};
+
+    let (mut ws, pane) = shell_window("printf 'known phrase'; sleep 10", |term| {
+        term.term.lock().unwrap().grid()[Line(0)][Column(0)].c == 'k'
+    });
+    let point = Point::new(Line(0), Column(0));
+    // A triple-click selects a line. A plain click elsewhere replaces the
+    // range with a zero-width drag anchor.
+    for (selection, copy_enabled, first_action) in [
+        (None, false, Action::Paste),
+        (
+            Some(Selection::new(SelectionType::Lines, point, Side::Left)),
+            true,
+            Action::Copy,
+        ),
+        (
+            Some(Selection::new(
+                SelectionType::Simple,
+                Point::new(Line(1), Column(0)),
+                Side::Right,
+            )),
+            false,
+            Action::Paste,
+        ),
+    ] {
+        ws.mux.panes[&pane].term.term.lock().unwrap().selection = selection;
+        let rows = super::terminal_edit_menu_rows(&ws, EN_TEXT);
+        let items = super::filter_disabled(super::grouped_terminal_menu(Vec::from(rows), EN_TEXT));
+        let first = items.iter().position(super::item_is_dispatchable).unwrap();
+        let rows = menu_rows(&items);
+        assert_eq!(rows[first].1, first_action);
+        assert_eq!(
+            rows,
+            [
+                ("Copy", Action::Copy, copy_enabled),
+                ("Paste", Action::Paste, true),
+                ("Select All", Action::SelectAll, true),
+            ],
+        );
+
+        super::arm_selection_gesture(&mut ws, pane, 0);
+        super::clear_selection_gesture(&mut ws);
+        assert_eq!(
+            ws.mux.panes[&pane]
+                .term
+                .term
+                .lock()
+                .unwrap()
+                .selection
+                .is_some(),
+            copy_enabled,
+        );
+    }
+}
+
 /// A real pane offers the rows only once its output carried a prompt mark,
 /// and with that prompt scrolled up into history, Previous alone is enabled.
 #[cfg(unix)]
@@ -2113,6 +2189,15 @@ fn parsed_screen(wire: &str) -> kettle_core::term::SharedTerm {
     std::sync::Arc::new(std::sync::Mutex::new(term))
 }
 
+/// Stable rows `start..end` of output that fills its last row.
+fn whole_rows(start: u64, end: u64) -> kettle_core::term::CommandOutput {
+    kettle_core::term::CommandOutput {
+        start,
+        end,
+        end_column: None,
+    }
+}
+
 /// The selected text and the text of the top row of the view.
 fn selected_and_top_row(term: &kettle_core::term::SharedTerm) -> (Option<String>, String) {
     use kettle_core::Dimensions as _;
@@ -2133,7 +2218,7 @@ fn selected_and_top_row(term: &kettle_core::term::SharedTerm) -> (Option<String>
 #[test]
 fn select_command_output_selects_exactly_the_output_lines() {
     let term = parsed_screen(OUTPUT_WIRE);
-    assert!(super::select_output_rows(&term, (1, 3)));
+    assert!(super::select_output_rows(&term, whole_rows(1, 3)));
     assert_eq!(
         selected_and_top_row(&term),
         (Some("out1\nout2".into()), "$ cmd".into())
@@ -2151,6 +2236,32 @@ fn select_command_output_selects_exactly_the_output_lines() {
     assert_eq!(t.grid().display_offset(), 0);
 }
 
+/// Output with no final newline shares its last row with the next prompt, as
+/// bash writes it: the selection stops at the column D found the cursor at,
+/// and copies no prompt.
+#[test]
+fn select_command_output_stops_where_the_next_prompt_starts_on_its_last_row() {
+    let term = parsed_screen(
+        "\x1b]133;A\x07$ cmd\r\n\x1b]133;C\x07out1\r\nout2\x1b]133;D;0\x07\x1b]133;A\x07$ ",
+    );
+    let output = kettle_core::term::CommandOutput {
+        start: 1,
+        end: 3,
+        end_column: Some(4),
+    };
+    assert!(super::select_output_rows(&term, output));
+    assert_eq!(selected_and_top_row(&term).0.as_deref(), Some("out1\nout2"));
+    let t = term.lock().unwrap();
+    let range = t.selection.as_ref().and_then(|s| s.to_range(&t)).unwrap();
+    assert_eq!(
+        (range.start, range.end),
+        (
+            kettle_core::Point::new(kettle_core::Line(1), kettle_core::Column(0)),
+            kettle_core::Point::new(kettle_core::Line(2), kettle_core::Column(3)),
+        )
+    );
+}
+
 /// A first output row off screen is scrolled to the top of the view, one on
 /// screen is not, and rows that are not retained select nothing.
 #[test]
@@ -2162,12 +2273,12 @@ fn select_command_output_scrolls_its_first_row_into_view() {
         "{OUTPUT_WIRE}big\x1b]133;C\x07\r\n{lines}\x1b]133;D;0\x07\x1b]133;A\x07$ "
     ));
     let expected: Vec<String> = (0..40).map(|n| format!("line{n}")).collect();
-    assert!(super::select_output_rows(&term, (4, 44)));
+    assert!(super::select_output_rows(&term, whole_rows(4, 44)));
     assert_eq!(
         selected_and_top_row(&term),
         (Some(expected.join("\n")), "line0".into())
     );
-    assert!(super::select_output_rows(&term, (1, 3)));
+    assert!(super::select_output_rows(&term, whole_rows(1, 3)));
     assert_eq!(
         selected_and_top_row(&term),
         (Some("out1\nout2".into()), "out1".into())
@@ -2175,10 +2286,10 @@ fn select_command_output_scrolls_its_first_row_into_view() {
     term.lock()
         .unwrap()
         .scroll_display(kettle_core::Scroll::Delta(1));
-    assert!(super::select_output_rows(&term, (1, 3)));
+    assert!(super::select_output_rows(&term, whole_rows(1, 3)));
     assert_eq!(selected_and_top_row(&term).1, "$ cmd", "already on screen");
-    assert!(!super::select_output_rows(&term, (45, 50)), "past the grid");
-    assert!(!super::select_output_rows(&term, (3, 3)), "an empty span");
+    assert!(!super::select_output_rows(&term, whole_rows(45, 50)), "past the grid");
+    assert!(!super::select_output_rows(&term, whole_rows(3, 3)), "an empty span");
 }
 
 /// The terminal menu's Select Command Output row is enabled only over a
@@ -2233,13 +2344,13 @@ fn select_command_output_keeps_the_rows_scrollback_still_holds() {
     assert_eq!(engine.grid().history_origin(), 7);
     let term = std::sync::Arc::new(std::sync::Mutex::new(engine));
     let expected: Vec<String> = (7..20).map(|n| format!("line{n}")).collect();
-    assert!(super::select_output_rows(&term, (3, 20)));
+    assert!(super::select_output_rows(&term, whole_rows(3, 20)));
     assert_eq!(
         selected_and_top_row(&term),
         (Some(expected.join("\n")), "line7".into())
     );
     term.lock().unwrap().selection = None;
-    assert!(!super::select_output_rows(&term, (0, 7)), "all gone");
+    assert!(!super::select_output_rows(&term, whole_rows(0, 7)), "all gone");
     assert_eq!(selected_and_top_row(&term).0, None);
 }
 
@@ -2291,6 +2402,133 @@ fn the_menu_names_the_output_row_under_the_pointer_in_scrolled_back_history() {
     );
 }
 
+/// A real interactive Bash at `SEL> `, running Kettle's shipped hooks after
+/// the user's `prompt_command`, or `None` where no Bash is installed. The
+/// directory holds its rcfile and lives as long as the pane.
+#[cfg(unix)]
+fn integrated_bash(
+    prompt_command: &str,
+) -> Option<(WindowState, u64, kettle_test_support::PrivateTempDir)> {
+    let Some(bash) = ["/opt/homebrew/bin/bash", "/usr/local/bin/bash", "/usr/bin/bash", "/bin/bash"]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).is_file())
+    else {
+        eprintln!("bash not installed; real-shell output selection skipped");
+        return None;
+    };
+    let quoted = |path: &str| format!("'{}'", path.replace('\'', "'\\''"));
+    let hooks = quoted(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../shell-integration/kettle.bash"
+    ));
+    // Debian and Ubuntu Bash read /etc/bash.bashrc before the --rcfile, even
+    // with --noprofile, and it sets PS1 and may set PROMPT_COMMAND. Set them in
+    // the rcfile, after it, and only then source the hooks, as a user's
+    // ~/.bashrc would.
+    let dir = crate::test_tempdir();
+    let rcfile = dir.path().join("bashrc");
+    std::fs::write(
+        &rcfile,
+        format!(
+            "PS1='SEL> '\nPROMPT_COMMAND={prompt_command}\nHISTFILE=/dev/null\nsource {hooks}\n"
+        ),
+    )
+    .unwrap();
+    let rcfile = quoted(rcfile.to_str().unwrap());
+    let (ws, pane) = shell_window(
+        &format!("INPUTRC=/dev/null exec {bash} --noprofile --rcfile {rcfile} -i"),
+        |term| bash_at_prompt(term, 0),
+    );
+    Some((ws, pane, dir))
+}
+
+/// The `SEL> ` prompt is on the cursor's row and the shell is at it, after
+/// `commands` commands have finished.
+#[cfg(unix)]
+fn bash_at_prompt(term: &kettle_core::Terminal, commands: usize) -> bool {
+    use kettle_core::Dimensions as _;
+    if !term.shell_at_prompt() || term.command_marks().len() != commands {
+        return false;
+    }
+    let t = term.term.lock().unwrap();
+    let row = t.grid().cursor.point.line;
+    (0..t.grid().columns())
+        .map(|col| t.grid()[row][kettle_core::Column(col)].c)
+        .collect::<String>()
+        .trim_end()
+        .ends_with("SEL>")
+}
+
+/// Type `command` and wait for the prompt after it, the `commands`th.
+#[cfg(unix)]
+fn run_in_bash(term: &kettle_core::Terminal, command: &str, commands: usize) {
+    term.write(format!("{command}\r").as_bytes());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !bash_at_prompt(term, commands) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{command}: no prompt; screen {:?}",
+            term.screen_text(0).map(|screen| screen.text)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// What Select Command Output copies for the command holding row `at`, or
+/// the newest.
+#[cfg(unix)]
+fn copied_output(term: &kettle_core::Terminal, at: Option<u64>) -> Option<String> {
+    term.term.lock().unwrap().selection = None;
+    assert!(super::select_command_output(term, at), "{at:?}");
+    selected_and_top_row(&term.term).0
+}
+
+/// A real interactive Bash running Kettle's hooks: output with no final
+/// newline leaves the next prompt on its last row, with nothing between them
+/// on the wire. Select Command Output copies the output without that prompt,
+/// for the newest command and, by row, for an older one whose last row also
+/// holds the next command line; ordinary output still copies whole rows.
+#[cfg(unix)]
+#[test]
+fn select_command_output_leaves_out_the_bash_prompt_after_an_unterminated_line() {
+    let Some((ws, pane, _rcfile)) = integrated_bash("") else {
+        return;
+    };
+    let term = &ws.mux.panes[&pane].term;
+    run_in_bash(term, "printf 'unterminated-output'", 1);
+    assert_eq!(copied_output(term, None).as_deref(), Some("unterminated-output"));
+    let first = term.command_output_rows(None).unwrap();
+    assert!(first.end_column.is_some(), "the prompt shares the row: {first:?}");
+    // The next command is typed on that shared row.
+    run_in_bash(term, "printf 'first\\nsecond'", 2);
+    assert_eq!(copied_output(term, None).as_deref(), Some("first\nsecond"));
+    assert_eq!(
+        copied_output(term, Some(first.end - 1)).as_deref(),
+        Some("unterminated-output"),
+        "the older output, by its row"
+    );
+    run_in_bash(term, "printf 'ordinary-output\\n'", 3);
+    assert_eq!(copied_output(term, None).as_deref(), Some("ordinary-output"));
+    assert_eq!(term.command_output_rows(None).unwrap().end_column, None);
+    term.write(b"exit\r");
+}
+
+/// A real interactive Bash whose own prompt hook starts the prompt on a new
+/// row after Kettle's D and A marks: output that left the cursor partway
+/// along its last row keeps the cells right of the cursor, since no prompt
+/// was written over them.
+#[cfg(unix)]
+#[test]
+fn select_command_output_keeps_output_right_of_the_cursor_when_the_prompt_starts_below() {
+    let Some((ws, pane, _rcfile)) = integrated_bash("echo") else {
+        return;
+    };
+    let term = &ws.mux.panes[&pane].term;
+    run_in_bash(term, "printf 'abcdef\\033[3D'", 1);
+    assert_eq!(copied_output(term, None).as_deref(), Some("abcdef"));
+    term.write(b"exit\r");
+}
+
 /// The menu row acts on the row the menu was opened over, captured as a
 /// stable id when it opened, and a chord or the palette on the newest
 /// command. A real menu needs a live App, so the wiring is pinned at the
@@ -2334,11 +2572,11 @@ fn compact_header_menu_origin_survives_loading_submenus_and_dismissal() {
         let tr = kettle_i18n::Translator::new(language);
         let shells = vec![("sh".to_string(), vec!["sh".to_string()])];
         let origin = MenuOrigin::NewTab { compact: true };
-        assert!(App::shell_menu_is_loading(&origin.shell_items(None, &tr), &tr));
+        assert!(App::shell_menu_is_loading(&origin.shell_items(None, None, &tr), &tr));
         let mut state = ContextMenuState {
             origin,
             anchor: (10.0, 32.0), anchor_scale: 1.0,
-            items: origin.shell_items(Some(&shells), &tr),
+            items: origin.shell_items(Some(&shells), None, &tr),
             highlight: 0, drill_stack: Vec::new(), scroll_offset: 0,
             typeahead_buf: String::new(), typeahead_until: None,
         };
@@ -2352,7 +2590,7 @@ fn compact_header_menu_origin_survives_loading_submenus_and_dismissal() {
         assert_eq!(state.origin, origin);
         assert!(state.leave_submenu());
         assert_eq!(state.origin, origin);
-        let full = MenuOrigin::NewTab { compact: false }.shell_items(Some(&shells), &tr);
+        let full = MenuOrigin::NewTab { compact: false }.shell_items(Some(&shells), None, &tr);
         assert!(actions(&full).contains(&Action::OpenSettings));
         let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
         ws.context_menu = Some(state);
@@ -2601,3 +2839,406 @@ fn a_menu_opened_from_the_keyboard_opens_at_the_text_cursor() {
     assert!(point.contains("(point.line.0, point.column.0)"), "the signed line");
     assert!(point.contains("map.visual(column)"), "the painted column");
 }
+
+#[test]
+fn a_tabs_menu_offers_what_can_be_done_to_that_tab() {
+    use kettle_i18n::{Language, Translator};
+    let shape = |tabs, language| {
+        super::tab_menu_items(tabs, Translator::new(language))
+            .into_iter()
+            .map(|item| match item {
+                ContextMenuItem::Item {
+                    label,
+                    action,
+                    enabled: true,
+                } => Some((label, Some(action))),
+                ContextMenuItem::CloseOtherTabs { label } => Some((label, None)),
+                ContextMenuItem::Separator => None,
+                _ => panic!("a tab menu row is a plain row"),
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        shape(3, Language::En),
+        [
+            Some(("Rename Tab…", Some(Action::EditTabTitle))),
+            Some(("Duplicate Tab", Some(Action::DuplicateTab))),
+            None,
+            Some(("Move Tab Left", Some(Action::MoveTabLeft))),
+            Some(("Move Tab Right", Some(Action::MoveTabRight))),
+            None,
+            Some(("Close Tab", Some(Action::CloseTab))),
+            Some(("Close Other Tabs", None)),
+        ]
+    );
+    assert_eq!(
+        shape(2, Language::Es),
+        [
+            Some(("Cambiar el nombre de la pestaña…", Some(Action::EditTabTitle))),
+            Some(("Duplicar pestaña", Some(Action::DuplicateTab))),
+            None,
+            Some(("Mover la pestaña a la izquierda", Some(Action::MoveTabLeft))),
+            Some(("Mover la pestaña a la derecha", Some(Action::MoveTabRight))),
+            None,
+            Some(("Cerrar pestaña", Some(Action::CloseTab))),
+            Some(("Cerrar las otras pestañas", None)),
+        ]
+    );
+    // A lone tab has nowhere to move and no others to close, and no
+    // separator is left doubled.
+    assert_eq!(
+        shape(1, Language::En),
+        [
+            Some(("Rename Tab…", Some(Action::EditTabTitle))),
+            Some(("Duplicate Tab", Some(Action::DuplicateTab))),
+            None,
+            Some(("Close Tab", Some(Action::CloseTab))),
+        ]
+    );
+    // Its width is measured from the same translated labels it paints.
+    let spanish = super::tab_menu_items(2, Translator::new(Language::Es));
+    let widest = spanish
+        .iter()
+        .map(|item| context_menu_item_columns(item, ""))
+        .max()
+        .unwrap();
+    assert_eq!(
+        widest,
+        unicode_width::UnicodeWidthStr::width("Cambiar el nombre de la pestaña…")
+    );
+}
+
+#[test]
+fn a_tabs_menu_runs_each_row_on_its_own_tab() {
+    use super::{TabMenuDispatch as D, tab_menu_dispatch};
+    assert_eq!(tab_menu_dispatch(&Action::CloseTab), Some(D::Close));
+    assert_eq!(tab_menu_dispatch(&Action::MoveTabLeft), Some(D::Move(-1)));
+    assert_eq!(tab_menu_dispatch(&Action::MoveTabRight), Some(D::Move(1)));
+    for action in [Action::EditTabTitle, Action::DuplicateTab] {
+        assert_eq!(
+            tab_menu_dispatch(&action),
+            Some(D::Activate(action.clone()))
+        );
+    }
+    assert_eq!(tab_menu_dispatch(&Action::Paste), None);
+
+    let src = production_source();
+    let dispatch = finding_body(&src, "dispatch_context_menu_click");
+    let action_arm = dispatch
+        .split("ContextMenuClick::Action(action) => {")
+        .nth(1)
+        .expect("the action arm");
+    let tab = action_arm
+        .find("if let Some(tab) = ws.context_menu_session.tab.take()")
+        .expect("a tab's menu keeps its tab");
+    let generic = action_arm
+        .find("(action, _) => self.handle_action(ws, action, event_loop),")
+        .expect("other menus run the action");
+    assert!(tab < generic, "the tab target is consulted first");
+    let act = finding_body(&src, "act_on_menu_tab");
+    assert!(act.contains("match step_tab_menu_row(&mut ws.mux, tab, dispatch) {"));
+    assert!(act.contains("ConfirmAction::CloseTabHolding(ws.mux.tab_anchor_panes(idx))"));
+    assert!(act.contains("ws.mux.close_tab_at(idx)"));
+    let open = finding_body(&src, "open_tab_menu");
+    assert!(
+        open.contains("self.close_modals_for_context_menu(ws);")
+            && !open.contains("close_all_modals"),
+        "a tab's menu keeps Find open, as the terminal's menu does"
+    );
+    let shown = open
+        .find("self.show_context_menu(ws, items, px, py);")
+        .unwrap();
+    assert!(shown < open.find("ws.context_menu_session.tab = Some(tab);").unwrap());
+    assert!(open.contains("Text::MenuA11yTab"));
+}
+
+#[test]
+fn right_clicking_a_tab_opens_its_menu() {
+    let src = production_source();
+    let segment = src
+        .split("fn tab_menu_segment(")
+        .nth(1)
+        .and_then(|body| body.split("\n}\n").next())
+        .expect("the tab under a right-click");
+    assert!(segment.contains("if !tab_bar_pointer_region_contains(bar, x, y) {"));
+    assert!(segment.contains(".find(|segment| rect_contains(segment.rect, x, y))"));
+    // Native presses, then control presses: the tab segment's right-click
+    // reaches the tab menu before the terminal menu's route.
+    for press in [
+        src.split("WindowEvent::MouseInput {")
+            .nth(1)
+            .expect("the native press"),
+        src.split("fn ctl_mouse_press(")
+            .nth(1)
+            .expect("the control press"),
+    ] {
+        let press = press.split_whitespace().collect::<Vec<_>>().join(" ");
+        let tab = press
+            .find(
+                "if bcode == 2 && let Some(idx) = tab_menu_segment(&bar, px, py) { self.open_tab_menu(ws, idx, px, py);",
+            )
+            .expect("a right-click on a tab opens its menu");
+        let terminal = press
+            .find("self.open_context_menu(ws, px, py, offer_copied)")
+            .expect("the terminal menu");
+        assert!(tab < terminal);
+    }
+}
+
+/// A tab of one pane, `id`, with no terminal behind it.
+fn fake_tab(id: u64) -> crate::mux::Tab {
+    crate::mux::Tab {
+        root: crate::mux::Node::Leaf(id),
+        focus: id,
+        title_override: None,
+        zoomed: false,
+        last_output_at: None,
+        last_seen_at: None,
+        bell: false,
+        lanes: Default::default(),
+        generated_group_name: None,
+        scaled_zoom_owner: false,
+    }
+}
+
+fn fake_tabs(ids: &[u64]) -> Mux {
+    let mut mux = Mux::new();
+    mux.tabs.extend(ids.iter().copied().map(fake_tab));
+    mux
+}
+
+#[test]
+fn a_tab_menu_row_acts_on_its_tab_wherever_it_has_moved() {
+    use super::{TabMenuDispatch as D, TabMenuStep as S, step_tab_menu_row};
+    let order = |mux: &Mux| mux.tabs.iter().map(|tab| tab.focus).collect::<Vec<_>>();
+    // The menu of tab 2 opens while tab 1 is active; then tab 2 is dragged
+    // to the end before a row is picked.
+    let mut mux = fake_tabs(&[1, 2, 3]);
+    let tab = mux.tab_anchor_panes(1);
+    assert!(mux.nudge_tab(1, 1));
+    assert_eq!((order(&mux), mux.active), (vec![1, 3, 2], 0));
+    assert_eq!(step_tab_menu_row(&mut mux, &tab, D::Close), S::Close(2));
+    assert_eq!(step_tab_menu_row(&mut mux, &tab, D::Move(-1)), S::Moved(true));
+    assert_eq!((order(&mux), mux.active), (vec![1, 2, 3], 0), "it moved, tab 1 stayed active");
+    assert_eq!(
+        step_tab_menu_row(&mut mux, &tab, D::Activate(Action::EditTabTitle)),
+        S::Run(Action::EditTabTitle)
+    );
+    assert_eq!(mux.tabs[mux.active].focus, 2, "Rename runs on tab 2, brought forward");
+    // A neighbour closing shifts it down one; the row still finds it.
+    let mut mux = fake_tabs(&[1, 2, 3]);
+    let tab = mux.tab_anchor_panes(2);
+    assert!(!mux.close_tab_at(0));
+    assert_eq!(step_tab_menu_row(&mut mux, &tab, D::Close), S::Close(1));
+}
+
+#[test]
+fn a_tab_menu_row_whose_tab_has_gone_does_nothing() {
+    use super::{TabMenuDispatch as D, TabMenuStep as S, step_tab_menu_row};
+    let mut mux = fake_tabs(&[1, 2, 3]);
+    let tab = mux.tab_anchor_panes(1);
+    // Its last shell exits.
+    assert!(!mux.close_tab_at(1));
+    for dispatch in [
+        D::Close,
+        D::Move(1),
+        D::Activate(Action::DuplicateTab),
+        D::Activate(Action::EditTabTitle),
+    ] {
+        assert_eq!(step_tab_menu_row(&mut mux, &tab, dispatch.clone()), S::Gone, "{dispatch:?}");
+        let tabs = mux.tabs.iter().map(|tab| tab.focus).collect::<Vec<_>>();
+        assert_eq!((tabs, mux.active), (vec![1, 3], 0), "{dispatch:?} left the others alone");
+    }
+}
+
+#[test]
+fn a_tab_menu_closes_once_its_tab_has_gone() {
+    let mut ws = WindowState::new(1, fake_tabs(&[1, 2, 3]));
+    let open = |ws: &mut WindowState, tab: Option<Vec<u64>>| {
+        ws.context_menu = Some(super::ContextMenuState {
+            origin: crate::app::MenuOrigin::Other,
+            anchor: (10.0, 10.0),
+            anchor_scale: 1.0,
+            items: super::tab_menu_items(3, kettle_i18n::Translator::new(kettle_i18n::Language::En)),
+            highlight: 0,
+            drill_stack: Vec::new(),
+            scroll_offset: 0,
+            typeahead_buf: String::new(),
+            typeahead_until: None,
+        });
+        ws.context_menu_session.tab = tab;
+    };
+    let tab = ws.mux.tab_anchor_panes(1);
+    open(&mut ws, Some(tab));
+    assert!(!super::dismiss_orphaned_tab_menu(&mut ws), "its tab is still open");
+    assert!(ws.context_menu.is_some());
+    // Reordering keeps it: the menu follows its tab.
+    assert!(ws.mux.nudge_tab(1, 1));
+    assert!(!super::dismiss_orphaned_tab_menu(&mut ws));
+    // Its tab's last shell exits.
+    let gone = ws.mux.tab_index_of_any_pane(&[2]).unwrap();
+    assert!(!ws.mux.close_tab_at(gone));
+    assert!(super::dismiss_orphaned_tab_menu(&mut ws));
+    assert!(ws.context_menu.is_none() && ws.context_menu_session.tab.is_none());
+    // The terminal menu has no tab to lose.
+    open(&mut ws, None);
+    assert!(!super::dismiss_orphaned_tab_menu(&mut ws));
+    assert!(ws.context_menu.is_some());
+
+    // Each turn checks, and a stale pick repaints the popup away.
+    let src = production_source();
+    let wait = src
+        .split("fn about_to_wait_inner(")
+        .nth(1)
+        .expect("the scheduler");
+    assert!(wait.contains("if dismiss_orphaned_tab_menu(ws)"));
+    let act = finding_body(&src, "act_on_menu_tab");
+    let gone = act
+        .split("TabMenuStep::Gone => {")
+        .nth(1)
+        .and_then(|arm| arm.split("TabMenuStep::Close(idx) => {").next())
+        .expect("the stale row");
+    assert!(gone.contains("window.request_redraw();"));
+}
+
+#[test]
+fn close_other_tabs_closes_every_tab_but_its_own_and_asks_once() {
+    use super::{
+        ConfirmAction, TabMenuDispatch as D, TabMenuStep as S, lone_pane_in_scope,
+        other_tabs_close_scope, step_tab_menu_row,
+    };
+    use crate::mux::{Dir, Node};
+    // The row, on the tab its menu was opened on, wherever that has moved.
+    let mut mux = fake_tabs(&[1, 2, 3]);
+    let tab = mux.tab_anchor_panes(0);
+    assert!(mux.nudge_tab(0, 1));
+    assert_eq!(step_tab_menu_row(&mut mux, &tab, D::CloseOthers), S::CloseOthers(1));
+    let row = super::tab_menu_items(3, kettle_i18n::Translator::new(kettle_i18n::Language::En))
+        .into_iter()
+        .last()
+        .expect("rows");
+    assert!(matches!(
+        super::item_to_click(&row, 7),
+        Some(super::ContextMenuClick::CloseOtherTabs)
+    ));
+
+    // One question covers every pane that would close: the split tab's two
+    // and the last tab's one.
+    let mut ws = WindowState::new(1, fake_tabs(&[1, 2, 4]));
+    ws.mux.tabs[1].root = Node::Split {
+        dir: Dir::Horizontal,
+        ratio: 0.5,
+        a: Box::new(Node::Leaf(2)),
+        b: Box::new(Node::Leaf(3)),
+    };
+    // No terminal stands behind these panes, so each counts as busy.
+    assert_eq!(other_tabs_close_scope(&ws, 0), (3, 3));
+    assert_eq!(other_tabs_close_scope(&ws, 1), (2, 2));
+    // With one pane left to close, its own program is what the question
+    // names, as when closing that tab.
+    let ws_two = WindowState::new(1, fake_tabs(&[1, 2]));
+    assert_eq!(
+        lone_pane_in_scope(
+            &ws_two,
+            1,
+            &ConfirmAction::CloseOtherTabs {
+                keep: vec![1],
+                panes: super::other_tabs_panes(&ws_two, 0),
+            }
+        ),
+        Some(2)
+    );
+    assert_eq!(super::other_tabs_panes(&ws, 0), vec![2, 3, 4]);
+
+    // Closing them leaves the kept tab, active.
+    let mut mux = fake_tabs(&[1, 2, 3, 4]);
+    mux.active = 3;
+    use crate::mux::BulkClosed::Tab;
+    assert_eq!(mux.close_tabs_except(1, &[1, 3, 4]), vec![Tab(3), Tab(2), Tab(0)]);
+    assert_eq!(mux.tabs.iter().map(|tab| tab.focus).collect::<Vec<_>>(), vec![2]);
+    assert_eq!(mux.active, 0);
+    assert!(fake_tabs(&[1]).close_tabs_except(0, &[]).is_empty());
+
+    // The row and its confirmation share the close, and the row asks first.
+    let src = production_source();
+    let act = finding_body(&src, "act_on_menu_tab");
+    let others = act
+        .split("TabMenuStep::CloseOthers(idx) => {")
+        .nth(1)
+        .and_then(|arm| arm.split("TabMenuStep::Moved(moved) => {").next())
+        .expect("the Close Other Tabs arm");
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let others = flat(others);
+    let asked = others
+        .find("ConfirmAction::CloseOtherTabs { keep: keep.clone(), panes: others.clone(), },")
+        .expect("asks first, about the panes it found");
+    assert!(asked < others.find("self.close_other_tabs_now(ws, &keep, &others);").unwrap());
+    assert!(flat(&src).contains(
+        "ConfirmAction::CloseOtherTabs { keep, panes } => { self.close_other_tabs_now(ws, &keep, &panes); }"
+    ));
+    let close = flat(finding_body(&src, "close_other_tabs_now"));
+    assert!(close.contains("for closed in ws.mux.close_tabs_except(idx, others) {"));
+    assert!(close.contains("crate::mux::BulkClosed::Tab(closed) => self.fire_tab_close_event(ws, closed),"));
+    assert!(close.contains("crate::mux::BulkClosed::Pane(pane) => self.fire_pane_close_event(ws, pane),"));
+}
+
+#[test]
+fn close_other_tabs_closes_only_the_panes_its_question_was_about() {
+    use crate::mux::BulkClosed::{Pane, Tab};
+    use crate::mux::{Dir, Node};
+    let order = |mux: &Mux| mux.tabs.iter().map(|tab| tab.focus).collect::<Vec<_>>();
+    // The audit's case: from A's menu, the question is about B and C. While
+    // it is on screen a new tab, D, opens and gets to work.
+    let mut mux = fake_tabs(&[1, 2, 3]);
+    let asked = [2, 3];
+    mux.tabs.push(fake_tab(4));
+    mux.active = 3;
+    assert_eq!(mux.close_tabs_except(0, &asked), vec![Tab(2), Tab(1)]);
+    assert_eq!((order(&mux), mux.active), (vec![1, 4], 0), "D was not asked about");
+    // B is split while the question is up: the new pane stays, in B.
+    let mut mux = fake_tabs(&[1, 2, 3]);
+    mux.tabs[1].root = Node::Split {
+        dir: Dir::Horizontal,
+        ratio: 0.5,
+        a: Box::new(Node::Leaf(2)),
+        b: Box::new(Node::Leaf(5)),
+    };
+    assert_eq!(mux.close_tabs_except(0, &asked), vec![Tab(2), Pane(2)]);
+    assert_eq!(mux.tabs.len(), 2);
+    assert_eq!(mux.tabs[1].root.leaf_ids(), vec![5]);
+    assert_eq!(mux.active, 0, "A stays active");
+    // A pane already gone, or moved into the kept tab, closes nothing.
+    let mut mux = fake_tabs(&[1, 2]);
+    mux.tabs[0].root = Node::Split {
+        dir: Dir::Horizontal,
+        ratio: 0.5,
+        a: Box::new(Node::Leaf(1)),
+        b: Box::new(Node::Leaf(3)),
+    };
+    assert_eq!(mux.close_tabs_except(0, &[3, 9]), vec![]);
+    assert_eq!(order(&mux), vec![1, 2]);
+}
+
+#[test]
+fn a_stale_close_other_tabs_pick_repaints_the_menu_away() {
+    // The other tabs have all gone: nothing to close or ask about, but the
+    // popup the pick dismissed must not stay painted.
+    let src = production_source();
+    let act = finding_body(&src, "act_on_menu_tab");
+    let others = act
+        .split("TabMenuStep::CloseOthers(idx) => {")
+        .nth(1)
+        .and_then(|arm| arm.split("TabMenuStep::Moved(moved) => {").next())
+        .expect("the Close Other Tabs arm");
+    let none_left = others
+        .split("if panes == 0 {")
+        .nth(1)
+        .and_then(|branch| branch.split("return;").next())
+        .expect("the branch with nothing to close");
+    assert!(none_left.contains("window.request_redraw();"));
+    let mut ws = WindowState::new(1, fake_tabs(&[1]));
+    assert_eq!(super::other_tabs_close_scope(&ws, 0), (0, 0));
+    ws.mux.tabs.push(fake_tab(2));
+    assert_eq!(super::other_tabs_close_scope(&ws, 0), (1, 1));
+}
+

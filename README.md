@@ -93,9 +93,10 @@ and the key that restores them.
 macOS also has `Cmd+T`, `Cmd+D` and `Shift+Cmd+D` (split beside and
 below), `Shift+Cmd+]` and `Shift+Cmd+[` (next and previous tab),
 `Shift+Cmd+W` (close the window), `Cmd+A` (select all), `Cmd+C/V`, `Cmd+F`
-and `Cmd+,`; the gear before `▾ +` in the title bar opens Settings too. Run
+and `Cmd+,`; the gear before `+ ▾` in the title bar opens Settings too. Run
 `kettle --list-keybinds` for the full map, or choose **Keyboard Shortcuts** in
-the macOS Help menu or **Keyboard shortcuts** in the new-tab **▾** menu: the
+the macOS Help menu or **Keyboard shortcuts** in the new-tab **▾** menu on
+Linux and Windows: the
 command palette then lists only the commands that have a shortcut, with the
 shortcut beside each, and you can search it and press Enter to run one.
 With nothing typed, the palette lists its commands under headings, most used
@@ -109,8 +110,9 @@ current Cmd shortcuts, including config overrides. See
 
 ## Selecting text
 
-- Drag to select text. Double-click selects a word or detected path; triple-click
-  selects a line. Drag past the top or bottom to scroll through history.
+- Drag to select text. Double-click selects a word or a detected URL or path,
+  including one that wraps onto the next row; triple-click selects a line.
+  Drag past the top or bottom to scroll through history.
 - **Option-drag on macOS / Alt-drag elsewhere** selects a rectangular block.
 - **Shift-click** extends the existing selection from its anchor; keep dragging
   to adjust the end. Without a selection it starts one. Shift also bypasses a
@@ -416,7 +418,9 @@ See [configuration](docs/CONFIG.md) and [getting started](docs/GETTING-STARTED.m
 ## Links and quick-select hints
 
 Hover a link to highlight it and see its destination and opening gesture.
-The hovered link uses a solid accent underline and a hand cursor. At rest,
+The hovered link uses a solid accent underline. The pointer turns into a hand
+only while a click would open the link: with Cmd (macOS) or Ctrl held, or
+always with `link-single-click`; otherwise it stays the text cursor. At rest,
 detected URLs and paths have no underline, so a screen full of them stays
 quiet; `link-underline = always` gives them a thin, dim one. Explicit OSC 8
 links always rest with a dotted underline. Inside a selection or search match
@@ -439,8 +443,17 @@ blank cells after the match when available; otherwise they overlay its start.
 Paths need path context: progress counters such as `158/158`, ratios such as
 `a/b` and slash-joined words such as `read/write` stay plain text; a relative
 path counts as a link (shown on hover and offered as a hint) when its last part
-has an extension or it has three parts. Remote or unresolved paths are copied;
-see [configuration and hint actions](docs/CONFIG.md).
+has an extension (a dotfile such as `.env` counts) or it has three parts. Remote or unresolved paths are copied;
+see [configuration and hint actions](docs/CONFIG.md). Punctuation that ends a
+sentence is not part of a detected link, as in Ghostty, WezTerm and GNOME
+Terminal: trailing dots after a URL (`see https://example.com/docs...` links
+`https://example.com/docs`), a single dot after a path, commas, quotes, and a
+closing bracket that closes nothing the link opened. A path ending in two or
+more dots, such as `/tmp/a..` or `/usr/lib/...`, may name a file whose name
+ends in them, so it is not a link and quick select only copies it, unless a
+closing quote right after the dots makes them part of the name (`"/tmp/a.."`
+links `/tmp/a..`). Dots after other punctuation count too (`report.pdf,..`),
+and a `file://` link ending in them is no link either.
 
 ## Themes
 

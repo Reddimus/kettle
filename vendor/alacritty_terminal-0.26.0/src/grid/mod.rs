@@ -51,6 +51,14 @@ pub trait GridCell: Sized {
     fn clear_cells(cells: &mut Vec<Self>) {
         cells.clear();
     }
+
+    /// Turn the first half of a wide character into a single-width blank
+    /// that keeps its attributes. Narrowing the grid to one column does this,
+    /// since no row can hold the character there.
+    #[inline]
+    fn clear_wide_char(&mut self) {
+        self.flags_mut().remove(Flags::WIDE_CHAR);
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

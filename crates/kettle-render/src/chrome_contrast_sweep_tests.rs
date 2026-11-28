@@ -678,7 +678,7 @@ fn settings_outlines_text_and_focus_reach_their_floors() {
         for linear in [true, false] {
             for accent in [theme.accent, theme.palette[4]] {
                 let palette = settings::settings_colors(&theme, accent, linear, &mut colors);
-                let selected = color::over(bg, accent, settings::SETTINGS_SELECTED_ALPHA, linear);
+                let selected = settings::settings_selected_fill(bg, accent, linear);
                 assert_eq!(palette.selected, selected);
                 let at = format!("{name} linear={linear} accent={accent:?}");
                 let ratio = color::contrast_ratio;
@@ -744,7 +744,9 @@ fn settings_outlines_text_and_focus_reach_their_floors() {
 /// The judged panels, pinned: TokyoNight Night under a GNOME desktop's
 /// purple accent (the r17 Linux capture's), and Kettle Day under its own.
 /// Before this change their descriptions sat on the 4.5:1 floor and the
-/// focused row's label at 4.94:1.
+/// focused row's label at 4.94:1. Kettle Day's focused row is filled
+/// strongly enough to show (1.3:1 against the panel), which costs its label
+/// and description some of the contrast a faint tint left them.
 #[test]
 fn settings_judged_panels_read_clearly() {
     let mut colors = Colors::default();
@@ -758,7 +760,7 @@ fn settings_judged_panels_read_clearly() {
             6.3,
         ),
         ("TokyoNight Night", None, 7.0, 7.0, 6.3),
-        ("Kettle Day", None, 5.7, 6.5, 5.9),
+        ("Kettle Day", None, 5.7, 5.4, 4.85),
     ] {
         let theme = Theme::by_name(name);
         let accent = accent.unwrap_or(theme.accent);
@@ -803,8 +805,8 @@ fn the_painter_uses_the_swept_helpers() {
         "scrollback::scrollback_pill_quads(&mutmenu_q,pill,surface,self.scale);",
         "scrollback::kept_history_label_quads(&mutmenu_q,label,rest.fill);",
         "letpalette=settings::settings_colors(",
-        "settings::settings_row_surfaces(row,data,&palette,(theme.background,acc,on_ink),row_selected,self.scale,)",
-        "letcolor=settings::settings_text_color(set,item.kind,&palette,(theme,acc,on_ink),&mutself.chrome_colors,);",
+        "settings::settings_row_surfaces(row,data,&palette,theme.background,(row_fill,set.hover),self.scale,)",
+        "letcolor=settings::settings_text_color(set,item.kind,&palette,theme,&mutself.chrome_colors,);",
         "settings::settings_focus_bar(row.rect,bar,self.scale),focus,",
         "settings::settings_focus_bar(*r,bar,self.scale),focus,",
     ] {

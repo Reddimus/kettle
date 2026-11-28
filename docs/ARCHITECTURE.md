@@ -428,7 +428,11 @@ drive mapping. State and lock files, recordings, remote-command payloads,
 terminal logs, screenshots, pasted images, and runtime/GPU/crash diagnostics
 share these primitives. Advisory locks let callers serialize compound
 operations; configuration persistence holds one across the complete read,
-validate, backup, and replacement transaction.
+validate, backup, and replacement transaction. The kettle-state lock guards
+and recordings unlock explicitly instead of relying on close: a child forked
+meanwhile, such as a new pane's shell between fork and exec, holds a copy of
+every descriptor, and flock(2) keeps a lock those copies share until one of
+them unlocks or the last one closes.
 Windows lock creation requests DELETE access and shares deletion from the
 first handle while retaining the private creation checks. Retirement reopens
 that held object and uses POSIX deletion while the exclusive lock remains
@@ -1018,7 +1022,11 @@ naming every file it is about to write, and removes it once the new record is
 verified. A failed publish records what it did replace when that record would
 be complete; a retry or uninstall accepts a file that differs from its record,
 or has none, only when it matches the receipt. Equal bytes alone never adopt a
-file. Startup
+file. A self-update rollback that could not finish leaves its journal, which
+the installer reads as the same kind of receipt: files matching the bytes it
+shows the update left in each entry's state join `install-pending.json`, and
+the journal and its matching backups are retired before the installer writes
+anything. Startup
 and explicit update first authenticate the marker, layout, prefix ownership, and
 update journal under the update lock; they recover an incomplete transaction
 before checking file-content provenance, so the old record cannot strand the
@@ -1465,9 +1473,14 @@ lane request (`Tab::lanes`, by pane: side, share and whether expanded) is
 transient: never saved, cleared from a torn-off tab, and pruned with its
 pane. `partition_leaf` carves the lane in whole terminal cells and keeps
 the terminal at 20 columns and 5 rows at least; a lane without room to
-expand (a right one needs 16 columns for its header) is a one-row strip
-along the body's bottom whichever its side, and one without room for that a
-badge that changes nothing. Opening a lane into a badge is refused with a
+expand (a right one needs 16 columns for its header, a bottom one 4 rows and
+the room its header's buttons need above its resize edge) is a strip along
+the body's bottom whichever its side, and one without room for that a badge
+that changes nothing. The strip is as tall as its header's buttons need to be
+24-point targets (`Metrics::with_lane_header`, from
+`kettle_render::media_lane_header_room`) in whole terminal rows when the
+terminal keeps its 5 rows with that, and one row when it does not; with
+17.5 px rows in a 300 px leaf it takes two rows, leaving 15. Opening a lane into a badge is refused with a
 notice. What a lane shows is `WindowState::preview_panels` (by
 pane, the shelf item); `prune_previews`, on every pass of the event loop,
 closes a lane whose pane closed or left the window or whose item left the
@@ -1690,10 +1703,12 @@ hard wraps are joined back by inverting the harness's greedy word wrap: a
 row indented less than the body that no wrapper of that harness, or of
 either when it is unknown, could have kept on the row above is a
 continuation, joined with the space it took: one, however many the wrapper
-dropped, which Mermaid draws the same as a run. A row ending in a hyphen or
-slash before one that starts with a word (Codex may have broken a word or
-wrapped at a space after it), a full row a too-long word could have been cut
-at, a row that would have fit (wrapped at another width), and unindented
+dropped, which Mermaid draws the same as a run. A row ending where Codex may
+break inside a word (after a hyphen between letters or digits, or after a
+slash whatever comes before it, unless a digit or a closing mark follows: it
+may have broken a word or wrapped at a space after it), a full row a
+too-long word could have been cut at, a row that would have fit (wrapped at
+another width), and unindented
 text are refused, never guessed; without a width, so is any row that some width the
 rows fit in could have wrapped, by its shape or anywhere in an unindented
 body, and in an unindented body with a width too, since the pane may have
@@ -1934,7 +1949,13 @@ The search bar owns the keyboard but not the pointer. It is a reserved lane
 below the grid, so `App::any_modal_open` (keyboard, file drops,
 focus-follows-mouse) includes it while `App::pointer_modal_open` (the mouse
 arms and the cursor icon) does not; both derive from one
-`non_search_modal_open` list so they cannot drift on anything else. The pure
+`non_search_modal` list so they cannot drift on anything else
+(`modal_owns_pointer` answers `pointer_modal_open` for code that has only the
+window). Chrome under a pointer modal takes no press, so it shows no hover:
+`chrome_pointer` is `None` then, and `hover_tab_bar` clears the tab, `✕`,
+button and window-control hover, with the hand cursor and tooltips they drive,
+on the first frame after a modal opens. The Settings gear keeps its hover over
+open Settings, where a press on it still arms it. The pure
 `search_pointer_route` decides each pointer event by geometry: a press inside
 the lane goes to the bar's controls, a press above it is ordinary grid input,
 and motion or release follow whichever gesture is live (an editor drag keeps
@@ -1954,6 +1975,11 @@ so lines above the lane stay put. A focused result's pane takes back no more
 than it is scrolled up, keeping its first visible row. The right-click menu is
 the one modal allowed to coexist with the bar; keys go to the menu while it is
 up because its arm precedes search in the key handler.
+The bar's AccessKit `Search` region has one polite `Status`
+(`search_status_nodes`): the match count, then the search's own status when
+the bar paints one (Wrapped, Invalid pattern), over both painted rects. Match
+and No matches are left to the count, and a bar that shows neither has no
+status node, so the live region always has a name.
 
 Modal text fields and search share `kettle-ui::text_editor::TextEditor`: one
 bounded UTF-8 string, a caret and an optional selection anchor on extended
@@ -1983,7 +2009,10 @@ the suffix, and commits through the same editor. IME candidate placement shapes
 the exact same projection, including preedit, rather than estimating text widths.
 Native and control pointer routes both place the caret and extend drag selections
 from those shaped stops. A pointer press ends composition before mapping into
-committed text.
+committed text. `text_field_press_rect` says where a press reaches a field (a
+picker's whole header, else the slot between prefix and hint), and the cursor
+shows the I-beam over that same rect, as it does over open Settings' search box
+and the find bar's editor.
 
 The SSH launcher's rows come from one model, `SshRow` in
 `kettle-ui::app::pickers`. A host whose name or alias equals the trimmed query
@@ -2007,7 +2036,8 @@ configured name or target equals, or `Remove` when row 0 is the configured
 host the query names. `SshRow::is_action` keeps them out of everything but a
 deliberate Down or a press on the row: the Up wrap, the clamp after the list
 shrinks, and the wheel limit in `apply_picker_pointer` all skip them, and a
-hover selects nothing. Save opens the title editor with
+hover only lights them (`PickerView::prelight`, painted as
+`ContextMenuRow::prelit`) without selecting them. Save opens the title editor with
 `TitleEditScope::SaveSshHost` and `TitleEditTarget::SshHost`, which no pane
 exit makes stale. Remove and a Save over an existing name go through
 `ConfirmAction::RemoveSshHost` and `ReplaceSshHost`, Cancel first. The
@@ -2040,11 +2070,78 @@ contiguously, as `screen` does in `fullscreen`) the palette leaves
 out rows the query only lies scattered through. Command labels accent the
 characters of the alignment that ranked the row; English alias matches in
 Spanish have no accent unless the displayed label also matches. The whole card counts
-as inside. Any pointer press cancels a keyboard-only hint. Settings closes
+as inside. A pointer that moves over a row selects it (`picker_hover`), the
+quick-pick rule of editors: `PickerView::pointer_seen` is the pointer position
+the picker last saw, set when it opens, on each of its keys
+(`note_picker_keys`) and on each wheel step, so rows that scroll or change
+under a still pointer are never selected and the keyboard's selection holds
+until the pointer really moves. A row a hover may not select is lit instead.
+The keyboard previews the theme it selects at once; a theme the pointer
+selects previews once the pointer has rested on its row 150 ms
+(`PickerView::pointer_preview`, which `theme_preview_change` waits for and
+`about_to_wait_inner` wakes for), so a sweep across the list does not flash
+themes. Each motion within the row starts the wait again, and leaving the
+row or the window (`picker_pointer_left`) drops it until the pointer rests on
+a row or a key previews. A click runs the row as
+Enter does. Any pointer press cancels a keyboard-only hint. Settings closes
 on a press outside its panel; an active path editor or keybinding capture instead
 cancels only that capture on a press outside its focused row. Confirmation dialogs
 keep their question and consume outside presses. The search lane and vi mode keep
 their existing pointer behavior because they are not transient popups.
+
+The pickers, Settings and title editing are modal `Dialog` nodes in the
+accessibility tree, as the confirmation's `AlertDialog` is: each owns the
+keyboard and the pointer while open. A node with a selected state never acts
+on a `Click`: AccessKit's adapters turn selecting a selectable item (macOS
+`setAccessibilitySelected:` and `AXPick`, AT-SPI `Selection.SelectChild`,
+`DeselectChild` and `DeselectSelectedChild`, UIA `SelectionItem`, which needs
+no Click support) into the same `Click` a press sends, with nothing to tell
+them apart. Every enabled picker option has Focus and Click, and both only
+highlight it, as the arrow keys do; the theme picker previews it as they do,
+at once, since the selection takes the keyboard's bookkeeping
+(`select_accessible_picker_option` calls `note_picker_keys`), so a hover
+preview the pointer left pending never holds it back. The picker acts on its highlighted result only from
+its Choose button ("Choose Split right"), a `Button` with no selected state
+beside the list, bound to that result and painted nowhere, as a zero-width
+line at the row's end: its Click gives the picker its own Enter
+(`press_picker_enter`), as `picker_pointer` does for a click on the row, so
+the SSH launcher's Save and Remove still open their own steps. Settings
+follows the same rule: Focus and Click on a row only select it, and the
+selected row's Change button (bound to the row's category and label, over its
+painted control) changes it through `settings_adjust` as a left-click on the
+row does, beside
+the Reset button.
+`accessibility_picker_request` maps a request to the value the picker's
+selection holds (a command for the palette, a row elsewhere). Each
+quick-select label that still matches what has been typed has a press too,
+which runs `act_hint` without Shift, as typing the label does; labels have no
+selected state. A dimmed label and a disabled placeholder have no press.
+The hovered link's `Link` node has a press too, which opens the link under
+the pointer through `open_pane_link`, as the click its status names does.
+
+A node a screen reader can act on is bound to its target, not to its place:
+its AccessKit id is a hash of the target (`accessibility_bound_id`), above
+every modal kind's ids. A picker option's id comes from what it acts on, as
+its builder names it in `ContextMenuRow::a11y_key` (the command, the layout,
+the theme, the SSH row's kind and host or target), else from its whole name,
+and how many options above it share that (`accessibility_picker_option_ids`).
+It is bound before the label is fitted to the panel, so two long names that fit
+to one painted label stay two results, and the option and its Choose button
+are named with the whole name (`ContextMenuRow::a11y_name`). A
+quick-select label's from its label, pane, cell and text (a card's cell, never
+its nonce) and whether its quick select is for previews
+(`bind_hint_accessibility` gives the window's labels these ids), and
+the hovered link's from its status target and painted bounds. Adapters queue
+requests against the tree they last received, so a request that arrives after
+the view changed names a node the current view does not hold and is dropped,
+where a place-based id would act on whatever took that place. The
+accessibility key hashes what each bound id is made from (a picker row's
+`a11y_key` and `a11y_name` through `hash_accessible_menu_rows`, each
+quick-select label's bound id, the link status's target and bounds, a Settings
+row's category and label), so a change that only rebinds a node, such as a
+reload that moves an SSH host to another target, still republishes the tree.
+Opening still
+goes through `open_pane_link` and the picker's own Enter, with their checks.
 
 The context menu retains its platform convention: left/middle presses outside
 it, including in the terminal, dismiss and consume; an outside right press
@@ -2158,7 +2255,11 @@ starts the strip, and clamps the grab offset inside that tab.
 The menu owns its origin through shell-discovery replacement and submenu
 navigation. Only the macOS new-tab menu omits Settings through About; its
 origin also supplies the accessible name and expanded/pressed state, and
-clears with the menu. AccessKit children follow each strip's screen order.
+clears with the menu. The AccessKit tab list holds only the tabs; the
+strip's own buttons (New tab, the new-tab menu, the gear, and in the GNOME
+header Find, the main menu and the window buttons) sit beside it in a
+`Toolbar` named "Tab bar controls" (`tab_strip_roots`), and each container's
+children follow the strip's screen order.
 On macOS the dropdown uses the ComboBox role, mapped to AXPopUpButton, and a
 toggled value for open state because this adapter drops HasPopup/expanded.
 While the menu is open, only its popup remains in the strip's accessibility
@@ -2621,6 +2722,10 @@ whole scrollback buffer:
   the engine's single leftmost-first pass; consequently, a nullable alternative
   that wins with an empty match can shadow a later consuming alternative at
   the same position.
+  `search`/`search_with`, the whole-buffer call that tests and the fuzz
+  harness use, runs the find bar's exact-count scan (`SearchCountScan`) to the
+  end, so it returns the same `SearchSpan`s the find bar counts and stops
+  where that count is limited.
 - **`kettle-ui` owns interaction and scheduling.** Each `WindowState` has one
   search state and an in-memory per-pane query map. An open search bar follows
   focus and carries its query to the newly focused pane, where closing it
@@ -3106,6 +3211,7 @@ disabled, output keeps its per-codepoint layout.
 
 The engine uses generated Unicode 18 GCB, InCB, Extended_Pictographic,
 Emoji_Modifier_Base, emoji-variation base and joining General_Category=Mc tables,
+plus the Mc intersection with Indic_Syllabic_Category=Virama or Invisible_Stacker,
 with all 853 official GraphemeBreakTest vectors. Its finite streaming boundary
 state survives PTY splits independently of retained text. The product, vendor
 validation and fuzz graphs all pin Unicode 18 width tables in `unicode-width` 0.2.3;
@@ -3113,14 +3219,20 @@ the Unicode 17 segmentation dependency used by other interfaces does not decide
 terminal cluster boundaries.
 
 A cluster occupies its leading cell and its recorded wide spacer, with at most
-30 trailing scalars in the existing cell extra storage. Beyond that cap, the
-latest variation selector, ZWJ and its following spacing scalar, or first
-spacing scalar replace the final retained slots; other excess scalars are
-dropped while boundary and width state still advance. The pure cluster-width
+30 trailing scalars in the existing cell extra storage. Until the first shaping
+base arrives, retention reserves three slots for that base and two presentation
+tails. Excess prefix scalars are dropped, preserving the retained text order.
+The first base then stays before the final two slots, so later variation
+selectors and ZWJ/spacing tails cannot evict it. Base-led clusters retain the
+full existing capacity. Beyond the cap, the latest variation selector or ZWJ
+and its following spacing scalar replace the final slots; other excess scalars
+are dropped while boundary and width state still advance. The pure cluster-width
 calculator and streaming input share the same finite width accumulator. A
-General_Category=Mc mark after a measured base makes the cluster two cells;
-other positive-width scalars add their widths, capped at two, including Indic
-consonants after a virama and the Thai/Lao Lo spacing vowels. Emoji ZWJ chains
+General_Category=Mc mark after a measured base makes the cluster two cells,
+except for the generated Virama/Invisible_Stacker intersection: a final virama
+adds no column. InCb is unchanged; Grantha's InCb=Extend virama does not become
+a conjunct linker. Other positive-width scalars add their widths, capped at two,
+including Indic consonants after a virama and the Thai/Lao Lo spacing vowels. Emoji ZWJ chains
 keep the first emoji's width, and regional-indicator pairs remain two cells.
 VS16 widens a registered variation base only when it immediately follows that
 base and the base contributes to the cluster width. An immediately following
@@ -3129,6 +3241,20 @@ including East Asian Wide bases. The accumulator retains the preceding width,
 also capped at two, so narrowing preserves other contributions such as Prepend
 number signs before applying the cluster's two-cell cap. Intervening scalars
 end selector eligibility even when they exceed the retained-text limit.
+
+Mode 2027 gives each GCB=Prepend scalar, U+A8FA DEVANAGARI CARET, U+17A4 KHMER
+INDEPENDENT VOWEL QAA and U+17D8 KHMER SIGN BEYYAL a one-cell contribution,
+matching the selected application-side width reference for these singletons.
+This is terminal policy, not a Unicode column-count requirement or a promise of
+arbitrary `wcswidth` string equality: the cluster cap remains two cells. The
+legacy mode-off path keeps `unicode-width` scalar contributions. Shaping-base
+selection remains separate: Prepend anchors to its following base, A8FA is a
+spacing base for stored `GRAPHEME` cells, and soft hyphen keeps its previous
+formatting-base behavior. The renderer uses `grapheme_shaping_base_offset` only
+for those cells' prefix and cursor anchors. Raw row graphemes and emoji
+classification keep `grapheme_base_offset`'s scalar-width base selection, so a
+zero-width A8FA attached in scalar mode cannot change emoji font selection or
+ink fitting. Stored cell metadata selects this distinction after mode changes.
 
 An unattached Fitzpatrick modifier forces a new two-cell cluster and resets
 the boundary context. Emoji modifier bases and Extended_Pictographic bases
@@ -3272,11 +3398,27 @@ that parser could retire, the disconnected transport fails immediately rather
 than preserving an impossible pending count forever.
 Unix construction closes a separate race before this completion policy begins.
 The pump is running before the child is spawned, then retains Kettle's slave
-descriptor through the first successful master read. A child-only exit releases
-it before waiting for EOF; when macOS reports output and `NOTE_EXIT` together,
-the exit timestamp is recorded but the descriptor is released only after the
-read, because closing it first discards the tail. Linux waits on the master and
-a pidfd in one `poll`; macOS registers
+descriptor. On macOS it keeps it until the direct child has exited and nothing
+is left to read on the master: the last close of a slave there can discard
+output still unread, since an exiting child waits about half a second for the
+reader and then drops its tail, so a reader that had fallen behind lost a
+program's last output while the descriptor went at the first read. Holding it
+keeps the child's own close from being the last; once the exit is seen and the
+master is empty, the pump releases it and EOF follows, or the bounded wait
+below covers a descendant that keeps its own slave open. While it is held, an
+exiting child waits for its unread output without limit, and SIGKILL does not
+end that wait, so a child whose output is stopped (Ctrl+S, `tcflow`) stays in
+its exit until output resumes; a keypress resumes it under the default
+`ixany`. A session leader with stopped output waits the same way while a
+descendant holds the slave, even with no descriptor of Kettle's open. The
+descriptor sits in a slot the pane shares with the pump from before the pump
+first runs. Closing the pane, on the teardown thread, and `kettle exec`, before
+it signals the process tree, restart the stopped output from the master
+(`tcflow(TCOON)`) and then close the descriptor; the pump, draining, takes the
+output and the child's exit completes. Linux keeps unread output across the
+last close, so it releases the descriptor at the first read as before, and a
+child that closes its terminal still hangs the master up.
+Linux waits on the master and a pidfd in one `poll`; macOS registers
 master readability and `NOTE_EXIT` in one kqueue. Other Unix targets use a
 bounded exponential `poll` plus non-reaping `waitid(WNOWAIT)` fallback. The
 primary paths are event-driven, so a quiet long-running pane does not incur a
@@ -3490,7 +3632,9 @@ frames compose onto a full base-sized canvas. If neither a background/edit frame
 nor that canvas can be obtained, the request leaves the stored image and frames
 unchanged; the decoded patch cannot substitute for the canvas. Before uploads,
 each image layer derives its live set from the complete drawable frame,
-including images drawn later. Root-frame edits refresh the active screen's physical,
+including images drawn later. The GPU and CPU layers share the live-set rule: a
+fully clipped placement, or an image no texture can hold, is not live, so it
+cannot keep a reservation a visible image needs. Root-frame edits refresh the active screen's physical,
 virtual, and relative placement bases through one shared core helper, including
 synchronized replay. Placement geometry, appended frames, frame selection, and
 the playback clock survive the refresh. Frame composition uses uppercase `X`/`Y`
@@ -3826,6 +3970,8 @@ moving existing items.
 | Module | Responsibility |
 | --- | --- |
 | `gpu` | Device/adapter selection, display-handle ownership, surface setup, constructors, resize and recovery |
+| `backend` | The seam between building a frame and drawing it: `RendererBackend` and `preferred_backend`, the device handle and scene pass both backends share, each pipeline's GPU-or-CPU layer, glyphon's stand-ins, the CPU backend's draw list, its rasterizer (`SoftRaster`) and its window presenter seam (`CpuSurface`) |
+| `cpu_raster` | Software equivalents of the eight wgpu pipelines over the same instance structs, the packed `CpuFramebuffer`/`CpuTarget` they draw into, sRGB tables and banded threads; parity-tested against lavapipe |
 | `batching` | Shared pipelines, retained text damage keys, quad helpers, glyph emission and ordered scene encoding |
 | `arabic_join` | Reciprocal Arabic seam ownership, base placement and coloured connector fragments |
 | `terminal` | Pane projections, cell/run painting, selection/search projection, cursor glyphs, decorations and painted-card access |
@@ -3841,24 +3987,246 @@ moving existing items.
 | `theme` | Chrome/terminal color derivation, contrast caching, visual bell and surface alpha policy |
 | `background` | Decoded wallpaper state, bounded decode worker and animation scheduling |
 | `screenshot` | Live capture requests, cancellation, bounded workers, readback, cropping and atomic persistence |
-| `capture` | Synthetic screenshot scenes, GPU diagnostic render fixtures and offscreen self-test |
-| `quad`, `glyphpipe`, `imgpipe`, `outline`, `rounded_surface`, `starfield`, `present`, `upload` | Existing GPU pipelines, presentation conversion and retained/mapped uploads |
+| `capture` | Synthetic screenshot scenes (`kettle --screenshot`, drawn on the configured backend: the CPU renderer by default on Linux, through `backend::offscreen`), GPU diagnostic render fixtures and the offscreen GPU self-test |
+| `quad`, `glyphpipe`, `imgpipe`, `outline`, `rounded_surface`, `starfield`, `present`, `upload` | Existing GPU pipelines, presentation conversion and retained/mapped uploads; the glyph, image and starfield modules also hold their CPU twins |
 | `builtin_glyphs` | Box drawing, block elements, Powerline separators, triangles and braille rasterized from each cell's pixel rectangle; stroke widths and pixel snapping |
 | `chrome`, `color`, `confirm` | Existing contrast policy, terminal color resolution and final confirmation layout/text |
 | `snapshot`, `cursor_policy`, `cursor_patch` | Lock-free terminal projections, cursor compatibility policy and native cursor patch rendering |
 | `card_marks`, `inline_cards`, `card_scene` | Complete card marks, registered-card recognition and card draw lists |
 | `bg_image`, `media_lane`, `media_transport`, `media_viewport` | Image decoding, preview lane layout/text, player chrome and zoom/pan |
+| `cpu_present` (Linux) | Presents a CPU-drawn `u32` framebuffer with damage: a Kettle-owned `wl_shm` presenter on Wayland, softbuffer on X11 and as the Wayland fallback |
 
 Existing test modules remain attached to the crate root so their test names stay
 stable. The renderer source-guard helper joins the production portions of the
 root and extracted modules, excluding test-only items from each file.
+
+### Renderer backends
+
+A `Renderer` builds every frame the same way: the instance lists for its
+quad, glyph, image, rounded-surface, outline and starfield pipelines and the
+text areas for glyphon. Its `RendererBackend` decides what executes them.
+
+- **Choice.** The `renderer` key (`auto`, `cpu`, `gpu`) picks it once, for
+  window 1, through `preferred_backend`; later windows follow. `auto` is the
+  CPU on Linux and the GPU elsewhere; on Linux `gpu-force-software` also
+  means the CPU; `cpu` on macOS or Windows is logged and ignored. A CPU
+  presenter that cannot start falls back to the GPU. On Linux a GPU that
+  cannot start, or that is only llvmpipe or lavapipe, falls back to the CPU.
+- **`Gpu`** is wgpu, as before.
+- **`Cpu`** creates no wgpu instance, adapter, device or surface, so no GPU
+  driver is loaded into the process. kettle-ui skips the early Vulkan
+  instance and the Settings adapter list for it, which would load one. Each pipeline is a CPU twin
+  (`backend::layers`) that keeps a copy of its instances and textures. The
+  glyph pipeline shares its atlas packer and slot cache with the GPU path
+  and keeps its atlases in memory. glyphon's `Cache`, `TextAtlas`,
+  `Viewport` and `TextRenderer` are Kettle stand-ins (`backend::text`). On the
+  CPU they repeat glyphon 0.12 step for step:
+  - `prepare` runs glyphon's layout pass.
+  - It rasterizes each new key through `SwashCache` (or the custom-glyph
+    callback) into `CpuTextAtlas`, which caches, evicts and grows as
+    glyphon's mask and colour atlases do.
+  - It places and clips each glyph to its `TextBounds` as `prepare_glyph`
+    does.
+  - `draw_cpu_text` then blends the glyphs as glyphon's shader does in its
+    `Accurate` colour mode: a mask in its sRGB-decoded colour, a colour raster
+    as is, both straight-alpha over the sRGB scene.
+- **One draw list.** `encode_scene_pass` draws into a `ScenePass`, a wgpu
+  render pass or a `CpuPass`, so both backends issue the same draws in the
+  same order under the same scissors. `CpuPass` records each draw and hands
+  it to the CPU rasterizer, `SoftRaster`, which calls the matching
+  `cpu_raster` function with the pipeline's blend state, textures and
+  scissor. Pixels are packed `0xAARRGGBB`, sRGB-encoded and premultiplied in
+  linear light: what an `Rgba8UnormSrgb` scene target holds, and `wl_shm`'s
+  ARGB8888 byte order. CPU and lavapipe frames agree within 2 per channel.
+- **Threads and caches.** A draw covering many pixels runs on horizontal
+  bands at once (one per 400k frame pixels, at most 8 and at most the host's
+  parallelism); the result is bit-identical. A large image drawn unchanged
+  two frames running (the wallpaper) is cached at its drawn size and copied
+  after that, since its four-tap filter costs 30–40 ms a full-screen frame.
+  The cache holds one image. Each draw's choice is settled once a frame
+  (`CpuRaster::plan`) and holds for the whole frame: an entry a draw of the
+  frame is drawn from is not replaced by a later draw in the same frame,
+  which stays a candidate for the next.
+- **Damage tracking (`backend::cpu_damage`).** A window frame repaints only
+  what changed since the frame its buffer holds.
+  - Before drawing, the scene pass runs once more as a *signing* pass
+    (`CpuPass::signing`): every instance of every draw is hashed with what its
+    pipeline reads (its bytes, the pipeline, screen size and scissor, the
+    glyph atlas's dimensions and reuse epoch, an image's allocation, a glyphon
+    raster's id, and the rasterizer's choice of path from `CpuRaster::plan`,
+    such as drawing a wallpaper from its cache), and folded in draw order into
+    every 32x32 tile its footprint (`cpu_raster::rasterize`) touches.
+  - Tiles whose hash differs from the last drawn frame's are the damage,
+    reduced to at most 12 rectangles. The presenter widens it by the buffer's
+    age (`repaint_region`); the raster pass clears those rectangles, made
+    disjoint, and draws each draw once per rectangle with its scissor
+    intersected (`CpuRaster::draw_clipped`); the frame's own damage is
+    presented. A frame with no damage commits nothing.
+  - The frame begins (`FrameDraw::begin`: the rasterizer's per-frame caches
+    advance and the signing pass runs) only once the presenter has a buffer
+    for it. An attempt the compositor is not ready for (`Paced`), or that
+    finds every buffer busy, leaves the caches and the signature as they
+    were, so a wallpaper stays cached however many attempts fall between two
+    frames.
+  - A frame the presenter reports `Unchanged` (no damage, nothing waiting
+    for a commit) is already on screen: what it painted (its cards and bidi
+    rows, which can differ while its pixels do not, as for two tabs alike but
+    for the pane and card they show) is published at once, or, with a frame
+    still held, handed to that frame's commit.
+  - A frame is repainted in full when no frame can be compared (the first, a
+    resize, a format change, a buffer rounded past the scene), for a pending
+    screenshot, and when `KETTLE_CPU_FULL_REPAINT=1` is set, the diagnostic
+    switch. A whole-grid scroll changes every row, so it repaints the pane.
+  - The glyph atlas bumps its epoch (unique across pipelines) when a slot is
+    freed or the packer resets, because a reused slot leaves an instance's
+    bytes unchanged over new texels. Image allocations are pinned weakly
+    for the frame that is compared with, so an address cannot be reused and
+    an edited image moves (as for the GPU image cache).
+  - Per-frame damage, repainted area and the signing and raster times are
+    logged at trace level on the `kettle_render::cpu_damage` target.
+- **Frame tail.** A window frame is drawn straight into the presenter's
+  shared-memory buffer (`CpuSurface::present_frame`), with no scene copy, and
+  winit's `pre_present_notify` runs as the commit's pre-commit hook. A
+  translucent window gets premultiplied ARGB buffers, as the GPU's
+  `PreMultiplied` surface does. An offscreen CPU renderer draws into its own
+  `CpuFramebuffer` and converts to straight alpha for a `PostMultiplied`
+  surface. A pending screenshot converts directly from the borrowed scene into
+  one fallibly allocated RGBA buffer. Its graphics reservation stays with the
+  persistence worker until the PNG is saved or the job fails.
+- **The window loop.** All of it runs on winit's event-loop thread, the
+  only thread that presents (a debug build panics on a second one).
+  - A frame is not drawn while the compositor still holds the last one:
+    the renderer returns `FrameOutcome::Paced`, the output stays dirty, and
+    `about_to_wait` asks for the redraw once `cpu_frame_ready` says the
+    frame can be drawn, so it is drawn from the latest state instead of
+    being drawn, held and drawn over.
+  - A frame the presenter did hold (`has_held_frame`, a race with the
+    callback) is committed by `flush_held_frame` when the loop wakes. The
+    pre-present hook runs only for a real commit, and painted cards move to
+    a frame only when it is committed: a held frame's at its flush, never an
+    unchanged frame's.
+  - For both, `about_to_wait` merges `cpu_wake_deadline` into its
+    `ControlFlow::WaitUntil`, so the wake that brings only the presenter's
+    frame callback runs an iteration (see below).
+  - The idle-release deadline is recomputed on every wake and released
+    when due; it is never clamped later. A deadline that is not in the
+    future gets a 16 ms floor, only as a guard against spinning.
+  - `Occluded` is forwarded to `set_occluded`. CPU window initialization
+    acquires and presents a buffer before the renderer is accepted. X11 without
+    MIT-SHM requires the full image request to fit the negotiated limit.
+    An unusable presenter or a repeated failure after a CPU rebuild switches
+    the affected window to wgpu.
+- **Sizes and memory.** The presenter gets the scale with every resize and
+  scale change. A buffer it rounds up (an integer-scale Wayland buffer is a
+  multiple of the scale) repeats the frame's last column and row. Offscreen
+  frames are capped at 256 MiB, charged to the graphics budget before they
+  are allocated and grown fallibly; a shrink or an alpha-mode change gives
+  the memory back.
+- **Screenshots.** `kettle --screenshot` draws its synthetic scenes on the
+  configured backend through `backend::offscreen`: on the CPU by default on
+  Linux, with no adapter, and on the GPU exactly as before elsewhere.
+- **GPU-only.** The macOS cursor patch: a CPU renderer never attaches a
+  cursor layer. `--gpu-info` reports the configured renderer preference and
+  the result of a headless wgpu adapter probe.
+
+### CPU presentation (Linux)
+
+`kettle_render::cpu_present::CpuPresenter` puts a CPU-drawn frame on a winit
+window with no GPU driver in the process. It takes the window and display
+handles the wgpu surface takes and exposes no wgpu type. The renderer asks for
+a buffer, repaints the region the buffer's age requires (`repaint_region`),
+and presents the frame's own damage.
+
+- **Wayland.** The presenter binds its own `wl_shm` and event queue on
+  winit's `wl_display` and wraps winit's `wl_surface`. Each buffer is a sealed
+  memfd with its own `wl_shm_pool`, so releasing it returns the memory. Frames
+  are XRGB8888, or premultiplied ARGB8888 for a translucent window, and are
+  damaged with `wl_surface.damage_buffer`.
+  - The window must be on the display's connection. Its own display handle
+    must name the same `wl_display`, and where libwayland 1.23+ can say
+    (`wl_proxy_get_display`), so must its surface. A mismatch is an error
+    from the constructor; libwayland would otherwise abort the process at the
+    first frame callback.
+  - `wl_shm` is bound at v2 where offered and released with the presenter,
+    and the registry is destroyed through `wl_fixes` right after the bind, so
+    recreating the presenter leaves nothing on the connection. A compositor
+    without either keeps one registry and one `wl_shm` per presenter.
+  - At most three buffers exist. A buffer the compositor still holds is never
+    drawn into, and a new one is allocated instead of waiting. A spare idle
+    for a second is released, so an idle window holds one buffer, and an
+    occluded one holds none. The idle deadline is never in the past: a spare
+    the compositor still holds is checked again a second later, for up to
+    ten seconds. While occluded, a buffer the compositor releases late goes
+    at the next dispatch.
+  - Each commit asks for a frame callback unless one is already out, so a
+    hidden surface keeps at most one. A frame presented while it is out is
+    deferred, and its damage goes out with the next commit. A callback that
+    has not come within a second stops holding frames back.
+  - A caller that stops drawing with a frame deferred flushes it in
+    `about_to_wait` and arms `ControlFlow::WaitUntil` with
+    `pending_deadline()`. Under plain `ControlFlow::Wait`, winit 0.30 does
+    not run `about_to_wait` for a wake that brought only the presenter's
+    frame callback, and the frame stays off screen until an unrelated event.
+    With any deadline armed, every wake runs an iteration.
+  - Dropping a frame drawn into a deferred frame's buffer drops the deferred
+    frame too. Its damage is kept and goes out with the next frame, which
+    repaints that buffer in full.
+  - winit's `pre_present_notify` is passed to `present_with`. It runs only
+    before a real commit, because winit attaches its own frame callback to
+    the next commit at once. It runs before anything is staged on the
+    surface, so a hook that unwinds leaves no pending attach for winit's next
+    commit. Frames are presented on winit's event-loop thread, where winit
+    commits the same surface.
+  - winit keeps the surface's scale state (`set_buffer_scale` or the
+    fractional-scale viewport) and its opaque region. Buffers are always in
+    physical pixels. winit stages a scale change on the surface for the next
+    commit, so after a scale change the next frame is committed (in full)
+    even when the buffer's size and pixels did not change.
+- **X11.** softbuffer presents with MIT-SHM, falling back to `PutImage`. A
+  window with a depth-32 visual keeps its alpha; other windows are opaque.
+  The depth is asked on the window's own connection, not `$DISPLAY`. On a
+  depth-32 window the alpha byte of an opaque frame is set to 0xff before it
+  is sent, since the server keeps all 32 bits and winit's
+  `set_transparent(false)` does nothing on X11. X11 gives no frame callbacks,
+  so pacing is the caller's.
+  - Without a compositing manager the server keeps no copy of what another
+    window covers: uncovering it sends `Expose`, which winit turns into a
+    plain `RedrawRequested` (merged with any Kettle requested). That frame
+    has no damage there, and MIT-SHM sends only the rectangles it is given,
+    so the presenter selects `Expose` on the window from a second connection
+    of its own (`ExposeWatcher`; winit reads every event on its connection)
+    and adds each exposed rectangle to the next present, from the retained
+    buffer, which still holds those pixels. A round trip before each present
+    makes every `Expose` sent before winit's redraw arrive first.
+  - The watcher connects to `$DISPLAY` (where Xlib opened winit's display;
+    tests use `KETTLE_TEST_X11_DISPLAY` only) and must prove it reached the
+    window's server: a nonce written on the window through winit's
+    connection must read back through its own. Without a watcher, every
+    present sends the whole buffer. The `PutImage` fallback sends the whole
+    image on every present anyway.
+- **Fallback.** If the `wl_shm` presenter cannot start, softbuffer presents on
+  Wayland: opaque only, always two buffers. Its reported age is ignored for a
+  buffer that predates the last resize, because softbuffer 0.4 keeps that age
+  across the reallocation. A size past the limits is refused with
+  `FrameError::TooLarge`, as on the native path, and every present counts as
+  a commit, since softbuffer commits even with no damage.
+- **Tests.** `cpu_present::proto_tests` runs the presenters against an
+  in-process `wayland-server` compositor (`test_wl`), which records each
+  commit's pixels and damage and holds callbacks and buffers until a test
+  lets them go, and against an X server named by `KETTLE_TEST_X11_DISPLAY`
+  (skipped when unset). `examples/cpu_present_live.rs` covers what needs a
+  real session: the last frame of a burst, an abandoned draw and a minimized
+  window, with screenshots on Wayland.
 
 ### Arabic joining across cells
 
 `kettle-core::bidi` chooses Arabic presentation forms in logical order and
 reports their visual joining sides only at RTL levels. U+0640 tatweel also
 participates; joining characters from other scripts do not. Lam-alef remains
-two cells. Each row is independent, including across soft wraps.
+two cells. Each row is independent, including across soft wraps. A
+zero-width joiner stored with a cell is join causing, as in text shapers: the
+letter on either side of it takes its joined form even when the letter on the
+other side cannot join, and then only that one cell reports a joining side.
 
 Grid and bidi Legacy rows carry these sides in `GridGlyphCell`, whose full
 metadata participates in the shaped-row key. `arabic_join::JoinedRow` collects
@@ -3877,18 +4245,23 @@ reuses these positioned masks and connector samples in cursor colour in both
 renderers; its cache distinguishes natural masks from stretched samples.
 
 A wide final still overhangs its open side, and a wide isolated letter its
-right, so highlight fills in bidi rows follow the drawn text. After shaping,
-the pane walk measures each row holding highlighted right-to-left cells once
+right, so highlight fills in bidi rows follow the drawn text. Arabic text that
+is not strong right-to-left counts too: the bismillah ligature U+FDFD is a
+bidi neutral that Arabic faces draw many cells wide, so it can sit in a row
+without a layout or in a layout's left-to-right text. After shaping, the pane
+walk measures each row holding highlighted right-to-left or Arabic cells once
 with `batching::drawn_cell_spans`: the same grid emit through a source that
 reads raster placements and never rasterizes into or evicts from the atlas.
-`terminal::HighlightReach` takes each run of highlighted visual cells
+A row without cell metadata reports each glyph at the column its text starts
+in. `terminal::HighlightReach` takes each run of highlighted visual cells
 (selection and search together) and widens the fills at its ends over the
-right-to-left text drawn past them, inside both the pane rect that clips its
-quads and the pixel columns its glyph scissor keeps; two runs reaching into
-one gap meet halfway. Selection runs carry the x their widened sides moved
-to, and the outline traces those, joining runs only where moved sides meet.
-Underlines, links and cursors stay on the cell grid, and rows without a bidi
-layout are untouched.
+right-to-left or Arabic text drawn past them, inside both the pane rect that
+clips its quads and the pixel columns its glyph scissor keeps; text drawn
+across a whole run reaches on past it, in that run's fill, and two runs
+reaching into one gap meet halfway. Selection runs carry the x their widened
+sides moved to, and the outline traces those, joining runs only where moved
+sides meet. Underlines, links and cursors stay on the cell grid, and other
+left-to-right text, `bidi = false` and the alternate screen are untouched.
 
 This repairs connector gaps, not proportional glyph widths, fallback
 baselines, or contextual mark shaping. Preferring a metric-compatible Arabic
@@ -4226,7 +4599,14 @@ at low idle cost. The clock that places the stars stays continuous, so each
 repaint shows the exact position. The animated background (starfield or image)
 plays by default even when unfocused, but the event loop **freezes the wake
 when the window is minimized or occluded** (`window_occluded` +
-`is_minimized`), so a hidden window costs zero idle.
+`is_minimized`), so a hidden window costs zero idle. Reduced motion holds it:
+before it schedules or draws a frame, the app passes `motion_allowed` to
+`Renderer::set_background_motion`, which stops the shared `background_clock`
+at that moment, so a repaint shows the same frame and `background_is_animating`
+asks for no wakes. When motion returns, each clock moves on by the part of the
+pause it lived through (`resumed_clock`): playback resumes from the held
+frame, and an image decoded during the hold starts on its first frame.
+`background-animation = off` still shows frame 0.
 
 The **settings overlay is mouse-driven**: `kettle_render::settings_hit_test`
 recomputes the panel geometry from the SAME `settings_display_lines` + panel math
@@ -4243,11 +4623,18 @@ a later surface batch, it would paint over them and leave the menu blank.
 
 Each open menu level, and a picker's card, is a rounded panel (about 10
 logical pixels) on a shadow of four concentric low-opacity rounded layers,
-with the highlighted row drawn as an inset rounded selection. A picker whose
+with the highlighted row drawn as an inset rounded selection, and a prelit row
+(one a hover lights without selecting) as the same inset at half its accent. A picker whose
 results overflow also gets a decorative scrollbar thumb, a rounded pill in the
 gap between the selection's right inset and the border, drawn after the
 selection; its rows fill the panel from the header down, since pickers scroll
-with the selection and the wheel and keep no arrow strips. The panel's
+with the keys and the wheel and keep no arrow strips. The wheel scrolls the
+list only (`PickerView::scroll`): the selection stays while it is in view, and
+one the list scrolls past moves to the nearest row in view the wheel may
+select, or to the first one past a view that holds none, such as a one-row
+view on a group heading, so each detent moves the list on. Each frame records where it drew the list (`remember_picker_scroll`),
+and the keys move it from there only as far as keeps the selection in view
+(`picker_scroll_offset_from`). The panel's
 border is blended over the panel colour and drawn opaque, because the shader
 leaves the fill out of the border band; a translucent border would let the
 level beneath show through the edge. These are
@@ -4551,13 +4938,50 @@ no context reads, clock queries, formatting or writes.
 
 ## Threading model
 
-The macOS profile menu reads an event-loop-owned inventory. One owned worker
-runs the bounded `Config::list_profiles` scan at startup, on config reload,
-and every five seconds to notice profile additions/removals that do not touch
-the active config. A one-slot request channel coalesces invalidations, and a
-single latest-result slot coalesces event-loop notifications. Redraw and pointer
-dispatch only construct a menu from the current cache. Shutdown disconnects the
-worker without waiting on a potentially stalled filesystem.
+Profile menus and actions on every platform read one event-loop-owned
+`profile_inventory` cache, including the new-tab dropdown, terminal Profile
+submenu, command palette, profile cycling and macOS menu bar. One owned worker
+runs the bounded `Config::try_list_profiles` scan at startup, on config reload,
+and after five-second idle polls to notice profile additions/removals that do
+not touch the active config; a stalled scan has no completion-time guarantee.
+A one-slot request channel coalesces invalidations, and a single latest-result
+slot coalesces event-loop notifications. Redraw and pointer
+dispatch only construct a menu from the latest completed cache. Completion updates
+the inventory and native macOS menu model only. Open in-app menus and palettes keep
+their opening snapshot, including rows, query, selection, typeahead and all saved
+parent viewports; reopening takes the latest completed cache. Before the first
+successful completion, non-action localized menu status and a pinned palette
+status band explain that no completed profile snapshot was available at opening.
+The band includes the full reopening explanation and Run/Select/Esc guidance;
+it wraps independently of the editor and stays outside ranked actions and result
+scrolling. The renderer's optional `ContextMenu::status` owns measured lines and
+shared band/header/card bounds for painting, pointer containment, accessibility
+dialog bounds and control diagnostics. At constrained heights the palette can
+drop supplementary guidance, use compact status, or replace the decorative
+input prefix with Esc when a status band cannot fit. The full accessible
+explanation remains available. Ready snapshots have no band and retain the
+existing picker layout. Accessibility also retains its independent full
+input description and polite Status node.
+The first successful completion publishes readiness even for an empty result.
+Failures are logged and retain the last successful cache, including an
+unconsumed successful worker result. Before any success, failures leave the
+snapshot unavailable; Next/Previous Profile does not claim that no profiles
+exist. The fallible config enumerator preserves the existing file/name
+validation, link following, sorting and scan/profile caps. A missing profiles
+directory is an empty scan; other root lookup, directory access, iteration,
+metadata and cap failures return errors. Successful scans may also be empty. The Vec-returning
+`Config::list_profiles` remains the compatibility wrapper for CLI callers and
+returns an empty list on error. No permission repair policy or cap is added.
+Shutdown disconnects the inventory worker without waiting on a potentially
+stalled filesystem. Separate-process profile launches acquire one nonblocking
+validation permit shared across all windows of an App; occupied admission
+reports a localized notification. The launch worker revalidates exact name
+membership with `Config::try_list_profiles` before spawning. RAII returns
+admission on validation/spawn/thread-start failure, and a successfully started
+child is retained before admission is released. The same already-started
+worker then waits for that child independently of the validation permit, so
+long-lived profile windows do not block later validations. There is no scan
+completion-time guarantee or new limit on profile files or live children.
 
 The [2026-11-01 scaling diagnostics](SCALING-2026-11-01.md) retain the current
 per-pane readers, renderer-owned font systems and bounded search slices. The
@@ -4628,8 +5052,12 @@ non-regression claim.
   (one visible, three waiting; repeats and overflow are counted on toasts,
   never by evicting the visible one), is painted through the update toast's
   painter as one of the overlay's notices, and keeps its time in the update
-  toast's `ToastClock`. A desktop delivery is remembered in
-  `PendingDesktop` (64 entries, 60 s) under the id the worker reports
+  toast's `ToastClock`. A paused clock (hover or assistive focus) reports full
+  opacity, and resuming leaves at least three seconds, so a toast caught
+  mid-fade shows whole and later fades from the start; each tick compares
+  the opacity drawn before it with the one after and repaints once when a
+  pause changed it (`ToastClock::needs_frame`). A desktop delivery is
+  remembered in `PendingDesktop` (64 entries, 60 s) under the id the worker reports
   failures with, so a refused or failed one is queued as a toast in its own
   window. No path logs or stores the text.
 - **One process-wide desktop-notification worker** — every OSC 9/777, Lua,
@@ -5016,11 +5444,16 @@ still clear the ring rather than guessing which history row survived.
 Completed-command marks use the same ids. Each entry of their 2048-command
 ring holds the prompt row, the exit code and the output rows `output..end`:
 the cursor's row at OSC 133 C and at D, or the row below it when the cursor is
-past the first column. A scroll moves that span only when every row in it
-moves by the same amount, which checking the span's ends and the screen and
-region edges inside it proves; any other scroll empties the span and keeps the
-tick. Reflow, reset and a journal overflow clear the ring. Select Command
-Output converts the span back to grid lines under the term lock.
+past the first column. In that case D also keeps the cursor's column, unless a
+wrap is pending at the right margin, and a hash of the row's text from there
+on: the next prompt can follow the output on its last row. The selection
+stops before that column only once that text has changed, so a prompt that
+starts on another row leaves the row whole. A scroll moves that span only
+when every row in it moves by the same amount, which checking the span's ends
+and the screen and region edges inside it proves; any other scroll empties
+the span and keeps the tick. Reflow, reset and a journal overflow clear the
+ring. Select Command Output converts the span back to grid lines under the
+term lock.
 
 Vi mode deliberately stays inside `alacritty_terminal`: Kettle toggles
 `TermMode::VI`, dispatches native `ViMotion`, uses the engine's vi cursor and
@@ -5028,7 +5461,14 @@ selection, and renders the captured native state. The UI's `ViState` stores
 only the owning pane and whether visual selection is active; the visual kind
 (`v`, `V`, Ctrl-v) is the engine selection's own `SelectionType`. This single-owner
 model keeps viewport following, reflow, scrollback rotation, and selection
-invalidation consistent with the grid.
+invalidation consistent with the grid. The renderer marks the mode from the
+captured `PaneSnapshot::vi_mode` with a chip (`scrollback::vi_mode_chip`) in the
+kept-history label's lane and style: top right, else bottom right above the
+jump button, placed only where `rect_covers_text` finds no text, cursor or
+selection under it, and left out when both places are covered. It looks for
+them where the frame drew them: in a row with right-to-left text, at the
+visual columns of that frame's bidi layout (`PaneBidi`), not at their
+logical cells.
 
 ## Key design choices
 
@@ -5080,6 +5520,58 @@ and atomic config write-back via `persist_config_toggle`; its
 opt-in keys, and an opt-in pre-commit hook (`.githooks/pre-commit`) catches
 clippy / fmt / test / shellcheck / rustdoc regressions at commit time.
 A submenu restores its parent's selected row and scroll position when it closes.
+Hover goes through the pure `app/menu_pointer.rs`: a submenu row opens after a
+200 ms dwell (a click or Right opens it at once), and an open submenu holds
+while the pointer crosses its parent's other rows inside the triangle from the
+pointer's last position to the side of the submenu it faces (the two corners
+that bound the submenu seen from there, so a submenu that opened over its
+parent, or that the pointer approaches from below, counts too), giving way
+300 ms after the pointer leaves that triangle or comes to rest. A pointer off
+every panel (off the window included, until it moves in the window again,
+whatever its last position there was over) starts the same wait, and at its
+end every submenu closes; a submenu opened from the keyboard, with a pointer
+that was never over the menu, stays. A
+pointer at rest sends no events, so `about_to_wait` wakes once at the pending
+deadline
+(`context_menu_pointer_tick`); nothing redraws until the hover changes.
+Hovering a row that cannot run (a disabled Copy, an information line) leaves
+the highlight where it was, so the lit row is always one Enter can run.
+A pointer that leaves the menu's panels, or the window, with no submenu open
+clears the highlight, as macOS and GTK menus do: the overlay and `ctl`
+report no row (`usize::MAX`, `null`), Enter runs nothing, and the next arrow
+starts from the first or last row. A menu opened under the pointer, as a
+right-click opens it, counts as entered there, so a first motion off it
+clears the highlight too. A pointer that was never over the menu, as with one
+opened from the keyboard, leaves the highlight alone.
+`place_context_menu` opens a menu below its anchor and flips it above when it
+does not fit there, as GTK and macOS do. A right-click's anchor is the pointer,
+and a menu too tall for either side slides onto the window. A menu opened
+from the keyboard is anchored on the text cursor's line: too tall for either
+side, it takes the roomier one and is held short enough to leave the line in
+view (`ContextMenuSession::root_max_h`), and scrolls; with not one complete row
+of room beside the line it does not open, rather than cover the line or run
+off the window. A resize places it again beside the cursor's line once the
+terminals have reflowed (`follow_line_menu`), closing it if no row fits; a
+move closes its open submenus, which hung off its rows where they were, and
+leaves lit the row that opened them (`place_menu_root`).
+A right-click on a tab segment, native or through `ctl`, opens that tab's
+menu (`open_tab_menu`): Rename Tab…, Duplicate Tab, Move Tab Left/Right and
+Close Tab, as ordinary action rows. Like the terminal's menu it leaves an open
+Find bar, and its search, in place (`close_modals_for_context_menu`). The menu records the tab by the panes it
+holds (`ContextMenuSession::tab`), so a shell exiting meanwhile cannot
+retarget it, and the menu closes once that tab is gone
+(`dismiss_orphaned_tab_menu`, checked each event-loop turn).
+`step_tab_menu_row` finds the tab wherever it has moved and `act_on_menu_tab`
+runs the row on it: Close asks as the tab's ✕ does, Move uses
+`Mux::nudge_tab` and leaves the active tab active,
+and Rename and Duplicate bring the tab forward first. Close Other Tabs, a row
+no action runs (`ContextMenuItem::CloseOtherTabs`), asks once with
+`confirm_close` over all the other tabs' panes and busy count
+(`other_tabs_close_scope`). The question records those panes
+(`ConfirmAction::CloseOtherTabs { keep, panes }`), and on acceptance
+`Mux::close_tabs_except` closes only them: a tab all of whose panes were asked
+about closes whole, last first, a tab split since loses only its old panes, and
+a tab opened since stays. The kept tab ends active.
 
 Other additions:
 
@@ -5557,8 +6049,9 @@ and uses the named-layout writer with strict filename validation and visible
 failure feedback. It does not change the current automatic save destination.
 Profile launches use separate processes because configuration is application-wide.
 The dropdown, native Shell submenu and palette share profile launch entries from
-`Config::list_profiles`; the palette captures names on open so row activation
-and geometry use the same list throughout that interaction.
+the shared profile inventory. The palette snapshots that cache and its readiness
+when it opens, so ranking, row activation and geometry use the same list until
+reopening. Inventory completion does not replace choices under the pointer.
 
 Before creating any native window, renderer, or PTY, restore validates the
 entire normalized session: at most 16 non-empty windows and 256 pane leaves,
@@ -5816,6 +6309,9 @@ for both size-chip text preparation and drawing, suppressing it under Settings
 or a picker card. After a font-size action kettle-ui sets
 `Overlay::resize_overlay_text` to the translated size and grid; the chip is
 sized from the shaped text, and the same string is a polite live region.
+The chip is static: the resize or font change that shows it draws it, and
+`about_to_wait_inner` wakes once at its expiry (`resize_chip_wait`) for the
+frame that erases it, rather than redrawing it at the ~30 fps animation tick.
 
 ### Paste consent and context-menu nesting
 
@@ -6046,14 +6542,20 @@ Link hover and hint chrome use `kettle-render::PaneStatus` projections from the
 focused terminal rectangle. `link_status_layout` shares destination elision and
 avoidance bounds across painting, AccessKit and `ui_geometry`; hint chips share
 `hint_label_rect`. The legend wraps and moves clear of bottom-row chips when
-space permits. All are passive overlays, so they reserve no terminal cells and
+space permits. Quick select with nothing to label shows "No hints here" in
+the legend's place for three seconds (`NoHintsNotice`, `no_hints_status`),
+which the scheduler expires and which a screen reader hears as a polite
+status. All are passive overlays, so they reserve no terminal cells and
 do not change pointer grid mapping or terminal IME placement. A hover records
 `LinksScanKey` at native pointer movement and becomes invalid on viewport or
 focus changes. Typing, wheel input, pointer exit and focus events explicitly
 dismiss it. Modifier presses preserve it so the advertised opening gesture
 remains visible. A selection drag suspends hover in `link_under_native_pointer`,
 and `link_rects` clears the hover flag of a link group any of whose cells is
-selected, leaving its status and hand cursor. Hint actions and their legend share `hint_action`; OSC 8
+selected, leaving its status and hand cursor. The hand also needs
+`link_click_opens`, the test the press makes (`link-single-click`, or Ctrl or
+Cmd held), so a plain hover keeps the I-beam and a modifier change re-syncs the
+cursor. Hint actions and their legend share `hint_action`; OSC 8
 captions use the URI rather than their displayed text. The underlines
 themselves are pane quads: `terminal::link_decoration` picks each line from
 the link's hover state, its source and `link-underline`, and pane quads are
@@ -6067,6 +6569,10 @@ The raw PTY stream is never persisted for this feature. Hyperlinks and other
 controls cannot enter the snapshot. Validated UTF-8 cell boundaries and each
 cell's grapheme mode preserve widths even across DEC 2027 changes; replay
 generates its own mode controls, then restores the new shell's configured mode.
+DECSCA protection is not SGR, so each row saves it as runs of cell indexes;
+replay generates `CSI 1 " q` and `CSI 0 " q` around those runs and turns
+protection off before the row ends, so nothing the new shell writes is
+protected.
 Rows, encoded bytes and pane/window counts
 are bounded. `kettle-ui::session_content` stores a versioned, SHA-256-bound
 sidecar next to the session layout through `kettle-state` private durable writes.
@@ -6143,6 +6649,37 @@ System appearance is observed independently of a window's rendered palette.
 Linux appearance and reduced motion share a bounded XDG Settings worker
 transport (`kettle-ui/src/portal_settings.rs`): subscriptions precede snapshots,
 owner changes invalidate state, and retries and shutdown stay off the UI thread.
+Reduced motion reads `org.freedesktop.appearance reduced-motion`; only where the
+portal has none does `motion::SystemMotion` start a second watch, on GNOME's
+`org.gnome.desktop.interface enable-animations` through the same portal
+(`Preference::resolve`). Where the portal has neither key, or there is no
+portal, a GNOME-like session (`XDG_CURRENT_DESKTOP`) reads GNOME's own switch
+with the first `gsettings` on an absolute `PATH` entry that the process may
+run (as `faccessat` decides it for the effective user) and that starts: the
+search moves past one that cannot be started, such as a script whose
+interpreter is missing, all within the read's deadline and stop, so an
+unusable one earlier in `PATH` cannot hide a working one. The search yields
+one item per `PATH` entry, hit or miss, and the deadline and stop are checked
+before each entry is looked at, so a lookup held past either (a hung mount)
+is the last one that search starts. The one that ran
+is kept for the refreshes until it no longer starts; one that never started
+is not kept, so each refresh searches again and finds a later fix
+(`motion/gnome_local.rs`, `Preference::linux`). Finding `gsettings` and the read run on the watch's
+own thread. The first answer is due two seconds after the watch starts,
+lookup included, and is no longer pending then even if the thread is still
+held in the filesystem; each later read has two seconds and 64 bytes of
+output. A read's child is killed and reaped when it overruns or the watch is
+dropped, and no child starts past a read's deadline or after the stop. The
+read is repeated every 30 seconds so a change applies, and a failed one keeps
+the last answer. Dropping the watch never waits on the filesystem: it stops
+the thread and joins it within half a second, and otherwise leaves a thread
+held in a lookup or spawn to end on its own. A watch distinguishes a pending first answer, which holds motion
+back until the desktop answers or a bounded call fails, from an unavailable
+one. Under `auto` the portal watch starts on the first event-loop turn, the
+portal's GNOME watch as soon as the portal says it has no `reduced-motion`,
+and the local read once neither has an answer (`SystemMotion::prepare`), so
+that wait ends before the first motion. A desktop that says nothing allows
+motion.
 That worker and every other session-bus connection Kettle opens itself (global
 shortcuts, notifications, the image viewer and file-manager hand-offs) connect
 through `kettle-ui/src/dbus_bound.rs`, which reads each message's 16-byte
@@ -6214,7 +6751,14 @@ presses are consumed. The 6 logical pixel inner resize band takes priority over
 header input and uses `drag_resize_window`, except when maximized, fullscreen
 or non-resizable. Tiled windows retain the band because tiled state is not
 available. Native window controls activate on release over
-the originally pressed control. Close follows the native `CloseRequested`
+the originally pressed control, and so do `+`, Find and the Settings gear
+(`press_strip_button` / `release_strip_button`, `release_settings_gear`): each
+shows pressed while the pointer stays on it, and a release anywhere else
+cancels. A modal that takes the pointer while one is held ends its press
+(`WindowState::cancel_strip_presses`), so the release does nothing even after
+the modal has closed, and so does the next primary press, native or ctl, so a
+press whose release never came cannot take a later click's release. The `▾` (GNOME's `≡`) is a menu button and opens on press, as GTK's
+and AppKit's do; the overflow arrows step on press. Close follows the native `CloseRequested`
 confirmation policy; AccessKit exposes the same actions. Synthetic control
 input can activate buttons but does not impersonate a compositor drag serial.
 The shared `portal_settings.rs` watcher also reads GNOME button-layout beside
@@ -6222,6 +6766,14 @@ reduced-motion and color-scheme, with bounded parsing and live updates.
 Left/right lanes, order and omissions
 share the control geometry. Missing or invalid settings use the default right
 minimize, maximize/restore, close order.
+
+Profile switching reads a bounded config snapshot before changing the active
+path or trust mode. A missing or refused cached target leaves the active profile
+in place. The reload consumes that same path-bound snapshot, so deletion after
+the read cannot replace it with defaults. This preserves the existing config
+reload work; profile directory enumeration runs on the inventory worker.
+Inventory refresh preserves a manually scrolled menu viewport, independently of
+its highlighted row. Resize and keyboard navigation still keep selection visible.
 
 ### Settings geometry and sections
 

@@ -91,10 +91,10 @@ pub(crate) fn search_highlight_at(
         .then_some(span.active)
 }
 
-/// Where highlighted runs of cells in bidi rows start and end when the
-/// right-to-left text in them is drawn past their cell edges: the x of a
-/// run's left side, keyed by its viewport row and first visual column, and
-/// of its right side, keyed by its last.
+/// Where highlighted runs of cells start and end when the right-to-left or
+/// Arabic text in them is drawn past their cell edges: the x of a run's left
+/// side, keyed by its viewport row and first visual column, and of its right
+/// side, keyed by its last.
 #[derive(Default)]
 pub(crate) struct HighlightReach {
     left: std::collections::HashMap<(i32, usize), f32>,
@@ -103,12 +103,14 @@ pub(crate) struct HighlightReach {
 
 impl HighlightReach {
     /// Add one viewport row's runs. `cells` are its highlighted cells sorted
-    /// by visual column, each with whether it is right-to-left text; `drawn`
-    /// is the x span each visual column's text is drawn over. A run reaches
-    /// only over its right-to-left text, within `clip`, the pixel columns
+    /// by visual column, each with whether it is right-to-left or Arabic
+    /// text; `drawn` is the x span each visual column's text is drawn over. A
+    /// run reaches only over that text, within `clip`, the pixel columns
     /// that keep the pane's text. The fills at a run's ends take its reach,
-    /// whichever highlight they are, so the run's fill stays one block. Two
-    /// runs reaching into the same gap meet halfway through their overlap.
+    /// whichever highlight they are, so the run's fill stays one block. Text
+    /// drawn across a whole run reaches on into the gap beyond it, which
+    /// that run's fill takes. Two runs reaching into the same gap meet
+    /// halfway through their overlap.
     pub(crate) fn add_row(
         &mut self,
         cells: &[(i32, usize, bool)],
@@ -142,6 +144,12 @@ impl HighlightReach {
                 }
             })
             .collect();
+        for index in 1..runs.len() {
+            runs[index].reach.1 = runs[index].reach.1.max(runs[index - 1].reach.1);
+        }
+        for index in (1..runs.len()).rev() {
+            runs[index - 1].reach.0 = runs[index - 1].reach.0.min(runs[index].reach.0);
+        }
         for index in 1..runs.len() {
             let mut right = runs[index - 1].reach.1.min(runs[index].cells.0);
             let mut left = runs[index].reach.0.max(runs[index - 1].cells.1);
@@ -294,6 +302,46 @@ mod highlight_reach_tests {
             assert_eq!(reach.widen(&mut quad, row, first, last), [None; 2]);
             assert_eq!((quad.pos, quad.size), before, "row {row} {first}..={last}");
         }
+    }
+
+    #[test]
+    fn text_drawn_across_a_whole_run_reaches_on_past_it() {
+        let (ox, cw) = (5.0, 10.0);
+        let mut drawn = vec![None; 10];
+        // Column 0's ligature is drawn over the one-cell runs at columns 2
+        // and 5, ending in column 6; column 9's reaches back past column 3.
+        drawn[0] = Some((5.0, 72.0));
+        drawn[9] = Some((22.0, 105.0));
+        let mut reach = HighlightReach::default();
+        let cells = [(0, 0, true), (0, 2, false), (0, 5, false), (0, 8, false)];
+        reach.add_row(&cells, &drawn, (ox, cw), (0.0, 200.0));
+        reach.add_row(
+            &[(1, 3, false), (1, 9, true)],
+            &drawn,
+            (ox, cw),
+            (0.0, 200.0),
+        );
+        let widened = |row: i32, column: usize| {
+            let mut quad = rect(
+                ox + column as f32 * cw,
+                0.0,
+                cw,
+                10.0,
+                Rgb::new(0, 0, 0),
+                1.0,
+            );
+            reach.widen(&mut quad, row, column, column);
+            (quad.pos[0], quad.pos[0] + quad.size[0])
+        };
+        // Each fill reaches the next run, and the last one under the ink
+        // takes the rest of it: 5..72 is covered without a gap.
+        assert_eq!(widened(0, 0), (5.0, 25.0));
+        assert_eq!(widened(0, 2), (25.0, 55.0));
+        assert_eq!(widened(0, 5), (55.0, 72.0));
+        assert_eq!(widened(0, 8), (85.0, 95.0), "past the ink");
+        // Leftward the same way: 22..105 is covered.
+        assert_eq!(widened(1, 3), (22.0, 45.0));
+        assert_eq!(widened(1, 9), (45.0, 105.0));
     }
 }
 
@@ -625,6 +673,30 @@ impl Renderer {
         self.painted_bidi.clone_from(&self.drawn_bidi);
     }
 
+    /// What this frame painted, kept aside while the frame is held for the
+    /// compositor (a CPU window's deferred frame): it reaches
+    /// [`Self::commit_painted_cards`]'s state only when the frame is
+    /// committed, so a frame built meanwhile and not drawn cannot stand in
+    /// for it.
+    pub(crate) fn hold_painted(&self, scene: crate::cursor_patch::SceneFacts) -> HeldPaint {
+        debug_assert_eq!(self.drawn_cards.len(), self.card_scene.shown.len());
+        HeldPaint {
+            cards: self.drawn_cards.clone(),
+            shown: self.card_scene.shown.clone(),
+            bidi: self.drawn_bidi.clone(),
+            scene,
+        }
+    }
+
+    /// A held frame reached the screen: what it painted is now on screen.
+    pub(crate) fn commit_held_paint(&mut self, held: HeldPaint) {
+        self.painted_cards = held.cards;
+        self.painted_shown = held.shown;
+        self.painted_bidi = held.bidi;
+        self.last_scene = Some(held.scene);
+        self.frames_presented += 1;
+    }
+
     /// The bidi layout of viewport row `row` in the pane drawn at `terminal`
     /// on screen, or `None` when that row is shown in logical order.
     pub fn painted_row_bidi(
@@ -941,9 +1013,29 @@ impl Renderer {
         let mut search_quads = Vec::new();
         let mut highlight_decorations = Vec::new();
         let mut selection_cell_fills = Vec::new();
-        // The highlighted cells of rows drawn in bidi order: viewport row,
-        // visual column, and whether the cell is right-to-left text.
+        // The highlighted cells of rows drawn in bidi order or holding Arabic
+        // text: viewport row, visual column, and whether the cell is
+        // right-to-left or Arabic text, whose drawn width its highlight
+        // follows.
         let mut bidi_highlights = Vec::new();
+        // Rows without a layout whose Arabic text is not strong right to
+        // left, such as U+FDFD drawn many cells wide. Like the layouts, only
+        // the normal screen with `bidi` on has them.
+        let mut arabic_rows = Vec::new();
+        if cfg.bidi
+            && !snap.alt_screen
+            && (selection_range.is_some() || !search_highlights.is_empty())
+        {
+            arabic_rows.resize(screen_rows.max(0) as usize, false);
+            for cell in &snap.cells {
+                if super::bidi_rows::is_arabic(cell.c)
+                    && let Ok(row) = usize::try_from(cell.line + display_off)
+                    && let Some(arabic) = arabic_rows.get_mut(row)
+                {
+                    *arabic = true;
+                }
+            }
+        }
 
         for (snapshot_index, sc) in snap.cells.iter().enumerate() {
             let row = sc.line;
@@ -1107,10 +1199,16 @@ impl Renderer {
                 None if selected => CellHighlight::Selection,
                 None => CellHighlight::None,
             };
-            if let Some(map) = map
-                && !matches!(highlight, CellHighlight::None)
+            if !matches!(highlight, CellHighlight::None)
+                && (map.is_some()
+                    || usize::try_from(vrow)
+                        .ok()
+                        .and_then(|row| arabic_rows.get(row))
+                        == Some(&true))
             {
-                bidi_highlights.push((vrow, vcol, map.is_rtl(col)));
+                let reaches =
+                    map.is_some_and(|map| map.is_rtl(col)) || super::bidi_rows::is_arabic(sc.c);
+                bidi_highlights.push((vrow, vcol, reaches));
             }
             let highlight_bg = if matches!(highlight, CellHighlight::None) {
                 bg
@@ -1696,9 +1794,10 @@ impl Renderer {
                 ));
             }
         }
-        // Right-to-left text can be drawn wider than its cells: a wide Arabic
-        // final overhangs its open side, a wide isolated letter its right. A
-        // highlighted run of a bidi row reaches as far as its text is drawn.
+        // Right-to-left and Arabic text can be drawn wider than its cells: a
+        // wide Arabic final overhangs its open side, a wide isolated letter
+        // or ligature its right. A highlighted run reaches as far as that
+        // text is drawn.
         let mut reach = HighlightReach::default();
         if bidi_highlights.iter().any(|&(_, _, rtl)| rtl) {
             bidi_highlights.sort_unstable_by_key(|&(row, column, _)| (row, column));
@@ -1992,7 +2091,7 @@ impl Renderer {
                 .round()
                 .min(cursor.clip.0 + cursor.clip.2);
             cursor.clip = (left, cursor.clip.1, (right - left).max(0.0), cursor.clip.3);
-            let offset = alacritty_terminal::term::grapheme_base_offset(text);
+            let offset = alacritty_terminal::term::grapheme_shaping_base_offset(text);
             if offset > 0
                 && let Some(run) = buf.layout_runs().find(|run| run.line_i == cvrow as usize)
             {
@@ -2097,7 +2196,7 @@ impl Renderer {
             pane_buffers,
             glyph_char_starts,
             emoji_cells,
-            gpu,
+            device,
             cell_w,
             pane_bidi,
             pane_mark_shifts,
@@ -2107,8 +2206,7 @@ impl Renderer {
             ..
         } = self;
         let cw = *cell_w;
-        let device = &gpu.device;
-        let queue = &gpu.queue;
+        let device = device.handle();
         emoji_cells.clear();
         let mut pane_emoji = Vec::new();
 
@@ -2168,7 +2266,6 @@ impl Renderer {
                     swash,
                     font_system,
                     device,
-                    queue,
                     glyph_char_starts,
                     &mut pane_emoji,
                 );
@@ -2185,7 +2282,6 @@ impl Renderer {
                     *builtin_strokes,
                     glyph_pipeline,
                     device,
-                    queue,
                     builtin_mask,
                 ) {
                     out.push(glyph);
@@ -2595,4 +2691,12 @@ fn push_gapped_line(
         }
         sx += pitch;
     }
+}
+
+/// A held frame's painted state; see [`Renderer::hold_painted`].
+pub(crate) struct HeldPaint {
+    cards: Vec<PaintedCard>,
+    shown: Vec<bool>,
+    bidi: Vec<crate::PaintedBidi>,
+    scene: crate::cursor_patch::SceneFacts,
 }

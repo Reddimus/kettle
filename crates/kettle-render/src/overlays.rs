@@ -74,11 +74,27 @@ pub struct ContextMenuRow {
     /// hint: the shortcut in words, then the description. `None` reads the
     /// hint as it is painted.
     pub a11y_description: Option<String>,
+    /// The row's name as built, when fitting the label to the panel
+    /// shortened it: what a screen reader hears. `None` hears `label`.
+    pub a11y_name: Option<String>,
+    /// What the row acts on, as the picker that built it names it: a
+    /// command, a layout, a theme, an SSH row's kind and host. Accessibility
+    /// binds the row's node to it, so rows whose fitted labels match are
+    /// never one result. `None` binds the row by its name.
+    pub a11y_key: Option<String>,
     /// A group heading, such as the empty palette's "Tabs": painted as a
     /// disabled row in secondary text, with a divider above it unless it is
     /// the first row. It is never selected, pressed, or announced as an
     /// option, and option indices skip it ([`menu_row_option`]).
     pub heading: bool,
+    /// Static information in a context menu, with the contrast of shortcut
+    /// labels. The row still uses `enabled` to determine selectability.
+    pub informational: bool,
+    /// Lit under the pointer without being selected: a picker row a hover
+    /// may not select, such as the SSH launcher's Save row, which a click
+    /// still runs. Painted fainter than the selection, and only on an
+    /// enabled row that is not the highlighted one.
+    pub prelit: bool,
 }
 
 /// The option a picker's row `row` is, counting only rows that can be
@@ -290,10 +306,43 @@ pub(crate) fn menu_swatch_surfaces<'a>(
     out
 }
 
+/// Pinned explanatory text outside a menu's selectable/scrolling rows.
+pub struct MenuStatus {
+    pub lines: Vec<String>,
+    pub line_height: f32,
+}
+
+impl MenuStatus {
+    /// Use the renderer's natural overlay advance and line height, independent
+    /// of terminal cell scaling.
+    pub fn new(text: &str, width: f32, text_cell: (f32, f32)) -> Self {
+        let columns = menu::text_columns(width - 32.0, text_cell.0).max(1);
+        Self {
+            lines: crate::confirm::wrap(text, columns),
+            line_height: text_cell.1 + 4.0,
+        }
+    }
+
+    pub fn height(&self) -> f32 {
+        self.lines.len() as f32 * self.line_height + 12.0
+    }
+
+    pub fn line_rect(&self, band: Rect4, index: usize) -> Rect4 {
+        (
+            band.0 + 16.0,
+            band.1 + 6.0 + index as f32 * self.line_height,
+            (band.2 - 32.0).max(0.0),
+            self.line_height,
+        )
+    }
+}
+
 /// Vertical menu panel used by the right-click menu and the command, layout,
 /// and SSH pickers. The UI clamps the anchor and remains the source of truth
 /// for selection and dispatch; the renderer owns only shared list paint.
 pub struct ContextMenu {
+    /// Fixed explanatory band between a picker header and its result rows.
+    pub status: Option<MenuStatus>,
     /// Picker header above `anchor`; zero for ordinary context menus.
     pub picker_header_height: f32,
     /// The theme picker's sample and status line under its rows, inside its
@@ -333,11 +382,29 @@ impl ContextMenu {
         )
     }
 
-    /// A picker's query header: as wide as the card, just above its rows.
+    pub fn status_rect(&self) -> Option<Rect4> {
+        self.status.as_ref().map(|status| {
+            (
+                self.anchor.0,
+                self.anchor.1 - status.height(),
+                self.panel_w_clamped,
+                status.height(),
+            )
+        })
+    }
+
+    /// The picker's query header ([`Self::picker_header_rect`]).
+    pub fn header_rect(&self) -> Rect4 {
+        self.picker_header_rect()
+    }
+
+    /// A picker's query header: as wide as the card, just above its rows and
+    /// any pinned status band between them.
     pub fn picker_header_rect(&self) -> Rect4 {
+        let status_h = self.status.as_ref().map_or(0.0, MenuStatus::height);
         (
             self.anchor.0,
-            self.anchor.1 - self.picker_header_height,
+            self.anchor.1 - status_h - self.picker_header_height,
             self.panel_w_clamped,
             self.picker_header_height,
         )
@@ -345,12 +412,13 @@ impl ContextMenu {
 
     pub fn card_rect(&self) -> Rect4 {
         let (x, y, w, h) = self.rows_rect();
-        (
-            x,
-            y - self.picker_header_height,
-            w,
-            h + self.picker_header_height + self.picker_footer_height(),
-        )
+        let above =
+            self.picker_header_height + self.status.as_ref().map_or(0.0, MenuStatus::height);
+        (x, y - above, w, h + above + self.picker_footer_height())
+    }
+
+    pub(crate) fn text_buffer_count(&self) -> usize {
+        self.rows.len() + self.status.as_ref().map_or(0, |status| status.lines.len())
     }
 
     /// The height of the theme picker's footer under the rows, or zero.
@@ -370,7 +438,6 @@ impl ContextMenu {
         let (x, y, w, h) = self.rows_rect();
         Some(crate::theme_footer_layout(footer, tr, (x, y + h, w), cell))
     }
-
     /// Only fully painted picker rows have pointer/accessibility targets.
     pub fn visible_row_rect(&self, index: usize) -> Option<Rect4> {
         if self.picker_header_height <= 0.0
@@ -671,6 +738,10 @@ pub struct UpdateToastOverlay {
     pub close: String,
     pub opacity: f32,
     pub focused: Option<usize>,
+    /// The part under the pointer that a click acts on, numbered as
+    /// `focused`: 1 the details action (Show, Open config), 2 the close
+    /// action (×, Dismiss), and 0 a body that acts on a click.
+    pub hovered: Option<usize>,
 }
 
 impl UpdateToastOverlay {
@@ -1525,6 +1596,10 @@ pub struct TabBar {
     pub settings_shortcut: Option<String>,
     /// Localized action and live shortcut for the currently hovered control.
     pub tooltip: Option<String>,
+    /// The control `tooltip` hangs from when it is not one of the strip's
+    /// own buttons, which the renderer finds from their hover state: an
+    /// overflow arrow, a tab whose title is cut, or a media viewer's button.
+    pub tooltip_anchor: Option<Rect4>,
     /// The strip replaces the macOS caption and has a fixed native height.
     pub in_titlebar: bool,
     /// Kettle draws this strip as the Linux (GNOME) header bar: `+` leads
@@ -1629,6 +1704,10 @@ pub struct TabBar {
     pub scroll_left: Rect4,
     /// The forward scroll button, `›` or `⌄` (see `scroll_left`).
     pub scroll_right: Rect4,
+    /// The pointer is over `scroll_left` or `scroll_right`, from the same
+    /// rects the press uses.
+    pub hovered_scroll_left: bool,
+    pub hovered_scroll_right: bool,
 }
 
 impl TabBar {
@@ -1641,6 +1720,7 @@ impl TabBar {
             new_tab_shortcut: None,
             settings_shortcut: None,
             tooltip: None,
+            tooltip_anchor: None,
             in_titlebar: false,
             linux_header: false,
             lone_title: false,
@@ -1669,6 +1749,8 @@ impl TabBar {
             band: (0.0, 0.0, 0.0, 0.0),
             scroll_left: (0.0, 0.0, 0.0, 0.0),
             scroll_right: (0.0, 0.0, 0.0, 0.0),
+            hovered_scroll_left: false,
+            hovered_scroll_right: false,
         }
     }
 }
@@ -1889,9 +1971,9 @@ pub(crate) const MENU_SHADOW_LAYERS: [(f32, f32, f32); 4] = [
     (6.0, 4.0, 0.05),
     (10.0, 6.0, 0.035),
 ];
-/// The most rounded surfaces one level paints: its shadow, panel, selection
-/// and a picker's scrollbar thumb.
-pub(crate) const MENU_LEVEL_SURFACES: usize = MENU_SHADOW_LAYERS.len() + 3;
+/// The most rounded surfaces one level paints: its shadow, panel, selection,
+/// a picker row's hover prelight and a picker's scrollbar thumb.
+pub(crate) const MENU_LEVEL_SURFACES: usize = MENU_SHADOW_LAYERS.len() + 4;
 /// Levels whose surfaces fit in one frame. Kettle's own menus nest a few
 /// levels deep at most; a deeper stack paints only its deepest levels' panels.
 pub(crate) const MENU_SURFACE_LEVELS: usize = 16;
@@ -1899,9 +1981,10 @@ pub(crate) const MENU_SURFACES: usize = MENU_LEVEL_SURFACES * MENU_SURFACE_LEVEL
 
 /// The rounded surfaces of one menu or picker level, in draw order: a soft
 /// layered shadow, the bordered panel, then the highlighted row's inset
-/// selection. The selection is filled with the opaque colour the label pass
-/// resolves its text contrast against. Only the radii, the shadow and the
-/// selection's inset follow `scale`; rows, paddings and hit targets do not.
+/// selection and a prelit row's fainter one. Each is filled with the opaque
+/// colour the label pass resolves its text contrast against. Only the radii,
+/// the shadow and the selection's inset follow `scale`; rows, paddings and
+/// hit targets do not.
 pub(crate) fn menu_level_surfaces(
     menu: &ContextMenu,
     theme: &kettle_config::Theme,
@@ -1927,14 +2010,10 @@ pub(crate) fn menu_level_surfaces(
     };
     let panel = menu_panel(menu, cw, ch);
     let card = if menu.picker_header_height > 0.0 {
-        // A picker's card holds its query header above the rows.
-        let (x, rows_y) = menu.anchor;
-        Some((
-            x,
-            rows_y - menu.picker_header_height,
-            context_menu_panel_width(menu, cw),
-            menu.picker_header_height + menu.panel_h_clamped + menu.picker_footer_height(),
-        ))
+        // A picker's card holds its query header, and any pinned status
+        // band, above the rows.
+        let (x, y, _, h) = menu.card_rect();
+        Some((x, y, context_menu_panel_width(menu, cw), h))
     } else {
         panel.as_ref().map(|p| (p.ax, p.ay, p.panel_w, p.panel_h))
     };
@@ -1967,15 +2046,12 @@ pub(crate) fn menu_level_surfaces(
         stroke: rgba(border, 1.0),
         params: [radius, 1.0, 0.0, 0.0],
     });
-    let selected = context_menu_row_rects(menu, (cw, ch))
-        .into_iter()
-        .find(|(i, _)| menu_row_selected(menu, *i));
-    if let Some((_, (rx, ry, rw, rh))) = selected {
+    let rows = context_menu_row_rects(menu, (cw, ch));
+    let mut inset_row = |(rx, ry, rw, rh): Rect4, fill: Rgb| {
         let inset_x = (MENU_SELECTION_INSET.0 * scale).min(MENU_SELECTION_MAX_INSET_X);
         let inset_y = (MENU_SELECTION_INSET.1 * scale).min(rh * 0.15);
         let (sw, sh) = (rw - 2.0 * inset_x, rh - 2.0 * inset_y);
         if sw > 0.0 && sh > 0.0 {
-            let fill = menu_selection_fill(theme, accent, colors, linear);
             out.push(RoundedSurface {
                 pos: [rx + inset_x, ry + inset_y],
                 size: [sw, sh],
@@ -1984,6 +2060,12 @@ pub(crate) fn menu_level_surfaces(
                 params: [(MENU_SELECTION_RADIUS * scale).min(sh * 0.5), 0.0, 0.0, 0.0],
             });
         }
+    };
+    if let Some(&(_, rect)) = rows.iter().find(|(i, _)| menu_row_selected(menu, *i)) {
+        inset_row(rect, menu_selection_fill(theme, accent, colors, linear));
+    }
+    if let Some(&(_, rect)) = rows.iter().find(|(i, _)| menu_row_prelit(menu, *i)) {
+        inset_row(rect, menu_prelight_fill(theme, accent, colors, linear));
     }
     if let Some((tx, ty, tw, th)) = picker_scroll_thumb(menu, (cw, ch), scale) {
         out.push(RoundedSurface {
@@ -2081,6 +2163,24 @@ pub(crate) fn push_input_bar(
     quads.push(rect(x, y, 4.0, h, edge, 1.0));
 }
 
+pub(crate) fn push_resize_overlay_chrome(
+    quads: &mut Vec<QuadInstance>,
+    (x, y, w, h): Rect4,
+    theme: &kettle_config::Theme,
+    accent: Rgb,
+    colors: &mut chrome::Colors,
+) -> Rgb {
+    let palette = colors.completion(theme, accent);
+    let edge = colors.icon(accent, palette.panel_bg);
+    // Opaque chrome keeps contrast independent of terminal pixels below it.
+    quads.push(rect(x, y, w, h, palette.panel_bg, 1.0));
+    quads.push(rect(x, y, w, 1.0, edge, 1.0));
+    quads.push(rect(x, y + h - 1.0, w, 1.0, edge, 1.0));
+    quads.push(rect(x, y, 1.0, h, edge, 1.0));
+    quads.push(rect(x + w - 1.0, y, 1.0, h, edge, 1.0));
+    palette.label
+}
+
 // Named constants for the right-click context-menu chrome. Public so
 // `kettle-ui` reads the same values through `kettle_render::menu` instead
 // of redeclaring them.
@@ -2131,10 +2231,23 @@ pub mod menu {
 
     /// Recover the number of text columns that fit inside a panel width.
     pub fn panel_columns(panel_width: f32, cell_width: f32) -> usize {
+        let columns = text_columns(panel_width - H_PAD, cell_width);
+        let next = columns.saturating_add(1);
+        // Inverting the panel width can round an exact fit below a whole
+        // column. Check the next column with the forward width calculation.
+        if cell_width > 0.0 && next as f32 * cell_width + H_PAD <= panel_width {
+            next
+        } else {
+            columns
+        }
+    }
+
+    /// Text-column budget after the caller has removed its slot's padding.
+    pub fn text_columns(content_width: f32, cell_width: f32) -> usize {
         if cell_width <= 0.0 {
             return 0;
         }
-        ((panel_width - H_PAD).max(0.0) / cell_width).floor() as usize
+        (content_width.max(0.0) / cell_width).floor() as usize
     }
     /// Top + bottom breathing room reserved when clamping the panel
     /// height to the surface (for scrollable submenus). Keeps
@@ -2230,6 +2343,16 @@ pub(crate) fn menu_row_selected(menu: &ContextMenu, index: usize) -> bool {
             .is_some_and(|row| row.enabled && !row.separator)
 }
 
+/// Whether row `index` of `menu` paints the hover prelight: a prelit enabled
+/// item that is not also the selected row, which paints the selection.
+pub(crate) fn menu_row_prelit(menu: &ContextMenu, index: usize) -> bool {
+    !menu_row_selected(menu, index)
+        && menu
+            .rows
+            .get(index)
+            .is_some_and(|row| row.prelit && row.enabled && !row.separator)
+}
+
 /// The opaque fill behind the selected row, which its text is resolved against.
 pub(crate) fn menu_selection_fill(
     theme: &kettle_config::Theme,
@@ -2238,6 +2361,18 @@ pub(crate) fn menu_selection_fill(
     linear: bool,
 ) -> Rgb {
     colors.surface(theme.background, accent, 0.18, linear)
+}
+
+/// The opaque fill behind a prelit row: half the selection's accent, the
+/// hover mix the dialog buttons use, so it reads as a hover and not as a
+/// second selection.
+pub(crate) fn menu_prelight_fill(
+    theme: &kettle_config::Theme,
+    accent: Rgb,
+    colors: &mut chrome::Colors,
+    linear: bool,
+) -> Rgb {
+    colors.surface(theme.background, accent, 0.09, linear)
 }
 
 /// The surface a menu row's text sits on.
@@ -2255,10 +2390,32 @@ pub(crate) fn menu_row_background(
     }
 }
 
+/// The surface row `index` of `menu` paints its text on: the selection, the
+/// hover prelight, or the panel.
+pub(crate) fn menu_row_fill(
+    menu: &ContextMenu,
+    index: usize,
+    theme: &kettle_config::Theme,
+    accent: Rgb,
+    colors: &mut chrome::Colors,
+    linear: bool,
+) -> Rgb {
+    if menu_row_prelit(menu, index) {
+        menu_prelight_fill(theme, accent, colors, linear)
+    } else {
+        menu_row_background(
+            menu_row_selected(menu, index),
+            theme,
+            accent,
+            colors,
+            linear,
+        )
+    }
+}
+
 /// The colour of a menu row's label on `background`. A picker's disabled row
-/// is its empty-state message ("No matching command"), which people read, so
-/// it is secondary text; a context menu's disabled row is an unavailable
-/// command and stays muted.
+/// is its empty-state message ("No matching command"). Messages and static
+/// information use secondary text. Unavailable commands stay muted.
 pub(crate) fn menu_row_text_color(
     menu: &ContextMenu,
     row: &ContextMenuRow,
@@ -2268,7 +2425,7 @@ pub(crate) fn menu_row_text_color(
 ) -> Rgb {
     if row.enabled {
         colors.text(theme.foreground, background)
-    } else if menu.picker_header_height > 0.0 {
+    } else if row.informational || menu.picker_header_height > 0.0 {
         colors.secondary(theme.foreground, background)
     } else {
         colors.muted(theme.foreground, background)

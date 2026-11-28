@@ -45,7 +45,7 @@ fn cards_reach_the_screen_only_with_a_presented_frame() {
     let normalized = body.split_whitespace().collect::<Vec<_>>().join(" ");
     let commit = "self.commit_painted_cards();";
     let present = normalized
-        .find("self.gpu.queue.present(frame);")
+        .find("gpu.queue.present(frame);")
         .expect("presentation");
     let headless = normalized
         .find("// Headless (tests): the offscreen capture is the whole frame.")
@@ -64,8 +64,17 @@ fn cards_reach_the_screen_only_with_a_presented_frame() {
         present < commits[1],
         "only a presented frame shows its cards"
     );
+    // A CPU window's held frame puts what it painted on screen when the loop
+    // commits it, and only there.
+    let held = src
+        .split("pub(crate) fn commit_held_paint(")
+        .nth(1)
+        .and_then(|rest| rest.split("\n    }\n").next())
+        .expect("commit_held_paint");
     for field in ["painted_cards", "painted_shown"] {
-        assert_eq!(src.matches(&format!("self.{field} =")).count(), 0);
+        let assigned = format!("self.{field} = held.");
+        assert_eq!(src.matches(&format!("self.{field} =")).count(), 1);
+        assert!(held.contains(&assigned), "{assigned} in commit_held_paint");
         assert_eq!(src.matches(&format!("{field}.extend(")).count(), 0);
         assert_eq!(src.matches(&format!("{field}.push(")).count(), 0);
         assert_eq!(
@@ -94,7 +103,7 @@ fn live_capture_is_encoded_before_swapchain_acquisition() {
         .find("self.create_screenshot_target(target_size)")
         .expect("live capture must allocate an independent offscreen target");
     let render = normalized
-        .find("self.encode_scene_pass( &capture.view")
+        .find("self.encode_gpu_scene_pass( &capture.view")
         .expect("live capture must render the scene into its target");
     let copy = normalized
         .find("self.prepare_texture_screenshot(")
@@ -103,7 +112,7 @@ fn live_capture_is_encoded_before_swapchain_acquisition() {
         .find("self .surface .as_ref() .map(wgpu::Surface::get_current_texture)")
         .expect("live rendering must acquire the swapchain");
     let presentation = normalized
-        .find(".presentation .ensure_target(")
+        .find(".presentation.ensure_target(")
         .expect("translucent visible frames need a presentation target");
     assert!(
         target < render && render < copy && copy < acquire && acquire < presentation,
@@ -758,7 +767,7 @@ fn idle_gpu_ticks_retire_a_screenshot_after_worker_startup_failure() {
         .reserve_transient_gpu(budget.limits().process_gpu_bytes - 512)
         .unwrap();
     let mut encoder = renderer
-        .gpu
+        .gpu()
         .device
         .create_command_encoder(&Default::default());
     let prepared = renderer.prepare_texture_screenshot(
@@ -774,7 +783,7 @@ fn idle_gpu_ticks_retire_a_screenshot_after_worker_startup_failure() {
         &mut encoder,
         true,
     );
-    renderer.gpu.queue.submit([encoder.finish()]);
+    renderer.gpu().queue.submit([encoder.finish()]);
     // An unsuccessful thread spawn drops the unsent job after submission.
     let start_worker = || -> std::io::Result<()> {
         let _unsent_job = prepared;

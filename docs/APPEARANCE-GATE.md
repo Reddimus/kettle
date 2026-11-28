@@ -1,22 +1,69 @@
 # macOS appearance gate
 
-The unreleased default macOS chrome uses tabs in the titlebar. Historical native
-caption captures below cover `macos-titlebar-style = native`. Acceptance for the
-new default must check both styles: light/dark and custom chrome backgrounds,
+The default macOS chrome uses tabs in the titlebar (`macos-titlebar-style = tabs`).
+Historical native caption captures below cover `macos-titlebar-style = native`.
+Acceptance checks both styles: light/dark and custom chrome backgrounds,
 traffic-light clearance, a one-tab window whose tab starts the strip and fills
 it up to the 48 pt drag lane with `tab-bar = auto` (dragging and
 double-clicking that tab act on the window), several tabs splitting the strip
 evenly, an overflowing strip scrolling between `‹ ›` with the drag lane kept,
 the held widths after closing tabs with the pointer, resize, fullscreen,
 empty-space dragging and the system double-click preference, then tab reorder,
-tear-off and re-dock. No live acceptance for the new style is
-recorded here yet.
+tear-off and re-dock.
 
 
 [`RELEASING.md`](RELEASING.md#macos-appearance-gate) requires a native run
 before the release-cut pull request merges. Unit and image tests can prove the
 material policy; they cannot prove what AppKit actually draws. This file records
 each run, including what did not run and why.
+
+## 6.0.0 preflight - 2026-11-27
+
+macOS 27.3, Apple silicon, 1920x1080 at 1x. Native composited captures ran on
+`9d1e754e9` (same window chrome and renderer code as `d541c9852`, before
+non-chrome fixes `#964` and `#965`). Earlier
+[main rehearsal 44352280619](https://github.com/Reddimus/kettle/actions/runs/44352280619)
+at `1415a82b1` passed deep codesign, Gatekeeper, notarization, stapled-ticket
+validation and universal packaging checks for the 6.0-era bundle.
+
+### Passed
+
+- **Titlebar styles (`tabs` and `native`):** Composited captures covered
+  `default` (86% opacity, native blur on), `blur-off`, `opaque` (opacity 1.0,
+  blur off), `opaque-blur` (opacity 1.0, blur on), `custom-bg`, `light-start`
+  (cold light theme under system Dark) and `borderless`, plus resize,
+  fullscreen round trips, two-tab/one-tab transitions and live light/dark
+  toggles. All 35 recorded one-tab geometries match the current spec (the tab
+  starts the strip and keeps a 48 pt drag lane); 7 older script assertions
+  failed only because the script still checked the superseded centred lone-tab
+  layout.
+- **Visual review (83 composited captures across 23 review items):** Material
+  reaches both rounded top corners cleanly without seams or clear strips in
+  `default`, `opaque` and `opaque-blur`; `borderless` stays visible across
+  fullscreen via the sharp-alpha fallback; `blur-off` keeps an opaque backdrop;
+  cold `light-start` keeps titles clear of the traffic lights in both styles;
+  `tabs/opaque` and `tabs/custom-bg` preserve traffic lights and opaque chrome;
+  and multi-tab and live light/dark toggles transition cleanly. One
+  `tabs/borderless` resize capture was skipped when a transient system overlay
+  overlapped the window. Final visual sign-off before tagging stays required
+  per [`RELEASING.md`](RELEASING.md#macos-appearance-gate).
+- **Native and update smokes:** Native smokes (`gpu-render`, `touchpad-scroll`,
+  `split-exit-resize`, `text-presentation`, `line-edit-chords`,
+  `native-titlebar`, `dock-menu`, `modal-shortcuts`) passed on `9d1e754e9`.
+  On `d541c9852` (covering the updater and installer fixes from `#956`),
+  `just macos-update-smoke`
+  (`a_published_archive_extracts_verifies_and_swaps_for_real`) passed against
+  both the published `v5.9.0` universal archive and the notarized `44352280619`
+  universal rehearsal archive.
+
+### Not run
+
+- Live Reduce Transparency toggle (covered by portable policy unit tests).
+- Dock magnification and Cmd-Tab app switcher (icon assets match verified
+  bundle resources).
+- Physical Intel and mixed-DPI displays.
+- Re-capture after `#964` and `#965` (neither touches window chrome, blur or
+  material rendering).
 
 ## 5.9.0 preflight - 2026-11-03
 

@@ -2484,3 +2484,38 @@ fn repeated_frame_selection_rebases_playback_without_resetting_gap_updates() {
         assert_eq!(harness.anims.lock().unwrap()[&7].started, rebased);
     }
 }
+
+/// A finite animation that finished, stopped and ran again without `v` starts a
+/// new clock and plays its configured passes again, then stops requesting frames
+/// (#957).
+#[test]
+fn a_stopped_finite_animation_run_again_replays_its_passes() {
+    let mut harness = SyncGraphicsHarness::new();
+    harness.feed(b"\x1b_Ga=T,i=7,f=32,s=1,v=1;AQID/w==\x1b\\");
+    harness.feed(b"\x1b_Ga=f,i=7,f=32,s=1,v=1,z=100;CAkK/w==\x1b\\");
+    harness.feed(b"\x1b_Ga=a,i=7,r=1,z=100,c=1,s=3,v=3\x1b\\");
+    let old_start = std::time::Instant::now() - std::time::Duration::from_secs(30);
+    {
+        let mut animations = harness.anims.lock().unwrap();
+        let animation = animations.get_mut(&7).unwrap();
+        animation.started = old_start;
+        assert_eq!(
+            kettle_vt::kitty::playback_state(&animation.gaps, &animation.state, 30_000),
+            (1, false),
+            "two passes have long finished"
+        );
+    }
+    harness.feed(b"\x1b_Ga=a,i=7,s=1\x1b\\");
+    harness.feed(b"\x1b_Ga=a,i=7,s=3\x1b\\");
+    let animations = harness.anims.lock().unwrap();
+    let animation = &animations[&7];
+    assert!(
+        animation.started > old_start,
+        "running again restarts the clock"
+    );
+    assert_eq!(animation.state.loops, 2);
+    let at = |elapsed| kettle_vt::kitty::playback_state(&animation.gaps, &animation.state, elapsed);
+    assert_eq!(at(0), (0, true));
+    assert_eq!(at(299), (0, true));
+    assert_eq!(at(300), (1, false), "the second pass holds its last frame");
+}

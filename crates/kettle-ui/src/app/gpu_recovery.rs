@@ -70,6 +70,54 @@ impl App {
         }
     }
 
+    pub(super) fn install_shared_gpu(&mut self, renderer: &Renderer) {
+        if let Some(gpu) = renderer.gpu_context() {
+            let recovery_proxy = self.proxy.clone();
+            gpu.set_recovery_wake(kettle_render::ScreenshotRecoveryWake::new(move || {
+                let _ = recovery_proxy.send_event(UserEvent::Wakeup);
+            }));
+            log::info!("renderer: GPU");
+            self.gpu = Some(gpu.clone());
+            self.cpu_rendering = false;
+        }
+    }
+
+    /// Start wgpu for a CPU window whose presenter is unusable.
+    pub(super) fn gpu_window_after_cpu_failure(
+        &mut self,
+        window: Arc<Window>,
+    ) -> anyhow::Result<Renderer> {
+        let size = window.inner_size();
+        let scale = window.scale_factor() as f32;
+        if let Some(gpu) = &self.gpu {
+            return Renderer::new_with_gpu(
+                gpu,
+                window,
+                size.width.max(1),
+                size.height.max(1),
+                scale,
+                &self.cfg,
+                None,
+            );
+        }
+        let watchdog = GpuInitWatchdog::arm();
+        let result = pollster::block_on(Renderer::new_with_display_handle(
+            window.clone(),
+            window,
+            size.width.max(1),
+            size.height.max(1),
+            scale,
+            &self.cfg,
+            None,
+            None,
+        ));
+        drop(watchdog);
+        if let Ok(renderer) = &result {
+            self.install_shared_gpu(renderer);
+        }
+        result
+    }
+
     /// Recreate one window's surface and retained renderer resources while
     /// keeping the healthy process-wide adapter/device/queue. wgpu 30 requires
     /// this for `CurrentSurfaceTexture::Lost`; it is also the bounded repair
@@ -79,32 +127,41 @@ impl App {
         &mut self,
         ws: &mut WindowState,
     ) -> Result<(), String> {
-        let Some(gpu) = self.gpu.as_ref() else {
-            return Err("shared GPU context is unavailable".to_string());
-        };
-        if gpu.is_lost() {
-            return Err("shared GPU device is lost".to_string());
-        }
         let Some(window) = ws.window.clone() else {
             return Err("window is unavailable".to_string());
         };
         let Some(old_renderer) = ws.renderer.as_ref() else {
             return Err("window renderer is unavailable".to_string());
         };
-
         let recovery_state = old_renderer.recovery_state();
         let size = window.inner_size();
         let scale = window.scale_factor() as f32;
-        let mut replacement = Renderer::new_with_gpu(
-            gpu,
-            window,
-            size.width.max(1),
-            size.height.max(1),
-            scale,
-            &self.cfg,
-            None,
-        )
-        .map_err(|error| error.to_string())?;
+        let mut replacement = if old_renderer.backend() == kettle_render::RendererBackend::Cpu {
+            let cfg = self.cfg.clone();
+            cpu_window::recover_cpu_window(
+                ws.frame_recovery.first_renderer_rebuild(),
+                || cpu_window::cpu_window_renderer(&window, window.clone(), &cfg, None),
+                || self.gpu_window_after_cpu_failure(window.clone()),
+            )
+            .map_err(|error| error.to_string())?
+        } else {
+            let Some(gpu) = self.gpu.as_ref() else {
+                return Err("shared GPU context is unavailable".to_string());
+            };
+            if gpu.is_lost() {
+                return Err("shared GPU device is lost".to_string());
+            }
+            Renderer::new_with_gpu(
+                gpu,
+                window,
+                size.width.max(1),
+                size.height.max(1),
+                scale,
+                &self.cfg,
+                None,
+            )
+            .map_err(|error| error.to_string())?
+        };
 
         // These values can diverge from Config at runtime (font zoom, cell
         // scaling, and the resolved per-window accent). A queued screenshot
@@ -138,6 +195,9 @@ impl App {
         escalation: kettle_render::AdapterEscalation,
         attempt: u32,
     ) -> Result<GpuRecoveryOutcome, String> {
+        if self.cpu_rendering {
+            return Err("windows draw on the CPU; there is no GPU device to recover".to_string());
+        }
         let Some(window) = ws.window.clone() else {
             return Err("primary window is unavailable".to_string());
         };
@@ -176,7 +236,9 @@ impl App {
             &cfg,
             ws.renderer_recovery_font_size,
         );
-        let new_gpu = new_renderer.gpu().clone();
+        let Some(new_gpu) = new_renderer.gpu_context().cloned() else {
+            return Err("the rebuilt renderer has no GPU context".to_string());
+        };
         let targets = self.windows.values().filter_map(|other| {
             let window = other.window.clone()?;
             let size = window.inner_size();
@@ -242,6 +304,13 @@ impl App {
             let _ = recovery_proxy.send_event(UserEvent::Wakeup);
         }));
         self.gpu = Some(new_gpu);
+        // The device was built from the reloaded config, so the GPU
+        // settings the adapter it got honours run now, and Settings stops
+        // asking for a restart to apply them.
+        if let Some(running) = &self.running_graphics {
+            self.running_graphics =
+                Some(running.after_gpu_rebuild(&cfg, &adapter, self.gpu_software_fallback));
+        }
 
         self.finish_gpu_renderer_recovery(ws);
         for seq in secondary_seqs {

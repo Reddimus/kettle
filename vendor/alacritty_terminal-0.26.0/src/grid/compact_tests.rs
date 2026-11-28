@@ -234,7 +234,8 @@ fn compact_history_matches_full_rows_through_random_output() {
     let mut compacted = 0;
     for case in 0..120 {
         let history = [0, 3, 40][case % 3];
-        let mut pair = Pair::new(2 + next(60), 1 + next(12), history);
+        // One column too: no row there has room for a wide glyph.
+        let mut pair = Pair::new(1 + next(61), 1 + next(12), history);
         for step in 0..60 {
             let mut bytes = String::new();
             for _ in 0..next(40) {
@@ -245,7 +246,7 @@ fn compact_history_matches_full_rows_through_random_output() {
             }
             pair.feed(bytes.as_bytes());
             if next(6) == 0 {
-                pair.resize(2 + next(60), 1 + next(12));
+                pair.resize(1 + next(61), 1 + next(12));
             }
             if next(10) == 0 {
                 let delta = next(8) as i32 - 2;

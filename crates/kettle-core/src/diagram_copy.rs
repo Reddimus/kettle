@@ -251,9 +251,11 @@ fn fence_open(line: &str) -> Option<(usize, &str, bool)> {
     if mark == '`' && info.contains('`') {
         return None;
     }
+    // A language tag matches in any case, as GitHub and highlight.js read it.
     let mermaid = info
-        .strip_prefix("mermaid")
-        .is_some_and(|after| after.chars().next().is_none_or(|c| !word_char(c)));
+        .get(..7)
+        .is_some_and(|tag| tag.eq_ignore_ascii_case("mermaid"))
+        && info[7..].chars().next().is_none_or(|c| !word_char(c));
     Some((columns, &rest[..length], mermaid))
 }
 
@@ -619,26 +621,54 @@ fn body_indent(rows: &[&str]) -> usize {
         .unwrap_or(0)
 }
 
-/// Whether `row` ends with a letter or digit, in any script, then `-` or
-/// `/`: where Codex's wrapping may break inside a word.
-fn ends_in_word_break(row: &str) -> bool {
-    let mut tail = row.chars().rev();
-    matches!(tail.next(), Some('-' | '/')) && tail.next().is_some_and(char::is_alphanumeric)
+/// The ASCII marks Codex's wrapper (textwrap 0.16, by Unicode's line
+/// breaking) starts a line with after a `/`, besides letters. Before the
+/// rest, digits among them, it keeps the `/` on the same line.
+const BROKEN_AFTER_SLASH: &str = "([{<>=*#&@~^_+$%\\`";
+
+/// Whether Codex's wrapper may break inside a word between `at` and
+/// `after`, leaving no space: after a `-` between two letters or digits, in
+/// any script (its hyphen splitter, the only one that breaks at a hyphen),
+/// or after a `/`, whatever is before it, unless what follows is a digit or
+/// a mark no line starts with. A character past ASCII after a `/` may allow
+/// a break, but not `surely`.
+fn codex_breaks(before: Option<char>, at: char, after: char, surely: bool) -> bool {
+    match at {
+        '-' => before.is_some_and(char::is_alphanumeric) && after.is_alphanumeric(),
+        '/' if after.is_ascii() => {
+            after.is_ascii_alphabetic() || BROKEN_AFTER_SLASH.contains(after)
+        }
+        '/' => !surely,
+        _ => false,
+    }
 }
 
-/// Whether `row` starts with a letter or digit, in any script, as Codex's
-/// wrapper counts them.
-fn starts_with_word(row: &str) -> bool {
-    row.chars().next().is_some_and(char::is_alphanumeric)
+/// Whether Codex may have broken a word at the end of `above`, before the
+/// start of `next`, with no space between.
+fn codex_may_join(above: &str, next: &str) -> bool {
+    let mut tail = above.chars().rev();
+    match (tail.next(), next.chars().next()) {
+        (Some(at), Some(after)) => codex_breaks(tail.next(), at, after, false),
+        _ => false,
+    }
 }
 
 /// The first thing on `row` a wrapper could have placed on the row above:
-/// its first word, or, where it `splits` words as Codex does after `-` and
-/// `/`, up to and including the first of those.
-fn first_unit(row: &str, splits: bool) -> &str {
+/// its first word, or, where it `splits` words as Codex does, up to the
+/// first place Codex may break it, or, `surely`, the first it does.
+fn first_unit(row: &str, splits: bool, surely: bool) -> &str {
     let word = row.split(' ').next().unwrap_or(row);
-    if splits && let Some(at) = word.find(['-', '/']) {
-        return &word[..=at];
+    if splits {
+        let mut before = None;
+        let mut chars = word.char_indices().peekable();
+        while let Some((at, c)) = chars.next() {
+            if let Some(&(_, after)) = chars.peek()
+                && codex_breaks(before, c, after, surely)
+            {
+                return &word[..at + c.len_utf8()];
+            }
+            before = Some(c);
+        }
     }
     word
 }
@@ -646,11 +676,14 @@ fn first_unit(row: &str, splits: bool) -> &str {
 /// The columns a greedy wrapper needs on the row `above` to have kept the
 /// first word of the row below, `next`, there.
 struct WrapCost {
-    /// `above` ends in `-` or `/` after a letter and `next` starts with
-    /// one: Codex would place it with no space between.
+    /// Codex may have broken a word between `above` and `next`, where it
+    /// leaves no space.
     joins_word: bool,
-    /// Codex's, which also breaks after a `-` or `/` inside a word.
-    codex: usize,
+    /// The least Codex needs: no space where it may have broken a word, and
+    /// the shortest first piece it may break `next`'s first word into.
+    codex_least: usize,
+    /// The most Codex needs: the space, and the longest such piece.
+    codex_most: usize,
     /// Claude's, which breaks only at spaces.
     claude: usize,
 }
@@ -658,24 +691,31 @@ struct WrapCost {
 impl WrapCost {
     fn of(above: &str, next: &str) -> Self {
         let (above, next) = (scanned(above), scanned(next));
-        let joins_word = ends_in_word_break(above) && starts_with_word(next);
+        let joins_word = codex_may_join(above, next);
         Self {
             joins_word,
-            codex: above.width() + usize::from(!joins_word) + first_unit(next, true).width(),
-            claude: above.width() + 1 + first_unit(next, false).width(),
+            codex_least: above.width()
+                + usize::from(!joins_word)
+                + first_unit(next, true, false).width(),
+            codex_most: above.width() + 1 + first_unit(next, true, true).width(),
+            claude: above.width() + 1 + first_unit(next, false, false).width(),
         }
     }
 
     /// The least of what the harnesses that may have wrapped it need: Codex
     /// among them where it `splits` words.
     fn least(&self, splits: bool) -> usize {
-        if splits { self.codex } else { self.claude }
+        if splits {
+            self.codex_least
+        } else {
+            self.claude
+        }
     }
 
     /// The most of what they need: Claude among them where it wraps
     /// `whole` words.
     fn most(&self, whole: bool) -> usize {
-        if whole { self.claude } else { self.codex }
+        if whole { self.claude } else { self.codex_most }
     }
 }
 
@@ -691,8 +731,8 @@ fn rejoin(
     harness: Option<Harness>,
 ) -> Result<String, DiagramCopyError> {
     let body_min = body_indent(rows);
-    // Codex also breaks inside a word, after `-` or `/`; Claude only at
-    // spaces.
+    // Codex also breaks inside a word, after a `-` between letters or
+    // digits and after a `/`; Claude only at spaces.
     let splits = harness != Some(Harness::Claude);
     let whole = harness != Some(Harness::Codex);
     // An unindented body's wrap could have been made at any width its rows
@@ -716,7 +756,8 @@ fn rejoin(
         }
         let trimmed = row.trim();
         let cost = WrapCost::of(above, trimmed);
-        // `a-` then `b`: Codex broke `a-b`, or wrapped `a- b`.
+        // `a-` then `b`, or `/` then `b`: Codex broke `a-b` or `/b`, or
+        // wrapped `a- b` or `/ b`.
         let joins_word = splits && cost.joins_word;
         if body_min > 0 && indent(row) < body_min {
             // Indented less than the body, it has a wrap's shape. Yet a
@@ -757,6 +798,36 @@ mod tests {
     /// A fenced copy gives each Mermaid fence's body verbatim, in order;
     /// other fences, and an unclosed one, give nothing, and nothing after an
     /// unclosed one is a fence: it runs to the end of the text.
+    /// A fence's language tag matches in any case, as in GitHub and
+    /// highlight.js: `Mermaid` and `MERMAID` fences are sources, and a longer
+    /// word starting with it, in any case, is still another language (#962).
+    #[test]
+    fn a_mermaid_fence_tag_matches_in_any_case() {
+        for (text, source) in [
+            (
+                "```Mermaid\nflowchart TD\n  A-->B\n```",
+                "flowchart TD\n  A-->B",
+            ),
+            (
+                "```MERMAID\ngraph LR\n  A --> B\n```",
+                "graph LR\n  A --> B",
+            ),
+            (
+                "~~~Mermaid title\nsequenceDiagram\n  A->>B: Hi\n~~~",
+                "sequenceDiagram\n  A->>B: Hi",
+            ),
+        ] {
+            assert_eq!(diagram_sources(text, None).unwrap(), [source], "{text:?}");
+        }
+        for text in ["```Mermaidish\nhello\n```", "```MERMAIDS\nhello\n```"] {
+            assert_eq!(
+                diagram_sources(text, None),
+                Err(DiagramCopyError::NoDiagram),
+                "{text:?} is another language"
+            );
+        }
+    }
+
     #[test]
     fn each_mermaid_fence_is_a_source_verbatim() {
         let text = "Here:\n```mermaid\nflowchart TD\n  A-->B\n```\n\n~~~~ mermaid title\nsequenceDiagram\n  A->>B: Hi\n~~~~~\n```rust\nfn main() {}\n```";
@@ -1061,6 +1132,91 @@ mod tests {
             diagram_sources(claude, Some(20)).unwrap(),
             ["graph LR\n    A[see left-right] --> B"],
             "Claude's label says Claude, who breaks only at spaces"
+        );
+    }
+
+    /// Codex's wrapper breaks after a `/` whatever comes before it, as
+    /// Unicode's line breaking allows, unless a digit or a mark no line starts
+    /// with comes next; after a `-` only between letters or digits. A row
+    /// ending in a slash it may have broken at is refused, and a row whose
+    /// first word Codex keeps whole is measured whole.
+    #[test]
+    fn a_slash_codex_may_have_broken_after_anything_is_refused() {
+        // The leading `/` of `/very/long` (#935).
+        let path = "• graph LR\n      A[see /\n  very/long] --> B";
+        for (selected, by) in [
+            (path.to_owned(), "Codex"),
+            (path.replacen("• ", "  ", 1), "an unknown harness"),
+            (
+                format!("{}\n{}", NOTICES[0], path.replacen("• ", "  ", 1)),
+                "the notice",
+            ),
+        ] {
+            assert_eq!(
+                diagram_sources(&selected, Some(17)),
+                Err(DiagramCopyError::Wrapped),
+                "{by}"
+            );
+        }
+        // Before a bracket too: `/(x)` and `/ (x)` wrap alike.
+        let bracket = "• graph LR\n      A[see /\n  (x)] --> B";
+        assert_eq!(
+            diagram_sources(bracket, Some(17)),
+            Err(DiagramCopyError::Wrapped)
+        );
+        // Codex breaks no `/` before a digit: the wrap took a space.
+        let digit = "• graph LR\n      A[see /\n  2024] --> B";
+        assert_eq!(
+            diagram_sources(digit, Some(17)).unwrap(),
+            ["graph LR\n    A[see / 2024] --> B"]
+        );
+        assert_eq!(
+            diagram_sources(&path.replacen("• ", "⏺ ", 1), Some(17)).unwrap(),
+            ["graph LR\n    A[see / very/long] --> B"],
+            "Claude breaks only at spaces"
+        );
+        // Codex keeps `->>` whole, so a row ending in a lone `-` wrapped at a
+        // space after it: the source had `- >>`.
+        let arrow = "• classDiagram\n      D[x/y/z well-known Node review receive] -\n  >> C\n\n        C --- C";
+        assert_eq!(
+            diagram_sources(arrow, Some(47)).unwrap(),
+            ["classDiagram\n    D[x/y/z well-known Node review receive] - >> C\n\n      C --- C"]
+        );
+        // Unindented, `--> B` could be a statement or `A[...] --> B` wrapped
+        // at 25 columns, since Codex would have needed all of `-->` above.
+        let flat = format!(
+            "{}\n  graph LR\n  C\n  A[{}]\n  --> B\n  X --> Y[{}]",
+            NOTICES[0],
+            "b".repeat(19),
+            "a".repeat(16)
+        );
+        assert_eq!(
+            diagram_sources(&flat, Some(27)),
+            Err(DiagramCopyError::Wrapped)
+        );
+        // Where Codex may have broken a word, it may have wrapped at a space
+        // after it instead, which needed one more column.
+        let spaced = format!(
+            "{}\n  graph LR\n  C\n  A[{}-\n  c] --> B\n  X --> Y[{}]",
+            NOTICES[0],
+            "b".repeat(20),
+            "a".repeat(16)
+        );
+        assert_eq!(
+            diagram_sources(&spaced, Some(27)),
+            Err(DiagramCopyError::Wrapped)
+        );
+        // Codex keeps a `/` before `…` on its line, so it needed all of
+        // `u/…` above.
+        let kept = format!(
+            "{}\n  graph LR\n  C\n  A[{}]\n  u/… --> B\n  X --> Y[{}]",
+            NOTICES[0],
+            "b".repeat(19),
+            "a".repeat(16)
+        );
+        assert_eq!(
+            diagram_sources(&kept, Some(27)),
+            Err(DiagramCopyError::Wrapped)
         );
     }
 

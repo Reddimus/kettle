@@ -557,7 +557,12 @@ shrink with them again, add `keybind = ctrl+shift+minus=decrease_font_size`
 and `keybind = ctrl+shift+_=decrease_font_size`.
 
 The pointer works the same way. While a program has mouse reporting on, it
-gets your clicks, and Shift keeps a click Kettle's: Shift+drag selects text,
+gets your clicks. Plain motion, for a program that asks for it (DEC 1003), is
+reported only while the pointer is over the program's pane: over the tab bar,
+the status bar, a pane title bar or another split it hears nothing, as in
+xterm. A drag that began with a press in the pane keeps reporting, at the
+nearest edge cell, until the button is released. Shift keeps a click Kettle's:
+Shift+drag selects text,
 and Shift+right-click opens Kettle's menu, which also offers "Preview Copied
 File" when the clipboard names an image, SVG, Mermaid, Markdown, PDF or video
 file. With text
@@ -571,11 +576,10 @@ menu while a program uses the mouse", for a few seconds. It comes back only
 after the program turns mouse reporting off and on again, and never more than
 once every 30 seconds in a window. A right-click Kettle keeps from the
 program, such as one on the search bar, brings up no notice. The menu that
-Shift+right-click opens over such a program starts with the same sentence,
-broken over as many lines as the menu's width needs, and a screen reader
-reads it as one menu item, not line by line. With `putty-paste-style` on
-there is neither the notice nor the menu's sentence, since Shift+right-click
-pastes there.
+Shift+right-click opens over such a program starts with a short reminder
+of both Shift gestures. The panel widens to fit the reminder within the
+window, and a screen reader reads it as one item. With
+`putty-paste-style` on, Shift+right-click pastes and both hints are omitted.
 
 ## Claude Code diff panel
 
@@ -699,6 +703,13 @@ or exhaustive race coverage; the related background issue remains open.
 
 Kettle follows the client's negotiated modes. It does not clear them based on
 a process name or assume every foreground shell uses legacy keyboard input.
+Its bash and zsh integration does not push or pop keyboard flags around the
+prompt either. The flag stack is positional and shared by every process on
+the terminal, so a shell cannot tell its own entry from a client's: a
+background client's balanced pop removes the shell's entry, a nested bash
+left with Ctrl+D leaves one behind, and `set -T`, `bind -x` widgets and zsh
+widgets that run `fg` slip past the command hooks such a handoff would need.
+Ghostty and kitty leave the flags to the programs as well.
 
 See [Unix suspend/resume compatibility](TESTING.md#unix-suspendresume-compatibility)
 for the offline regression scenario and the explicit real-Codex probe. Until a

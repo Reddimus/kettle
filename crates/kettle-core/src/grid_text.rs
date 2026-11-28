@@ -166,7 +166,7 @@ pub struct LogicalLine {
 }
 
 /// Whether grid line `line` exists and ends in a soft wrap into the line below.
-fn soft_wraps(grid: &Grid<Cell>, line: i32, cols: usize) -> bool {
+pub(crate) fn soft_wraps(grid: &Grid<Cell>, line: i32, cols: usize) -> bool {
     let top = -(grid.history_size() as i32);
     let bottom = grid.screen_lines() as i32 - 1;
     cols > 0
@@ -274,13 +274,17 @@ pub fn accessible_viewport_text(grid: &Grid<Cell>, cursor_visible: bool) -> Stri
 }
 
 /// Right-trimmed grid rows in [first, end), joined within a UTF-8 byte cap.
-/// Returns a retained prefix and whether any non-trailing content was omitted.
+/// Returns a retained prefix, itself right-trimmed, and whether any text was
+/// omitted. Blanks and blank rows past the cap, which trimming would drop
+/// anyway, are not omitted text.
 pub fn rows_text_bounded(grid: &Grid<Cell>, first: i32, end: i32, cap: usize) -> (String, bool) {
     let mut out = String::with_capacity(cap);
     for row in first..end {
         if row != first {
             if out.len() == cap {
-                return (out, true);
+                // The newline does not fit. Rows that trim to nothing would
+                // have added only newlines, which are not text left out.
+                return (out, (row..end).any(|row| row_keeps_text(grid, row)));
             }
             out.push('\n');
         }
@@ -300,6 +304,7 @@ pub fn rows_text_bounded(grid: &Grid<Cell>, first: i32, end: i32, cap: usize) ->
                         trimmed_end = out.len();
                     }
                 } else if !ch.is_whitespace() {
+                    out.truncate(trimmed_end);
                     return (out, true);
                 } else {
                     // Whitespace beyond the cap can still be trimmed at row end.
@@ -310,6 +315,19 @@ pub fn rows_text_bounded(grid: &Grid<Cell>, first: i32, end: i32, cap: usize) ->
         out.truncate(trimmed_end);
     }
     (out, false)
+}
+
+/// Whether row `row` keeps any text once right-trimmed.
+fn row_keeps_text(grid: &Grid<Cell>, row: i32) -> bool {
+    (0..grid.columns()).any(|column| {
+        let cell = &grid[Point::new(Line(row), Column(column))];
+        if is_spacer(cell.flags) {
+            return false;
+        }
+        let (base, marks) =
+            crate::inline_text::text_parts(cell.c, cell.zerowidth().unwrap_or_default());
+        !base.is_whitespace() || marks.iter().any(|mark| !mark.is_whitespace())
+    })
 }
 
 #[cfg(test)]
@@ -495,6 +513,62 @@ mod tests {
             ("\u{754c}\u{301}y".into(), false)
         );
         assert_eq!(rows_text_bounded(&grid, 1, 2, 4), ("\u{754c}".into(), true));
+    }
+
+    /// A row the cap cuts after blanks inside it comes back right-trimmed,
+    /// like a row that fits.
+    #[test]
+    fn bounded_rows_trim_a_row_the_cap_cuts_after_blanks() {
+        let mut grid: Grid<Cell> = Grid::new(1, 8, 0);
+        for (column, ch) in "ab   c  ".chars().enumerate() {
+            grid[Point::new(Line(0), Column(column))].c = ch;
+        }
+        // "ab" and three blanks fill the cap, and 'c' does not fit.
+        assert_eq!(rows_text_bounded(&grid, 0, 1, 5), ("ab".into(), true));
+        // One blank fits, the next one does not, and then 'c' is cut.
+        assert_eq!(rows_text_bounded(&grid, 0, 1, 3), ("ab".into(), true));
+    }
+
+    /// Only text is omitted: a cap reached at the end of a row, with nothing
+    /// but blanks and empty rows after it, leaves nothing out.
+    #[test]
+    fn bounded_rows_omit_nothing_when_only_blanks_follow_the_cap() {
+        let mut grid: Grid<Cell> = Grid::new(3, 6, 0);
+        grid[Point::new(Line(0), Column(0))].c = 'a';
+        assert_eq!(rows_text_bounded(&grid, 0, 2, 1), ("a".into(), false));
+        assert_eq!(rows_text_bounded(&grid, 0, 3, 1), ("a".into(), false));
+        let empty: Grid<Cell> = Grid::new(2, 4, 0);
+        assert_eq!(rows_text_bounded(&empty, 0, 2, 0), (String::new(), false));
+
+        // No-break spaces and tabs are blanks too.
+        for (column, ch) in "bb\u{a0}\u{a0}\t".chars().enumerate() {
+            grid[Point::new(Line(1), Column(column))].c = ch;
+        }
+        assert_eq!(rows_text_bounded(&grid, 0, 3, 4), ("a\nbb".into(), false));
+        // Text after the blanks is still omitted.
+        grid[Point::new(Line(2), Column(3))].c = 'z';
+        assert_eq!(rows_text_bounded(&grid, 0, 3, 4), ("a\nbb".into(), true));
+        // So is a combining mark, which a right-trim keeps.
+        grid[Point::new(Line(2), Column(3))].c = ' ';
+        grid[Point::new(Line(2), Column(3))].push_zerowidth('\u{301}');
+        assert_eq!(rows_text_bounded(&grid, 0, 3, 4), ("a\nbb".into(), true));
+
+        // A wide glyph fills the cap; its spacer is not text.
+        let mut wide: Grid<Cell> = Grid::new(2, 4, 0);
+        wide[Point::new(Line(0), Column(0))].c = 'a';
+        let cell = &mut wide[Point::new(Line(0), Column(1))];
+        cell.c = '\u{4e16}';
+        cell.flags.insert(Flags::WIDE_CHAR);
+        wide[Point::new(Line(0), Column(2))]
+            .flags
+            .insert(Flags::WIDE_CHAR_SPACER);
+        for (column, ch) in "\u{a0}\t\t".chars().enumerate() {
+            wide[Point::new(Line(1), Column(column))].c = ch;
+        }
+        assert_eq!(
+            rows_text_bounded(&wide, 0, 2, 4),
+            ("a\u{4e16}".into(), false)
+        );
     }
 
     /// A logical line joins rows only across soft wraps, only while the next

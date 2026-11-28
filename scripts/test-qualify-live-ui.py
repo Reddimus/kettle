@@ -808,5 +808,23 @@ class CampaignAdmission(unittest.TestCase):
         self.campaign({"passed": True}, mismatch=True)
 
 
+class LiveSessionPreconditions(unittest.TestCase):
+    def test_a_python_without_waitid_refuses_before_launching_kettle(self):
+        live = qualification.load_live()
+        saved = getattr(live.os, "waitid", None)
+        if saved is not None:
+            del live.os.waitid
+        try:
+            with patch.object(live.platform, "system", return_value="Darwin"), patch.object(
+                live.subprocess, "run"
+            ) as run:
+                reason = live.live_session_failure_reason()
+        finally:
+            if saved is not None:
+                live.os.waitid = saved
+        self.assertIn("has no os.waitid", reason)
+        run.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,7 @@
 use crate::geometry::GridGlyphCell;
 use crate::gpu_tests::gpu_test_guard;
 use crate::headless_tests::{capture, focused, pane, renderer, snapshot_of};
+use crate::visual_parity_tests::parity_scene;
 use crate::*;
 use glyphon::cosmic_text::{Attrs, AttrsList, BufferLine, Family, LineEnding, Shaping};
 
@@ -22,7 +23,7 @@ fn drawn_columns(renderer: &Renderer) -> Vec<(char, usize)> {
         .collect()
 }
 
-#[test]
+parity_scene! {
 fn a_right_to_left_word_is_drawn_in_visual_cells() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 120) else {
@@ -52,8 +53,9 @@ fn a_right_to_left_word_is_drawn_in_visual_cells() {
         );
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn arabic_joins_and_brackets_mirror_only_in_right_to_left_text() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 120) else {
@@ -145,8 +147,9 @@ fn arabic_joins_and_brackets_mirror_only_in_right_to_left_text() {
         "column 0 opens and column 2 closes"
     );
 }
+}
 
-#[test]
+parity_scene! {
 fn a_selection_over_reordered_text_fills_its_visual_cells() {
     use alacritty_terminal::selection::SelectionRange;
     use kettle_core::{Column, Line, Point};
@@ -217,8 +220,9 @@ fn a_selection_over_reordered_text_fills_its_visual_cells() {
         assert!(filled(col) < 0.1, "visual {col} is not: {}", filled(col));
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn the_alternate_screen_and_bidi_off_keep_logical_order() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
@@ -247,8 +251,9 @@ fn the_alternate_screen_and_bidi_off_keep_logical_order() {
     assert!(drawn_columns(&renderer).is_empty());
     assert!(!renderer.pane_bidi[0].any());
 }
+}
 
-#[test]
+parity_scene! {
 fn the_block_cursor_draws_the_cells_joined_form() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 120) else {
@@ -265,6 +270,7 @@ fn the_block_cursor_draws_the_cells_joined_form() {
         &focused(true),
     );
     assert_eq!(renderer.cursor_glyph_buffer.lines[0].text(), "\u{FE92}");
+}
 }
 
 /// The first glyph's id and every span's level for `text` shaped as one line.
@@ -369,7 +375,7 @@ fn band_has_ink(frame: &image::RgbaImage, x: u32, band: &[u32], bg: Rgb) -> bool
     })
 }
 
-#[test]
+parity_scene! {
 fn flat_arabic_joins_are_one_unbroken_stroke() {
     let _serial = gpu_test_guard();
     for family in crate::arabic_join_tests::ARABIC_FACES {
@@ -416,8 +422,9 @@ fn flat_arabic_joins_are_one_unbroken_stroke() {
         }
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn joined_word_edges_are_inked_and_a_nonjoining_seam_keeps_its_hole() {
     let _serial = gpu_test_guard();
     for family in crate::arabic_join_tests::ARABIC_FACES {
@@ -465,8 +472,9 @@ fn joined_word_edges_are_inked_and_a_nonjoining_seam_keeps_its_hole() {
         }
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn arabic_style_and_selection_boundaries_keep_bridge_colour_inside_its_cell() {
     use alacritty_terminal::selection::SelectionRange;
     use kettle_core::{Column, Line, Point};
@@ -535,8 +543,9 @@ fn arabic_style_and_selection_boundaries_keep_bridge_colour_inside_its_cell() {
         }
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn block_cursor_keeps_arabic_initial_and_its_bridge_in_the_panes_position() {
     let _serial = gpu_test_guard();
     for family in crate::arabic_join_tests::ARABIC_FACES {
@@ -594,8 +603,9 @@ fn block_cursor_keeps_arabic_initial_and_its_bridge_in_the_panes_position() {
         }
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn joined_arabic_leaves_latin_and_hebrew_rows_pixel_identical() {
     let _serial = gpu_test_guard();
     for family in crate::arabic_join_tests::ARABIC_FACES {
@@ -642,8 +652,9 @@ fn joined_arabic_leaves_latin_and_hebrew_rows_pixel_identical() {
         }
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn arabic_hidden_cells_and_row_ends_have_no_outward_seam() {
     let _serial = gpu_test_guard();
     for family in crate::arabic_join_tests::ARABIC_FACES {
@@ -684,6 +695,7 @@ fn arabic_hidden_cells_and_row_ends_have_no_outward_seam() {
             }
         }
     }
+}
 }
 
 /// The four fills a pane paints under highlighted cells.
@@ -826,11 +838,11 @@ fn dominant(
     Rgb::new(r, g, b)
 }
 
+parity_scene! {
 /// A highlighted Arabic word's fill spans exactly the pixels its letters are
 /// drawn over. A final wider than its cell overhangs on its open side, into
 /// the padding or the cells before it, and an isolated letter overhangs to
 /// its right; the fill reaches as far, and no further.
-#[test]
 fn highlights_cover_the_drawn_width_of_arabic_words() {
     let _serial = gpu_test_guard();
     // The text, its highlighted logical columns, the visual columns those
@@ -905,10 +917,123 @@ fn highlights_cover_the_drawn_width_of_arabic_words() {
         }
     }
 }
+}
 
+parity_scene! {
+/// The bismillah ligature U+FDFD is a bidi neutral that Arabic faces draw
+/// many cells wide. Its highlight follows it in a row without a bidi layout
+/// and where a layout shows it left to right, as for an Arabic letter, and
+/// past another match drawn under it.
+fn highlights_cover_an_arabic_ligature_outside_right_to_left_text() {
+    let _serial = gpu_test_guard();
+    // The text, the ligature's column, and whether the row has a layout.
+    let cases = [
+        ("abcdefghij\u{FDFD}klmnop", 10, false),
+        ("\u{FDFD} سلام", 0, true),
+    ];
+    for family in crate::arabic_join_tests::ARABIC_FACES {
+        let Some((mut renderer, mut cfg)) = arabic_renderer(family) else {
+            continue;
+        };
+        cfg.padding_x = 24.25;
+        cfg.padding_y = 4.0;
+        let (ox, _) = pane_grid_origin((0.0, 0.0, 640.0, 220.0), (cfg.padding_x, cfg.padding_y));
+        'face: for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
+            cfg.text_renderer = mode;
+            for scale in [1.0, 2.0] {
+                renderer.set_scale(scale);
+                for (text, column, laid_out) in cases {
+                    // Legacy draws a pane without layouts or emoji through
+                    // glyphon, whose glyphs this test cannot see. An emoji on
+                    // the next row has the shared emit draw the pane, in the
+                    // same places.
+                    let text = if mode == TextRendererMode::Legacy && !laid_out {
+                        format!("{text}\r\n\u{1F600}")
+                    } else {
+                        text.to_owned()
+                    };
+                    for (highlight, beneath) in Highlight::ALL
+                        .into_iter()
+                        .flat_map(|highlight| [(highlight, false), (highlight, true)])
+                    {
+                        let context = format!(
+                            "{family} {mode:?}@{scale} {text:?} {highlight:?} beneath={beneath}"
+                        );
+                        let mut snap = snapshot_of(40, 4, format!("{text}\x1b[?25l").as_bytes());
+                        let mut overlay = focused(false);
+                        highlight.apply(&mut snap, &mut overlay, column..=column + 1);
+                        // A one-cell match the ligature is drawn across.
+                        let under = column + 3;
+                        if beneath {
+                            overlay.highlights.push(HighlightRect {
+                                row: 0,
+                                col: under,
+                                width: 1,
+                                active: false,
+                            });
+                        }
+                        let frame =
+                            capture(&mut renderer, &cfg, &[pane(&snap, 640, 220)], &overlay);
+                        let map = renderer.pane_bidi[0].row(0);
+                        assert_eq!(map.is_some(), laid_out, "{context}: layout");
+                        assert!(
+                            map.is_none_or(|map| !map.is_rtl(column)),
+                            "{context}: the ligature is shown left to right"
+                        );
+                        let rows = row_pixels(&renderer, &cfg, 0);
+                        let left = ox + column as f32 * renderer.cell_w;
+                        let right = left + 2.0 * renderer.cell_w;
+                        let (grid_left, grid_right) = (first_pixel(left), first_pixel(right));
+                        let (ink_left, ink_right) =
+                            ink_columns(&renderer, &rows, (left, right), frame.width())
+                                .unwrap_or_else(|| panic!("{context}: the ligature is drawn"));
+                        if ink_right < first_pixel(right + 2.0 * renderer.cell_w) {
+                            eprintln!(
+                                "ARABIC_LIGATURE_SKIP: {family} draws U+FDFD within about a \
+                                 cell ({ink_left}..{ink_right})"
+                            );
+                            break 'face;
+                        }
+                        let fill = dominant(&frame, grid_left..grid_right, &rows);
+                        assert_ne!(fill, cfg.theme.background, "{context}: highlighted");
+                        let mut colors: Vec<_> = std::iter::once(fill)
+                            .chain(highlight.outline(&renderer, &cfg))
+                            .collect();
+                        if beneath {
+                            let under = map.map_or(under, |map| map.visual(under));
+                            let left = first_pixel(ox + under as f32 * renderer.cell_w);
+                            let right = first_pixel(ox + (under + 1) as f32 * renderer.cell_w);
+                            colors.push(dominant(&frame, left..right, &rows));
+                        }
+                        let (lo, hi) = (ink_left.min(grid_left), ink_right.max(grid_right));
+                        for x in lo..hi {
+                            let share = painted(&frame, x, &rows, &colors);
+                            assert!(
+                                share >= 0.1,
+                                "{context}: column {x} of the ligature's {lo}..{hi} is drawn \
+                                 but not highlighted ({share:.2}); its cells are \
+                                 {grid_left}..{grid_right}"
+                            );
+                        }
+                        for x in [lo - 1, hi] {
+                            let share = painted(&frame, x, &rows, &colors);
+                            assert!(
+                                share < 0.05,
+                                "{context}: column {x}, past the ligature's {lo}..{hi}, is \
+                                 highlighted ({share:.2})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+}
+
+parity_scene! {
 /// Without bidi, and in rows without right-to-left text, every highlight
 /// fill stays on the cell grid as before.
-#[test]
 fn highlights_off_bidi_rows_stay_on_the_grid() {
     let _serial = gpu_test_guard();
     for family in crate::arabic_join_tests::ARABIC_FACES {
@@ -922,8 +1047,10 @@ fn highlights_off_bidi_rows_stay_on_the_grid() {
             for (bidi, text, columns) in [
                 (false, "ab نص cd", 3..=4),
                 (false, "ص", 0..=0),
+                (false, "ab \u{FDFD} cd", 3..=3),
                 (true, "ab cd", 0..=4),
                 (true, "\x1b[?1049hab نص cd", 3..=4),
+                (true, "\x1b[?1049hab \u{FDFD} cd", 3..=3),
             ] {
                 cfg.bidi = bidi;
                 for highlight in Highlight::ALL {
@@ -956,10 +1083,11 @@ fn highlights_off_bidi_rows_stay_on_the_grid() {
         }
     }
 }
+}
 
+parity_scene! {
 /// A selection's outline traces its fill, widened over a final's overhang,
 /// not the cell edge inside it.
-#[test]
 fn a_selection_outline_follows_the_arabic_overhang() {
     let _serial = gpu_test_guard();
     let Some(theme) = kettle_config::Theme::list().iter().find_map(|name| {
@@ -1038,4 +1166,5 @@ fn a_selection_outline_follows_the_arabic_overhang() {
             assert_eq!(sides.len(), 2, "{context}: {sides:?}");
         }
     }
+}
 }

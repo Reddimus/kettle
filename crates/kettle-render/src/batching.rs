@@ -1,3 +1,4 @@
+use super::backend::{DeviceRef, ScenePass};
 use super::mark_fallback::{LineShifts, MarkShift, shift_for, shifts_of};
 use super::theme::pane_inactive_amount;
 use super::{
@@ -42,6 +43,12 @@ pub(crate) fn context_menu_text_damage_key(
         menu.scroll_offset.hash(&mut hash);
         menu.panel_w_clamped.to_bits().hash(&mut hash);
         menu.panel_h_clamped.to_bits().hash(&mut hash);
+        menu.picker_header_height.to_bits().hash(&mut hash);
+        menu.status.is_some().hash(&mut hash);
+        if let Some(status) = &menu.status {
+            status.lines.hash(&mut hash);
+            status.line_height.to_bits().hash(&mut hash);
+        }
         menu.rows.len().hash(&mut hash);
         for row in &menu.rows {
             row.label.hash(&mut hash);
@@ -50,6 +57,7 @@ pub(crate) fn context_menu_text_damage_key(
             row.hint.hash(&mut hash);
             row.description.hash(&mut hash);
             row.heading.hash(&mut hash);
+            row.informational.hash(&mut hash);
             row.matched_chars.hash(&mut hash);
         }
     }
@@ -198,13 +206,13 @@ impl Renderer {
             self.card_decoration.upload_counts(),
             self.card_posters
                 .as_ref()
-                .map(imgpipe::ImagePipeline::upload_counts)
+                .map(crate::backend::layers::ImageLayer::upload_counts)
                 .unwrap_or_default(),
             self.media_receipt_img.upload_counts(),
             self.lane_quads.upload_counts(),
             self.lane_img
                 .as_ref()
-                .map(imgpipe::ImagePipeline::upload_counts)
+                .map(crate::backend::layers::ImageLayer::upload_counts)
                 .unwrap_or_default(),
             self.bg_imgs.upload_counts(),
             self.starfield.upload_counts(),
@@ -219,18 +227,15 @@ impl Renderer {
             text_prepares: self.text_prepares,
             chrome_prepares: self.chrome_prepares,
             skipped_writes: counts.skipped_writes,
-            mapped_uploads: self.gpu.mapped_uploads(),
+            mapped_uploads: self.device.mapped_uploads(),
             mapped_writes: counts.mapped_writes,
             mapped_bytes: counts.mapped_bytes,
         }
     }
 
-    /// Encode the whole scene into `target`. With a `window`, `target` holds
-    /// only that rect of the `target_size` scene (a cursor patch pass): the
-    /// viewport maps the scene 1:1 with the window's top-left at the origin,
-    /// so every pipeline keeps its full-size screen uniform. The live window
-    /// and an offscreen capture draw the same pass, configured alpha included.
-    pub(crate) fn encode_scene_pass(
+    /// Encode the whole scene into the GPU `target` (see
+    /// [`Self::encode_scene_pass`]).
+    pub(crate) fn encode_gpu_scene_pass(
         &self,
         target: &wgpu::TextureView,
         target_size: [u32; 2],
@@ -255,14 +260,35 @@ impl Renderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        self.encode_scene_pass(
+            ScenePass::Gpu(&mut pass),
+            target_size,
+            cfg,
+            cursor_on,
+            window,
+        )
+    }
+
+    /// Draw the whole scene into `pass`, whose target the caller cleared to
+    /// transparent. With a `window`, the target holds only that rect of the
+    /// `target_size` scene (a cursor patch pass): the viewport maps the scene
+    /// 1:1 with the window's top-left at the origin, so every pipeline keeps
+    /// its full-size screen uniform. The live window and an offscreen capture
+    /// draw the same pass, configured alpha included, on either backend.
+    pub(crate) fn encode_scene_pass(
+        &self,
+        mut pass: ScenePass<'_, '_>,
+        target_size: [u32; 2],
+        cfg: &Config,
+        cursor_on: bool,
+        window: Option<PatchRect>,
+    ) -> Result<()> {
         if let Some(window) = window {
             pass.set_viewport(
                 -(window.x as f32),
                 -(window.y as f32),
                 target_size[0] as f32,
                 target_size[1] as f32,
-                0.0,
-                1.0,
             );
         }
         // Layering, back to front: wallpaper, then cell + chrome + border
@@ -545,8 +571,7 @@ pub(crate) fn emit_cell_locked_glyphs(
     glyph_pipeline: &mut GlyphPipeline,
     swash: &mut SwashCache,
     font_system: &mut FontSystem,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
+    device: DeviceRef<'_>,
     char_starts: &mut Vec<u32>,
     emoji_cells: &mut Vec<EmojiCellImages>,
 ) {
@@ -565,7 +590,6 @@ pub(crate) fn emit_cell_locked_glyphs(
             swash,
             font_system,
             device,
-            queue,
             emoji_cells,
         },
     );
@@ -621,6 +645,8 @@ pub(crate) trait GlyphSource {
 
     /// The emit placed one run of a grid cell's glyphs as `instances` of its
     /// output. Arabic join shifts move them again before the emit returns.
+    /// A glyph without cell metadata is reported one column wide, at the
+    /// column its text starts in; an emoji cluster without it is not.
     fn drew(&mut self, _column: usize, _width: usize, _instances: std::ops::Range<usize>) {}
 }
 
@@ -638,8 +664,7 @@ struct AtlasGlyphs<'a> {
     glyph_pipeline: &'a mut GlyphPipeline,
     swash: &'a mut SwashCache,
     font_system: &'a mut FontSystem,
-    device: &'a wgpu::Device,
-    queue: &'a wgpu::Queue,
+    device: DeviceRef<'a>,
     emoji_cells: &'a mut Vec<EmojiCellImages>,
 }
 
@@ -650,11 +675,10 @@ impl GlyphSource for AtlasGlyphs<'_> {
             swash,
             font_system,
             device,
-            queue,
             ..
         } = self;
         let mut image = None;
-        glyph_pipeline.ensure_glyph(device, queue, key, || {
+        glyph_pipeline.ensure_glyph(*device, key, || {
             image = swash.get_image_uncached(font_system, key);
             RasterGlyph::from_swash(image.as_ref()?)
         })
@@ -684,7 +708,6 @@ impl GlyphSource for AtlasGlyphs<'_> {
             swash,
             font_system,
             device,
-            queue,
             ..
         } = self;
         let slot_size = [u16::try_from(size[0]).ok()?, u16::try_from(size[1]).ok()?];
@@ -695,8 +718,7 @@ impl GlyphSource for AtlasGlyphs<'_> {
         unshifted.y_bin = glyphon::cosmic_text::SubpixelBin::Zero;
         let mut raster = None;
         glyph_pipeline.ensure_glyph(
-            device,
-            queue,
+            *device,
             super::glyphpipe::SlotKey::Emoji {
                 key: unshifted,
                 size: slot_size,
@@ -800,7 +822,8 @@ impl GlyphSource for &mut PlacedGlyphs<'_> {
 /// The pixel x span the grid emit draws each cell of buffer `line` over,
 /// as `(column, width, left, right)`, one entry per run of a cell's glyphs.
 /// A glyph wider than its cell reaches past the cell's edges: an Arabic
-/// final or isolated letter, after its join shift.
+/// final or isolated letter, after its join shift, or an Arabic ligature
+/// such as U+FDFD, drawn many cells wide in a row without a bidi layout.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn drawn_cell_spans(
     buf: &TextBuffer,
@@ -869,12 +892,11 @@ pub(crate) fn builtin_glyph_instance(
     cell: &super::builtin_glyphs::BuiltinCell,
     strokes: super::builtin_glyphs::Strokes,
     glyph_pipeline: &mut GlyphPipeline,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
+    device: DeviceRef<'_>,
     mask: &mut Vec<u8>,
 ) -> Option<GlyphInstance> {
     let key = cell.key(strokes)?;
-    let slot = glyph_pipeline.ensure_glyph(device, queue, key, || {
+    let slot = glyph_pipeline.ensure_glyph(device, key, || {
         if !super::builtin_glyphs::rasterize(key, mask) {
             return None;
         }
@@ -986,7 +1008,7 @@ pub(crate) fn emit_positioned_glyphs(
             let Some(text) = run.text.get(range.clone()) else {
                 continue;
             };
-            let offset = alacritty_terminal::term::grapheme_base_offset(text);
+            let offset = alacritty_terminal::term::grapheme_shaping_base_offset(text);
             if offset == 0 {
                 continue;
             }
@@ -1204,10 +1226,18 @@ pub(crate) fn emit_positioned_glyphs(
                     instances: start..out.len(),
                 });
             }
-            if let Some(cell) = cell
-                && out.len() > start
-            {
-                glyph_source.drew(cell.column, cell.width, start..out.len());
+            if out.len() > start {
+                match cell {
+                    Some(cell) => glyph_source.drew(cell.column, cell.width, start..out.len()),
+                    // Outside an emoji cluster each glyph is its own run, and
+                    // `active_cell` holds the column its text starts in.
+                    None if cluster.is_none() => {
+                        if let Some(column) = active_cell {
+                            glyph_source.drew(column, 1, start..out.len());
+                        }
+                    }
+                    None => {}
+                }
             }
         }
         if let Some(joined) = joined {

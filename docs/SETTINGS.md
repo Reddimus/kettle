@@ -1,18 +1,36 @@
 # Settings overlay
 
 kettle has a built-in **Settings** panel so you can change the common options
-without editing a config file. Open it with **`Ctrl + ,`** or
-**right-click → Settings…**.
+without editing a config file. Open it with **Cmd+,** on macOS or **Ctrl+,**
+elsewhere, or **right-click → Settings…**. Opening it again while it is open
+leaves it as it is, on the same option and search.
 
 The centered window has a category sidebar and a search field. The right pane
 shows the category title, a short description under each option, and a value
-control. On/Off switches show their state with a knob as well as the label,
-choices have arrows, and quantities
+control. On/Off switches are all one size and show their state without
+words: off, an outlined track with the knob at the left and an open ring;
+on, a filled track with a white knob at the right and a bar. The filled
+track keeps 3:1 contrast against the panel and the knob against the track
+in every theme. Choices have arrows, and quantities
 show their units. A control keeps one width while its value changes. The
-highlighted option has a bar at its left edge as well as a tint. An option
+highlighted option has a bar at its left edge as well as a tint, which stands
+out from the panel (at least 1.3:1) in light and dark themes alike. An option
 you have changed shows a **Reset** button beside its value; the highlighted
-option shows it dimmed when it already holds its default. Where a row is
-too narrow for the word, Reset shows as an anticlockwise-arrow icon, and on
+option shows it dimmed when it already holds its default. Reset removes the
+option's lines from your config file, older spellings and the Terminator keys
+it reads in their place included (`clipboard` for Clipboard access,
+`update-check` for Updates, `visible_bell`, `urgent_bell` and `force_no_bell`
+for Bell, `scrollback_infinite` for Scrollback lines), so the option follows
+Kettle's default from then on, including one that differs by platform, such as the font size.
+Where another line still decides the value, such as a `theme` line for
+Appearance or a `font` line for Font size, Reset adds the default after it and
+keeps that line. Reset saves in one step: if the file cannot be saved, the
+file and the option stay as they were. If it is saved but the system cannot
+confirm it reached the disk, the reset applies and a notification warns that
+it could be lost if the computer stops suddenly. Reset keeps lines of spaces
+or tabs; it takes only the one empty line Kettle added before a setting it
+appended.
+Where a row is too narrow for the word, Reset shows as an anticlockwise-arrow icon, and on
 the narrowest rows it is left out (Delete still resets). Below a panel width
 of 640 pixels, categories become a
 horizontal strip above the options. When categories overflow, click the left
@@ -25,10 +43,15 @@ and values shorten with an ellipsis.
 Click **Search settings**, or press **Cmd+F** on macOS or **Ctrl+F** elsewhere.
 With `vim-menu-nav` enabled, **/** also focuses the search field. Type to match
 labels, descriptions or config keys across every category. Matching ignores
-case and Spanish accents. Results stay grouped by category; **Enter** or
+case and Spanish accents. While a query is typed the title reads **Search
+results** and no category is marked as open. Results stay grouped by category; **Enter** or
 **Down** moves from the search field into the results. Normal navigation and
-value editing work there too. A search with no matches shows **No settings
-match**. **Esc** clears the query; another **Esc** closes Settings. Clicking a
+value editing work there too; Home, End and the page keys stop at the first
+and last results. A search with no matches shows **No settings
+match**; **Tab** then leaves the search for the next category. **Esc** clears
+the query; another **Esc** closes Settings. A search cleared from its field,
+without moving into a result, leaves the highlight where it was when the field
+was focused, on a result chosen before that included. Clicking a
 category clears the search and opens that category. Focusing Search through
 assistive technology cancels any pending keybinding capture.
 
@@ -37,25 +60,50 @@ assistive technology cancels any pending keybinding capture.
 | Key | Action |
 |---|---|
 | ↑ / ↓ | Move between options (skips options that don't apply) |
-| ← / → | Change the highlighted option |
+| Home / End | First / last option |
+| Page Up / Page Down | Move a page: the options in view, less one |
+| ← / → | Change the highlighted option; ← turns a switch off and → turns it on |
+| Shift+← / Shift+→ | Change a number ten steps at a time |
 | Delete / Backspace | Reset the highlighted setting to its default, as its Reset button does (not the theme, GPU, shortcut or text rows) |
-| Space / Enter | Toggle / cycle the highlighted option; on the Theme row, open the theme picker |
+| Space / Enter | Toggle / cycle the highlighted option; on the Theme row, open the theme picker. Numbers change with the arrows only |
 | Tab / Shift+Tab | Next / previous category |
 | Esc | Clear a search query, or close if the query is empty |
 
-The panel is also fully **mouse-driven**: **left-click** a row to cycle its
+The panel is also fully **mouse-driven**. Under the pointer, an option or a
+category lights up with a faint tint of the theme's selection colour, without
+the bar that marks the highlighted option, and Reset, a choice's ‹ › control
+and a switch darken or lighten like a dialog button, on the highlighted option
+too; the highlight itself stays where the
+keyboard put it. **Left-click** a row to cycle its
 value forward, **right-click** to cycle back, **scroll-wheel** over a row to
 adjust it, **left-click Reset** to restore a changed row's default, **click
 a category** to switch pages, and **click outside** the panel to close. A
 right-click or the wheel over Reset acts on the row as anywhere else on it.
-Screen readers get one Reset button for the highlighted row, named for the
-row and the default it restores ("Reset Font size to 14 px") and marked
-unavailable while the row holds that default. (A keybind row starts capture on click, the image-path row opens
-an inline text prompt, and the Theme row opens the theme picker.)
+Screen readers get one Change button for the highlighted row ("Change Font
+size"), over its value control, which changes the row as a left-click on it
+does (Space does the same to a switch, a choice or a text row; a number steps
+up, as → steps it), and one Reset button, named for the row and the default it restores ("Reset Font size
+to 14 px") and marked unavailable while the row holds that default. Pressing,
+focusing or selecting a row with a screen reader only highlights it: the
+platforms send the same request for selecting a row as for pressing it, so a
+row's own press never changes its value. While a shortcut row captures a
+chord, its Change button is unavailable. Each row is read with its value
+(a choice's current choice, a switch's On or Off); on Linux a switch is also
+reported checked or not checked. The locked macOS and Windows adapters cannot
+carry that state on a list row, so VoiceOver and Narrator hear the On or Off.
+On Linux and Windows each row also gives its place among the rows the list
+shows, such as 3 of 12; the locked macOS adapter does not pass that on.
+Rows scrolled out of the panel stay reachable with a screen reader's cursor;
+moving to one selects it and scrolls it into view. (A left-click on a keybind
+row, or its Change button, starts capture; on the image-path row it opens an
+inline text prompt, and on the Theme row the theme picker.)
 
 With **`vim-menu-nav`** on (the default), the panel also takes vim keys:
 `j`/`k` move between options, `h`/`l` change the highlighted option, `g`/`G`
-jump to the first/last option, and `Ctrl+d`/`Ctrl+u` move half a page. The
+jump to the first/last option, `Ctrl+d`/`Ctrl+u` move half the options in view, and
+Shift+`h`/`l` change a number ten steps at a time. Like
+the arrows, these jumps skip options that don't apply, as does a new category
+opened with Tab or a click. The
 same scheme works in the right-click context menu and the new-tab dropdown,
 where `h` closes or pops a submenu and `l` drills in or activates. `y`/`n`
 answer confirm dialogs. In the Confirm paste dialog `y` only takes Paste
@@ -125,7 +173,7 @@ four-logical-pixel gap. Free text and shortcut fields have no Reset.
 | Option | Config key | Notes |
 |---|---|---|
 | Background opacity | `background-opacity` | 20–100% (stored as 0.0–1.0) |
-| Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window. Where the session cannot blur (GNOME and other Wayland compositors without KWin's blur protocol, X11 including KDE Plasma on X11, and Windows without its system backdrop, such as Windows 10), the switch reads **Unavailable** instead of On, unfilled with a hollow knob, the row says "This session cannot blur; saved setting: On. Opacity still applies.", the footer drops its blur hint on this row and Background opacity, and background opacity still works. The switch still turns blur off. On Wayland, for the moment (at most half a second) while Kettle asks the compositor, it reads **Checking…** rather than On |
+| Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window. Where the session cannot blur (GNOME and other Wayland compositors without KWin's blur protocol, X11 including KDE Plasma on X11, and Windows without its system backdrop, such as Windows 10), the switch is unfilled with a hollow knob and **Unavailable** shows beside it, the row says "This session cannot blur; saved setting: On. Opacity still applies.", the footer drops its blur hint on this row and Background opacity, and background opacity still works. The switch still turns blur off, and turning it on there asks for no new window, since one would not blur either. On Wayland, for the moment (at most half a second) while Kettle asks the compositor, **Checking…** shows beside the switch instead. The switch keeps the same size as every other switch in every state |
 | Window padding | `window-padding-x` | 0–40 px |
 | Show pane titlebars | `show-titlebar` | On / Off |
 
@@ -146,7 +194,7 @@ the panel. See [BACKGROUNDS.md](BACKGROUNDS.md).
 |---|---|---|
 | Background | `background-type` | Solid color · Image · Starfield (animated) · Transparent |
 | Image file | `background-image` | the wallpaper path — **editable inline** here (Enter to open the prompt, type a path, Enter to save). Only for `image` |
-| Animation | `background-animation` | Always (default) · When focused · Off — how a starfield / animated image plays |
+| Animation | `background-animation` | Always (default) · When focused · Off — how a starfield / animated image plays; reduced motion holds it still |
 | Interface bar color | `chrome-background` | Theme · Automatic (from wallpaper) · Black · White |
 
 ### Behavior
@@ -231,17 +279,27 @@ history-scan bounds, and TUI behavior.
 
 | Option | Config key | Notes |
 |---|---|---|
+| Renderer | `renderer` | Automatic · CPU · GPU. **Default: Automatic** (the CPU on Linux, the GPU elsewhere). CPU is Linux-only. Applies on the next launch; every window follows the first one's renderer |
 | GPU preference | `gpu-power-preference` | Automatic · Low power (integrated) · High performance. **Default: Automatic** (platform/wgpu chooses). Pick `high` only when you want dedicated-GPU render headroom on hybrid hardware |
 | GPU device | `gpu-device-id` + `gpu-vendor-id` + `gpu-name` | Pin a *specific* detected GPU, or **Automatic**. The list is the GPUs found on this machine |
 | GPU backend | `gpu-backend` | Automatic · DirectX 12 · Vulkan · Metal · OpenGL |
 | Force software rendering | `gpu-force-software` | On / Off — debugging fallback (slow) |
 
-A footer line shows the **Active GPU** in use right now. GPU changes take effect
-on the **next launch** (the GPU/surface graph can't hot-swap), so the panel shows
-"Restart Kettle or open a new window to apply pending changes." after an edit
-that requires a restart or new window. The pending flag does not record the
-cause, so selecting Graphics does not change that wording. GPU edits require a
-full restart. The GPU picker persists the selection per application.
+A footer line shows the **Active GPU** in use right now, or, for windows drawn
+on the CPU, **Active renderer: CPU** with its presenter. On the CPU renderer the
+GPU device list holds only **Automatic**: listing adapters would load a GPU
+driver into the process. Renderer and GPU changes take effect on the **next
+launch** (the GPU/surface graph can't hot-swap). While a saved graphics setting
+differs from the one Kettle started with, the footer says "Restart Kettle to
+apply graphics changes.", however the change was made and however often
+Settings is reopened, until Kettle restarts or the setting is put back. A
+recovery from a lost GPU device builds the new device with the saved GPU
+settings, so the note goes then for each one the device it got honours; a
+pin, backend or power preference the recovery passed over, and a renderer
+change, still wait. A
+background opacity, type or blur change that this window was not opened able
+to show says "Restart Kettle or open a new window to apply pending changes."
+instead. The GPU picker persists the selection per application.
 
 **Agents**
 
@@ -268,9 +326,13 @@ launch.
 ### Keybinds
 
 Rebind common actions interactively. Each row shows the chord
-currently bound to that action; press **Enter** on a row, then press the new
+currently bound to that action, the one the menus and the command palette
+show (on macOS the Cmd chord where the action has one); press **Enter** on a row, then press the new
 chord you want (any modifier combination). It binds immediately (replacing the
-action's previous chord) and is saved to your config as a `keybind = …` line. Press **Esc** to cancel a capture. Covered
+action's previous chord) and is saved to your config as a `keybind = …` line. Press **Esc** to cancel a capture.
+A key pressed without a modifier is refused (a Keybinds row takes a bare F-key
+or Menu key): the row reads **Add a modifier, Esc to cancel** and keeps
+waiting. Covered
 actions are grouped in this order:
 
 #### Panes
@@ -302,7 +364,11 @@ these config-only options; edits still reload immediately for every open pane.
 ### Theme picker
 
 The theme picker lists every bundled theme. Type part of a name to filter them,
-or move with ↑/↓; the window wears the selected theme while you browse. Enter
+or move with ↑/↓; the window wears the selected theme while you browse. Moving
+the pointer onto a row selects it too, and the window wears that theme once
+the pointer rests there for a moment, so sweeping across the list does not
+flash every theme (moving off the row first leaves the window's theme as it
+was); a still pointer never takes the selection from the keys. Enter
 keeps it and writes it to your config file, and Esc puts back the theme you
 started with, or, if the system or the schedule switched sides while the
 picker was open, that side's theme. The prompt names the side a pick saves

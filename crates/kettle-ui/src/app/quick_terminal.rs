@@ -208,7 +208,7 @@ impl App {
         self.quick_terminal
             .portal_wake_pending
             .store(false, std::sync::atomic::Ordering::Release);
-        if self.gpu.is_none() {
+        if !self.renderers_ready() {
             return;
         }
         #[cfg(target_os = "linux")]
@@ -281,7 +281,7 @@ impl App {
     }
 
     pub(super) fn toggle_quick_terminal(&mut self, el: &ActiveEventLoop) -> bool {
-        if self.gpu.is_none() {
+        if !self.renderers_ready() {
             return false;
         }
         if !self.quick_terminal.model.visible {
@@ -302,9 +302,8 @@ impl App {
         match self.quick_terminal.model.toggle(can_return) {
             Effect::Show => {
                 let rect = self.quick_geometry(el);
-                let animate = quick::can_slide(self.quick_terminal.wayland, || {
-                    self.quick_system_motion_allowed()
-                });
+                let animate =
+                    quick::can_slide(self.quick_terminal.wayland, || self.quick_slide_allowed());
                 self.quick_terminal.slide = rect.filter(|_| animate).map(|rect| {
                     quick::Slide::new(
                         seq,
@@ -355,9 +354,7 @@ impl App {
         true
     }
 
-    // The system's reduced-motion preference always wins for this animation,
-    // even when the general reduce-motion config is explicitly off.
-    fn quick_system_motion_allowed(&self) -> bool {
+    fn quick_slide_allowed(&self) -> bool {
         quick::animation_allowed(
             self.cfg.quick_terminal_animation,
             self.cfg.reduce_motion,

@@ -114,7 +114,7 @@ chrome-background = auto
 | `background-image-align-horiz` / `-vert` | position for `center` / `scale` |
 | `background-blur` | CPU 3-pass box blur at load (a soft, subtle backdrop) |
 | `background-darkness` | `0.0` fully see-through (backdrop at full strength) … `1.0` fully covered (backdrop hidden); default `0.5` |
-| `background-animation` | `always` (default), `when-focused` (battery-friendly), `off` (freeze on frame 1) — applies to the starfield and animated images alike |
+| `background-animation` | `always` (default), `when-focused` (battery-friendly), `off` (freeze on frame 1) — applies to the starfield and animated images alike. Reduced motion (`reduce-motion`) holds either one still on its current frame |
 
 **Performance.** Decoded animations are capped at 128 MiB and 128 frames;
 longer animations retain only the frames that fit. Frames decode once per

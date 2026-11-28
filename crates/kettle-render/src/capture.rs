@@ -1,11 +1,17 @@
+// The one-frame offscreen capture draws on the backend the config chooses
+// (`preferred_backend`): the GPU, or the CPU renderer's software raster.
+use super::backend::layers::{QuadLayer, RoundedSurfaceLayer};
+use super::backend::offscreen::render_offscreen_rgba8;
+use super::backend::text::{Cache, TextAtlas, TextRenderer, Viewport};
+use super::backend::{DeviceRef, RendererBackend};
 use super::{
-    Attrs, Cache, Config, ContextMenu, ContextMenuRow, Family, FontSystem, GColor, GlyphClip,
+    Attrs, Config, ContextMenu, ContextMenuRow, Family, FontSystem, GColor, GlyphClip,
     GlyphInstance, GlyphPipeline, Metrics, OUTLINE_BOTTOM_LEFT, OUTLINE_BOTTOM_RIGHT,
     OutlinePipeline, QuadInstance, QuadPipeline, Resolution, Result, Rgb, Shaping, SwashCache,
-    Text, TextArea, TextAtlas, TextBounds, TextBuffer, TextRenderer, TextRendererMode, Translator,
-    Viewport, Wrap, anyhow, bell_flash_alpha, cap_axis_cells, chrome, clamp_font_size, color,
-    composed_bg_alpha, context_menu_panel_width, emit_cell_locked_glyphs, gc, imgpipe,
-    live_device_limits, load_bundled_font, measure_cell, menu_chrome_quads, pane_outline, rect,
+    Text, TextArea, TextBounds, TextBuffer, TextRendererMode, Translator, Wrap, anyhow,
+    bell_flash_alpha, cap_axis_cells, chrome, clamp_font_size, color, composed_bg_alpha,
+    context_menu_panel_width, emit_cell_locked_glyphs, gc, imgpipe, live_device_limits,
+    load_bundled_font, measure_cell, menu_chrome_quads, pane_outline, rect,
     resolve_headless_adapter, surface_clear_color, unpremultiply_rgba8,
 };
 
@@ -66,8 +72,10 @@ pub(crate) fn screenshot_meter(value: u32, total: u32) -> (String, String) {
 /// Which synthetic scene to render in [`capture_png_with`].
 ///
 /// Every scene is rendered **offscreen** (no window/surface) through kettle's
-/// *real* GPU text + quad path (bundled Nerd Font, `glyphon` shaping, the
-/// `QuadPipeline`, the active theme). The base frame is a scripted two-pane
+/// *real* text + quad path (bundled Nerd Font, `glyphon` shaping, the quad
+/// and glyph pipelines, the active theme), on the backend the config chooses
+/// ([`crate::preferred_backend`]): the GPU, or on Linux by default the CPU
+/// renderer, which matches it within 2 per channel and loads no GPU driver. The base frame is a scripted two-pane
 /// vertical split under the tab bar (active tab, per-tab `✕`, trailing `+`),
 /// with a themed shell session on the left and a monitor-style readout on the
 /// right. This synthetic fixture exercises the offscreen text and quad pipelines;
@@ -136,6 +144,11 @@ pub fn capture_png_with_annotation(
     scene: DebugScene,
     annotation: Option<&str>,
 ) -> Result<(u32, u32)> {
+    // The CPU renderer (Linux's default) needs no adapter, and loads no GPU
+    // driver into this process either.
+    if crate::preferred_backend(cfg).backend == RendererBackend::Cpu {
+        return capture_scene(cfg, cols, rows, out, scene, annotation, DeviceRef::Cpu);
+    }
     pollster::block_on(async {
         let (_instance, adapter) = resolve_headless_adapter(cfg, "capture_png").await?;
         let (device, queue) = adapter
@@ -146,29 +159,68 @@ pub fn capture_png_with_annotation(
             })
             .await
             .map_err(|e| anyhow!("device: {e:?}"))?;
+        capture_scene(
+            cfg,
+            cols,
+            rows,
+            out,
+            scene,
+            annotation,
+            DeviceRef::gpu(&device, &queue),
+        )
+    })
+}
+
+/// A `QuadPipeline::new` on `device`'s backend: a blending quad layer.
+fn quad_layer(device: DeviceRef<'_>, format: wgpu::TextureFormat) -> QuadLayer {
+    match device {
+        DeviceRef::Gpu { device, .. } => QuadLayer::Gpu(QuadPipeline::new(device, format)),
+        DeviceRef::Cpu => QuadLayer::cpu_blend(),
+    }
+}
+
+/// A `RoundedSurfacePipeline::new` on `device`'s backend.
+fn rounded_layer(device: DeviceRef<'_>, format: wgpu::TextureFormat) -> RoundedSurfaceLayer {
+    match device {
+        DeviceRef::Gpu { device, .. } => RoundedSurfaceLayer::Gpu(
+            crate::rounded_surface::RoundedSurfacePipeline::new(device, format),
+        ),
+        DeviceRef::Cpu => RoundedSurfaceLayer::cpu(crate::rounded_surface::DEFAULT_CAPACITY),
+    }
+}
+
+/// The capture's scene on `dev`; see [`capture_png_with_annotation`].
+#[allow(clippy::too_many_arguments)]
+fn capture_scene(
+    cfg: &Config,
+    cols: u32,
+    rows: u32,
+    out: &std::path::Path,
+    scene: DebugScene,
+    annotation: Option<&str>,
+    dev: DeviceRef<'_>,
+) -> Result<(u32, u32)> {
+    {
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
 
         let mut font_system = FontSystem::new();
         for face in kettle_config::font::all() {
             load_bundled_font(&mut font_system, face);
         }
-        let swash_cache = Cache::new(&device);
-        let mut atlas = TextAtlas::new(&device, &queue, &swash_cache, format);
-        let viewport = Viewport::new(&device, &swash_cache);
-        let mut text_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let swash_cache = Cache::new(dev);
+        let mut atlas = TextAtlas::new(dev, &swash_cache, format);
+        let viewport = Viewport::new(dev, &swash_cache);
+        let mut text_renderer = TextRenderer::new(&mut atlas, dev);
         let mut swash = SwashCache::new();
-        let mut quads = QuadPipeline::new(&device, format);
+        let mut quads = quad_layer(dev, format);
         // Second pipelines for the debug-scene overlays (context menu, bell
         // flash, scrollbar). Allocated unconditionally (small, cheap) so the
         // render pass can always call `draw` / `render` on them; empty uploads
         // are a no-op. Mirrors the live `Renderer`.
-        let mut menu_quads_pipe = QuadPipeline::new(&device, format);
-        let mut menu_surfaces_pipe =
-            crate::rounded_surface::RoundedSurfacePipeline::new(&device, format);
+        let mut menu_quads_pipe = quad_layer(dev, format);
+        let mut menu_surfaces_pipe = rounded_layer(dev, format);
         let mut menu_surfaces = Vec::new();
-        let mut menu_text_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let mut menu_text_renderer = TextRenderer::new(&mut atlas, dev);
 
         let theme = &cfg.theme;
         let fam = cfg.font_family.clone();
@@ -201,7 +253,7 @@ pub fn capture_png_with_annotation(
         let body_h = rows as f32 * ch;
         let w = (pad * 2.0 + body_w).ceil() as u32;
         let h = (tab_h + body_h + pad * 2.0).ceil() as u32;
-        let texture_limit = device.limits().max_texture_dimension_2d.min(8192);
+        let texture_limit = dev.max_texture_dimension_2d().min(8192);
         if w > texture_limit || h > texture_limit {
             let tr = Translator::new(cfg.language.resolve(kettle_i18n::os_locale));
             return Err(anyhow!(tr.text(Text::ScreenshotDimensionsTooLarge)));
@@ -498,33 +550,31 @@ pub fn capture_png_with_annotation(
 
         let mut vp = viewport;
         vp.update(
-            &queue,
+            dev,
             Resolution {
                 width: w,
                 height: h,
             },
         );
-        quads.upload(&device, &queue, [wf, hf], &q);
-        text_renderer.prepare(
-            &device,
-            &queue,
-            &mut font_system,
-            &mut atlas,
-            &vp,
-            areas,
-            &mut swash,
-        )?;
+        quads.upload(dev, [wf, hf], &q);
+        text_renderer.prepare(dev, &mut font_system, &mut atlas, &vp, areas, &mut swash)?;
 
         // Grid (default `text-renderer`): emit the pane body buffers through the
         // cell-locked GlyphPipeline — the exact renderer the shipped product
         // uses — so the README imagery isn't a legacy-glyphon misrepresentation.
         // Each buffer's appended instance range gets its own `GlyphClip` so the
         // scissor clips text to its pane, mirroring the live `emit_pane_glyphs`.
-        let mut grid_glyphs =
-            GlyphPipeline::new_with_budget(&device, format, kettle_core::GraphicsBudget::default())
-                .ok_or_else(|| {
-                    anyhow!("GPU graphics budget exhausted while capturing screenshot")
-                })?;
+        let mut grid_glyphs = match dev {
+            DeviceRef::Gpu { device, .. } => GlyphPipeline::new_with_budget(
+                device,
+                format,
+                kettle_core::GraphicsBudget::default(),
+            ),
+            DeviceRef::Cpu => {
+                GlyphPipeline::new_cpu(format, kettle_core::GraphicsBudget::default())
+            }
+        }
+        .ok_or_else(|| anyhow!("graphics budget exhausted while capturing screenshot"))?;
         let mut grid_instances: Vec<GlyphInstance> = Vec::new();
         let mut grid_clips: Vec<GlyphClip> = Vec::new();
         if grid {
@@ -549,8 +599,7 @@ pub fn capture_png_with_annotation(
                     &mut grid_glyphs,
                     &mut swash,
                     &mut font_system,
-                    &device,
-                    &queue,
+                    dev,
                     &mut char_starts,
                     &mut Vec::new(),
                 );
@@ -560,7 +609,7 @@ pub fn capture_png_with_annotation(
                     count: grid_instances.len() as u32 - start,
                 });
             }
-            grid_glyphs.upload(&device, &queue, [wf, hf], &grid_instances);
+            grid_glyphs.upload(dev, [wf, hf], &grid_instances);
         }
 
         // `DebugScene::ContextMenu`: build a synthetic context menu at
@@ -675,6 +724,7 @@ pub fn capture_png_with_annotation(
                 panel_w_clamped: 0.0,
                 panel_h_clamped: 0.0,
                 a11y_label: None,
+                status: None,
                 picker_header_height: 0.0,
                 picker_footer: None,
             };
@@ -799,11 +849,10 @@ pub fn capture_png_with_annotation(
                 menu_q.push(rect(x, y, w, h, ink, alpha));
             }
         }
-        menu_surfaces_pipe.upload(&device, &queue, [wf, hf], &menu_surfaces);
-        menu_quads_pipe.upload(&device, &queue, [wf, hf], &menu_q);
+        menu_surfaces_pipe.upload(dev, [wf, hf], &menu_surfaces);
+        menu_quads_pipe.upload(dev, [wf, hf], &menu_q);
         menu_text_renderer.prepare(
-            &device,
-            &queue,
+            dev,
             &mut font_system,
             &mut atlas,
             &vp,
@@ -811,127 +860,44 @@ pub fn capture_png_with_annotation(
             &mut swash,
         )?;
 
-        let tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("kettle-screenshot-target"),
-            size: wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let bpp = 4u32;
-        let unpadded = w * bpp;
-        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let padded = unpadded.div_ceil(align) * align;
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("kettle-screenshot-readback"),
-            size: (padded * h) as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let mut enc =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let bg = theme.background;
-            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("kettle-screenshot-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        // Route through composed_bg_alpha so the screenshot
-                        // honors background-type, background-darkness, and
-                        // cfg.background_opacity the way the live window does.
-                        // A hardcoded `a: 1.0` would turn `kettle --screenshot
-                        // --config /transparent.conf` into an opaque PNG.
-                        //
-                        // This target is ours end to end, so it clears
-                        // premultiplied to match what the pipelines drawing
-                        // over it expect, and `unpremultiply_rgba8` converts
-                        // back to the straight alpha PNG stores before the
-                        // pixels are saved.
-                        load: wgpu::LoadOp::Clear(surface_clear_color(
-                            bg,
-                            composed_bg_alpha(cfg),
-                            wgpu::CompositeAlphaMode::PreMultiplied,
-                        )),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            quads.draw(&mut pass);
-            // Grid mode draws pane body text through the cell-locked pipeline
-            // (the `grid_clips` scissor each pane); the `text_renderer` then only
-            // carries the annotation chrome. Legacy mode left all pane text in
-            // `text_renderer` and `grid_clips` is empty (no-op draw). Same pass
-            // order as the live `Renderer::render_frame`: quads, then glyphs.
-            grid_glyphs.draw(&mut pass, &grid_clips, [w, h]);
-            text_renderer.render(&atlas, &vp, &mut pass)?;
-            // Menu chrome + menu text, same pass order as
-            // the live `Renderer::render_frame`. Cheap no-ops for the
-            // `DebugScene::Default` path because both uploads are
-            // empty.
-            menu_surfaces_pipe.draw_range(&mut pass, 0..u32::MAX);
-            menu_quads_pipe.draw(&mut pass);
-            menu_text_renderer.render(&atlas, &vp, &mut pass)?;
-        }
-        enc.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded),
-                    rows_per_image: Some(h),
-                },
-            },
-            wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
+        // Route the clear through composed_bg_alpha so the screenshot honors
+        // background-type, background-darkness, and cfg.background_opacity
+        // the way the live window does. A hardcoded `a: 1.0` would turn
+        // `kettle --screenshot --config /transparent.conf` into an opaque PNG.
+        //
+        // This target is ours end to end, so it clears premultiplied to match
+        // what the pipelines drawing over it expect, and `unpremultiply_rgba8`
+        // converts back to the straight alpha PNG stores before the pixels are
+        // saved.
+        let clear = surface_clear_color(
+            theme.background,
+            composed_bg_alpha(cfg),
+            wgpu::CompositeAlphaMode::PreMultiplied,
         );
-        queue.submit(std::iter::once(enc.finish()));
-
-        let slice = readback.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        rx.recv()
-            .map_err(|_| anyhow!("map channel closed"))?
-            .map_err(|e| anyhow!("buffer map failed: {e:?}"))?;
-
-        let data = slice
-            .get_mapped_range()
-            .map_err(|e| anyhow!("capture mapped range failed: {e:?}"))?;
-        let mut pixels = Vec::with_capacity((unpadded * h) as usize);
-        for row in 0..h {
-            let start = (row * padded) as usize;
-            pixels.extend_from_slice(&data[start..start + unpadded as usize]);
-        }
-        drop(data);
-        readback.unmap();
+        let mut pixels = render_offscreen_rgba8(dev, format, w, h, clear, |pass| {
+            quads.draw(pass);
+            // Grid mode draws pane body text through the cell-locked pipeline
+            // (the `grid_clips` scissor each pane); the `text_renderer` then
+            // only carries the annotation chrome. Legacy mode left all pane
+            // text in `text_renderer` and `grid_clips` is empty (no-op draw).
+            // Same pass order as the live `Renderer::render_frame`: quads,
+            // then glyphs.
+            grid_glyphs.draw_in_window(
+                pass,
+                &grid_clips,
+                [w, h],
+                [0, 0, w.max(1), h.max(1)],
+                false,
+            );
+            text_renderer.render(&atlas, &vp, pass)?;
+            // Menu chrome + menu text, same pass order as the live
+            // `Renderer::render_frame`. Cheap no-ops for the
+            // `DebugScene::Default` path because both uploads are empty.
+            menu_surfaces_pipe.draw_range(pass, 0..u32::MAX);
+            menu_quads_pipe.draw(pass);
+            menu_text_renderer.render(&atlas, &vp, pass)?;
+            Ok(())
+        })?;
 
         // The pass composited premultiplied; PNG stores straight alpha. Ask
         // the format which space the multiply happened in rather than assuming
@@ -951,7 +917,7 @@ pub fn capture_png_with_annotation(
                 .map_err(|e| anyhow!("write {}: {e}", out.display()))
         })?;
         Ok((cols, rows))
-    })
+    }
 }
 
 /// Headless GPU validation. Builds the real wgpu pipelines (compiling the

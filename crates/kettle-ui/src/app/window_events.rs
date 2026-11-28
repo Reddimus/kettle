@@ -269,6 +269,7 @@ impl App {
             }
             WindowEvent::CursorLeft { .. } => {
                 dismiss_link_hover(ws);
+                self.context_menu_pointer_left(ws);
                 // A compositor's move grab takes the pointer away as well.
                 ws.titlebar_click = None;
                 if let Some(dialog) = ws.confirm_dialog.as_mut() {
@@ -304,6 +305,8 @@ impl App {
                 ws.native_pointer = None;
                 ws.card_hover = None;
                 ws.card_settle_wake = None;
+                // Nor is a theme picker row it was resting on.
+                picker_pointer_left(ws);
                 if let Some(receipt) = ws.media_paste_receipt.as_mut() {
                     receipt.set_hover(false, std::time::Instant::now());
                 }
@@ -340,6 +343,7 @@ impl App {
                     return;
                 }
                 self.update_search_hover(ws);
+                self.track_settings_hover(ws);
                 if ws.selecting {
                     note_selection_drag_motion(ws);
                 }
@@ -503,6 +507,10 @@ impl App {
                         return;
                     }
                 }
+                // The scrollbar hover goes first: motion a program reports
+                // returns below, and must not leave lit a bar the pointer
+                // has left.
+                self.update_scrollbar_hover(ws);
                 {
                     // Motion. `MOUSE_NO_BUTTON` is xterm's code 3, which with
                     // the motion bit is the `CSI < 35 ; x ; y M` report DEC
@@ -524,20 +532,6 @@ impl App {
                     }
                     return;
                 }
-                // Overlay-scrollbar hover-brighten. Update the hovered
-                // pane's identity and repaint only on the enter/leave edge so it
-                // costs nothing while the pointer is elsewhere.
-                {
-                    let area = self.area(ws);
-                    let (px, py) = (ws.cursor.x as f32, ws.cursor.y as f32);
-                    let hover = self.scrollbar_pane_at(ws, area, px, py);
-                    if hover != ws.scrollbar_hover {
-                        ws.scrollbar_hover = hover;
-                        if let Some(w) = &ws.window {
-                            w.request_redraw();
-                        }
-                    }
-                }
                 if ws.selecting {
                     let area = self.area(ws);
                     self.update_selection(ws, area);
@@ -557,6 +551,13 @@ impl App {
                 ..
             } => {
                 ws.resume_native_pointer();
+                // A press hides the tooltip until the pointer leaves its
+                // control.
+                if ws.tooltip.press(std::time::Instant::now())
+                    && let Some(window) = &ws.window
+                {
+                    window.request_redraw();
+                }
                 // A paste still waiting for the clipboard never lands behind
                 // a click.
                 self.drop_clipboard_wait(ws);
@@ -653,9 +654,12 @@ impl App {
                 if bcode == 0 {
                     ws.card_press = None;
                 }
-                // And a jump button's: a new primary press starts over.
+                // And a jump button's or a title-bar button's: a new primary
+                // press starts over, so an old press's release, which went
+                // elsewhere, is never taken for this one's.
                 if bcode == 0 {
                     ws.scrollback_pill_press = None;
+                    ws.cancel_strip_presses();
                 }
                 // Likewise a program still noted as holding this button gets
                 // the release it missed, and the press is Kettle's own
@@ -796,41 +800,30 @@ impl App {
                 {
                     return;
                 }
+                // A right-click on a tab opens that tab's menu.
+                if bcode == 2
+                    && let Some(idx) = tab_menu_segment(&bar, px, py)
+                {
+                    self.open_tab_menu(ws, idx, px, py);
+                    return;
+                }
                 if tab_bar_pointer_region_contains(&bar, px, py) && (bcode == 0 || bcode == 1) {
                     if press_settings_gear(ws, &bar, (px, py), bcode) {
                         // The Settings gear opens on release, like a native
                         // button; a middle press does nothing.
-                    } else if bcode == 0 && search_button_at(&bar, px, py) {
-                        // GNOME's Find button opens or closes Find, as its
-                        // shortcut does.
-                        ws.pressed_search = true;
-                        self.toggle_header_find(ws);
+                    } else if bcode == 0 && press_strip_button(ws, &bar, (px, py)) {
+                        // `+` and GNOME's Find act on release over themselves,
+                        // like native buttons, so dragging off cancels.
                     } else if bcode == 0
                         && bar.new_tab_menu.2 > 0.0
                         && in_bar(bar.new_tab_menu, px, py)
                     {
                         // The `▾` dropdown — open the shell chooser
-                        // anchored at the arrow's bottom-left. Checked BEFORE the
-                        // `+` so the arrow region isn't swallowed by the button.
+                        // anchored at the arrow's bottom-left. A menu button,
+                        // it opens on press, as GTK's and AppKit's do.
                         ws.pressed_new_tab_menu = true;
                         let (ax, ay, _, ah) = bar.new_tab_menu;
                         self.open_new_tab_menu(ws, ax, ay + ah);
-                    } else if bcode == 0 && in_bar(bar.new_tab, px, py) {
-                        ws.pressed_new_tab = true;
-                        let area = self.area(ws);
-                        let (cols, rows) = self.grid_of(ws, area);
-                        let geometry = self.pty_geometry_for_grid(ws, cols, rows);
-                        // Log a `+`-button new-tab spawn failure rather than
-                        // swallowing it, and fire TabAdd on success so Lua
-                        // `TabAdd` and dev-record see the new tab.
-                        let pre = self.focus_key(ws);
-                        match ws.mux.new_tab_geometry(&self.cfg, geometry, self.waker()) {
-                            Ok(()) => {
-                                self.note_focus_change(ws, pre);
-                                self.fire_tab_add_event(ws);
-                            }
-                            Err(e) => log::warn!("could not open a new tab (+ button): {e}"),
-                        }
                     } else if bcode == 0
                         && bar.scroll_left.2 > 0.0
                         && in_bar(bar.scroll_left, px, py)
@@ -965,8 +958,7 @@ impl App {
                 // modifier) is enough to open URLs. Default keeps
                 // kettle's Ctrl-click guard so accidental drags don't
                 // navigate.
-                let url_modifier =
-                    self.cfg.link_single_click || ws.mods.control_key() || ws.mods.super_key();
+                let url_modifier = link_click_opens(self.cfg.link_single_click, ws.mods);
                 if bcode == 0
                     && url_modifier
                     && let Some(uri) = self.link_at_cursor(ws).map(|l| l.uri.clone())
@@ -1105,15 +1097,17 @@ impl App {
                     let at = (ws.cursor.x as f32, ws.cursor.y as f32);
                     self.track_titlebar_pointer(ws, TitlebarPointer::Release(at.0, at.1));
                 }
-                if button == MouseButton::Left
-                    && (ws.pressed_new_tab || ws.pressed_new_tab_menu || ws.pressed_search)
-                {
-                    ws.pressed_new_tab = false;
+                if button == MouseButton::Left && ws.pressed_new_tab_menu {
                     ws.pressed_new_tab_menu = false;
-                    ws.pressed_search = false;
                     if let Some(window) = &ws.window {
                         window.request_redraw();
                     }
+                }
+                if button == MouseButton::Left
+                    && let Some(released) = release_strip_button(ws, |ws| self.tab_bar(ws))
+                {
+                    self.act_on_strip_release(ws, released);
+                    return;
                 }
                 if button == MouseButton::Left
                     && let Some(action) = release_settings_gear(ws, |ws| self.tab_bar(ws))
@@ -1278,7 +1272,13 @@ impl App {
                 }
                 if bcode == 0 {
                     ws.search.dragging_editor = false;
-                    ws.scrollbar_drag_offset = None;
+                    // A drag held the arrow and the bar's hover wherever it
+                    // went; released over text the pointer gets the I-beam
+                    // back and the bar narrows now, not on its next move.
+                    if end_scrollbar_drag(ws) {
+                        self.update_scrollbar_hover(ws);
+                        self.sync_cursor_icon(ws);
+                    }
                     // End the drag-to-reorder gesture on
                     // left-button release. Any swaps that happened
                     // during the drag are already committed; this just
@@ -1630,6 +1630,10 @@ impl App {
             WindowEvent::Occluded(occluded) => {
                 // Suppress animation wakes while occluded; repaint on return.
                 ws.window_occluded = occluded;
+                // A CPU window gives back its buffers while hidden.
+                if let Some(renderer) = ws.renderer.as_mut() {
+                    renderer.set_occluded(occluded);
+                }
                 if occluded {
                     Self::hide_cursor_layer(ws);
                 }

@@ -20,6 +20,11 @@
       "sha256": "09c928886a178fcafd93c29e4bd59073a058e5a100b716d425cb563ab50f68c9"
     },
     {
+      "file": "IndicSyllabicCategory.txt",
+      "url": "https://www.unicode.org/Public/18.0.0/ucd/IndicSyllabicCategory.txt",
+      "sha256": "a2b3aacf6b3e7bad4ca351ef985d9543825e20280ff280c25f646d9bc4ce304c"
+    },
+    {
       "file": "emoji-data.txt",
       "url": "https://www.unicode.org/Public/18.0.0/ucd/emoji/emoji-data.txt",
       "sha256": "16dc935647bd803a2b1ccd755f15b59a9a9d1bb75f9ab5f67c80d3ba336a6fe6",

@@ -316,6 +316,7 @@ mod tests {
                     "\x1b[1;31m世界 e\u{301}\x1b[0m".into(),
                     false,
                     vec![(10, true), (13, true), (14, false), (17, true)],
+                    vec![(0, 2), (3, 4)],
                 )],
             }]]],
         );
@@ -363,18 +364,29 @@ mod tests {
                 &session,
                 vec![vec![vec![PaneContent {
                     remote: false,
-                    lines: vec![(line, false, vec![])],
+                    lines: vec![(line, false, vec![], vec![])],
                 }]]],
             )
             .save(&path)
             .unwrap();
             assert!(load(&path, &session).is_none());
         }
+        // A protected run that reaches past the row's one cell.
         ContentSnapshot::new(
             &session,
             vec![vec![vec![PaneContent {
                 remote: false,
-                lines: vec![("safe".into(), false, vec![])],
+                lines: vec![("safe".into(), false, vec![(4, false)], vec![(0, 2)])],
+            }]]],
+        )
+        .save(&path)
+        .unwrap();
+        assert!(load(&path, &session).is_none());
+        ContentSnapshot::new(
+            &session,
+            vec![vec![vec![PaneContent {
+                remote: false,
+                lines: vec![("safe".into(), false, vec![], vec![])],
             }]]],
         )
         .save(&path)
@@ -392,10 +404,99 @@ mod tests {
             &session(),
             vec![vec![vec![PaneContent {
                 remote: false,
-                lines: vec![("x".repeat(MAX_BYTES), false, vec![])],
+                lines: vec![("x".repeat(MAX_BYTES), false, vec![], vec![])],
             }]]],
         );
         assert!(snapshot.save(&path).is_err());
         assert!(!super::path(&path).exists());
+    }
+
+    /// With remote saving off, a remote session's output stays out of the
+    /// saved file after the pane narrows or widens. The boundary counted
+    /// rows, and a width change rewraps rows, so narrowing moved it into the
+    /// middle of the remote output and saved the rest as local. Local output
+    /// written after the session ended still saves.
+    #[cfg(unix)]
+    #[test]
+    fn remote_output_stays_unsaved_through_width_changes() {
+        use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
+        use std::sync::Arc;
+        let cfg = kettle_config::Config {
+            restore_scrollback_remote: false,
+            restore_scrollback_lines: 1000,
+            ..Default::default()
+        };
+        let saved_text = |mux: &crate::mux::Mux| {
+            let content = mux.snapshot_content(&cfg, &mut TEXT_BUDGET.clone());
+            let session = mux.snapshot();
+            let dir = crate::test_tempdir();
+            let path = dir.path().join("session.json");
+            ContentSnapshot::new(&session, vec![content])
+                .save(&path)
+                .unwrap();
+            let loaded = load(&path, &session).unwrap();
+            let pane = &loaded.windows[0][0][0];
+            assert!(!pane.remote);
+            pane.lines
+                .iter()
+                .map(|row| row.0.as_str())
+                .collect::<String>()
+        };
+        for (local, sizes) in [
+            (false, &[(10, 4)][..]),
+            (true, &[(10, 4)][..]),
+            (true, &[(13, 4), (80, 4), (25, 7), (40, 3)][..]),
+        ] {
+            let mut mux = crate::mux::Mux::new();
+            mux.new_tab_with(
+                &cfg,
+                40,
+                4,
+                8,
+                16,
+                Arc::new(|| {}),
+                &["/bin/cat".into()],
+                None,
+            )
+            .unwrap();
+            let id = mux.active_focus().unwrap();
+            let line = "REMOTE_SECRET_ABCDEFGHIJKLMNOPQRSTUVWXYZ\r\n";
+            {
+                let pane = mux.panes.get_mut(&id).unwrap();
+                Processor::<StdSyncHandler>::new().advance(
+                    &mut *pane.term.term.lock().unwrap(),
+                    line.repeat(3).as_bytes(),
+                );
+                pane.note_remote_output_ended();
+                if local {
+                    // Enough to scroll every row the session left on screen.
+                    let mut output = String::new();
+                    for n in 0..8 {
+                        output.push_str(&format!("local {n} {}\r\n", "x".repeat(n * 6)));
+                    }
+                    Processor::<StdSyncHandler>::new()
+                        .advance(&mut *pane.term.term.lock().unwrap(), output.as_bytes());
+                }
+            }
+            let before = saved_text(&mux);
+            assert!(!before.contains("REMOTE_SEC"), "{before:?}");
+            for &(columns, rows) in sizes {
+                let pane = mux.panes.get_mut(&id).unwrap();
+                pane.term.resize(columns, rows, 8, 16).unwrap();
+                let after = saved_text(&mux);
+                assert!(
+                    !after.contains("REMOTE_SEC") && !after.contains("RET_"),
+                    "{columns}x{rows}: {after:?}"
+                );
+                if local {
+                    // Line 0 went to the row the cursor was on when the
+                    // session ended, which stays out with it.
+                    for n in 1..8 {
+                        let label = format!("local {n} ");
+                        assert!(after.contains(&label), "{columns}x{rows}: {after:?}");
+                    }
+                }
+            }
+        }
     }
 }

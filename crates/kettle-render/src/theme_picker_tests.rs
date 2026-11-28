@@ -4,6 +4,7 @@ use crate::headless_tests::{capture, focused, pane, renderer, snapshot_of};
 use crate::theme_picker::{
     FooterInk, LOW_CONTRAST, ThemeFollow, ThemePickerFooter, ThemeSlot, footer_colors, footer_ink,
 };
+use crate::visual_parity_tests::parity_scene;
 use crate::{
     ContextMenu, ContextMenuRow, MinimumContrastCache, Overlay, menu, minimum_contrast_token,
     step_minimum_contrast, theme_footer_height, theme_footer_layout, theme_readability,
@@ -337,6 +338,7 @@ fn picker_with_footer(f: ThemePickerFooter, (width, row_h): (f32, f32)) -> Conte
         .collect();
     let rows_h = rows.len() as f32 * row_h;
     ContextMenu {
+        status: None,
         picker_header_height: 30.0,
         picker_footer: Some(f),
         anchor: (40.0, 50.0),
@@ -356,11 +358,11 @@ fn near(p: &image::Rgba<u8>, c: Rgb, tolerance: u8) -> bool {
         .all(|(want, got)| want.abs_diff(got) <= tolerance)
 }
 
+parity_scene! {
 /// The sample card paints the highlighted theme: its background, its 16
 /// palette colours as squares, and its sample text in the theme's own
 /// colours. Highlighting another theme repaints all of it, text included,
 /// though the footer's buffers are reused.
-#[test]
 fn the_sample_card_paints_the_highlighted_themes_colours() {
     let _serialized = crate::gpu_tests::gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(720, 560) else {
@@ -425,11 +427,12 @@ fn the_sample_card_paints_the_highlighted_themes_colours() {
         }
     }
 }
+}
 
+parity_scene! {
 /// The contrast button's words change in place: "Contrast: Off" and
 /// "Contrast: 3:1" are as wide, in the same buffer at the same spot, so only
 /// the footer's own damage key makes the next frame show the new value.
-#[test]
 fn a_new_contrast_value_repaints_the_button_in_place() {
     let _serialized = crate::gpu_tests::gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(720, 560) else {
@@ -462,6 +465,7 @@ fn a_new_contrast_value_repaints_the_button_in_place() {
         buttons.push(pixels);
     }
     assert!(buttons[0] != buttons[1], "the button still says Off");
+}
 }
 
 /// Each side on the status line is a target that covers its own label and
@@ -515,9 +519,9 @@ fn each_side_on_the_status_line_is_a_target_over_its_own_words() {
     assert!(crate::theme_footer_slots(&fixed, &EN).is_empty());
 }
 
+parity_scene! {
 /// Choosing the other side changes no words on the status line, only where
 /// its mark and underline are; the next frame draws them under that side.
-#[test]
 fn choosing_the_other_side_repaints_its_underline() {
     let _serialized = crate::gpu_tests::gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(720, 560) else {
@@ -551,4 +555,5 @@ fn choosing_the_other_side_repaints_its_underline() {
         under_light[0] != under_light[1],
         "the light side shows no underline"
     );
+}
 }

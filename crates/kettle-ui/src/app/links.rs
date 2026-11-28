@@ -17,9 +17,13 @@ pub(super) fn warn_refused_terminal_url(_uri: &str, warn: impl FnOnce(&str)) {
 /// it gets an explicit local-only guard too (defense-in-depth). Crucially this
 /// check does NO filesystem stat — `Path::is_dir` on a `//host` path would
 /// itself route over SMB — it's a pure string check: reject UNC/authority
-/// (`//`, leading `\`) and traversal.
+/// (`//`, leading `\`) and traversal: a segment naming the parent, not a
+/// name holding dots (`a..b`, `...`).
 pub(super) fn cwd_is_local(cwd: &str) -> bool {
-    !cwd.is_empty() && !cwd.starts_with("//") && !cwd.starts_with('\\') && !cwd.contains("..")
+    !cwd.is_empty()
+        && !cwd.starts_with("//")
+        && !cwd.starts_with('\\')
+        && !cwd.split(['/', '\\']).any(kettle_core::links::names_parent)
 }
 
 /// What opening a local file link would do, decided on the opener thread.
@@ -50,6 +54,12 @@ pub(super) enum FileLinkCheck {
 /// stopped.
 pub(super) fn check_file_link(path: &std::path::Path) -> FileLinkCheck {
     use kettle_core::links::names_program_or_shortcut;
+    // Win32 drops a name's trailing dots and spaces before it looks a path
+    // up, so `C:\Temp\report.pdf..` would resolve to `report.pdf`, another
+    // file than the link names: refuse a path it would not read as written.
+    if cfg!(windows) && !path.to_str().is_some_and(win32_reads_link_path) {
+        return FileLinkCheck::Unresolved;
+    }
     let Ok(resolved) = std::fs::canonicalize(path) else {
         return FileLinkCheck::Unresolved;
     };
@@ -91,6 +101,18 @@ pub(super) fn local_resolved_path(resolved: std::path::PathBuf) -> Option<std::p
     };
     let local = text.strip_prefix(r"\\?\").unwrap_or(text);
     (drive(local) && win32_keeps_path(local)).then(|| std::path::PathBuf::from(local))
+}
+
+/// Whether Win32 reads a link's path `text` as written before resolving it
+/// (see [`win32_keeps_path`]). A `.` segment names the folder it is in,
+/// which Win32 resolves as such rather than dropping a dot.
+pub(super) fn win32_reads_link_path(text: &str) -> bool {
+    let named = text
+        .split(['\\', '/'])
+        .filter(|name| *name != ".")
+        .collect::<Vec<_>>()
+        .join("/");
+    win32_keeps_path(&named)
 }
 
 /// Whether Win32 reads the drive path `local` as written once the verbatim
@@ -1180,6 +1202,15 @@ pub(super) fn link_open_gesture(
     })
 }
 
+/// Whether a primary click opens the link under it: any click with
+/// `link-single-click` on, else one with Ctrl or Cmd held. The press, and
+/// the hand cursor that promises it, both ask this; on plain hover the
+/// underline and the status hint name the link while the I-beam stays, since
+/// a plain click there selects.
+pub(super) fn link_click_opens(single_click: bool, mods: winit::keyboard::ModifiersState) -> bool {
+    single_click || mods.control_key() || mods.super_key()
+}
+
 pub(super) fn dismiss_link_hover(ws: &mut WindowState) {
     if ws.link_hover_key.take().is_some()
         && let Some(window) = &ws.window
@@ -1285,4 +1316,28 @@ pub(super) fn painted_row_bidi(
     row: usize,
 ) -> Option<&kettle_core::bidi::RowBidi> {
     ws.renderer.as_ref()?.painted_row_bidi(terminal, row)
+}
+
+#[cfg(test)]
+mod link_click_tests {
+    use super::link_click_opens;
+    use winit::keyboard::ModifiersState as M;
+
+    /// Ctrl or Cmd opens a link, alone or with other keys held; Shift or
+    /// Alt alone does not. `link-single-click` opens on any click.
+    #[test]
+    fn a_click_opens_a_link_with_the_open_modifier_or_single_click() {
+        for mods in [
+            M::CONTROL,
+            M::SUPER,
+            M::CONTROL | M::SHIFT,
+            M::SUPER | M::ALT,
+        ] {
+            assert!(link_click_opens(false, mods), "{mods:?}");
+        }
+        for mods in [M::empty(), M::SHIFT, M::ALT, M::SHIFT | M::ALT] {
+            assert!(!link_click_opens(false, mods), "{mods:?}");
+            assert!(link_click_opens(true, mods), "{mods:?}");
+        }
+    }
 }

@@ -172,6 +172,17 @@ pub(super) fn animation_wait(
     .min()
 }
 
+/// How long the resize chip shown at `shown` stays up, `None` once it has
+/// expired (or there is none).
+pub(super) fn resize_chip_wait(
+    shown: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> Option<std::time::Duration> {
+    RESIZE_OVERLAY_DURATION
+        .checked_sub(now.saturating_duration_since(shown?))
+        .filter(|left| !left.is_zero())
+}
+
 /// Whether terminal-owned transient chrome may be projected. Keeping this
 /// predicate shared prevents a hidden receipt from retaining a hover pause
 /// behind a modal surface.
@@ -241,6 +252,7 @@ impl App {
         event_loop: &ActiveEventLoop,
     ) -> Option<std::time::Instant> {
         self.poll_system_appearance(ws);
+        self.watch_system_motion();
         if take_window_lifecycle_wakes(ws) {
             self.drain_events(ws);
         }
@@ -293,6 +305,12 @@ impl App {
         // Binding, not an inline call on the right of `||`: see the matching
         // reap in `redraw`.
         let stale_title = clear_stale_title_edit(&ws.mux, &mut ws.editing_title);
+        // A tab's menu goes with its tab.
+        if dismiss_orphaned_tab_menu(ws)
+            && let Some(window) = &ws.window
+        {
+            window.request_redraw();
+        }
         if reaped.layout_changed || stale_title {
             // Another window's turn may already have swept this turn, from
             // before this pane went.
@@ -600,14 +618,13 @@ impl App {
             }
         }
         let bell_active = !render_hidden && !ws.bell_flashes.is_empty();
-        // The resize chip needs repaints until it expires (then one more to
-        // erase it); clear the state once it has.
         let update_toast_wait = self.tick_update_toast(ws, now);
         let notification_toast_wait = self.tick_notification_toast(ws, now);
-        let resize_chip_live = ws
-            .resize_overlay
-            .map(|(_, _, t)| t.elapsed() < RESIZE_OVERLAY_DURATION)
-            .unwrap_or(false);
+        // The resize chip never changes while it is up: the resize or font
+        // change that shows it draws it. Wake once, when it expires, for the
+        // frame that erases it, and clear the state then.
+        let resize_chip_wait = resize_chip_wait(ws.resize_overlay.map(|(_, _, t)| t), now);
+        let resize_chip_live = resize_chip_wait.is_some();
         let resize_chip_active = resize_chip_live && !render_hidden;
         if !resize_chip_live && ws.resize_overlay.is_some() {
             ws.resize_overlay = None;
@@ -630,6 +647,21 @@ impl App {
                 .saturating_duration_since(now)
                 .max(std::time::Duration::from_millis(1))
         });
+        // "No hints here" leaves its pane when its time is up.
+        if ws.no_hints_notice.expire(now) {
+            ws.accessibility_pending = true;
+            if !render_hidden && let Some(w) = &ws.window {
+                w.request_redraw();
+            }
+        }
+        let no_hints_wait = ws.no_hints_notice.deadline().map(|deadline| {
+            deadline
+                .saturating_duration_since(now)
+                .max(std::time::Duration::from_millis(1))
+        });
+        let theme_preview_wait = self.settle_theme_hover_preview(ws, now);
+        // A submenu waiting on the pointer's dwell or aim opens or gives way.
+        let menu_pointer_wait = self.context_menu_pointer_tick(ws, now);
         let receipt_enabled = ws
             .media_paste_receipt
             .as_ref()
@@ -712,6 +744,24 @@ impl App {
             at.saturating_duration_since(now)
                 .max(std::time::Duration::from_millis(1))
         });
+        // A tooltip comes due once, at its deadline: one frame shows it, and
+        // nothing redraws while it waits.
+        let (tooltip_due, tooltip_wake) = ws.tooltip.poll(now);
+        if tooltip_due
+            && !render_hidden
+            && let Some(window) = &ws.window
+        {
+            window.request_redraw();
+        }
+        let tooltip_wait = tooltip_wake.map(|at| {
+            at.saturating_duration_since(now)
+                .max(std::time::Duration::from_millis(1))
+        });
+        // A tab drag resting on an overflow arrow scrolls the strip.
+        let tab_drag_scroll_wait = self.scroll_tab_drag_at_arrow(ws, now).map(|at| {
+            at.saturating_duration_since(now)
+                .max(std::time::Duration::from_millis(1))
+        });
         let media_receipt_wait = ws
             .media_paste_receipt
             .as_ref()
@@ -768,6 +818,9 @@ impl App {
         let term_anim_finished = std::mem::replace(&mut ws.term_animation_active, term_anim)
             && !term_anim
             && !render_hidden;
+        if let Some(renderer) = ws.renderer.as_mut() {
+            self.sync_background_motion(renderer, now);
+        }
         // Wake at background frame boundaries, subject to the focus policy.
         // Output-driven repaints may still advance a focus-paused background.
         let bg_anim_interval_raw = ws
@@ -907,7 +960,6 @@ impl App {
             || autoscroll_active
             || coalesce_due
             || echo_settle_due
-            || resize_chip_active
             || media_receipt_redraw
             || completion_hide_due
             || theme_schedule_due)
@@ -919,16 +971,19 @@ impl App {
             }
         }
         // Pick the earliest wake we still need: ~30 fps for bell / animation /
-        // autoscroll / the resize chip, the cursor-blink edge (the end of the
-        // hold after a restart, a half-period after any other edge), or the
-        // pending coalesced output paint's deadline.
+        // autoscroll, the cursor-blink edge (the end of the hold after a
+        // restart, a half-period after any other edge), the resize chip's
+        // expiry, or the pending coalesced output paint's deadline.
         let blink_wait =
             crate::cursor_blink::wait_for_edge(blink_active, ws.last_blink, blink_interval, now);
         let mut wait = animation_wait(
-            bell_active || autoscroll_active || resize_chip_active,
+            bell_active || autoscroll_active,
             bg_anim_interval,
             blink_wait,
         );
+        if let Some(next) = resize_chip_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
         if let Some(until) = self.sync_selection_hint(ws, now) {
             let next = until
                 .saturating_duration_since(now)
@@ -987,7 +1042,22 @@ impl App {
         if let Some(next) = mouse_hint_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
+        if let Some(next) = menu_pointer_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = theme_preview_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = no_hints_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
         if let Some(next) = card_settle_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = tooltip_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = tab_drag_scroll_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = cards_tip_wait {

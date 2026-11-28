@@ -62,82 +62,42 @@ fn settings_slots_fit_english_spanish_and_measured_pseudo_text() {
     }
 }
 
-/// A switch's label is centred in the room beside its knob: after the knob
-/// when it is off (the knob sits at the left), before it when on (the knob
-/// is at the right), and it fits beside the knob in both languages' longest
-/// words.
+/// A switch's track holds no words in either language: On, Off and their
+/// translations are left to the accessibility tree. Only an unavailable
+/// switch says its state, whole where the row has room, fitted before the
+/// track where it does not, and never over the label, the track or Reset.
 #[test]
-fn switch_labels_clear_the_knob() {
-    use super::{SettingsControl, SettingsTextKind};
-    let row = |value: &str, on: bool| SettingsRow {
-        label: "Cursor blink".into(),
-        value: value.into(),
-        control: SettingsControl::Toggle(on),
-        ..Default::default()
-    };
-    let cases = [
-        ("On", true),
-        ("Off", false),
-        ("Desactivado", true),
-        ("Desactivado", false),
-    ];
-    let set = SettingsOverlay {
-        categories: vec!["Appearance".into()],
-        rows: cases.iter().map(|(text, on)| row(text, *on)).collect(),
-        ..Default::default()
-    };
-    let layout = settings_layout(&set, (8.0, 16.0), (1280.0, 820.0), 8.0, 1.0);
-    let items = super::settings::settings_text_items(&set, &layout, 8.0);
-    for (index, (text, on)) in cases.into_iter().enumerate() {
-        let chip = layout.rows[index].chip_rect;
-        let knob = super::settings::settings_toggle_knob(chip.3, 1.0);
-        let value = items
-            .iter()
-            .find(|item| item.kind == SettingsTextKind::Value(index))
-            .unwrap()
-            .rect;
-        let (start, end) = if on {
-            (chip.0 + 4.0, chip.0 + chip.2 - 4.0 - knob - 2.0)
-        } else {
-            (chip.0 + 4.0 + knob + 2.0, chip.0 + chip.2 - 4.0)
-        };
-        let width = text.chars().count() as f32 * 8.0;
-        assert!((value.2 - width).abs() < 0.01, "{text} {on}: {value:?}");
-        assert!(
-            (value.0 + value.2 * 0.5 - (start + end) * 0.5).abs() < 0.01,
-            "{text} {on}: {value:?} not centred in {start}..{end}"
-        );
-        assert!(value.0 >= start && value.0 + value.2 <= end, "{text} {on}");
-    }
-}
-
-#[test]
-fn translated_switch_labels_fit_beside_painted_knobs_after_width_clamping() {
+fn switch_tracks_hold_no_words_and_their_state_words_fit_beside_them() {
     use super::{SettingsControl, SettingsHit, SettingsTextKind, display_width};
     for language in [Language::Es, Language::En] {
         let tr = Translator::new(language);
-        for on in [true, false] {
+        let states = [
+            (true, false, Text::SettingsValueOn),
+            (false, false, Text::SettingsValueOff),
+            (true, true, Text::SettingsValueUnavailable),
+            (true, true, Text::SettingsValueChecking),
+        ];
+        for (on, unavailable, value) in states {
             for disabled in [false, true] {
-                let text = tr.text(if on {
-                    Text::SettingsValueOn
-                } else {
-                    Text::SettingsValueOff
-                });
+                let text = tr.text(value);
                 let set = SettingsOverlay {
                     rows: vec![SettingsRow {
                         label: tr.text(Text::SettingsFieldCursorBlink).into(),
                         value: text.into(),
                         control: SettingsControl::Toggle(on),
                         disabled,
+                        unavailable,
+                        reset: Some(true),
+                        value_cols: display_width(tr.text(Text::SettingsValueUnavailable)),
                         ..Default::default()
                     }],
+                    reset_label: tr.text(Text::SettingsResetButton).into(),
                     ..Default::default()
                 };
-                for (surface, cell, text_cw, full_label) in [
-                    ((360.0, 600.0), (24.0, 48.0), 24.0, false),
+                for (surface, cell, text_cw, whole) in [
                     ((1280.0, 820.0), (8.0, 16.0), 8.0, true),
-                    ((2000.0, 1200.0), (24.0, 48.0), 24.0, true),
-                    ((360.0, 600.0), (48.0, 48.0), 24.0, false),
+                    ((2000.0, 1200.0), (24.0, 48.0), 24.0, false),
+                    ((360.0, 600.0), (24.0, 48.0), 24.0, false),
                     ((360.0, 600.0), (6.0, 48.0), 24.0, false),
                     ((720.0, 1200.0), (48.0, 96.0), 48.0, false),
                     ((120.0, 120.0), (8.0, 16.0), 24.0, false),
@@ -146,60 +106,55 @@ fn translated_switch_labels_fit_beside_painted_knobs_after_width_clamping() {
                     let layout = settings_layout(&set, cell, surface, text_cw, 1.0);
                     let row = &layout.rows[0];
                     let chip = row.chip_rect;
-                    let diameter = super::settings::settings_toggle_knob(chip.3, 1.0);
                     let items = super::settings::settings_text_items(&set, &layout, text_cw);
+                    let context = format!(
+                        "{language:?} {text} disabled={disabled} surface={surface:?} cell={cell:?}"
+                    );
                     let value = items
                         .iter()
-                        .find(|item| item.kind == SettingsTextKind::Value(0))
-                        .unwrap();
-                    let context = format!(
-                        "{language:?} on={on} disabled={disabled} surface={surface:?} cell={cell:?} text_cw={text_cw}: {:?} {:?} in {chip:?}",
-                        value.text, value.rect
-                    );
-                    assert!(
-                        value.rect.2 >= 0.0
-                            && value.rect.0 >= chip.0
-                            && value.rect.0 + value.rect.2 <= chip.0 + chip.2 + 0.1,
-                        "{context}"
-                    );
-                    let advance = display_width(&value.text) as f32 * text_cw;
-                    assert!(advance <= value.rect.2 + 0.1, "{context}");
-                    let knob_left = if on && !disabled {
-                        chip.0 + chip.2 - diameter - 3.0
-                    } else {
-                        chip.0 + 3.0
-                    };
-                    if !value.text.is_empty() {
-                        assert!(
-                            value.rect.0 + advance <= knob_left
-                                || value.rect.0 >= knob_left + diameter,
-                            "painted label overlaps knob: {context}"
-                        );
-                        assert!(
-                            value.rect.0 + value.rect.2 <= knob_left
-                                || value.rect.0 >= knob_left + diameter,
-                            "label bounds overlap knob: {context}"
-                        );
+                        .find(|item| item.kind == SettingsTextKind::Value(0));
+                    assert_eq!(row.status_rect.is_some(), unavailable, "{context}");
+                    match (value, row.status_rect) {
+                        (Some(value), Some(status)) => {
+                            let advance = display_width(&value.text) as f32 * text_cw;
+                            assert!(advance <= value.rect.2 + 0.1, "{context}");
+                            assert!(
+                                value.rect.0 >= status.0 - 0.01
+                                    && (value.rect.0 + value.rect.2 - status.0 - status.2).abs()
+                                        < 0.01,
+                                "{context}: {:?} not right-aligned in {status:?}",
+                                value.rect
+                            );
+                            assert!(value.rect.0 + value.rect.2 <= chip.0 + 0.01, "{context}");
+                            if whole {
+                                assert_eq!(value.text, text, "{context}");
+                                assert!(
+                                    (chip.0 - status.0 - status.2 - 8.0).abs() < 0.01,
+                                    "{context}: the state word keeps 8 points before the track"
+                                );
+                            }
+                        }
+                        (None, None) => {}
+                        (value, status) => {
+                            panic!("{context}: {:?} {status:?}", value.map(|value| &value.text))
+                        }
                     }
-                    if full_label {
-                        assert_eq!(value.text, text, "{context}");
-                    }
-                    if surface.0 == 360.0 && language == Language::Es && on && !disabled {
-                        assert!((chip.2 - 145.92).abs() < 0.01);
-                        assert!((diameter - 57.6).abs() < 0.01, "{diameter}");
-                        assert!(
-                            !value.text.is_empty(),
-                            "a clamped switch must retain a fitted label"
-                        );
-                    }
-                    for x in [chip.0 + chip.2 * 0.5, knob_left + diameter * 0.5] {
-                        if x >= chip.0 && x < chip.0 + chip.2 {
-                            assert_eq!(
-                                layout.pointer_hit((x, chip.1 + chip.3 * 0.5), None),
-                                SettingsHit::Field(0)
+                    for item in &items {
+                        if let SettingsTextKind::Label(0) | SettingsTextKind::Reset(0) = item.kind
+                            && item.rect.2 > 0.0
+                        {
+                            assert!(
+                                item.rect.0 + item.rect.2 <= chip.0 + 0.01,
+                                "{context}: {:?} runs into the track",
+                                item.text
                             );
                         }
                     }
+                    assert_eq!(
+                        layout.pointer_hit((chip.0 + chip.2 * 0.5, chip.1 + chip.3 * 0.5), None),
+                        SettingsHit::Field(0),
+                        "{context}"
+                    );
                 }
             }
         }

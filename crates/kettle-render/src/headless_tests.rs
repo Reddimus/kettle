@@ -6,6 +6,7 @@
 //! `encode_scene_pass`.
 
 use crate::gpu_tests::{gpu_test_config, gpu_test_guard};
+use crate::visual_parity_tests::parity_scene;
 use crate::*;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::Config as TermConfig;
@@ -114,9 +115,11 @@ pub(crate) fn capture_with_tabs(
         .recv_timeout(std::time::Duration::from_secs(30))
         .expect("the capture completes")
         .expect("the capture succeeds");
-    image::open(written)
+    let pixels = image::open(written)
         .expect("the capture is a PNG")
-        .to_rgba8()
+        .to_rgba8();
+    crate::visual_parity_tests::observe(renderer.backend(), &pixels);
+    pixels
 }
 
 /// The overlay of a focused window with the cursor in the given blink phase.
@@ -197,12 +200,12 @@ fn a_missing_adapter_is_skipped_where_none_is_required() {
 
 pub(crate) fn renderer(width: u32, height: u32) -> Option<(Renderer, Config)> {
     let cfg = gpu_test_config();
-    let renderer =
-        Renderer::headless_for_tests(&cfg, width, height).expect("headless renderer builds")?;
+    let renderer = crate::visual_parity_tests::renderer(&cfg, width, height)
+        .expect("headless renderer builds")?;
     Some((renderer, cfg))
 }
 
-#[test]
+parity_scene! {
 fn returning_to_cached_wallpaper_rejects_an_obsolete_decode() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(32, 32) else {
@@ -247,16 +250,15 @@ fn returning_to_cached_wallpaper_rejects_an_obsolete_decode() {
             })
             .is_ok()
     );
-    let _ = renderer
-        .render_frame(&[], &TabBar::hidden(), &cfg, &focused(false))
-        .expect("wallpaper frame renders");
+    capture(&mut renderer, &cfg, &[], &focused(false));
     let cache = renderer.bg_image_cache.as_ref().unwrap();
     assert_eq!(cache.path, "A");
     assert_eq!(cache.frames[0].allocation_key(), key);
     assert!(renderer.bg_image_pending.is_none());
 }
+}
 
-#[test]
+parity_scene! {
 fn bold_palette_resolution_honors_osc_overrides_and_preserves_truecolor() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
@@ -305,8 +307,9 @@ fn bold_palette_resolution_honors_osc_overrides_and_preserves_truecolor() {
     );
     assert_eq!(actual, expected, "bold must preserve explicit RGB colors");
 }
+}
 
-#[test]
+parity_scene! {
 fn a_headless_frame_draws_a_real_pane() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 120) else {
@@ -331,16 +334,19 @@ fn a_headless_frame_draws_a_real_pane() {
         cursor_pixels(&frame, &cfg, &snap) > 100,
         "the block cursor is drawn"
     );
-    if let Ok(dir) = std::env::var("KETTLE_HEADLESS_DUMP") {
+    if renderer.backend() == RendererBackend::Gpu
+        && let Ok(dir) = std::env::var("KETTLE_HEADLESS_DUMP")
+    {
         frame
             .save(std::path::Path::new(&dir).join("headless.png"))
             .expect("dump");
     }
 }
+}
 
+parity_scene! {
 /// Quad layers share blending and replacing pipelines. Image layers, including
 /// the lazily admitted card poster, share one pipeline.
-#[test]
 fn a_renderer_compiles_each_distinct_pipeline_once() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(1200, 400) else {
@@ -382,6 +388,9 @@ fn a_renderer_compiles_each_distinct_pipeline_once() {
         Some(card)
     );
     assert_eq!(renderer.card_at(x - 1.0, y), None);
+    if renderer.backend() == RendererBackend::Cpu {
+        return;
+    }
     let replacing = [&renderer.pane_bases];
     let blending = [
         &renderer.quads,
@@ -394,7 +403,7 @@ fn a_renderer_compiles_each_distinct_pipeline_once() {
     let mut quads: Vec<&wgpu::RenderPipeline> = replacing
         .iter()
         .chain(&blending)
-        .map(|layer| layer.pipeline())
+        .map(|layer| layer.gpu().expect("a GPU layer").pipeline())
         .collect();
     quads.sort();
     quads.dedup();
@@ -402,7 +411,8 @@ fn a_renderer_compiles_each_distinct_pipeline_once() {
     assert!(
         blending
             .iter()
-            .all(|layer| layer.pipeline() == blending[0].pipeline())
+            .all(|layer| layer.gpu().map(|l| l.pipeline())
+                == blending[0].gpu().map(|l| l.pipeline()))
     );
     let image_layers = [
         &renderer.imgs,
@@ -413,12 +423,15 @@ fn a_renderer_compiles_each_distinct_pipeline_once() {
         &renderer.media_receipt_img,
         &renderer.bg_imgs,
     ];
-    let mut images: Vec<&wgpu::RenderPipeline> =
-        image_layers.iter().map(|layer| layer.pipeline()).collect();
+    let mut images: Vec<&wgpu::RenderPipeline> = image_layers
+        .iter()
+        .map(|layer| layer.gpu().expect("a GPU layer").pipeline())
+        .collect();
     images.sort();
     images.dedup();
     assert_eq!(images.len(), 1, "all image layers share one pipeline");
     crate::gpu_tests::assert_shared_quad_pixels_match_standalone();
+}
 }
 
 /// The quad instance bytes the last frame uploaded.
@@ -426,24 +439,24 @@ fn uploaded_quads(renderer: &Renderer) -> Vec<u8> {
     bytemuck::cast_slice(&renderer.quad_scratch).to_vec()
 }
 
+parity_scene! {
 /// A blink only changes what is drawn: the same quads are uploaded in both
 /// phases and no text is prepared again, so a blinking window does no upload
 /// or shaping work.
-#[test]
 fn a_blink_changes_no_uploaded_quads_and_prepares_no_text() {
     let _serialized = gpu_test_guard();
     for allow_mapping in [true, false] {
         let cfg = gpu_test_config();
         let Some(mut renderer) =
-            Renderer::headless_for_tests_with_mapping(&cfg, 320, 120, 1.0, false, allow_mapping)
+            crate::visual_parity_tests::renderer_with_mapping(&cfg, 320, 120, 1.0, false, allow_mapping)
                 .expect("headless renderer builds")
         else {
             eprintln!("no GPU adapter on this host; skipped");
             return;
         };
-        if !allow_mapping {
+        if !allow_mapping && renderer.backend() == RendererBackend::Gpu {
             assert!(
-                !renderer.gpu.mapped_uploads(),
+                !renderer.gpu().mapped_uploads(),
                 "the forced queue device has no mapped uploads"
             );
         }
@@ -486,24 +499,25 @@ fn a_blink_changes_no_uploaded_quads_and_prepares_no_text() {
         assert_eq!(renderer.text_prepares, prepares);
     }
 }
+}
 
+parity_scene! {
 /// A frame whose content did not change writes nothing to the GPU, and one
 /// whose content did writes only what changed.
-#[test]
 fn a_steady_frame_writes_nothing_and_a_change_writes_only_the_difference() {
     let _serialized = gpu_test_guard();
     for allow_mapping in [true, false] {
         let cfg = gpu_test_config();
         let Some(mut renderer) =
-            Renderer::headless_for_tests_with_mapping(&cfg, 320, 120, 1.0, false, allow_mapping)
+            crate::visual_parity_tests::renderer_with_mapping(&cfg, 320, 120, 1.0, false, allow_mapping)
                 .expect("headless renderer builds")
         else {
             eprintln!("no GPU adapter on this host; skipped");
             return;
         };
-        if !allow_mapping {
+        if !allow_mapping && renderer.backend() == RendererBackend::Gpu {
             assert!(
-                !renderer.gpu.mapped_uploads(),
+                !renderer.gpu().mapped_uploads(),
                 "the forced queue device has no mapped uploads"
             );
         }
@@ -511,10 +525,9 @@ fn a_steady_frame_writes_nothing_and_a_change_writes_only_the_difference() {
         let panes = [pane(&snap, 320, 120)];
         capture(&mut renderer, &cfg, &panes, &focused(true));
         let first = renderer.render_uploads();
-        assert!(
-            first.buffer_writes > 0,
-            "the first frame uploads everything"
-        );
+        if renderer.backend() == RendererBackend::Gpu {
+            assert!(first.buffer_writes > 0, "the first frame uploads everything");
+        }
         capture(&mut renderer, &cfg, &panes, &focused(true));
         let steady = renderer.render_uploads();
         assert_eq!(
@@ -532,12 +545,17 @@ fn a_steady_frame_writes_nothing_and_a_change_writes_only_the_difference() {
             ),
             "an unchanged frame writes nothing"
         );
-        assert!(steady.skipped_writes > first.skipped_writes);
+        if renderer.backend() == RendererBackend::Gpu {
+            assert!(steady.skipped_writes > first.skipped_writes);
+        }
         assert_eq!(steady.text_prepares, first.text_prepares);
 
         let changed = snapshot_of(20, 4, b"hellp");
         let panes = [pane(&changed, 320, 120)];
         capture(&mut renderer, &cfg, &panes, &focused(true));
+        if renderer.backend() == RendererBackend::Cpu {
+            continue;
+        }
         let after = renderer.render_uploads();
         // On shared memory the instances go through mapped buffers rather than
         // the queue, so count both.
@@ -553,23 +571,25 @@ fn a_steady_frame_writes_nothing_and_a_change_writes_only_the_difference() {
         );
     }
 }
+}
 
+parity_scene! {
 /// On shared memory, output that changes the grid reaches the GPU without a
 /// queue write: its glyph instances and quads go through mapped buffers, and
 /// the screen uniforms did not change. On Apple GPUs each queue write is a
 /// staging copy and a blit, and one per frame keeps the driver's blit pool
 /// (about 128 MiB) resident for as long as a pane prints.
-#[test]
 fn printing_writes_nothing_through_the_queue_on_shared_memory() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 120) else {
         eprintln!("no GPU adapter on this host; skipped");
         return;
     };
-    let info = renderer.gpu.adapter.get_info();
+    if let Some(gpu) = renderer.gpu_context() {
+    let info = gpu.adapter.get_info();
     // The production policy decides, so a host it keeps on the queue
     // (Windows, a discrete GPU, GL) skips rather than fails.
-    let shared = upload::mapped_upload_features(&renderer.gpu.adapter)
+    let shared = upload::mapped_upload_features(&gpu.adapter)
         .contains(wgpu::Features::MAPPABLE_PRIMARY_BUFFERS);
     if !shared {
         eprintln!(
@@ -579,9 +599,10 @@ fn printing_writes_nothing_through_the_queue_on_shared_memory() {
         return;
     }
     assert!(
-        renderer.gpu.mapped_uploads(),
+        gpu.mapped_uploads(),
         "the shared-memory device enabled mapped uploads"
     );
+    }
     let first = snapshot_of(20, 4, b"line 1\r\n");
     capture(
         &mut renderer,
@@ -598,6 +619,9 @@ fn printing_writes_nothing_through_the_queue_on_shared_memory() {
         &[pane(&printed, 320, 120)],
         &focused(true),
     );
+    if renderer.backend() == RendererBackend::Cpu {
+        return;
+    }
     let after = renderer.render_uploads();
     assert_eq!(
         after.buffer_writes, before.buffer_writes,
@@ -605,6 +629,7 @@ fn printing_writes_nothing_through_the_queue_on_shared_memory() {
     );
     assert_eq!(after.chrome_prepares, before.chrome_prepares);
     assert!(after.mapped_writes > before.mapped_writes);
+}
 }
 
 fn test_device_result<T, E: std::fmt::Debug>(result: std::result::Result<T, E>) -> Option<T> {
@@ -911,13 +936,21 @@ fn the_glyph_ring_outgrows_its_first_buffer() {
     .expect("glyph pipeline");
     let screen = [64.0, 32.0];
     let glyph = <GlyphInstance as bytemuck::Zeroable>::zeroed();
-    glyphs.upload(&device, &queue, screen, &[glyph]);
+    glyphs.upload(
+        crate::backend::DeviceRef::gpu(&device, &queue),
+        screen,
+        &[glyph],
+    );
     let size = std::mem::size_of::<GlyphInstance>() as u64;
     assert!(
         100 * size > 4096,
         "100 instances outgrow the first 4 KiB buffer"
     );
-    glyphs.upload(&device, &queue, screen, &[glyph; 100]);
+    glyphs.upload(
+        crate::backend::DeviceRef::gpu(&device, &queue),
+        screen,
+        &[glyph; 100],
+    );
     let counts = glyphs.upload_counts();
     assert_eq!(
         (
@@ -1080,9 +1113,17 @@ fn every_pipeline_skips_an_unchanged_upload() {
         GlyphPipeline::new_with_budget(&device, format, kettle_core::GraphicsBudget::default())
             .expect("glyph pipeline");
     let glyph = [<GlyphInstance as bytemuck::Zeroable>::zeroed()];
-    glyphs.upload(&device, &queue, screen, &glyph);
+    glyphs.upload(
+        crate::backend::DeviceRef::gpu(&device, &queue),
+        screen,
+        &glyph,
+    );
     let first = writes(glyphs.upload_counts());
-    glyphs.upload(&device, &queue, screen, &glyph);
+    glyphs.upload(
+        crate::backend::DeviceRef::gpu(&device, &queue),
+        screen,
+        &glyph,
+    );
     assert_eq!(
         writes(glyphs.upload_counts()),
         first + 1,
@@ -1131,8 +1172,8 @@ fn a_pipeline_reports_what_it_uploaded() {
     assert!(positions(&quads).is_empty());
 }
 
+parity_scene! {
 /// The off phase draws exactly what a cursor hidden with DECTCEM draws.
-#[test]
 fn the_off_phase_matches_a_hidden_cursor() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 120) else {
@@ -1157,10 +1198,11 @@ fn the_off_phase_matches_a_hidden_cursor() {
         assert_eq!(off, dectcem, "cursor shape {shape:?}");
     }
 }
+}
 
+parity_scene! {
 /// A wide glyph under the block keeps both cells covered in the on phase, and
 /// the off phase restores the glyph in its normal colour.
-#[test]
 fn a_blink_over_a_wide_glyph_restores_the_glyph() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 120) else {
@@ -1195,12 +1237,13 @@ fn a_blink_over_a_wide_glyph_restores_the_glyph() {
     );
     assert_eq!(off, dectcem);
 }
+}
 
+parity_scene! {
 /// A blank cell draws no ink, so a row is shaped only up to its last inked
 /// cell. Recolouring the blanks after it (a prompt's padding, keyblock's
 /// reverse-video block on blank rows) changes no row key, so no row is
 /// reshaped and no text is prepared, while the new colours are still drawn.
-#[test]
 fn blanks_at_the_end_of_a_row_are_not_shaped() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 120) else {
@@ -1255,6 +1298,7 @@ fn blanks_at_the_end_of_a_row_are_not_shaped() {
         .collect();
     assert_eq!(rows, ["hi ", "a    b ", "", ""]);
 }
+}
 
 /// The blink phase reaches the renderer only at draw time: `build_pane` never
 /// sees it, so it cannot change what is built or uploaded.
@@ -1274,9 +1318,9 @@ fn the_blink_phase_reaches_only_the_draw() {
     );
     assert_eq!(
         src.matches("overlay.cursor_visible").count(),
-        3,
-        "only the live and the capture scene passes read the phase, and the \
-         frame records it for a cursor-layer hand-off"
+        4,
+        "only the live, the capture and the CPU scene passes read the phase, \
+         and the frame records it for a cursor-layer hand-off"
     );
     assert!(src.contains("cursor_on: overlay.cursor_visible,"));
     let scene = src
@@ -1294,7 +1338,7 @@ fn the_blink_phase_reaches_only_the_draw() {
     assert!(scene.contains("if cursor_on && self.pending_cursor_glyph.is_some()"));
 }
 
-#[test]
+parity_scene! {
 fn combining_marks_do_not_move_the_following_grid_glyph() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 120) else {
@@ -1328,12 +1372,13 @@ fn combining_marks_do_not_move_the_following_grid_glyph() {
         );
     }
 }
+}
 
+parity_scene! {
 /// Pane text in the default grid mode is drawn by the glyph pipeline, not
 /// glyphon, so output that changes only pane text prepares no glyphon text. A
 /// prepare would rewrite the chrome's unchanged vertices through the queue on
 /// every frame of output.
-#[test]
 fn grid_output_prepares_no_glyphon_text() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 120) else {
@@ -1373,8 +1418,9 @@ fn grid_output_prepares_no_glyphon_text() {
     assert_eq!(renderer.render_uploads().chrome_prepares, chrome_prepares);
     assert_ne!(after, before, "the new text is still drawn");
 }
+}
 
-#[test]
+parity_scene! {
 fn block_cursor_uses_the_pane_baseline_with_scaled_rows() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(320, 160) else {
@@ -1418,8 +1464,9 @@ fn block_cursor_uses_the_pane_baseline_with_scaled_rows() {
         );
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn block_cursor_preserves_cell_font_attributes_and_invalidates_style() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
@@ -1456,6 +1503,7 @@ fn block_cursor_preserves_cell_font_attributes_and_invalidates_style() {
         previous_key = renderer.cursor_glyph_cache.key;
     }
 }
+}
 
 fn confirmation_overlay() -> Overlay {
     Overlay {
@@ -1481,14 +1529,14 @@ fn confirmation_overlay() -> Overlay {
     }
 }
 
-#[test]
+parity_scene! {
 fn confirmation_uses_chrome_metrics_and_separate_text_roles() {
     let _serialized = gpu_test_guard();
     let mut cfg = gpu_test_config();
     cfg.cell_width = 0.5;
     cfg.cell_height = 0.5;
     let Some(mut renderer) =
-        Renderer::headless_for_tests_with(&cfg, 800, 600, 1.25, false).unwrap()
+        crate::visual_parity_tests::renderer_with(&cfg, 800, 600, 1.25, false).unwrap()
     else {
         return;
     };
@@ -1511,8 +1559,9 @@ fn confirmation_uses_chrome_metrics_and_separate_text_roles() {
     assert_eq!(renderer.confirmation_text.key()[2], "Cancel");
     assert_eq!(renderer.confirmation_text.key()[3], "Close window");
 }
+}
 
-#[test]
+parity_scene! {
 fn confirmation_preserves_settings_below_opaque_panel() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(800, 600) else {
@@ -1572,8 +1621,9 @@ fn confirmation_preserves_settings_below_opaque_panel() {
         "Settings context must remain visible outside the dialog"
     );
 }
+}
 
-#[test]
+parity_scene! {
 fn confirmation_retains_uploads_and_clears_text_when_closed() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(800, 600) else {
@@ -1589,7 +1639,9 @@ fn confirmation_retains_uploads_and_clears_text_when_closed() {
     let repeated_uploads = renderer.rounded_surfaces.upload_counts();
     assert_eq!(uploads.buffer_writes, repeated_uploads.buffer_writes);
     assert_eq!(uploads.buffer_bytes, repeated_uploads.buffer_bytes);
-    assert!(repeated_uploads.skipped_writes > uploads.skipped_writes);
+    if renderer.backend() == RendererBackend::Gpu {
+        assert!(repeated_uploads.skipped_writes > uploads.skipped_writes);
+    }
     assert_eq!(
         prepares, renderer.chrome_prepares,
         "idle dialog should retain shaped glyphs"
@@ -1632,8 +1684,9 @@ fn confirmation_retains_uploads_and_clears_text_when_closed() {
         "a visible modal prepare is counted, and an already-cleared modal performs no empty prepare"
     );
 }
+}
 
-#[test]
+parity_scene! {
 fn block_cursor_shapes_attached_marks_and_invalidates_their_cache() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 120) else {
@@ -1661,13 +1714,14 @@ fn block_cursor_shapes_attached_marks_and_invalidates_their_cache() {
         );
     }
 }
+}
 
+parity_scene! {
 /// The same character under the cursor with and without emoji presentation
 /// is two atlas bitmaps. Grid output no longer prepares the chrome, so when
 /// the cursor's bitmap changes the chrome must be prepared with it: a 1-glyph
 /// cursor prepare that grows or evicts the atlas would otherwise leave the
 /// tab bar's and menus' cached vertices pointing at glyphs it replaced.
-#[test]
 fn a_cursor_glyph_changing_presentation_prepares_the_chrome() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 120) else {
@@ -1702,13 +1756,14 @@ fn a_cursor_glyph_changing_presentation_prepares_the_chrome() {
         "a new cursor bitmap must prepare the chrome with it"
     );
 }
+}
 
+parity_scene! {
 /// Output that moves the cursor onto another cell with the same character can
 /// still rasterize a new bitmap: at a fractional cell width the glyph lands
 /// on another subpixel position. A visible cursor glyph therefore never
 /// prepares alone, while a cursor on a blank cell (printing, typing at the end
 /// of a line) leaves the chrome alone.
-#[test]
 fn output_moving_the_cursor_over_text_prepares_the_chrome() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 120) else {
@@ -1752,6 +1807,7 @@ fn output_moving_the_cursor_over_text_prepares_the_chrome() {
         "a moved non-blank whitespace glyph must prepare the chrome with it"
     );
 }
+}
 
 /// Only legacy-mode pane text may force the glyphon prepare; hosts with no
 /// GPU still check it here.
@@ -1772,9 +1828,9 @@ fn only_legacy_pane_text_forces_a_glyphon_prepare() {
     assert!(src.contains("any_pane_text_changed && cfg.text_renderer == TextRendererMode::Legacy"));
 }
 
+parity_scene! {
 /// An opaque paste receipt over the cursor cell must hide the whole terminal
 /// cursor: its block quad and its inverted glyph.
-#[test]
 fn opaque_media_receipt_covers_the_terminal_cursor_inverted_glyph() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(640, 400) else {
@@ -1851,8 +1907,9 @@ fn opaque_media_receipt_covers_the_terminal_cursor_inverted_glyph() {
     }
     eprintln!("MEDIA_CURSOR_GPU_ACCEPTANCE: opaque receipt covers cursor quad and inverted glyph");
 }
+}
 
-#[test]
+parity_scene! {
 fn unknown_inline_cluster_has_exact_owned_fallback_pixels_in_both_renderers() {
     let _serialized = gpu_test_guard();
     for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
@@ -1977,8 +2034,9 @@ fn unknown_inline_cluster_has_exact_owned_fallback_pixels_in_both_renderers() {
         eprintln!("INLINE_CARD_GPU_ACCEPTANCE: unknown fallback {mode:?}");
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn fallback_cursor_blinks_above_its_background_without_raw_placeholder_ink() {
     let _serialized = gpu_test_guard();
     for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
@@ -2035,8 +2093,9 @@ fn fallback_cursor_blinks_above_its_background_without_raw_placeholder_ink() {
         eprintln!("INLINE_CARD_GPU_ACCEPTANCE: fallback cursor {mode:?}");
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn registered_poster_overwrite_removes_tiles_and_badges_in_the_same_frame() {
     let _serialized = gpu_test_guard();
     for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
@@ -2107,8 +2166,9 @@ fn registered_poster_overwrite_removes_tiles_and_badges_in_the_same_frame() {
         eprintln!("INLINE_CARD_GPU_ACCEPTANCE: registered overwrite {mode:?}");
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn refused_card_poster_upload_paints_status_and_recovers_on_the_next_frame() {
     let _serialized = gpu_test_guard();
     for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
@@ -2195,8 +2255,9 @@ fn refused_card_poster_upload_paints_status_and_recovers_on_the_next_frame() {
         eprintln!("INLINE_CARD_GPU_ACCEPTANCE: upload refusal and recovery {mode:?}");
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn card_badge_labels_follow_configured_minimum_contrast_after_reload() {
     let _serialized = gpu_test_guard();
     for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
@@ -2237,8 +2298,9 @@ fn card_badge_labels_follow_configured_minimum_contrast_after_reload() {
         eprintln!("INLINE_CARD_GPU_ACCEPTANCE: label contrast reload {mode:?}");
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn registered_poster_real_scroll_keeps_partial_pixels_and_offscreen_overwrite_removes_them() {
     use alacritty_terminal::grid::Scroll;
     let _serialized = gpu_test_guard();
@@ -2319,8 +2381,9 @@ fn registered_poster_real_scroll_keeps_partial_pixels_and_offscreen_overwrite_re
         eprintln!("INLINE_CARD_GPU_ACCEPTANCE: partial scroll and offscreen overwrite {mode:?}");
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn exhausted_preview_account_keeps_new_terminal_windows_and_recovers_cards() {
     let _serialized = gpu_test_guard();
     for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
@@ -2347,7 +2410,7 @@ fn exhausted_preview_account_keeps_new_terminal_windows_and_recovers_cards() {
             .reserve_transient_gpu(low)
             .expect("serialized preview account");
         assert!(budget.reserve_transient_gpu(1).is_none());
-        let mut renderer = Renderer::headless_for_tests(&cfg, 1200, 400)
+        let mut renderer = crate::visual_parity_tests::renderer(&cfg, 1200, 400)
             .expect("preview pressure must not prevent a terminal window")
             .expect("the already-probed adapter remains available");
         let snap = snapshot_of(80, 8, b"a new terminal remains usable");
@@ -2411,10 +2474,11 @@ fn exhausted_preview_account_keeps_new_terminal_windows_and_recovers_cards() {
         );
     }
 }
+}
 
+parity_scene! {
 /// A quick-select chip over an inline card sits above the card's poster and
 /// frame, so its label stays readable on any image.
-#[test]
 fn a_hint_chip_over_a_card_is_drawn_above_it() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(1200, 400) else {
@@ -2464,10 +2528,11 @@ fn a_hint_chip_over_a_card_is_drawn_above_it() {
         "the chip shows over the card's poster"
     );
 }
+}
 
+parity_scene! {
 /// A quick-select chip is cut to its pane like its label, so one at the
 /// last column never paints over the next pane.
-#[test]
 fn a_hint_chip_stays_inside_its_pane() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(1200, 400) else {
@@ -2506,14 +2571,16 @@ fn a_hint_chip_stays_inside_its_pane() {
     assert!(chip_pixels(0, 600) > 0, "the chip shows in its pane");
     assert_eq!(chip_pixels(600, 1200), 0, "and nowhere in the next");
 }
+}
 
+parity_scene! {
 /// The card a click would open gets an accent outline over its frame, and
 /// only while the UI names it.
-#[test]
 fn a_hovered_card_is_outlined_in_the_accent() {
     for font_size in [13.0, 14.0] {
         hovered_card_outline_at(font_size);
     }
+}
 }
 
 fn hovered_card_outline_at(font_size: f32) {
@@ -2522,7 +2589,7 @@ fn hovered_card_outline_at(font_size: f32) {
         font_size,
         ..gpu_test_config()
     };
-    let Some(mut renderer) = Renderer::headless_for_tests(&cfg, 1200, 400).unwrap() else {
+    let Some(mut renderer) = crate::visual_parity_tests::renderer(&cfg, 1200, 400).unwrap() else {
         eprintln!("card outline at {font_size} px skipped: no GPU adapter");
         return;
     };
@@ -2601,7 +2668,7 @@ fn hovered_card_outline_at(font_size: f32) {
     }
 }
 
-#[test]
+parity_scene! {
 fn lane_play_control_changes_invalidate_retained_text() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(800, 600) else {
@@ -2655,11 +2722,12 @@ fn lane_play_control_changes_invalidate_retained_text() {
     capture(&mut renderer, &cfg, &[pane(&snap, 800, 600)], &overlay);
     assert_eq!(renderer.render_uploads().chrome_prepares, prepares);
 }
+}
 
+parity_scene! {
 /// A lane's open-outside button is drawn where its geometry puts it, a
 /// button cell with its glyph like the close button, and is not there when
 /// the lane does not offer it.
-#[test]
 fn a_lane_draws_its_open_outside_button_only_when_offered() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(800, 600) else {
@@ -2714,7 +2782,9 @@ fn a_lane_draws_its_open_outside_button_only_when_offered() {
     )
     .expect("the lane fits");
     let open = geometry.open_outside.expect("offered");
+    // The chip behind a button's glyph, on its row's text line.
     let corner = |frame: &image::RgbaImage, rect: (f32, f32, f32, f32)| {
+        let rect = geometry.chip(rect);
         let p = frame.get_pixel(rect.0.ceil() as u32 + 1, rect.1.ceil() as u32 + 1);
         (p[0], p[1], p[2])
     };
@@ -2740,11 +2810,12 @@ fn a_lane_draws_its_open_outside_button_only_when_offered() {
     );
     eprintln!("MEDIA_LANE_GPU_ACCEPTANCE: open-outside button");
 }
+}
 
+parity_scene! {
 /// A gallery's page controls are drawn at the end of the detail line, button
 /// cells like close with their glyphs and the counter between; the control
 /// with no page that way is drawn in the quieter color.
-#[test]
 fn a_lane_draws_a_gallerys_page_controls() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(800, 600) else {
@@ -2800,7 +2871,9 @@ fn a_lane_draws_a_gallerys_page_controls() {
         geometry.page_counter.unwrap(),
         geometry.page_next.unwrap(),
     );
+    // The chip behind a button's glyph, on its row's text line.
     let corner = |frame: &image::RgbaImage, rect: (f32, f32, f32, f32)| {
+        let rect = geometry.chip(rect);
         let p = frame.get_pixel(rect.0.ceil() as u32 + 1, rect.1.ceil() as u32 + 1);
         (p[0], p[1], p[2])
     };
@@ -2849,12 +2922,13 @@ fn a_lane_draws_a_gallerys_page_controls() {
     );
     eprintln!("MEDIA_LANE_GPU_ACCEPTANCE: gallery page controls");
 }
+}
 
+parity_scene! {
 /// A pane's terminal paints nothing outside its rectangle: a snapshot left
 /// taller than a terminal that has just shrunk for its preview lane draws no
 /// glyph or cell below it, so the lane's share of the pane shows exactly
 /// what it would with no text at all.
-#[test]
 fn a_terminal_paints_nothing_outside_its_rect() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 240) else {
@@ -2889,10 +2963,11 @@ fn a_terminal_paints_nothing_outside_its_rect() {
         }
     }
 }
+}
 
+parity_scene! {
 /// In source mode a lane shows its source's rows on the pane's background
 /// where the image was, and the image not at all; rendered, the image.
-#[test]
 fn a_lane_in_source_mode_shows_rows_instead_of_the_image() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(480, 320) else {
@@ -2984,10 +3059,11 @@ fn a_lane_in_source_mode_shows_rows_instead_of_the_image() {
         "the first source row is drawn"
     );
 }
+}
 
+parity_scene! {
 /// A zoomed lane draws its image larger, covering its content, and clipped
 /// to it: none of it reaches the header, the footer or the terminal.
-#[test]
 fn a_zoomed_lane_covers_its_content_and_stays_inside_it() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(480, 320) else {
@@ -3070,10 +3146,11 @@ fn a_zoomed_lane_covers_its_content_and_stays_inside_it() {
     let area = (cw * ch) as usize;
     assert!(inside * 100 >= area * 99, "{inside} of {area}: covered");
 }
+}
 
+parity_scene! {
 /// Sharper pixels covering a zoomed lane's view are drawn instead of its
 /// own, never as well; ones that do not cover it are not drawn.
-#[test]
 fn a_tile_that_covers_the_view_is_drawn_instead_of_the_image() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(480, 320) else {
@@ -3161,10 +3238,11 @@ fn a_tile_that_covers_the_view_is_drawn_instead_of_the_image() {
     );
     assert!(count(&short, [255, 0, 0]) > 1000);
 }
+}
 
+parity_scene! {
 /// A preview lane paints its opaque panel over its share of the pane, with
 /// its title, and leaves the terminal beside it as it was.
-#[test]
 fn a_preview_lane_paints_its_panel_and_leaves_the_terminal() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(480, 320) else {
@@ -3245,11 +3323,12 @@ fn a_preview_lane_paints_its_panel_and_leaves_the_terminal() {
         "the title is drawn"
     );
 }
+}
 
+parity_scene! {
 /// A playing video's lane draws its frame in the item's place and its bar
 /// under it: the part played in the accent up to where the video is, the
 /// rest in the divider's color.
-#[test]
 fn a_playing_lane_draws_its_frame_and_bar() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(480, 320) else {
@@ -3430,7 +3509,9 @@ fn a_playing_lane_draws_its_frame_and_bar() {
         renderer.text_prepares, prepares,
         "progress-only updates reuse prepared text"
     );
-    assert!(renderer.rounded_surfaces.upload_counts().buffer_writes > writes);
+    if renderer.backend() == RendererBackend::Gpu {
+        assert!(renderer.rounded_surfaces.upload_counts().buffer_writes > writes);
+    }
     player.media_pointer = Some((timeline.0 + timeline.2 / 2.0, timeline.1 + timeline.3 / 2.0));
     let hovered = capture(&mut renderer, &cfg, &[view()], &player);
     let changed = (timeline.1 as u32..(timeline.1 + timeline.3) as u32)
@@ -3446,7 +3527,7 @@ fn a_playing_lane_draws_its_frame_and_bar() {
         "timeline hover does not reshape text"
     );
     for scale in [1.0, 1.25, 2.0] {
-        let mut scaled = Renderer::headless_for_tests_with(
+        let mut scaled = crate::visual_parity_tests::renderer_with(
             &cfg,
             (480.0 * scale) as u32,
             (320.0 * scale) as u32,
@@ -3498,8 +3579,9 @@ fn a_playing_lane_draws_its_frame_and_bar() {
         );
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn disabled_wallpaper_discards_late_worker_frames() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(32, 32) else {
@@ -3524,9 +3606,7 @@ fn disabled_wallpaper_discards_late_worker_frames() {
             receiver,
             busy: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         });
-        let _ = renderer
-            .render_frame(&[], &TabBar::hidden(), &cfg, &focused(false))
-            .expect("disabled frame renders");
+        capture(&mut renderer, &cfg, &[], &focused(false));
         assert!(renderer.bg_image_cache.is_none());
         assert!(
             results
@@ -3544,9 +3624,7 @@ fn disabled_wallpaper_discards_late_worker_frames() {
                 })
                 .is_ok()
         );
-        let _ = renderer
-            .render_frame(&[], &TabBar::hidden(), &cfg, &focused(false))
-            .expect("late decode redraw renders");
+        capture(&mut renderer, &cfg, &[], &focused(false));
         assert!(renderer.bg_image_pending.is_none());
         assert!(
             renderer
@@ -3559,8 +3637,9 @@ fn disabled_wallpaper_discards_late_worker_frames() {
         );
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn horizontal_translucent_active_surface_matches_terminal_pixels() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(400, 160) else {
@@ -3614,10 +3693,13 @@ fn horizontal_translucent_active_surface_matches_terminal_pixels() {
             }
         }
     }
-    eprintln!("TAB_SURFACE_GPU_PASS: {:?}", renderer.gpu.adapter_info());
+    if renderer.backend() == RendererBackend::Gpu {
+        eprintln!("TAB_SURFACE_GPU_PASS: {:?}", renderer.gpu().adapter_info());
+    }
+}
 }
 
-#[test]
+parity_scene! {
 fn regression_active_close_glyph_contrasts_with_its_tab_surface() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(320, 160) else {
@@ -3652,8 +3734,9 @@ fn regression_active_close_glyph_contrasts_with_its_tab_surface() {
         .fold(1.0_f64, f64::max);
     assert!(best >= 2.9, "painted close glyph: {best:.3}:1");
 }
+}
 
-#[test]
+parity_scene! {
 fn inactive_dark_text_on_white_retains_contrast_at_the_shipped_sizes() {
     let _serialized = gpu_test_guard();
     for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
@@ -3666,7 +3749,7 @@ fn inactive_dark_text_on_white_retains_contrast_at_the_shipped_sizes() {
             cfg.theme.foreground = Rgb::new(0, 0, 0);
             cfg.unfocused_split_opacity = 0.1;
             cfg.cursor_unfocused_style = kettle_config::CursorUnfocusedStyle::Hidden;
-            let Some(mut renderer) = Renderer::headless_for_tests(&cfg, 400, 160).unwrap() else {
+            let Some(mut renderer) = crate::visual_parity_tests::renderer(&cfg, 400, 160).unwrap() else {
                 eprintln!("inactive light {mode:?} at {size} px skipped: no GPU adapter");
                 return;
             };
@@ -3696,19 +3779,22 @@ fn inactive_dark_text_on_white_retains_contrast_at_the_shipped_sizes() {
         }
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn regression_inactive_color_emoji_dim_grid() {
     for size in [13.0, 14.0] {
         inactive_color_emoji_dim(TextRendererMode::Grid, size);
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn regression_inactive_color_emoji_dim_legacy() {
     for size in [13.0, 14.0] {
         inactive_color_emoji_dim(TextRendererMode::Legacy, size);
     }
+}
 }
 
 fn inactive_color_emoji_dim(mode: TextRendererMode, font_size: f32) {
@@ -3725,7 +3811,7 @@ fn inactive_color_emoji_dim(mode: TextRendererMode, font_size: f32) {
     cfg.inactive_bg_color_offset = 1.0;
     // Compare text dimming only: unfocused panes otherwise draw a hollow cursor.
     cfg.cursor_unfocused_style = kettle_config::CursorUnfocusedStyle::Hidden;
-    let Some(mut renderer) = Renderer::headless_for_tests(&cfg, 400, 160).unwrap() else {
+    let Some(mut renderer) = crate::visual_parity_tests::renderer(&cfg, 400, 160).unwrap() else {
         eprintln!("inactive {mode:?} text at {font_size} px skipped: no GPU adapter");
         return;
     };
@@ -3838,7 +3924,7 @@ fn inactive_color_emoji_dim(mode: TextRendererMode, font_size: f32) {
     }
 }
 
-#[test]
+parity_scene! {
 fn regression_inactive_decorations_keep_the_glyph_contrast_floor() {
     let _serialized = gpu_test_guard();
     for mode in [TextRendererMode::Grid, TextRendererMode::Legacy] {
@@ -3851,7 +3937,7 @@ fn regression_inactive_decorations_keep_the_glyph_contrast_floor() {
         cfg.theme.background = Rgb::new(0, 0, 0);
         cfg.theme.foreground = Rgb::new(255, 255, 255);
         cfg.unfocused_split_opacity = 0.1;
-        let mut renderer = Renderer::headless_for_tests(&cfg, 400, 160)
+        let mut renderer = crate::visual_parity_tests::renderer(&cfg, 400, 160)
             .unwrap()
             .unwrap();
         let snap = snapshot_of(20, 4, b"\x1b[4;9mM");
@@ -3879,8 +3965,9 @@ fn regression_inactive_decorations_keep_the_glyph_contrast_floor() {
         }
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn regression_inactive_images_cards_and_preview_lanes_dim() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(1200, 600) else {
@@ -4004,8 +4091,9 @@ fn regression_inactive_images_cards_and_preview_lanes_dim() {
     }
     assert!(failures.is_empty(), "{}", failures.join("; "));
 }
+}
 
-#[test]
+parity_scene! {
 fn ime_preedit_single_glyph_survives_solid_block_cursor() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
@@ -4046,13 +4134,14 @@ fn ime_preedit_single_glyph_survives_solid_block_cursor() {
         );
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn ime_preedit_narrow_cells_cover_the_shaped_text() {
     let _serialized = gpu_test_guard();
     let mut cfg = gpu_test_config();
     cfg.cell_width = 0.5;
-    let Some(mut renderer) = Renderer::headless_for_tests(&cfg, 320, 120).unwrap() else {
+    let Some(mut renderer) = crate::visual_parity_tests::renderer(&cfg, 320, 120).unwrap() else {
         eprintln!("no GPU adapter on this host; skipped");
         return;
     };
@@ -4087,8 +4176,9 @@ fn ime_preedit_narrow_cells_cover_the_shaped_text() {
         }
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn ime_preedit_screenshot_hides_existing_glyphs_and_retains_cursor() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
@@ -4143,8 +4233,9 @@ fn ime_preedit_screenshot_hides_existing_glyphs_and_retains_cursor() {
         }
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn grapheme_positive_scalars_do_not_displace_the_next_cell_in_either_renderer() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(640, 180) else {
@@ -4190,10 +4281,13 @@ fn grapheme_positive_scalars_do_not_displace_the_next_cell_in_either_renderer() 
             "{mode:?} must keep X at column 2"
         );
     }
-    eprintln!("GRAPHEME_GPU_PASS: {:?}", renderer.gpu.adapter_info());
+    if renderer.backend() == RendererBackend::Gpu {
+        eprintln!("GRAPHEME_GPU_PASS: {:?}", renderer.gpu().adapter_info());
+    }
+}
 }
 
-#[test]
+parity_scene! {
 fn emoji_ink_is_fitted_without_changing_grid_widths_or_baselines() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(640, 180) else {
@@ -4270,8 +4364,9 @@ fn emoji_ink_is_fitted_without_changing_grid_widths_or_baselines() {
         }
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn grapheme_vs15_prefers_a_monochrome_face() {
     use image::GenericImageView;
     let _serial = gpu_test_guard();
@@ -4319,10 +4414,12 @@ fn grapheme_vs15_prefers_a_monochrome_face() {
             .pixels()
             .filter(|(_, _, p)| p.0[..3].iter().any(|c| *c > 80))
             .count();
-        eprintln!(
+        if renderer.backend() == RendererBackend::Gpu {
+            eprintln!(
             "GRAPHEME_VS15_GPU: colored={colored} ink={ink} adapter={:?}",
-            renderer.gpu.adapter_info()
+            renderer.gpu().adapter_info()
         );
+        }
         assert!(ink > 0, "text glyph must be visible");
         assert_eq!(
             colored, 0,
@@ -4330,8 +4427,9 @@ fn grapheme_vs15_prefers_a_monochrome_face() {
         );
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn grapheme_unsupported_zwj_emoji_uses_one_image_and_keeps_the_next_cell_clear() {
     use super::geometry::GridGlyphCell;
     let _serial = gpu_test_guard();
@@ -4376,10 +4474,12 @@ fn grapheme_unsupported_zwj_emoji_uses_one_image_and_keeps_the_next_cell_clear()
                     .is_some_and(|i| i.placement.width > 0 && i.placement.height > 0)
             })
             .count();
-        eprintln!(
+        if renderer.backend() == RendererBackend::Gpu {
+            eprintln!(
             "GRAPHEME_ZWJ_GPU: visible_images={visible} adapter={:?}",
-            renderer.gpu.adapter_info()
+            renderer.gpu().adapter_info()
         );
+        }
         assert_eq!(
             visible, 1,
             "unsupported joined emoji must use one replacement, never decomposed images"
@@ -4400,10 +4500,11 @@ fn grapheme_unsupported_zwj_emoji_uses_one_image_and_keeps_the_next_cell_clear()
         );
     }
 }
+}
 
+parity_scene! {
 /// Mode 2027 flags every printed cell as a grapheme, but only a cell that
 /// holds more than one scalar is a cluster to the renderer.
-#[test]
 fn grapheme_mode_marks_only_multi_scalar_cells_as_clusters() {
     use super::geometry::GridGlyphCell;
     let _serial = gpu_test_guard();
@@ -4437,11 +4538,12 @@ fn grapheme_mode_marks_only_multi_scalar_cells_as_clusters() {
     }
     assert_eq!(cells.get(&11), Some(&true), "e + U+0301 is a cluster");
 }
+}
 
+parity_scene! {
 /// A cell holding one scalar draws the same with or without mode 2027: the
 /// `::` ligature keeps both colons, and a block cursor over a glyph whose ink
 /// overhangs its cell is not narrowed to that cell.
-#[test]
 fn grapheme_mode_draws_single_scalar_cells_as_without_it() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(640, 180) else {
@@ -4494,8 +4596,9 @@ fn grapheme_mode_draws_single_scalar_cells_as_without_it() {
         assert_eq!(differing, 0, "{body:?}: mode 2027 changed the drawing");
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn grapheme_replacement_stays_consistent_under_a_cursor_on_cached_frames() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(640, 180) else {
@@ -4560,13 +4663,16 @@ fn grapheme_replacement_stays_consistent_under_a_cursor_on_cached_frames() {
             "cursor must not overwrite the following cell"
         );
     }
-    eprintln!(
+    if renderer.backend() == RendererBackend::Gpu {
+        eprintln!(
         "GRAPHEME_CURSOR_GPU_PASS: {:?}",
-        renderer.gpu.adapter_info()
+        renderer.gpu().adapter_info()
     );
+    }
+}
 }
 
-#[test]
+parity_scene! {
 fn grapheme_prefixes_keep_the_first_spacing_glyph_visible_in_its_cell() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(640, 180) else {
@@ -4641,13 +4747,16 @@ fn grapheme_prefixes_keep_the_first_spacing_glyph_visible_in_its_cell() {
             "prefix displaced or hid the spacing glyph"
         );
     }
-    eprintln!(
+    if renderer.backend() == RendererBackend::Gpu {
+        eprintln!(
         "GRAPHEME_PREFIX_GPU_PASS: {:?}",
-        renderer.gpu.adapter_info()
+        renderer.gpu().adapter_info()
     );
+    }
+}
 }
 
-#[test]
+parity_scene! {
 fn grapheme_prefix_cursor_anchors_the_spacing_glyph_on_cached_frames() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(640, 180) else {
@@ -4711,13 +4820,16 @@ fn grapheme_prefix_cursor_anchors_the_spacing_glyph_on_cached_frames() {
             );
         }
     }
-    eprintln!(
+    if renderer.backend() == RendererBackend::Gpu {
+        eprintln!(
         "GRAPHEME_PREFIX_CURSOR_GPU_PASS: {:?}",
-        renderer.gpu.adapter_info()
+        renderer.gpu().adapter_info()
     );
+    }
+}
 }
 
-#[test]
+parity_scene! {
 fn grapheme_trailing_blank_colors_reuse_the_shaped_row() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 120) else {
@@ -4746,8 +4858,9 @@ fn grapheme_trailing_blank_colors_reuse_the_shaped_row() {
         "changing the foreground of cut blanks has no ink"
     );
 }
+}
 
-#[test]
+parity_scene! {
 fn the_block_cursor_makes_the_same_presentation_choice_as_the_pane() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 120) else {
@@ -4811,8 +4924,9 @@ fn the_block_cursor_makes_the_same_presentation_choice_as_the_pane() {
         }
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn a_qualified_text_default_symbol_draws_in_the_colour_emoji_face() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 120) else {
@@ -4862,8 +4976,9 @@ fn a_qualified_text_default_symbol_draws_in_the_colour_emoji_face() {
         .count();
     assert_eq!(colour, 2, "both qualified symbols draw in colour");
 }
+}
 
-#[test]
+parity_scene! {
 fn grapheme_cells_do_not_change_other_legacy_rows() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(640, 180) else {
@@ -4905,8 +5020,9 @@ fn grapheme_cells_do_not_change_other_legacy_rows() {
         "an unrelated Legacy row must retain its pixels when another row gains a grapheme"
     );
 }
+}
 
-#[test]
+parity_scene! {
 fn special_attribute_colors_render_only_when_enabled_and_override_ansi_on_request() {
     use alacritty_terminal::term::cell::Flags;
     use image::GenericImageView;
@@ -5006,10 +5122,16 @@ fn special_attribute_colors_render_only_when_enabled_and_override_ansi_on_reques
             );
         }
     }
-    eprintln!("SPECIAL_COLOR_GPU_PASS: {:?}", renderer.gpu.adapter_info());
+    if renderer.backend() == RendererBackend::Gpu {
+        eprintln!(
+        "SPECIAL_COLOR_GPU_PASS: {:?}",
+        renderer.gpu().adapter_info()
+    );
+    }
+}
 }
 
-#[test]
+parity_scene! {
 fn screen_reverse_paints_defaults_preserves_explicit_colors_and_restores_cached_frames() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
@@ -5080,8 +5202,9 @@ fn screen_reverse_paints_defaults_preserves_explicit_colors_and_restores_cached_
         );
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn toast_redesign_corners_reveal_terminal_while_center_is_opaque() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(800, 600) else {
@@ -5116,6 +5239,7 @@ fn toast_redesign_corners_reveal_terminal_while_center_is_opaque() {
             close: "\u{00d7}".into(),
             opacity: 1.0,
             focused: None,
+            hovered: None,
         }),
         ..Overlay::default()
     };
@@ -5137,8 +5261,9 @@ fn toast_redesign_corners_reveal_terminal_while_center_is_opaque() {
     let (px, py) = ((x + w * 0.5) as u32, (y + h - 4.0) as u32);
     assert_ne!(frame.get_pixel(px, py), baseline.get_pixel(px, py));
 }
+}
 
-#[test]
+parity_scene! {
 fn toast_redesign_text_focus_fade_and_dismissal_preserve_retained_layers() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(800, 600) else {
@@ -5167,6 +5292,7 @@ fn toast_redesign_text_focus_fade_and_dismissal_preserve_retained_layers() {
             close: "\u{00d7}".into(),
             opacity: 1.0,
             focused: Some(2),
+            hovered: None,
         }),
         ..Overlay::default()
     };
@@ -5203,13 +5329,14 @@ fn toast_redesign_text_focus_fade_and_dismissal_preserve_retained_layers() {
     overlay.update_toast = None;
     assert_eq!(baseline, capture(&mut renderer, &cfg, &panes, &overlay));
 }
+}
 
-#[test]
+parity_scene! {
 fn review_titlebar_editor_paint_and_measurement_share_fitted_metrics() {
     let _serialized = gpu_test_guard();
     let mut cfg = gpu_test_config();
     cfg.font_size = 72.0;
-    let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 800, 240, 1.0, false).unwrap()
+    let Some(mut renderer) = crate::visual_parity_tests::renderer_with(&cfg, 800, 240, 1.0, false).unwrap()
     else {
         eprintln!("titlebar editor paint/measurement check skipped: no GPU adapter");
         return;
@@ -5262,12 +5389,13 @@ fn review_titlebar_editor_paint_and_measurement_share_fitted_metrics() {
     );
     assert_eq!(measured, painted);
 }
+}
 
-#[test]
+parity_scene! {
 fn strip_control_and_close_glyphs_draw_larger_than_tab_text() {
     let _serialized = gpu_test_guard();
     let cfg = gpu_test_config();
-    let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 400, 160, 1.0, false).unwrap()
+    let Some(mut renderer) = crate::visual_parity_tests::renderer_with(&cfg, 400, 160, 1.0, false).unwrap()
     else {
         eprintln!("strip control glyph check skipped: no GPU adapter");
         return;
@@ -5308,18 +5436,19 @@ fn strip_control_and_close_glyphs_draw_larger_than_tab_text() {
         }
     }
 }
+}
 
+parity_scene! {
 /// An unfocused window paints no Cmd+N hints: they are for the keyboard in
 /// a focused one. Their lane stays reserved, so the title does not move when
 /// focus comes and goes.
-#[test]
 fn an_unfocused_window_hides_tab_hints_without_moving_titles() {
     let _serialized = gpu_test_guard();
     let cfg = Config {
         background_opacity: 1.0,
         ..gpu_test_config()
     };
-    let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 480, 160, 1.0, false).unwrap()
+    let Some(mut renderer) = crate::visual_parity_tests::renderer_with(&cfg, 480, 160, 1.0, false).unwrap()
     else {
         eprintln!("tab hint visibility skipped: no GPU adapter");
         return;
@@ -5381,6 +5510,7 @@ fn an_unfocused_window_hides_tab_hints_without_moving_titles() {
         boxes.push(glyph_ink(&frame, title, theme.background).expect("the title is painted"));
     }
     assert_eq!(boxes[0], boxes[1], "the title moved when focus changed");
+}
 }
 
 /// The pixel box the ink in `rect` spans against `background`. Ink is any
@@ -5524,15 +5654,16 @@ fn assert_glyph_inside_chip(
 /// row, an unfocused window's primary text where secondary belongs at 1.35.
 const GLYPH_SOLID_REACH: std::ops::RangeInclusive<f64> = 0.95..=1.05;
 
+parity_scene! {
 /// Inactive tab titles read faint and the strip's controls tiny. Inactive
 /// titles now read at AAA in a focused window, and the close, `+`, `▾`, `≡`
 /// and header-button glyphs are drawn large enough to find, at 3:1 or
 /// better, whole inside the button that takes their clicks.
-#[test]
 fn tab_strip_titles_and_controls_are_legible_and_inside_their_buttons() {
     for font_size in [13.0, 14.0] {
         tab_strip_legibility_at(font_size);
     }
+}
 }
 
 fn tab_strip_legibility_at(font_size: f32) {
@@ -5541,7 +5672,8 @@ fn tab_strip_legibility_at(font_size: f32) {
         font_size,
         ..gpu_test_config()
     };
-    let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 480, 160, 1.0, false).unwrap()
+    let Some(mut renderer) =
+        crate::visual_parity_tests::renderer_with(&cfg, 480, 160, 1.0, false).unwrap()
     else {
         eprintln!("tab strip legibility at {font_size} px skipped: no GPU adapter");
         return;
@@ -5746,12 +5878,12 @@ fn tab_strip_legibility_at(font_size: f32) {
     }
 }
 
+parity_scene! {
 /// The macOS title bar's Settings gear is drawn from quads, not a font, so
 /// it reads the same on every host: at 1x and 2x, in Night and Day, focused
 /// and unfocused, its ink meets the 3:1 icon floor against the strip (and
 /// the hover fill), stays whole inside its button, and lifts on hover. A
 /// zero rect draws nothing.
-#[test]
 fn titlebar_settings_gear_is_legible_and_inside_its_button() {
     let _serialized = gpu_test_guard();
     for scale in [1.0_f32, 2.0] {
@@ -5760,7 +5892,7 @@ fn titlebar_settings_gear_is_legible_and_inside_its_button() {
             cfg.theme = cfg.theme_by_name(theme_name);
             let (w, h) = ((480.0 * scale) as u32, (160.0 * scale) as u32);
             let Some(mut renderer) =
-                Renderer::headless_for_tests_with(&cfg, w, h, scale, false).unwrap()
+                crate::visual_parity_tests::renderer_with(&cfg, w, h, scale, false).unwrap()
             else {
                 eprintln!("settings gear check skipped: no GPU adapter");
                 return;
@@ -5853,6 +5985,7 @@ fn titlebar_settings_gear_is_legible_and_inside_its_button() {
         }
     }
 }
+}
 
 /// A GNOME header `w` by 46 points at `scale`: a window close button, the
 /// main menu `≡` before it and the leading `+`, with `tabs` tabs.
@@ -5896,10 +6029,10 @@ fn gnome_header_tabs(w: f32, scale: f32, tabs: usize) -> TabBar {
     bar
 }
 
+parity_scene! {
 /// The GNOME header's `≡` is drawn, not shaped: its ink is the 14 by 12
 /// point icon at 1x and 2x whatever the font size, where a font's `≡`
 /// grew and shrank with the text. It keeps its glyph's ink colour.
-#[test]
 fn gnome_header_menu_icon_keeps_its_size_at_every_font_size() {
     let _serialized = gpu_test_guard();
     for scale in [1.0_f32, 2.0] {
@@ -5910,7 +6043,7 @@ fn gnome_header_menu_icon_keeps_its_size_at_every_font_size() {
             };
             let (w, h) = ((480.0 * scale) as u32, (160.0 * scale) as u32);
             let Some(mut renderer) =
-                Renderer::headless_for_tests_with(&cfg, w, h, scale, false).unwrap()
+                crate::visual_parity_tests::renderer_with(&cfg, w, h, scale, false).unwrap()
             else {
                 eprintln!("menu icon check skipped: no GPU adapter");
                 return;
@@ -5956,12 +6089,13 @@ fn gnome_header_menu_icon_keeps_its_size_at_every_font_size() {
         }
     }
 }
+}
 
+parity_scene! {
 /// The GNOME header ends in a hairline that reads apart from the header and
 /// the terminal below it, at 1.5:1 against each as painted, in both default
 /// themes, focused and unfocused, at 1x and 2x. It stops under the active
 /// tab when there are two, which still joins the terminal.
-#[test]
 fn gnome_header_hairline_is_painted_in_both_themes_and_focus_states() {
     let _serialized = gpu_test_guard();
     let pixel = |frame: &image::RgbaImage, x: f32, y: f32| {
@@ -5974,7 +6108,7 @@ fn gnome_header_hairline_is_painted_in_both_themes_and_focus_states() {
             cfg.theme = cfg.theme_by_name(theme_name);
             let (w, h) = ((480.0 * scale) as u32, (160.0 * scale) as u32);
             let Some(mut renderer) =
-                Renderer::headless_for_tests_with(&cfg, w, h, scale, false).unwrap()
+                crate::visual_parity_tests::renderer_with(&cfg, w, h, scale, false).unwrap()
             else {
                 eprintln!("header hairline check skipped: no GPU adapter");
                 return;
@@ -6022,11 +6156,12 @@ fn gnome_header_hairline_is_painted_in_both_themes_and_focus_states() {
         }
     }
 }
+}
 
+parity_scene! {
 /// The size chip is sized from the text it shows, so a font-size caption
 /// ("Font size 14 · 80×24") sits whole inside its outline instead of in a
 /// chip sized for the bare grid.
-#[test]
 fn resize_chip_fits_a_font_size_caption() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(640, 200) else {
@@ -6065,15 +6200,16 @@ fn resize_chip_fits_a_font_size_caption() {
         assert_eq!(renderer.resize_overlay_text, caption);
     }
 }
+}
 
+parity_scene! {
 /// At a large font in a small window a caption wider than the window is
 /// drawn smaller, on one line, whole inside a chip inside the window.
-#[test]
 fn resize_chip_caption_fits_a_narrow_window_at_a_large_font() {
     let _serialized = gpu_test_guard();
     let mut cfg = gpu_test_config();
     cfg.font_size = 48.0;
-    let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 480, 240, 1.0, false).unwrap()
+    let Some(mut renderer) = crate::visual_parity_tests::renderer_with(&cfg, 480, 240, 1.0, false).unwrap()
     else {
         eprintln!("resize chip fit check skipped: no GPU adapter");
         return;
@@ -6117,12 +6253,13 @@ fn resize_chip_caption_fits_a_narrow_window_at_a_large_font() {
         "chip {left}..{right} reaches the window edge"
     );
 }
+}
 
+parity_scene! {
 /// A side bar draws its tabs' close glyph from the same enlarged buffer as a
 /// top bar, so it grew too. At the default font and a large one the `✕`
 /// must stay inside the chip that shows the button (its square less 5 px a
 /// side), at rest and hovered, on the active row and an inactive one.
-#[test]
 fn side_bar_close_glyph_stays_inside_its_chip() {
     let _serialized = gpu_test_guard();
     for font_size in [Config::default().font_size, 20.0] {
@@ -6130,7 +6267,7 @@ fn side_bar_close_glyph_stays_inside_its_chip() {
         cfg.font_size = font_size;
         cfg.tab_bar_pos = kettle_config::TabBarPos::Left;
         let Some(mut renderer) =
-            Renderer::headless_for_tests_with(&cfg, 480, 320, 1.0, false).unwrap()
+            crate::visual_parity_tests::renderer_with(&cfg, 480, 320, 1.0, false).unwrap()
         else {
             eprintln!("side bar close glyph check skipped: no GPU adapter");
             return;
@@ -6208,18 +6345,19 @@ fn side_bar_close_glyph_stays_inside_its_chip() {
         }
     }
 }
+}
 
+parity_scene! {
 /// A 40 px side bar splits its last row into 20 px `▾` and `+` buttons. At a
 /// large font the enlarged glyphs must fit those widths, not just the row's
 /// height, or the button clips them.
-#[test]
 fn narrow_side_bar_controls_fit_their_half_width_buttons() {
     let _serialized = gpu_test_guard();
     let mut cfg = gpu_test_config();
     cfg.font_size = 30.0;
     cfg.tab_bar_pos = kettle_config::TabBarPos::Left;
     cfg.tab_bar_width = 40.0;
-    let Some(mut renderer) = Renderer::headless_for_tests_with(&cfg, 480, 320, 1.0, false).unwrap()
+    let Some(mut renderer) = crate::visual_parity_tests::renderer_with(&cfg, 480, 320, 1.0, false).unwrap()
     else {
         eprintln!("side bar control fit check skipped: no GPU adapter");
         return;
@@ -6265,11 +6403,12 @@ fn narrow_side_bar_controls_fit_their_half_width_buttons() {
         );
     }
 }
+}
 
+parity_scene! {
 /// Shortcut hints in a menu read at AAA where the theme's text does, on the
 /// panel and on the selected row, never clearer than their labels; a
 /// disabled row's hint stays as dim as its label.
-#[test]
 fn menu_shortcut_hints_read_clearly_and_dim_with_disabled_rows() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(480, 200) else {
@@ -6289,6 +6428,7 @@ fn menu_shortcut_hints_read_clearly_and_dim_with_disabled_rows() {
     let (ax, ay, panel_w) = (40.0, 20.0, 320.0);
     let overlay = Overlay {
         context_menu: Some(ContextMenu {
+            status: None,
             picker_header_height: 0.0,
             picker_footer: None,
             anchor: (ax, ay),
@@ -6378,10 +6518,11 @@ fn menu_shortcut_hints_read_clearly_and_dim_with_disabled_rows() {
         "disabled hint {disabled:.2}:1 vs enabled {enabled:.2}:1"
     );
 }
+}
 
+parity_scene! {
 /// A row's swatches reach the frame in their own colours, above the selected
 /// row's tint, and a row without them paints none.
-#[test]
 fn menu_row_swatches_paint_their_colours_above_the_selected_row() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(480, 200) else {
@@ -6399,6 +6540,7 @@ fn menu_row_swatches_paint_their_colours_above_the_selected_row() {
         Rgb::new(128, 0, 255),
     ];
     let menu = |swatches| ContextMenu {
+        status: None,
         picker_header_height: 0.0,
         picker_footer: None,
         anchor: (40.0, 20.0),
@@ -6445,6 +6587,7 @@ fn menu_row_swatches_paint_their_colours_above_the_selected_row() {
         }
     }
 }
+}
 
 /// One menu level as the UI projects it: clamped to its natural size.
 fn menu_level(
@@ -6454,6 +6597,7 @@ fn menu_level(
     (width, row_h): (f32, f32),
 ) -> ContextMenu {
     ContextMenu {
+        status: None,
         picker_header_height: 0.0,
         picker_footer: None,
         anchor,
@@ -6488,6 +6632,7 @@ fn darkening(frame: &image::RgbaImage, (x, y): (u32, u32), base: Rgb) -> i32 {
         .sum()
 }
 
+parity_scene! {
 /// Every open menu level, and a picker's card, is a rounded panel on a soft
 /// shadow, with an inset rounded selection in place of a full-width tint and
 /// a 2-pixel accent rail. The corners show what lies beneath, the shadow
@@ -6495,7 +6640,6 @@ fn darkening(frame: &image::RgbaImage, (x, y): (u32, u32), base: Rgb) -> i32 {
 /// selection leaves the row's edges and the panel's edge clear. A picker's
 /// query and caret still show in its header. Every check is collected, so a
 /// failure lists each property that broke.
-#[test]
 fn menu_levels_and_pickers_paint_rounded_panels_on_a_soft_shadow() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(640, 260) else {
@@ -6629,10 +6773,108 @@ fn menu_levels_and_pickers_paint_rounded_panels_on_a_soft_shadow() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+}
 
+parity_scene! {
+/// A picker's pinned status band sits inside its card, and the shared menu
+/// text pass is cut out of every card, so the band's lines must draw with
+/// the card's own labels. Each line shows in the secondary text colour; the
+/// same band with blank lines stays clean, so the ink is the status text.
+fn picker_status_band_text_draws_inside_its_card() {
+    let _serialized = gpu_test_guard();
+    let Some((mut renderer, cfg)) = renderer(480, 280) else {
+        eprintln!("picker status band check skipped: no GPU adapter");
+        return;
+    };
+    let theme = &cfg.theme;
+    let bg = theme.background;
+    let row_h = menu::row_height(renderer.cell_h);
+    let width = 360.0;
+    let text_cell = (
+        renderer.overlay_text_cell_width(),
+        renderer.overlay_text_line_height(),
+    );
+    let status = MenuStatus::new(
+        "Profiles weren't ready.\nEnter run / Tab select / Esc cancel",
+        width,
+        text_cell,
+    );
+    assert!(status.lines.len() >= 2, "{:?}", status.lines);
+    let picker = |status: MenuStatus| ContextMenu {
+        picker_header_height: 30.0,
+        status: Some(status),
+        ..menu_level(
+            (40.0, 140.0),
+            &["Nord", "Dracula", "Solarized"],
+            usize::MAX,
+            (width, row_h),
+        )
+    };
+    let shown = picker(status);
+    let band = shown.status_rect().expect("status band");
+    let (cx, cy, cw, ch) = shown.card_rect();
+    assert!(
+        cy + 30.0 <= band.1
+            && band.1 + band.3 <= cy + ch
+            && cx <= band.0
+            && band.0 + band.2 <= cx + cw,
+        "band {band:?} outside card {:?}",
+        (cx, cy, cw, ch)
+    );
+    let status = shown.status.as_ref().expect("status");
+    let lines: Vec<Rect4> = (0..status.lines.len())
+        .map(|index| status.line_rect(band, index))
+        .collect();
+    let blank = picker(MenuStatus {
+        lines: vec![String::new(); status.lines.len()],
+        line_height: status.line_height,
+    });
+    assert_eq!(blank.status_rect(), Some(band));
+    let snap = snapshot_of(20, 4, b"");
+    let ink = chrome::Colors::default().secondary(theme.foreground, bg);
+
+    let overlay = Overlay {
+        context_menu: Some(shown),
+        ..focused(false)
+    };
+    let frame = capture(&mut renderer, &cfg, &[pane(&snap, 480, 280)], &overlay);
+    for (index, &line) in lines.iter().enumerate() {
+        assert_glyph_painted(
+            &frame,
+            line,
+            (bg, ink),
+            chrome::TEXT_CONTRAST,
+            &format!("status line {index}"),
+        );
+    }
+
+    let overlay = Overlay {
+        context_menu: Some(blank),
+        ..focused(false)
+    };
+    let frame = capture(&mut renderer, &cfg, &[pane(&snap, 480, 280)], &overlay);
+    for (index, &(x, y, w, h)) in lines.iter().enumerate() {
+        let stray = (y as u32..(y + h) as u32)
+            .flat_map(|py| (x as u32..(x + w) as u32).map(move |px| (px, py)))
+            .filter(|&(px, py)| {
+                let p = frame.get_pixel(px, py);
+                [bg.r, bg.g, bg.b]
+                    .into_iter()
+                    .zip(p.0)
+                    .any(|(want, got)| want.abs_diff(got) > 2)
+            })
+            .count();
+        assert_eq!(
+            stray, 0,
+            "blank status line {index} shows {stray} ink pixels"
+        );
+    }
+}
+}
+
+parity_scene! {
 /// An open menu covers a toast beneath it, panel and labels alike, as it
 /// covers the terminal.
-#[test]
 fn an_open_menu_covers_a_toast_beneath_it() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(800, 600) else {
@@ -6670,6 +6912,7 @@ fn an_open_menu_covers_a_toast_beneath_it() {
             close: "\u{00d7}".into(),
             opacity: 1.0,
             focused: None,
+            hovered: None,
         }),
         context_menu: Some(menu),
         ..focused(false)
@@ -6693,11 +6936,12 @@ fn an_open_menu_covers_a_toast_beneath_it() {
         shows.first()
     );
 }
+}
 
+parity_scene! {
 /// A submenu is a layer above its parent: its panel covers the parent's
 /// selection and labels where they overlap, and its shadow falls over the
 /// parent's labels next to it rather than under them.
-#[test]
 fn submenu_covers_its_parents_selection_labels_and_shadowed_edge() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(480, 220) else {
@@ -6760,11 +7004,12 @@ fn submenu_covers_its_parents_selection_labels_and_shadowed_edge() {
         "the parent's label paints over the submenu's shadow: {shadowed} vs {bare} unshadowed"
     );
 }
+}
 
+parity_scene! {
 /// A submenu's bordered edge is opaque: where its top edge crosses the
 /// parent's selection and its bottom edge the next row's label, the edge
 /// rows paint exactly as they do with no parent beneath.
-#[test]
 fn submenu_edge_hides_its_parents_selection_and_labels() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(480, 220) else {
@@ -6841,8 +7086,9 @@ fn submenu_edge_hides_its_parents_selection_and_labels() {
         shows.first().map(|&(x, y)| alone.get_pixel(x, y)),
     );
 }
+}
 
-#[test]
+parity_scene! {
 fn selection_link_and_sgr_decorations_follow_focus_and_split_fills() {
     use alacritty_terminal::selection::SelectionRange;
     use kettle_core::{Column, Line, Point};
@@ -6943,7 +7189,9 @@ fn selection_link_and_sgr_decorations_follow_focus_and_split_fills() {
         }
     }
 }
+}
 
+parity_scene! {
 /// Over a highlight a link underline is drawn like an underline of the
 /// highlighted text: in its colour, at the resting 1 px weight, hovered or
 /// not. Link blue, the hover accent and the 1.5 px line competed with the
@@ -6951,7 +7199,6 @@ fn selection_link_and_sgr_decorations_follow_focus_and_split_fills() {
 /// selection and a search match, and in both `link-underline` modes; a
 /// resting detected link that draws no line off a highlight draws none on
 /// one either.
-#[test]
 fn link_underlines_over_a_selection_take_the_selected_text_colour() {
     use alacritty_terminal::selection::SelectionRange;
     use kettle_core::{Column, Line, Point};
@@ -7105,14 +7352,15 @@ fn link_underlines_over_a_selection_take_the_selected_text_colour() {
         }
     }
 }
+}
 
+parity_scene! {
 /// Detected links (URLs and paths) rest without an underline by default, so
 /// a screen of them stays quiet and the hovered link stands out; a UX panel
 /// found the always-on lines busy and competing with selections.
 /// `link-underline = always` brings the thin dim resting line back. An OSC 8
 /// link rests dotted and a hovered link is a solid accent line in both modes,
 /// and a reload that changes the mode repaints with no cached line left.
-#[test]
 fn detected_links_are_underlined_on_hover_unless_link_underline_is_always() {
     use kettle_config::LinkUnderline;
     let _serial = gpu_test_guard();
@@ -7221,13 +7469,14 @@ fn detected_links_are_underlined_on_hover_unless_link_underline_is_always() {
         }
     }
 }
+}
 
+parity_scene! {
 /// A selected cell keeps the selection visible against the background it
 /// shows when unselected, including a program-set background and a dimmed
 /// split. The row's fill was resolved against the undimmed default background
 /// only, so a cell whose SGR background happened to be that fill lost the
 /// selection (1:1).
-#[test]
 fn a_selected_cell_with_its_own_background_gets_a_fill_that_separates_from_it() {
     use alacritty_terminal::selection::SelectionRange;
     use kettle_core::{Column, Line, Point};
@@ -7305,7 +7554,9 @@ fn a_selected_cell_with_its_own_background_gets_a_fill_that_separates_from_it() 
         }
     }
 }
+}
 
+parity_scene! {
 /// One selection across program-set backgrounds keeps one fill wherever that
 /// fill stands out from the cell's background. Resolving every cell against
 /// its own background made a patchwork in TokyoNight Night: an inverse status
@@ -7313,7 +7564,6 @@ fn a_selected_cell_with_its_own_background_gets_a_fill_that_separates_from_it() 
 /// `#283457`, which already separates from them, beside the `#4d64a6` row.
 /// A cell the row's fill does not stand out from (`#565f89`, or the fill
 /// itself) still gets a fill of its own, and its text follows that fill.
-#[test]
 fn a_selection_over_program_backgrounds_keeps_one_fill_where_it_separates() {
     use alacritty_terminal::selection::SelectionRange;
     use kettle_core::{Column, Line, Point};
@@ -7422,8 +7672,9 @@ fn a_selection_over_program_backgrounds_keeps_one_fill_where_it_separates() {
         }
     }
 }
+}
 
-#[test]
+parity_scene! {
 fn unfocused_window_and_split_cursor_are_steady_and_respect_dectcem() {
     use alacritty_terminal::vte::ansi::CursorShape;
     let _serial = gpu_test_guard();
@@ -7476,10 +7727,11 @@ fn unfocused_window_and_split_cursor_are_steady_and_respect_dectcem() {
     );
     assert_eq!(cursor_pixels(&off, &cfg, &snap), 0);
 }
+}
 
+parity_scene! {
 /// The focused pane's title is bold, the others regular, so which pane has
 /// focus does not rest on the titlebar colour alone; moving focus reshapes.
-#[test]
 fn the_focused_pane_title_is_bold() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(640, 200) else {
@@ -7520,11 +7772,12 @@ fn the_focused_pane_title_is_bold() {
         [glyphon::Weight::NORMAL, glyphon::Weight::BOLD]
     );
 }
+}
 
+parity_scene! {
 /// A default-emoji character without U+FE0F asks for the colour face too:
 /// on Linux a monochrome symbol face can come first in the cascade. U+FE0E
 /// still keeps the text face.
-#[test]
 fn default_emoji_without_a_selector_asks_for_the_colour_face() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(320, 120) else {
@@ -7555,6 +7808,7 @@ fn default_emoji_without_a_selector_asks_for_the_colour_face() {
     assert_eq!(family_at("\u{1f600}", 0), glyphon::Family::Name(family));
     assert_eq!(family_at("\u{231a}", 0), glyphon::Family::Name(family));
     assert_ne!(family_at("\u{231a}", 1), glyphon::Family::Name(family));
+}
 }
 
 /// A program title with a ZWJ sequence, a check mark, a flag, a skin tone,
@@ -7646,6 +7900,7 @@ fn emoji_title_header(title: &str, width: f32) -> TabBar {
     tabs
 }
 
+parity_scene! {
 /// Chrome titles ask for the colour-emoji face on each grapheme presented as
 /// emoji, as the grid's rows do, over the whole grapheme. Shaped in the
 /// terminal's family alone, the fallback cascade picks each codepoint's
@@ -7653,7 +7908,6 @@ fn emoji_title_header(title: &str, width: f32) -> TabBar {
 /// regional indicators and U+2705, so a flag drew as two boxed letters and
 /// a check mark in monochrome. The face named here need not exist: the
 /// spans are what the shaper is asked for, whatever fonts the host has.
-#[test]
 fn chrome_titles_ask_for_the_colour_emoji_face_on_whole_emoji_graphemes() {
     const EMOJI: &str = "Kettle Fixture Colour Emoji";
     let _serial = gpu_test_guard();
@@ -7716,7 +7970,9 @@ fn chrome_titles_ask_for_the_colour_emoji_face_on_whole_emoji_graphemes() {
         "the header title is measured as it is drawn"
     );
 }
+}
 
+parity_scene! {
 /// With the host's colour-emoji face, a chrome title draws each emoji
 /// grapheme exactly as that face shapes it alone, the grid's choice: a flag
 /// is the face's one flag glyph (two letter glyphs where the face has no
@@ -7724,7 +7980,6 @@ fn chrome_titles_ask_for_the_colour_emoji_face_on_whole_emoji_graphemes() {
 /// regular tab titles and in the bold focused pane title and header title.
 /// Only graphemes the face itself covers are compared, at least the flag and
 /// the check mark. Skipped on a host without such a face.
-#[test]
 fn chrome_titles_draw_emoji_in_the_colour_emoji_face() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(800, 160) else {
@@ -7848,6 +8103,7 @@ fn chrome_titles_draw_emoji_in_the_colour_emoji_face() {
     }
     eprintln!("CHROME_EMOJI_FACE_PASS: {emoji}");
 }
+}
 
 /// A tab or pane title is fitted to its lane in columns of the cell width,
 /// and drawn on one line whatever its shaped width. A label that filled its
@@ -7910,11 +8166,11 @@ fn chrome_titles_stay_on_one_line_in_every_lane() {
     assert!(wrapped.is_empty(), "{}", wrapped.join("\n"));
 }
 
+parity_scene! {
 /// The command palette shapes a row's matched characters in the colour the
 /// row's own surface needs, so the selected row's matches read on its
 /// accent-tinted fill, and moving the selection reshapes the rows it leaves
 /// and enters. Matches are in the bold face, which keeps the row's width.
-#[test]
 fn palette_matches_are_shaped_in_their_rows_contrast_checked_color() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, cfg)) = renderer(480, 220) else {
@@ -7983,10 +8239,11 @@ fn palette_matches_are_shaped_in_their_rows_contrast_checked_color() {
         "matched characters keep the row's width"
     );
 }
+}
 
+parity_scene! {
 /// A picker header's key hint reaches the frame in secondary text, the
 /// colour `text_field_slot_color` gives the hint slot, not muted grey.
-#[test]
 fn a_picker_header_paints_its_key_hint_as_secondary_text() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(640, 260) else {
@@ -8034,10 +8291,11 @@ fn a_picker_header_paints_its_key_hint_as_secondary_text() {
         "picker key hint",
     );
 }
+}
 
+parity_scene! {
 /// An empty picker query paints its placeholder in the editor slot, in the
 /// secondary text colour; typing replaces it, and other fields paint none.
-#[test]
 fn an_empty_picker_query_paints_its_placeholder() {
     let _serialized = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(640, 260) else {
@@ -8109,11 +8367,12 @@ fn an_empty_picker_query_paints_its_placeholder() {
         "a typed query hides the placeholder"
     );
 }
+}
 
+parity_scene! {
 /// An unfocused window paints its selection in a neutral grey, the hue a
 /// macOS selection takes in an inactive window, so the change of focus shows
 /// in the selection's colour and not only its strength.
-#[test]
 fn an_unfocused_window_paints_its_selection_grey() {
     use alacritty_terminal::selection::SelectionRange;
     use kettle_core::{Column, Line, Point};
@@ -8157,11 +8416,12 @@ fn an_unfocused_window_paints_its_selection_grey() {
         "the unfocused selection is painted"
     );
 }
+}
 
+parity_scene! {
 /// A see-through window paints the selection worked out against its
 /// background as the desktop shows it; a window the OS draws opaque (macOS
 /// Reduce Transparency) keeps the one worked out against the theme colour.
-#[test]
 fn a_see_through_window_paints_the_selection_measured_as_shown() {
     use super::theme::PaneSelectionFills;
     use alacritty_terminal::selection::SelectionRange;
@@ -8172,7 +8432,7 @@ fn a_see_through_window_paints_the_selection_measured_as_shown() {
     cfg.show_titlebar = false;
     cfg.background_opacity = 0.86;
     let Some(mut renderer) =
-        Renderer::headless_for_tests_with(&cfg, 320, 120, 1.0, true).expect("renderer builds")
+        crate::visual_parity_tests::renderer_with(&cfg, 320, 120, 1.0, true).expect("renderer builds")
     else {
         eprintln!("C09_GPU_SKIP: see-through selection colour, no adapter");
         return;
@@ -8215,14 +8475,15 @@ fn a_see_through_window_paints_the_selection_measured_as_shown() {
     assert_eq!(sample(false), see_through);
     assert_eq!(sample(true), opaque);
 }
+}
 
+parity_scene! {
 /// Background tabs and the active tab paint their activity markers beside
 /// their titles, at 1x and 2x and in a dark and a light theme: a filled disc
 /// for output, a ring once it stopped and a bell when the bell rang, on a
 /// background tab and on the active one (a bell in its focused pane). The
 /// bell's lip, the empty row under it, its clapper and its dome are sampled
 /// where the mask is solid or empty, not at antialiased edges.
-#[test]
 fn tab_markers_have_distinct_shapes_on_background_and_active_tabs() {
     let _serialized = gpu_test_guard();
     for scale in [1.0_f32, 2.0] {
@@ -8230,7 +8491,7 @@ fn tab_markers_have_distinct_shapes_on_background_and_active_tabs() {
         let mut cfg = gpu_test_config();
         cfg.close_button_on_tab = false;
         let Some(mut renderer) =
-            Renderer::headless_for_tests_with(&cfg, width as u32, height as u32, scale, false)
+            crate::visual_parity_tests::renderer_with(&cfg, width as u32, height as u32, scale, false)
                 .unwrap()
         else {
             eprintln!("TAB_MARKER_GPU_SKIP: no adapter");
@@ -8365,6 +8626,7 @@ fn tab_markers_have_distinct_shapes_on_background_and_active_tabs() {
     }
     eprintln!("TAB_MARKER_GPU_PASS");
 }
+}
 
 /// A pane `back` lines up from the bottom of `lines` short lines, so the
 /// right side of every row is blank, with a command that succeeded near the
@@ -8390,6 +8652,7 @@ fn history_snapshot(cols: usize, rows: usize, lines: usize, back: i32) -> PaneSn
     snap
 }
 
+parity_scene! {
 /// A scrolled-back pane paints its jump button where the pointer hits it,
 /// in the resolved colours of its state: the edge around it, the fill
 /// inside, the rule before its key. At the top of a history that has lost
@@ -8397,7 +8660,6 @@ fn history_snapshot(cols: usize, rows: usize, lines: usize, back: i32) -> PaneSn
 /// On TokyoNight Night and Kettle Day, at 1x and 2x, at rest, hovered and
 /// pressed. The colours are sampled in the button's padding and on its
 /// edge, where no glyph is, so the fonts on the host do not matter.
-#[test]
 fn a_scrolled_back_pane_paints_its_jump_button_and_kept_history_label() {
     let _serialized = gpu_test_guard();
     let (width, height) = (640_u32, 400_u32);
@@ -8525,12 +8787,80 @@ fn a_scrolled_back_pane_paints_its_jump_button_and_kept_history_label() {
     }
     eprintln!("SCROLLBACK_BUTTON_GPU_PASS");
 }
+}
 
+parity_scene! {
+/// Review D20: a pane in vi mode paints its "Vi mode" chip, in the jump
+/// button's rest fill, where the chip's layout puts it: the blank top right
+/// of a pane whose text is a prompt at the top left. The same pane out of vi
+/// mode paints no chip.
+fn a_pane_in_vi_mode_paints_its_chip() {
+    let _serialized = gpu_test_guard();
+    let (width, height) = (640_u32, 400_u32);
+    let Some((mut renderer, base)) = renderer(width, height) else {
+        no_gpu_adapter();
+        return;
+    };
+    let near = |got: &image::Rgba<u8>, want: kettle_config::Rgb| {
+        [got[0], got[1], got[2]]
+            .into_iter()
+            .zip([want.r, want.g, want.b])
+            .all(|(a, b)| (i16::from(a) - i16::from(b)).abs() <= 2)
+    };
+    let linear = renderer.config.format.is_srgb();
+    for scale in [1.0_f32, 2.0] {
+        renderer.set_scale(scale);
+        let cfg = Config {
+            theme: kettle_config::Theme::by_name("TokyoNight Night"),
+            background_opacity: 1.0,
+            ..base.clone()
+        };
+        let mut snap = snapshot_of(40, 12, b"$ ls");
+        let text_cell = (
+            renderer.overlay_text_cell_width(),
+            renderer.overlay_text_line_height(),
+        );
+        let panes = [pane(&snap, width, height)];
+        let chip = crate::scrollback::vi_mode_chip(
+            panes[0].terminal,
+            scale,
+            text_cell,
+            cfg.scrollbar_width,
+            None,
+            None,
+            |_| false,
+            &panes[0].tr,
+        )
+        .expect("a chip");
+        let (x, y, w, h) = chip.rect;
+        assert!(x > width as f32 / 2.0 && y < height as f32 / 2.0, "top right: {:?}", chip.rect);
+        let fill = crate::scrollback::scrollback_button_colors(
+            &cfg.theme,
+            linear,
+            crate::color::Backing::opaque(cfg.theme.background),
+        )
+        .rest
+        .fill;
+        let sample = (x + 3.0 * scale, y + h / 2.0);
+        let frame = capture(&mut renderer, &cfg, &panes, &focused(false));
+        let got = frame.get_pixel(sample.0 as u32, sample.1 as u32);
+        assert!(near(got, cfg.theme.background), "scale {scale}: no chip out of vi mode, {got:?}");
+        snap.vi_mode = true;
+        let panes = [pane(&snap, width, height)];
+        let frame = capture(&mut renderer, &cfg, &panes, &focused(false));
+        let got = frame.get_pixel(sample.0 as u32, sample.1 as u32);
+        assert!(near(got, fill), "scale {scale}: chip fill {got:?}, want {fill:?}");
+        let right = frame.get_pixel((x + w - 3.0 * scale) as u32, sample.1 as u32);
+        assert!(near(right, fill), "scale {scale}: chip right {right:?}");
+    }
+}
+}
+
+parity_scene! {
 /// The chord the painter shapes for a scrolled-back pane ends inside the
 /// button it paints, a pad short of its right edge, with one modifier and
 /// with all four, at 1x and 2x. The chord is spelled as this host spells
 /// it: on macOS `⌃⌥⇧⌘End`, in the renderer's own fonts.
-#[test]
 fn the_painted_chord_ends_inside_the_jump_button() {
     let _serialized = gpu_test_guard();
     let (width, height) = (640_u32, 400_u32);
@@ -8582,7 +8912,9 @@ fn the_painted_chord_ends_inside_the_jump_button() {
     }
     eprintln!("SCROLLBACK_CHORD_GPU_PASS");
 }
+}
 
+parity_scene! {
 /// A pane with history paints its thumb in a full-height channel as wide as
 /// it, in the resolved colours, and command ticks across the whole bar in
 /// the colour for what they lie on, channel or thumb: at its resting width
@@ -8590,7 +8922,6 @@ fn the_painted_chord_ends_inside_the_jump_button() {
 /// TokyoNight Night and Kettle Day, at 1x and 2x, painted solid inside a
 /// wide padding and as translucent layers over a narrow one. The colours are
 /// sampled where no glyph is, so the fonts on the host do not matter.
-#[test]
 fn a_pane_with_history_paints_its_thumb_channel_and_ticks() {
     let _serialized = gpu_test_guard();
     let (width, height) = (320_u32, 400_u32);
@@ -8708,12 +9039,13 @@ fn a_pane_with_history_paints_its_thumb_channel_and_ticks() {
         }
     }
 }
+}
 
+parity_scene! {
 /// The lone GNOME-header title is shaped in the bundled Fira Sans Bold at
 /// GNOME's 11 pt title size, whatever the terminal's font, at 1x and 2x: a
 /// long title is cut to the widest label its lane holds, ending in an
 /// ellipsis, and a short one stays whole.
-#[test]
 fn gnome_header_lone_title_is_bundled_bold_sans_fitted_to_its_lane() {
     let _serialized = gpu_test_guard();
     let long = "a window title that a program set, far too long for the header lane";
@@ -8721,7 +9053,7 @@ fn gnome_header_lone_title_is_bundled_bold_sans_fitted_to_its_lane() {
         let cfg = gpu_test_config();
         let (w, h) = ((480.0 * scale) as u32, (160.0 * scale) as u32);
         let Some(mut renderer) =
-            Renderer::headless_for_tests_with(&cfg, w, h, scale, false).unwrap()
+            crate::visual_parity_tests::renderer_with(&cfg, w, h, scale, false).unwrap()
         else {
             eprintln!("lone header title at {scale}x skipped: no GPU adapter");
             return;
@@ -8759,14 +9091,15 @@ fn gnome_header_lone_title_is_bundled_bold_sans_fitted_to_its_lane() {
         }
     }
 }
+}
 
+parity_scene! {
 /// The current search match stands apart from the other matches by its
 /// fill, so nothing is drawn over its text: the cell's bottom rows, where
 /// descenders reach, keep the fill around them. An underline in the match's
 /// text colour along the cell bottom hid the descenders in a solid bar and
 /// made the text look set low. When the two fills cannot be told apart, the
 /// underline is still drawn.
-#[test]
 fn the_current_search_match_keeps_its_descender_rows_clear() {
     let _serial = gpu_test_guard();
     let Some((mut renderer, mut cfg)) = renderer(320, 120) else {
@@ -8838,4 +9171,5 @@ fn the_current_search_match_keeps_its_descender_rows_clear() {
             );
         }
     }
+}
 }

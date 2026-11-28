@@ -576,9 +576,15 @@ impl App {
         // Window 1's Vulkan instance needs no window, so it is created while
         // the rest of startup runs. Only the config says whether Vulkan is
         // the first attempt: under `gpu-backend = gl` or a GPU pin, Kettle
-        // must not load the Vulkan driver early, so this waits for it.
-        let early_gpu_instance =
-            kettle_render::EarlyGpuInstance::start(&initial_cfg, event_loop.owned_display_handle());
+        // must not load the Vulkan driver early, so this waits for it. A
+        // window drawn on the CPU loads no GPU driver at all.
+        let early_gpu_instance = if kettle_render::preferred_backend(&initial_cfg).backend
+            == kettle_render::RendererBackend::Cpu
+        {
+            None
+        } else {
+            kettle_render::EarlyGpuInstance::start(&initial_cfg, event_loop.owned_display_handle())
+        };
         let initial_triggers = compile_triggers(&initial_cfg.triggers);
         // Dropdown-parity: capture before `startup` moves into the App.
         let startup_version = startup
@@ -807,6 +813,8 @@ impl App {
             window_focus_order: VecDeque::from([1]),
             next_window_seq: 2,
             gpu: None,
+            cpu_rendering: false,
+            running_graphics: None,
             font_preload: Some(font_preload),
             early_gpu_instance,
             launch_override: plan.launch_override,
@@ -829,10 +837,10 @@ impl App {
             system_motion: std::sync::OnceLock::new(),
             #[cfg(target_os = "linux")]
             agent_launches: kettle_ctl::agent_launch::LaunchScopes::default(),
-            #[cfg(target_os = "macos")]
+            profile_launch_gate: Default::default(),
             profile_inventory: {
                 let proxy = proxy.clone();
-                crate::macos_menu::ProfileInventory::new(move || {
+                crate::profile_inventory::ProfileInventory::new(move || {
                     let _ = proxy.send_event(UserEvent::ProfilesReady);
                 })?
             },
@@ -903,6 +911,7 @@ impl App {
             os_theme_dark: None,
             system_appearance: std::sync::OnceLock::new(),
             config_path: startup.config.clone(),
+            prepared_profile_reload: None,
             config_trust: startup.config_trust,
             config_malformed_last: Vec::new(),
             config_watcher_path: watcher
@@ -1347,25 +1356,70 @@ impl App {
         // hazard with the GPU objects) turns that infinite hang into a clean,
         // actionable exit. `done` is set the instant init returns — success OR
         // a quick failure — so only a true never-returns hang trips it.
-        let gpu_init_watchdog = GpuInitWatchdog::arm();
-        let init_result = {
+        // `renderer` picks the backend: the CPU on Linux by default. A CPU
+        // presenter that cannot start falls back to the GPU, and on Linux a
+        // GPU renderer that cannot start falls back to the CPU.
+        let choice = kettle_render::preferred_backend(&self.cfg);
+        if let Some(note) = choice.note {
+            log::info!("renderer: {note}");
+        }
+        let mut cpu_failed = false;
+        let mut init_result = None;
+        if choice.backend == kettle_render::RendererBackend::Cpu {
             let runtime_tracker = self.runtime_tracker.clone();
-            let _phase = runtime_tracker.enter("gpu_init");
-            pollster::block_on(Renderer::new_with_display_handle(
-                window.clone(),
+            let _phase = runtime_tracker.enter("cpu_renderer_init");
+            match cpu_window::cpu_window_renderer(
+                &window,
                 event_loop.owned_display_handle(),
-                size.width.max(1),
-                size.height.max(1),
-                scale,
                 &self.cfg,
                 ws.startup_fonts.take(),
-                self.early_gpu_instance.take(),
-            ))
+            ) {
+                Ok(renderer) => init_result = Some(Ok(renderer)),
+                Err(error) => {
+                    cpu_failed = true;
+                    log::warn!(
+                        "renderer: the CPU renderer could not start ({error:#}); using the GPU"
+                    );
+                }
+            }
+        }
+        let init_result = match init_result {
+            Some(result) => result,
+            None => {
+                let gpu_init_watchdog = GpuInitWatchdog::arm();
+                let result = {
+                    let runtime_tracker = self.runtime_tracker.clone();
+                    let _phase = runtime_tracker.enter("gpu_init");
+                    pollster::block_on(Renderer::new_with_display_handle(
+                        window.clone(),
+                        event_loop.owned_display_handle(),
+                        size.width.max(1),
+                        size.height.max(1),
+                        scale,
+                        &self.cfg,
+                        ws.startup_fonts.take(),
+                        self.early_gpu_instance.take(),
+                    ))
+                };
+                // Disarm the watchdog the moment init returns, on BOTH the
+                // success and the quick-failure path, so a clean renderer-init
+                // error below never gets a spurious "timed out" report behind
+                // it.
+                drop(gpu_init_watchdog);
+                if cpu_failed {
+                    result
+                } else {
+                    cpu_window::gpu_or_cpu_fallback(result, || {
+                        cpu_window::cpu_window_renderer(
+                            &window,
+                            event_loop.owned_display_handle(),
+                            &self.cfg,
+                            None,
+                        )
+                    })
+                }
+            }
         };
-        // Disarm the watchdog the moment init returns, on BOTH the success and
-        // the quick-failure path, so a clean renderer-init error below never
-        // gets a spurious "timed out" report behind it.
-        drop(gpu_init_watchdog);
         let renderer = match init_result {
             Ok(r) => r,
             Err(e) => {
@@ -1386,14 +1440,16 @@ impl App {
             t_startup.elapsed().as_secs_f64() * 1000.0 - create_window_ms - a11y_ms,
             t_startup.elapsed().as_secs_f64() * 1000.0
         );
-        // Cache the shared GPU context for open_window (windows 2..N).
-        let gpu = renderer.gpu().clone();
-        let recovery_proxy = self.proxy.clone();
-        gpu.set_recovery_wake(kettle_render::ScreenshotRecoveryWake::new(move || {
-            let _ = recovery_proxy.send_event(UserEvent::Wakeup);
-        }));
-        self.gpu = Some(gpu);
+        // Cache the shared GPU context for open_window (windows 2..N), or
+        // remember that every window draws on the CPU.
+        if renderer.backend() == kettle_render::RendererBackend::Cpu {
+            self.cpu_rendering = true;
+        } else {
+            self.install_shared_gpu(&renderer);
+        }
         ws.renderer = Some(renderer);
+        self.running_graphics
+            .get_or_insert_with(|| crate::settings::GraphicsSettings::of(&self.cfg));
         ws.startup_cell = None;
         ws.startup_surface = None;
         ws.accessibility = Some(accessibility);

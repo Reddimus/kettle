@@ -167,6 +167,10 @@ impl FrameRecoveryState {
         self.pending.is_some()
     }
 
+    pub(crate) fn first_renderer_rebuild(&self) -> bool {
+        self.renderer_attempts == 1
+    }
+
     pub(crate) fn renderer_rebuild_pending(&self) -> bool {
         self.pending
             .is_some_and(|pending| pending.action == FrameRecoveryAction::RebuildRenderer)
@@ -270,6 +274,17 @@ impl OutputPaintPacer {
     pub(crate) fn presentation_failed(&mut self) {
         if self.phase == OutputPaintPhase::Presenting {
             self.phase = OutputPaintPhase::Deferred;
+        }
+    }
+
+    /// A CPU window's frame was not drawn because the compositor had not
+    /// taken the last one (`FrameOutcome::Paced`). The output stays dirty,
+    /// and the presenter tick (`App::tick_cpu_presenter`) asks winit for the
+    /// redraw once a frame can be drawn, so the redraw counts as queued and
+    /// the pacer does not ask again meanwhile.
+    pub(crate) fn paced(&mut self) {
+        if self.phase == OutputPaintPhase::Presenting {
+            self.phase = OutputPaintPhase::Queued;
         }
     }
 
@@ -532,6 +547,87 @@ impl MouseOverrideHint {
     }
 
     /// Take the hint down once its time is up, saying whether it was.
+    pub(crate) fn expire(&mut self, now: std::time::Instant) -> bool {
+        self.deadline().is_some_and(|until| now >= until) && self.dismiss()
+    }
+}
+
+/// How long a pointer that moved a theme picker selection must rest before
+/// the window previews that theme, so a sweep across rows does not flash
+/// every theme it crosses. The keyboard previews at once.
+pub(crate) const THEME_HOVER_PREVIEW_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(150);
+
+/// The open picker's list as the pointer and the wheel see it: the command
+/// palette, theme, layout or SSH picker, whichever is open. Reset when one
+/// opens.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct PickerView {
+    /// The first row the list showed when it was last painted, or where the
+    /// wheel left it. The list moves from there only as far as it must to
+    /// keep the selection in view. `None` until it first paints.
+    pub(crate) scroll: Option<usize>,
+    /// Where the pointer was when the picker last saw it: at a hover, or when
+    /// it opened, took a key or scrolled. Rows move under a pointer that
+    /// stays put, so only a pointer somewhere else selects the row under it,
+    /// and the keyboard's selection holds until the pointer really moves.
+    pub(crate) pointer_seen: Option<PhysicalPosition<f64>>,
+    /// The row under the pointer that a hover lights without selecting: the
+    /// SSH launcher's Save or Remove row, which only a click or a deliberate
+    /// Down selects.
+    pub(crate) prelight: Option<usize>,
+    /// Where a theme the pointer selected stands on its way to the window's
+    /// preview; see `PointerPreview`.
+    pub(crate) pointer_preview: PointerPreview,
+}
+
+/// A theme picker selection the pointer made, which the window previews only
+/// once the pointer rests on its row. The keyboard previews at once.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum PointerPreview {
+    /// Nothing waits: the window wears the selection.
+    #[default]
+    None,
+    /// The pointer is on the selected row: preview it at this instant if the
+    /// pointer has not moved again by then. Each motion within the row, or a
+    /// wheel step that moves the selection, sets a later one.
+    At(std::time::Instant),
+    /// The pointer left the row, or the window, before it rested. The window
+    /// keeps the theme it wears until a key, or a rest on a row.
+    Held,
+}
+
+/// How long "No hints here" stays on its pane.
+pub(crate) const NO_HINTS_NOTICE_LIFETIME: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The pane status that says quick select found nothing to label, so the
+/// key that asked for it does not seem to do nothing.
+#[derive(Debug, Default)]
+pub(crate) struct NoHintsNotice {
+    showing: Option<(u64, std::time::Instant)>,
+}
+
+impl NoHintsNotice {
+    /// Show the notice on `pane` for `NO_HINTS_NOTICE_LIFETIME` from `now`.
+    pub(crate) fn show(&mut self, pane: u64, now: std::time::Instant) {
+        self.showing = Some((pane, now + NO_HINTS_NOTICE_LIFETIME));
+    }
+
+    /// The pane the notice shows on, until it expires or is dismissed.
+    pub(crate) fn pane(&self) -> Option<u64> {
+        self.showing.map(|(pane, _)| pane)
+    }
+
+    pub(crate) fn deadline(&self) -> Option<std::time::Instant> {
+        self.showing.map(|(_, until)| until)
+    }
+
+    /// Take the notice down, saying whether it was up.
+    pub(crate) fn dismiss(&mut self) -> bool {
+        self.showing.take().is_some()
+    }
+
+    /// Take the notice down once its time is up, saying whether it was.
     pub(crate) fn expire(&mut self, now: std::time::Instant) -> bool {
         self.deadline().is_some_and(|until| now >= until) && self.dismiss()
     }
@@ -920,10 +1016,11 @@ impl SurfaceCaps {
 
     /// Whether `cfg` needs a capability this window was created without, so
     /// only a new window can show it. Lowering the opacity of a window that is
-    /// already translucent, or turning blur off, applies at once.
-    pub(crate) fn lacks_for(self, cfg: &kettle_config::Config) -> bool {
+    /// already translucent, or turning blur off, applies at once. Blur counts
+    /// only where the session `can_blur`: a new window would not blur either.
+    pub(crate) fn lacks_for(self, cfg: &kettle_config::Config, can_blur: bool) -> bool {
         let wanted = Self::for_config(cfg);
-        (wanted.alpha && !self.alpha) || (wanted.blur && !self.blur)
+        (wanted.alpha && !self.alpha) || (can_blur && wanted.blur && !self.blur)
     }
 }
 
@@ -1151,6 +1248,10 @@ pub(crate) struct WindowState {
     /// The lane whose picture the real pointer rests on: what starts a
     /// hover preview.
     pub(crate) lane_hover: Option<LaneHover>,
+    /// The lane button under the real pointer, by pane, whose chip is lit.
+    pub(crate) lane_control_hover: Option<(u64, kettle_render::MediaLaneHit)>,
+    /// The toast or notice button under the real pointer, which is lit.
+    pub(crate) toast_control_hover: Option<kettle_render::Rect4>,
     pub(crate) selecting: bool,
     pub(crate) selection_hint_plain: bool,
     /// Pane that owns the active pointer selection gesture. Focus can
@@ -1214,8 +1315,9 @@ pub(crate) struct WindowState {
     /// When `cfg.ssh_hosts` no longer equals it, `sync_ssh_hosts` moves the
     /// selection back to row 0.
     pub(crate) ssh_hosts_shown: Vec<(String, String)>,
-    /// Profile names captured when opening the palette; all projections use this list.
-    pub(crate) palette_profiles: Vec<String>,
+    /// Opening snapshot shared by every palette projection; None means discovery
+    /// had not completed when it opened. Completion never changes this snapshot.
+    pub(crate) palette_profiles: Option<Vec<String>>,
     /// `Some((query, selected))` while the command palette is open.
     pub(crate) palette_input: Option<(crate::text_editor::TextEditor, usize)>,
     /// The open palette lists only commands with a keyboard shortcut
@@ -1228,15 +1330,13 @@ pub(crate) struct WindowState {
     /// over the settings panel; keystrokes route to it until Enter (persist) or
     /// Esc (cancel). Only meaningful while `settings_nav` is also `Some`.
     pub(crate) settings_text_edit: Option<crate::settings::SettingsTextEdit>,
-    /// Set when a persisted Settings change needs a restart or a new window to
-    /// take effect. GPU pin, power preference, backend, and force-software
-    /// changes need the next launch; background opacity, background type, and
-    /// window blur need a new window only when `surface_caps` lacks what the
-    /// new config asks for. The settings overlay shows a restart
-    /// footer while this is true; opening the overlay clears it.
-    pub(crate) settings_restart_pending: bool,
-    /// What this window's OS surface was created able to show. A Settings
-    /// change asks for a new window only when it needs more than this.
+    /// The Settings hover the last presented frame shows, so a pointer move
+    /// repaints only when what it is over differs. Each frame works it out
+    /// afresh.
+    pub(crate) settings_hover: Option<kettle_render::SettingsHover>,
+    /// What this window's OS surface was created able to show. Settings asks
+    /// for a new window while the config needs more than this
+    /// (`settings::pending_apply`).
     pub(crate) surface_caps: SurfaceCaps,
     /// The animated-background frame index last requested for paint.
     /// The event loop requests a bg redraw only when the live frame index
@@ -1357,6 +1457,9 @@ pub(crate) struct WindowState {
     /// Drag-to-reorder tab state. `true` while a left-mouse-button press in
     /// the tab bar is being held; cleared on release.
     pub(crate) tab_drag_active: bool,
+    /// The overflow arrow a live tab drag rests on (`true` forward), and
+    /// since when, or since the strip last scrolled for it.
+    pub(crate) tab_drag_arrow: Option<(bool, std::time::Instant)>,
     /// Surface position where the in-window tab reorder gesture was armed.
     /// A click stays visually a click until movement crosses the drag-distance
     /// threshold; this prevents the drag ghost from flashing under a normal
@@ -1397,7 +1500,8 @@ pub(crate) struct WindowState {
     pub(crate) hovered_tab_idx: Option<usize>,
     /// Hovered half of the trailing horizontal new-tab control. Stored beside
     /// close hover so pointer motion repaints only when the visual state
-    /// actually changes; `tab_bar()` forwards it to the renderer.
+    /// actually changes; `tab_bar()` forwards it to the renderer. A press on
+    /// `+` arms it, and a release back on it opens the tab.
     pub(crate) pressed_new_tab: bool,
     pub(crate) pressed_new_tab_menu: bool,
     pub(crate) hovered_new_tab: bool,
@@ -1407,9 +1511,14 @@ pub(crate) struct WindowState {
     pub(crate) hovered_settings: bool,
     pub(crate) pressed_settings: bool,
     /// The pointer is over, or pressed, the GNOME header's Find button. A
-    /// press opens or closes Find; the press only shows until its release.
+    /// press arms it; a release back on it opens or closes Find.
     pub(crate) hovered_search: bool,
     pub(crate) pressed_search: bool,
+    /// The tab strip's overflow arrow under the pointer: `Some(true)` for
+    /// forward, `Some(false)` for back.
+    pub(crate) hovered_scroll_arrow: Option<bool>,
+    /// When the tooltip of the control under the pointer shows.
+    pub(crate) tooltip: crate::tooltip::TooltipClock,
     /// The pointer is over the tab bar's update chip.
     /// What a screen reader calls the open context menu, when it is not the
     /// terminal's. Each new menu resets it.
@@ -1417,6 +1526,9 @@ pub(crate) struct WindowState {
     /// The pane and stable row id the terminal menu was opened over, for its
     /// Select Command Output row. Taken by the menu's next action.
     pub(crate) context_menu_output_row: Option<(u64, u64)>,
+    /// The open menu's pointer state and placement limit. Each new menu
+    /// resets it.
+    pub(crate) context_menu_session: crate::app::ContextMenuSession,
     /// Vi-mode (Alacritty parity): `Some(ViState)` while kettle is
     /// intercepting keys for vi-style navigation.
     pub(crate) vi_mode: Option<ViState>,
@@ -1575,6 +1687,10 @@ pub(crate) struct WindowState {
     /// The Shift hint over a program that uses the mouse; see
     /// `MouseOverrideHint`.
     pub(crate) mouse_override_hint: MouseOverrideHint,
+    /// "No hints here" after quick select found nothing; see `NoHintsNotice`.
+    pub(crate) no_hints_notice: NoHintsNotice,
+    /// The open picker's scroll, pointer and preview state; see `PickerView`.
+    pub(crate) picker_view: PickerView,
     /// The first `Resized` after window creation is the initial
     /// placement, not a user resize — `resize-overlay = after-first`
     /// (the default) skips it.
@@ -1639,7 +1755,21 @@ impl WindowState {
 
     pub(crate) fn install_preview_overlay(&mut self, overlay: crate::media::Overlay) {
         self.dragging_split = None;
+        // The viewer takes the pointer: a title-bar button held under it
+        // does not act on its release, even once the viewer has closed.
+        self.cancel_strip_presses();
         self.preview_overlay = Some(overlay);
+    }
+
+    /// End every title-bar button press that would act on its release (`+`,
+    /// Find, the Settings gear, a window control) without acting: a modal
+    /// took the pointer, or a new primary press began, so the release to
+    /// come is not that press's. The `▾` acts on press and is left showing.
+    pub(crate) fn cancel_strip_presses(&mut self) {
+        self.pressed_window_control = None;
+        self.pressed_new_tab = false;
+        self.pressed_settings = false;
+        self.pressed_search = false;
     }
 
     /// On focus loss, drop every title-bar button press and the window
@@ -1647,14 +1777,11 @@ impl WindowState {
     /// gear loses its hover too, so a release elsewhere never opens
     /// Settings and the gear never stays lit.
     pub(crate) fn release_titlebar_buttons(&mut self) {
-        self.pressed_window_control = None;
+        self.cancel_strip_presses();
         self.hovered_window_control = None;
-        self.pressed_new_tab = false;
         self.pressed_new_tab_menu = false;
         self.hovered_settings = false;
-        self.pressed_settings = false;
         self.hovered_search = false;
-        self.pressed_search = false;
     }
 
     /// When the pointer leaves the window no jump button is under it, and a
@@ -1668,14 +1795,19 @@ impl WindowState {
     }
 
     /// When the pointer leaves the window, nothing in the tab bar is under
-    /// it or pressed any more.
+    /// it or pressed any more, no tooltip shows and no lane or toast button
+    /// is lit.
     pub(crate) fn leave_tab_bar(&mut self) {
         self.release_tab_hold();
+        self.tooltip.hover(None, None, std::time::Instant::now());
+        self.lane_control_hover = None;
+        self.toast_control_hover = None;
         self.release_titlebar_buttons();
         self.hovered_close_idx = None;
         self.hovered_tab_idx = None;
         self.hovered_new_tab = false;
         self.hovered_new_tab_menu = false;
+        self.hovered_scroll_arrow = None;
     }
 
     /// Scroll the title-bar strip to the active tab at its next layout,
@@ -1887,6 +2019,8 @@ impl WindowState {
             lane_previews: std::collections::HashMap::new(),
             lane_playbacks: std::collections::HashMap::new(),
             lane_hover: None,
+            lane_control_hover: None,
+            toast_control_hover: None,
             selecting: false,
             selection_hint_plain: false,
             selecting_pane: None,
@@ -1907,11 +2041,11 @@ impl WindowState {
             ssh_status: None,
             ssh_hosts_shown: Vec::new(),
             palette_input: None,
-            palette_profiles: Vec::new(),
+            palette_profiles: None,
             palette_bound_only: false,
             settings_nav: None,
             settings_text_edit: None,
-            settings_restart_pending: false,
+            settings_hover: None,
             surface_caps: SurfaceCaps::default(),
             last_bg_frame: None,
             layout_picker_input: None,
@@ -1946,6 +2080,7 @@ impl WindowState {
             mouse_hidden: false,
             last_cursor_icon: None,
             tab_drag_active: false,
+            tab_drag_arrow: None,
             tab_drag_press: None,
             tab_pressed_idx: None,
             detach_drag: crate::detach::DragState::default(),
@@ -1962,8 +2097,11 @@ impl WindowState {
             pressed_settings: false,
             hovered_search: false,
             pressed_search: false,
+            hovered_scroll_arrow: None,
+            tooltip: crate::tooltip::TooltipClock::default(),
             context_menu_a11y_label: None,
             context_menu_output_row: None,
+            context_menu_session: Default::default(),
             vi_mode: None,
             scaled_zoom_prev_font_size: None,
             last_emitted_focus: None,
@@ -2007,6 +2145,8 @@ impl WindowState {
             resize_overlay: None,
             resize_overlay_label: None,
             mouse_override_hint: MouseOverrideHint::default(),
+            no_hints_notice: NoHintsNotice::default(),
+            picker_view: PickerView::default(),
             seen_first_resize: false,
             spawned_at: std::time::Instant::now(),
             pane_snapshots: Vec::new(),
@@ -2525,6 +2665,28 @@ mod tests {
     }
 
     #[test]
+    fn a_paced_frame_keeps_its_output_dirty_and_its_redraw_queued() {
+        let mut pacer = OutputPaintPacer::default();
+        pacer.defer();
+        assert!(pacer.queue_deferred_redraw());
+        assert!(pacer.begin_frame());
+        pacer.paced();
+        assert!(pacer.is_deferred(), "the output was not drawn");
+        assert!(
+            pacer.redraw_queued(),
+            "the presenter tick asks for the redraw; the pacer does not"
+        );
+        assert!(!pacer.queue_deferred_redraw());
+        assert!(pacer.begin_frame(), "the redraw flushes the output");
+        pacer.presented();
+        assert!(!pacer.is_deferred());
+        // A paced frame that drew no output leaves the pacer alone.
+        let mut idle = OutputPaintPacer::default();
+        idle.paced();
+        assert!(!idle.is_deferred());
+    }
+
+    #[test]
     fn frame_timeout_retries_are_one_shot_deadlines_with_a_cap() {
         let mut recovery = FrameRecoveryState::default();
         let mut now = std::time::Instant::now();
@@ -2981,25 +3143,25 @@ mod surface_caps_tests {
         // The Linux default: 99% with blur requested (unavailable on GNOME).
         let created = SurfaceCaps::for_config(&config(0.99, true));
         assert!(created.transparent_window());
-        assert!(!created.lacks_for(&config(0.59, true)));
-        assert!(!created.lacks_for(&config(0.2, false)));
-        assert!(!created.lacks_for(&config(1.0, true)));
+        assert!(!created.lacks_for(&config(0.59, true), true));
+        assert!(!created.lacks_for(&config(0.2, false), true));
+        assert!(!created.lacks_for(&config(1.0, true), true));
     }
 
     #[test]
     fn an_opaque_window_needs_a_new_window_to_turn_translucent() {
         let created = SurfaceCaps::for_config(&config(1.0, false));
         assert!(!created.transparent_window());
-        assert!(created.lacks_for(&config(0.8, false)));
-        assert!(!created.lacks_for(&config(1.0, false)));
+        assert!(created.lacks_for(&config(0.8, false), true));
+        assert!(!created.lacks_for(&config(1.0, false), true));
     }
 
     #[test]
     fn turning_blur_on_needs_a_new_window_and_turning_it_off_does_not() {
         let without_blur = SurfaceCaps::for_config(&config(0.86, false));
-        assert!(without_blur.lacks_for(&config(0.86, true)));
+        assert!(without_blur.lacks_for(&config(0.86, true), true));
         let with_blur = SurfaceCaps::for_config(&config(0.86, true));
-        assert!(!with_blur.lacks_for(&config(0.86, false)));
+        assert!(!with_blur.lacks_for(&config(0.86, false), true));
     }
 
     #[test]
@@ -3008,11 +3170,22 @@ mod surface_caps_tests {
         // which blur does not change, so a 100% window still needs a new one.
         let created = SurfaceCaps::for_config(&config(1.0, true));
         assert!(created.transparent_window());
-        assert!(created.lacks_for(&config(0.7, true)));
+        assert!(created.lacks_for(&config(0.7, true), true));
+    }
+
+    /// Where the session cannot blur (X11 without a blur protocol, GNOME),
+    /// turning blur on asks for no new window: one would not blur either.
+    /// A translucent background it also needs still does.
+    #[test]
+    fn blur_the_session_cannot_show_needs_no_new_window() {
+        let created = SurfaceCaps::for_config(&config(1.0, false));
+        assert!(created.lacks_for(&config(1.0, true), true));
+        assert!(!created.lacks_for(&config(1.0, true), false));
+        assert!(created.lacks_for(&config(0.8, true), false));
     }
 
     #[test]
     fn a_window_state_without_a_window_assumes_no_capabilities() {
-        assert!(SurfaceCaps::default().lacks_for(&config(0.5, false)));
+        assert!(SurfaceCaps::default().lacks_for(&config(0.5, false), true));
     }
 }

@@ -3,6 +3,7 @@
 use super::*;
 
 use crate::term::cell::Cell;
+use crate::vte::ansi::{Color, NamedColor};
 
 impl GridCell for usize {
     fn is_empty(&self) -> bool {
@@ -599,6 +600,65 @@ fn shrink_reflow_empty_cell_inside_line() {
 
     assert_eq!(grid[Line(0)].len(), 1);
     assert_eq!(grid[Line(0)][Column(0)], cell('4'));
+}
+
+/// A one-column row cannot hold a wide character, so narrowing to one column
+/// blanks it and drops its spacer, carrying the spacer's soft wrap, and the
+/// cursor stays on the cell it was on. Each pass used to put the character
+/// back on the next row, so the reflow never finished.
+#[test]
+fn shrink_reflow_to_one_column_blanks_wide_chars() {
+    let wide = |c| {
+        let mut cell = cell(c);
+        cell.fg = Color::Named(NamedColor::Red);
+        cell.flags.insert(Flags::WIDE_CHAR);
+        cell
+    };
+    let mut spacer = Cell::default();
+    spacer.flags.insert(Flags::WIDE_CHAR_SPACER);
+    let mut grid = Grid::<Cell>::new(2, 4, 10);
+    grid[Line(0)][Column(0)] = cell('c');
+    grid[Line(0)][Column(1)] = cell('d');
+    grid[Line(0)][Column(2)] = wide('\u{754c}');
+    let mut wrapped_spacer = spacer.clone();
+    wrapped_spacer.flags.insert(Flags::WRAPLINE);
+    grid[Line(0)][Column(3)] = wrapped_spacer;
+    grid[Line(1)][Column(0)] = cell('a');
+    grid[Line(1)][Column(1)] = wide('\u{754c}');
+    grid[Line(1)][Column(2)] = spacer;
+    grid[Line(1)][Column(3)] = cell('b');
+    grid.cursor.point = Point::new(Line(1), Column(3));
+
+    grid.resize(true, 2, 1);
+
+    let column: Vec<Cell> = (grid.topmost_line().0..=grid.bottommost_line().0)
+        .map(|line| grid[Line(line)][Column(0)].clone())
+        .collect();
+    let mut blank = wrap_cell(' ');
+    blank.fg = Color::Named(NamedColor::Red);
+    assert_eq!(
+        column,
+        [
+            wrap_cell('c'),
+            wrap_cell('d'),
+            blank.clone(),
+            wrap_cell('a'),
+            blank,
+            cell('b'),
+        ]
+    );
+    assert_eq!(grid[grid.cursor.point].c, 'b');
+    assert!(!grid.cursor.input_needs_wrap);
+
+    // Without reflow the row is cut, and the cut-off glyph is blanked too.
+    let mut grid = Grid::<Cell>::new(1, 3, 0);
+    grid[Line(0)][Column(0)] = wide('\u{754c}');
+    let mut spacer = Cell::default();
+    spacer.flags.insert(Flags::WIDE_CHAR_SPACER);
+    grid[Line(0)][Column(1)] = spacer;
+    grid.resize(false, 1, 1);
+    assert_eq!(grid[Line(0)][Column(0)].c, ' ');
+    assert!(!grid[Line(0)][Column(0)].flags.contains(Flags::WIDE_CHAR));
 }
 
 #[test]

@@ -10,6 +10,9 @@ pub(crate) struct RoundedSurface {
     pub stroke: [f32; 4],
     pub params: [f32; 4],
 }
+/// The surfaces a layer draws a frame unless it asks for another limit.
+pub(crate) const DEFAULT_CAPACITY: usize = 32;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Screen {
@@ -84,7 +87,7 @@ pub struct RoundedSurfacePipeline {
 
 impl RoundedSurfacePipeline {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
-        Self::with_capacity(device, format, 32)
+        Self::with_capacity(device, format, DEFAULT_CAPACITY)
     }
 
     /// A pipeline that draws at most `capacity` surfaces a frame.
@@ -239,7 +242,7 @@ impl RoundedSurfacePipeline {
         });
     }
 
-    pub fn draw_range<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, range: std::ops::Range<u32>) {
+    pub fn draw_range(&self, pass: &mut wgpu::RenderPass<'_>, range: std::ops::Range<u32>) {
         let start = range.start.min(self.count);
         let end = range.end.min(self.count);
         if start >= end {

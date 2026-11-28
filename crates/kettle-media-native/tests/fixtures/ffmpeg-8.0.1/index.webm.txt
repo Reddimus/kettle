@@ -1,0 +1,15 @@
+streams.stream.0.index=0
+streams.stream.0.codec_name="vp8"
+streams.stream.0.codec_type="video"
+streams.stream.0.width=64
+streams.stream.0.height=36
+streams.stream.0.sample_aspect_ratio="1:1"
+streams.stream.0.r_frame_rate="10/1"
+streams.stream.0.avg_frame_rate="10/1"
+streams.stream.0.time_base="1/1000"
+streams.stream.0.start_time="0.000000"
+streams.stream.0.duration="N/A"
+streams.stream.0.disposition.attached_pic=0
+streams.stream.0.tags.DURATION="00:00:04.000000000"
+format.start_time="0.000000"
+format.duration="4.000000"

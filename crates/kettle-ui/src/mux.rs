@@ -1108,14 +1108,6 @@ pub struct Pane {
     /// to the PTY. Unix input policy accepts it only when its pid still matches
     /// a fresh `tcgetpgrp` snapshot; Windows combines it with OSC 133 state.
     pub foreground_process: Option<kettle_remote::ForegroundProcess>,
-    /// Document row (see `kettle_core::restore::primary_end_row`) before which
-    /// this pane's primary grid may still hold a remote session's output,
-    /// recorded when the pane stops counting as remote, or when restore
-    /// replays output saved as remote. It never moves back, so with
-    /// `restore-scrollback-remote` off those rows stay out of the saved output
-    /// after `ssh` exits, until eviction, a scrollback clear or a reset has
-    /// taken every one of them out of the grid.
-    pub remote_output_end: Option<u64>,
     /// Media shown in this pane with `show`. It moves with the pane, into
     /// another window too.
     pub media_shelf: crate::media::Shelf,
@@ -1139,14 +1131,19 @@ impl Pane {
     /// Everything now in the primary grid may be a remote session's output:
     /// keep it out of the saved output (see [`Pane::remote_output_end`]).
     pub(crate) fn note_remote_output_ended(&mut self) {
-        let end = kettle_core::restore::primary_end_row(
-            &self
-                .term
-                .term
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
-        self.remote_output_end = Some(self.remote_output_end.map_or(end, |known| known.max(end)));
+        self.term.exclude_output_so_far();
+    }
+
+    /// Document row (see `kettle_core::restore::primary_end_row`) before which
+    /// this pane's primary grid may still hold a remote session's output,
+    /// recorded when the pane stops counting as remote, or when restore
+    /// replays output saved as remote. It never moves back over that output,
+    /// and a width change carries it with the rewrapped rows, so with
+    /// `restore-scrollback-remote` off those rows stay out of the saved output
+    /// after `ssh` exits, until eviction, a scrollback clear or a reset has
+    /// taken every one of them out of the grid.
+    pub(crate) fn remote_output_end(&self) -> Option<u64> {
+        self.term.excluded_output_end()
     }
 
     #[cfg(test)]
@@ -2288,6 +2285,15 @@ pub struct DetachedTab {
     pub panes: Vec<(u64, Pane)>,
 }
 
+/// What [`Mux::close_tabs_except`] closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BulkClosed {
+    /// The tab at this index, as it was when it closed.
+    Tab(usize),
+    /// This pane alone, from a tab that keeps panes opened since.
+    Pane(u64),
+}
+
 pub struct Mux {
     restore_content: std::collections::VecDeque<crate::session_content::PaneContent>,
     restore_divider: String,
@@ -2427,7 +2433,7 @@ impl Mux {
                     output: pane.term.output_generation(),
                     geometry: pane.term.geometry_generation(),
                     remote: pane_saves_as_remote(pane),
-                    remote_end: pane.remote_output_end,
+                    remote_end: pane.remote_output_end(),
                 },
                 None => crate::session_content::PaneContentKey {
                     id,
@@ -2466,7 +2472,7 @@ impl Mux {
                         let first = kettle_core::restore::primary_first_row(&term);
                         match remote_rows(
                             remote_now,
-                            pane.remote_output_end,
+                            pane.remote_output_end(),
                             first,
                             cfg.restore_scrollback_remote,
                         ) {
@@ -2868,7 +2874,6 @@ impl Mux {
                 reconnect_launch: launch.cloned(),
                 remote_context: None,
                 foreground_process: None,
-                remote_output_end: None,
                 agent_attached: false,
                 read_only: false,
                 completion_overlay: cfg.completion_overlay
@@ -4196,6 +4201,31 @@ impl Mux {
         self.relocate_active_tab(to)
     }
 
+    /// Move tab `idx` `delta` places along the bar, wrapping like
+    /// [`Mux::nudge_active_tab`], while the active tab stays active: the tab
+    /// menu moves the tab it was opened on, which need not be the active one.
+    pub fn nudge_tab(&mut self, idx: usize, delta: i32) -> bool {
+        if idx == self.active {
+            return self.nudge_active_tab(delta);
+        }
+        let n = self.tabs.len();
+        if n < 2 || delta == 0 || idx >= n {
+            return false;
+        }
+        let to = (idx as i32 + delta).rem_euclid(n as i32) as usize;
+        let tab = self.tabs.remove(idx);
+        let mut active = self.active;
+        if active > idx {
+            active -= 1;
+        }
+        self.tabs.insert(to, tab);
+        if active >= to {
+            active += 1;
+        }
+        self.active = active;
+        true
+    }
+
     /// Lift the active tab out of the bar and put it back down at `to`,
     /// following it with the focus. Shared by the drag and keyboard paths so
     /// they cannot drift apart on the part that actually reorders.
@@ -4499,6 +4529,39 @@ impl Mux {
             }
         }
         self.tabs.is_empty()
+    }
+
+    /// Close the panes `captured` that are still open outside tab `keep`,
+    /// which becomes the active tab, and say what closed, in order. A tab
+    /// whose every pane is captured closes whole, the last first, so each
+    /// index names the tab it was read for; a tab that has gained panes since
+    /// they were captured loses only the captured ones, and a tab of none
+    /// stays.
+    pub fn close_tabs_except(&mut self, keep: usize, captured: &[u64]) -> Vec<BulkClosed> {
+        let kept = self.tab_anchor_panes(keep);
+        if kept.is_empty() {
+            return Vec::new();
+        }
+        let mut closed = Vec::new();
+        for idx in (0..self.tabs.len()).rev() {
+            let panes = self.tabs[idx].root.leaf_ids();
+            if idx != keep && !panes.is_empty() && panes.iter().all(|id| captured.contains(id)) {
+                self.close_tab_at(idx);
+                closed.push(BulkClosed::Tab(idx));
+            }
+        }
+        for &pane in captured {
+            let Some(idx) = self.tab_index_of_any_pane(&[pane]) else {
+                continue;
+            };
+            if Some(idx) != self.tab_index_of_any_pane(&kept) && self.focus_pane(pane) {
+                self.close_focused();
+                closed.push(BulkClosed::Pane(pane));
+            }
+        }
+        self.active = self.tab_index_of_any_pane(&kept).unwrap_or(0);
+        self.touch_active_tab_seen();
+        closed
     }
 
     /// Open a new tab that duplicates the focused pane's argv + OSC-7
@@ -10656,6 +10719,55 @@ mod node_tests {
     }
 
     #[test]
+    fn nudging_a_background_tab_keeps_the_active_tab_active() {
+        let tab = |id: u64| Tab {
+            root: Node::Leaf(id),
+            focus: id,
+            title_override: None,
+            zoomed: false,
+            last_output_at: None,
+            last_seen_at: None,
+            bell: false,
+            scaled_zoom_owner: false,
+            generated_group_name: None,
+            lanes: HashMap::new(),
+        };
+        let order = |m: &Mux| m.tabs.iter().map(|t| t.focus).collect::<Vec<_>>();
+        let active = |m: &Mux| m.tabs[m.active].focus;
+        // (active tab, moved tab, delta, order after)
+        for (on, moved, delta, after) in [
+            (1, 3, -1, vec![1, 3, 2, 4]),
+            (1, 2, 1, vec![1, 3, 2, 4]),
+            (4, 1, 1, vec![2, 1, 3, 4]),
+            (3, 2, 1, vec![1, 3, 2, 4]),
+            (2, 3, -1, vec![1, 3, 2, 4]),
+            // Wrapping past either end, as Move Tab Left/Right do.
+            (2, 1, -1, vec![2, 3, 4, 1]),
+            (3, 4, 1, vec![4, 1, 2, 3]),
+        ] {
+            let mut m = Mux::new();
+            m.tabs.extend((1..=4).map(tab));
+            m.active = (on - 1) as usize;
+            assert!(
+                m.nudge_tab((moved - 1) as usize, delta),
+                "{on} {moved} {delta}"
+            );
+            assert_eq!(order(&m), after, "{on} {moved} {delta}");
+            assert_eq!(active(&m), on, "the active tab stays active");
+        }
+        // The active tab itself moves with the focus, as the keys move it.
+        let mut m = Mux::new();
+        m.tabs.extend((1..=3).map(tab));
+        m.active = 1;
+        assert!(m.nudge_tab(1, 1));
+        assert_eq!((order(&m), m.active), (vec![1, 3, 2], 2));
+        assert!(!m.nudge_tab(7, 1), "no such tab");
+        let mut single = Mux::new();
+        single.tabs.push(tab(1));
+        assert!(!single.nudge_tab(0, 1));
+    }
+
+    #[test]
     fn close_tab_at_keeps_active_valid() {
         // Build a 3-tab mux without spawning real terminals.
         let mut m = Mux::new();
@@ -12276,12 +12388,12 @@ mod restore_content_tests {
             vec![PaneContent {
                 remote: false,
                 lines: ["drop", "first", "second"]
-                    .map(|s| (s.into(), false, vec![]))
+                    .map(|s| (s.into(), false, vec![], vec![]))
                     .into(),
             }],
             vec![PaneContent {
                 remote: true,
-                lines: vec![("remote secret".into(), false, vec![])],
+                lines: vec![("remote secret".into(), false, vec![], vec![])],
             }],
         ];
         let mut mux = Mux::new();
@@ -12347,7 +12459,7 @@ mod restore_content_tests {
         };
         let content = vec![vec![PaneContent {
             remote: false,
-            lines: vec![("old content".into(), false, vec![])],
+            lines: vec![("old content".into(), false, vec![], vec![])],
         }]];
         let mut mux = Mux::new();
         let outcome = mux.restore_geometry_with_content(
@@ -12439,7 +12551,7 @@ mod restore_content_tests {
         };
         let content = vec![vec![PaneContent {
             remote: false,
-            lines: vec![("old content".into(), false, vec![])],
+            lines: vec![("old content".into(), false, vec![], vec![])],
         }]];
         let mut mux = Mux::new();
         mux.restore_geometry_with_content(

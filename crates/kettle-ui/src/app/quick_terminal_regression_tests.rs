@@ -101,7 +101,7 @@ fn review_quick_cold_startup_hook_preserves_normal_session() {
         )
     );
     assert!(resumed.contains(
-        "if show_initial_quick && !self.quick_terminal.model.visible && self.gpu.is_some()"
+        "if show_initial_quick && !self.quick_terminal.model.visible && self.renderers_ready()"
     ));
 }
 

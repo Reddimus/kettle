@@ -17,7 +17,7 @@ pub(super) fn settings_footer_note(
     active_gpu: Option<&str>,
     focused_key: Option<&str>,
     blur_unavailable: bool,
-    restart_pending: bool,
+    restart_pending: crate::settings::SettingsApply,
     language_pending: bool,
     agent_previews: Option<kettle_i18n::Text>,
 ) -> Option<String> {
@@ -36,19 +36,19 @@ pub(super) fn settings_footer_note(
             notes.push(tr.text(Text::SettingsNoteBlur));
         }
         Some("completion-overlay") => notes.push(tr.text(Text::SettingsNoteNewShells)),
-        // A new window keeps the process's language, unlike the changes the
-        // general restart note covers.
-        Some("language") if !language_pending => {
-            notes.push(tr.text(Text::SettingsNoteLanguage));
-        }
+        // The Language row's description already says a change waits for a
+        // restart; the footer says so only once one is waiting.
         _ => {}
     }
     if language_pending {
         notes.push(tr.text(Text::SettingsNoteLanguagePending));
     }
-    if restart_pending {
-        // The pending flag records no cause, even when Graphics is selected.
-        notes.push(tr.text(Text::SettingsNoteRestart));
+    match restart_pending {
+        crate::settings::SettingsApply::None => {}
+        crate::settings::SettingsApply::NewWindow => notes.push(tr.text(Text::SettingsNoteRestart)),
+        crate::settings::SettingsApply::Restart => {
+            notes.push(tr.text(Text::SettingsNoteGraphicsRestart))
+        }
     }
     (!notes.is_empty()).then(|| notes.join("\n"))
 }
@@ -114,6 +114,22 @@ pub(super) fn agent_previews_note(
     } else {
         Text::SettingsNoteAgentPreviews
     }
+}
+
+/// The Settings panel's title: the open category's name, or while the
+/// search field holds a query, which lists rows from every category,
+/// "Search results".
+pub(super) fn settings_title(
+    tr: &kettle_i18n::Translator,
+    category: kettle_i18n::Text,
+    query: &str,
+) -> String {
+    let title = if query.is_empty() {
+        category
+    } else {
+        kettle_i18n::Text::SettingsSearchResults
+    };
+    tr.text(title).to_string()
 }
 
 /// The Settings footer: each key followed by what it does, the groups apart

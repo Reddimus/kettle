@@ -411,6 +411,7 @@ mod tests {
                     blur: Default::default(),
                     quick: Some(status.clone()),
                     gnome: true,
+                    gpu_discovery_skipped: false,
                 };
                 let note = settings::row_description(hotkey, context.clone(), &cfg, &tr);
                 assert!(

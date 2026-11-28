@@ -1822,6 +1822,9 @@ impl ExecProcessTree {
     }
 
     fn terminate_once(&self, term: &Terminal) -> bool {
+        // A child whose output cannot drain would otherwise wait in its exit
+        // after any signal below while Kettle holds the PTY slave.
+        term.release_retained_slave();
         let Some(root) = self.root.or_else(|| term.child_pid()) else {
             let direct = report_failed_termination(term.kill());
             #[cfg(unix)]
@@ -7196,6 +7199,118 @@ wait
         );
     }
 
+    #[cfg(target_os = "macos")]
+    const STOPPED_OUTPUT_FIXTURE: &str = "exec::tests::macos_stopped_output_helper";
+
+    /// The child half of the stopped-output timeout test: record its pid,
+    /// suspend its terminal's output as Ctrl+S does, write a tail, and exit,
+    /// which leaves it waiting in its exit for output nothing can take.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_stopped_output_helper() {
+        if !invoked_as_fixture(STOPPED_OUTPUT_FIXTURE) {
+            return;
+        }
+        let pid_file = std::env::var_os("KETTLE_STOPPED_PID_FILE").expect("pid file");
+        std::fs::write(pid_file, std::process::id().to_string()).expect("record pid");
+        // SAFETY: tcflow takes a descriptor and an action; stdout is open.
+        assert_eq!(unsafe { libc::tcflow(1, libc::TCOOFF) }, 0);
+        print!("tail");
+        std::io::stdout().flush().expect("write the tail");
+        std::process::exit(0);
+    }
+
+    /// macOS: a child that exits while its output is stopped waits in its
+    /// exit while Kettle keeps the PTY slave for its unread output. When the
+    /// timeout fires, teardown restarts output and closes that slave, so the
+    /// child has finished exiting by the time `kettle exec` reports 124, not
+    /// only once the Terminal is dropped afterwards.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_timed_out_child_stuck_on_stopped_output_is_gone_before_exec_reports() {
+        struct FinishProbe<'a> {
+            direct: DirectOutput<'a>,
+            seen: Vec<u8>,
+            pid_file: &'a Path,
+            state_at_finish: Option<Option<String>>,
+        }
+        impl ExecOutput for FinishProbe<'_> {
+            fn ready(&mut self) -> OutputResult<bool> {
+                self.direct.ready()
+            }
+            fn start(&mut self, cols: u16, rows: u16) -> OutputResult<()> {
+                self.direct.start(cols, rows)
+            }
+            fn output(&mut self, bytes: Vec<u8>) -> OutputResult<()> {
+                self.seen.extend_from_slice(&bytes);
+                self.direct.output(bytes)
+            }
+            fn title(&mut self, title: String) -> OutputResult<()> {
+                self.direct.title(title)
+            }
+            fn finish(
+                &mut self,
+                code: i32,
+                duration: Duration,
+                mode: OutputFinish,
+            ) -> OutputResult<()> {
+                // `ps -p` prints nothing and exits 1 once no process has the
+                // pid; `E` is a process still in its exit.
+                let pid = std::fs::read_to_string(self.pid_file).expect("the child's pid");
+                let probe = std::process::Command::new("ps")
+                    .args(["-o", "stat=", "-p", pid.trim()])
+                    .output()
+                    .expect("run ps");
+                let stat = String::from_utf8_lossy(&probe.stdout).trim().to_string();
+                self.state_at_finish = Some((!stat.is_empty()).then_some(stat));
+                self.direct.finish(code, duration, mode)
+            }
+        }
+        let helper = std::env::current_exe().expect("resolve the unit-test binary");
+        let directory = kettle_test_support::private_tempdir("kettle-stopped-output-");
+        let pid_file = directory.path().join("pid");
+        let opts = ExecOpts {
+            argv: vec![
+                "/usr/bin/env".into(),
+                format!("KETTLE_STOPPED_PID_FILE={}", pid_file.display()),
+                helper.to_string_lossy().into_owned(),
+                "--exact".into(),
+                STOPPED_OUTPUT_FIXTURE.into(),
+                "--nocapture".into(),
+                "--test-threads=1".into(),
+            ],
+            cols: 80,
+            rows: 24,
+            cwd: None,
+            timeout: Some(Duration::from_secs(2)),
+            mode: OutputMode::Raw,
+            record: None,
+            forward_stdin: false,
+        };
+        let mut sink = Vec::new();
+        let mut output = FinishProbe {
+            direct: DirectOutput::new(OutputMode::Raw, &mut sink),
+            seen: Vec::new(),
+            pid_file: &pid_file,
+            state_at_finish: None,
+        };
+        let code = run_exec_engine(opts, &|| None, &mut output, None, false);
+        let state = output
+            .state_at_finish
+            .clone()
+            .expect("exec finished its output");
+        assert_eq!(
+            code,
+            EXIT_TIMEOUT,
+            "{:?}",
+            String::from_utf8_lossy(&output.seen)
+        );
+        assert!(
+            state.as_deref().is_none_or(|stat| !stat.contains('E')),
+            "the child was still in its exit when exec reported: {state:?}"
+        );
+    }
+
     /// libtest matches `--exact` against a test's FULL path, so the fixture has
     /// to be named the way libtest names it. The integration helpers in
     /// `tests/exec.rs` sit at their crate root and get away with a bare name;
@@ -7208,7 +7323,7 @@ wait
     /// run as part of an ordinary suite. Reading argv is race-free, unlike the
     /// environment-variable guard the integration fixtures use — those are set
     /// on a `Command` by their parent, which `run_exec_with` has no way to do.
-    #[cfg(any(windows, target_os = "linux"))]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     fn invoked_as_fixture(name: &str) -> bool {
         let mut exact = false;
         let mut named = false;

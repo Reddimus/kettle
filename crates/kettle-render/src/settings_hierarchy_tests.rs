@@ -321,8 +321,8 @@ fn settings_reset_segments_share_an_outline_and_switches_keep_four_logical_pixel
                     row,
                     &set.rows[0],
                     &palette,
-                    (theme.background, theme.accent, theme.foreground),
-                    true,
+                    theme.background,
+                    (settings::SettingsRowFill::Focused, None),
                     scale,
                 );
                 if !matches!(control, SettingsControl::Toggle(_)) {
@@ -355,27 +355,31 @@ fn settings_new_control_surfaces_and_inks_meet_their_adjacent_backgrounds() {
                         "{name} {linear} unavailable"
                     );
                 }
-                for (ink, outside) in [
-                    (palette.well_control, theme.background),
-                    (palette.selected_well_control, palette.selected),
+                // A well's outline meets the well and the surface around it;
+                // on the focused row a joined Reset also shows the panel
+                // inside the outline.
+                for (ink, surfaces) in [
+                    (palette.well_control, vec![palette.well, theme.background]),
+                    (
+                        palette.selected_well_control,
+                        vec![palette.well, palette.selected, theme.background],
+                    ),
                 ] {
+                    let weakest = |ink: Rgb| {
+                        surfaces
+                            .iter()
+                            .map(|surface| color::contrast_ratio(ink, *surface))
+                            .fold(f64::INFINITY, f64::min)
+                    };
                     let floor = if [Rgb::new(0, 0, 0), Rgb::new(255, 255, 255)]
-                        .iter()
-                        .any(|ink| {
-                            color::contrast_ratio(*ink, palette.well)
-                                .min(color::contrast_ratio(*ink, outside))
-                                >= 4.5
-                        }) {
+                        .into_iter()
+                        .any(|ink| weakest(ink) >= 4.5)
+                    {
                         4.5
                     } else {
                         3.0
                     };
-                    assert!(
-                        color::contrast_ratio(ink, palette.well)
-                            .min(color::contrast_ratio(ink, outside))
-                            >= floor,
-                        "{name} {linear} well"
-                    );
+                    assert!(weakest(ink) >= floor, "{name} {linear} well");
                 }
                 assert!(
                     color::contrast_ratio(palette.selected_well_control, theme.background) >= 3.0,
@@ -394,18 +398,25 @@ fn settings_new_control_surfaces_and_inks_meet_their_adjacent_backgrounds() {
                         set.rows[0].unavailable = true;
                         let well =
                             matches!(control, SettingsControl::Value | SettingsControl::Text);
+                        let switch = matches!(control, SettingsControl::Toggle(_));
                         let ink = settings_text_color(
                             &set,
                             SettingsTextKind::Value(0),
                             &palette,
-                            (&theme, accent, theme.foreground),
+                            &theme,
                             &mut colors,
                         );
+                        // A switch's state word sits on the focused row's
+                        // fill, before the track.
+                        let text_surface = if well {
+                            palette.well
+                        } else if switch {
+                            palette.selected
+                        } else {
+                            theme.background
+                        };
                         assert!(
-                            color::contrast_ratio(
-                                ink,
-                                if well { palette.well } else { theme.background }
-                            ) >= 4.5,
+                            color::contrast_ratio(ink, text_surface) >= 4.5,
                             "{name} {control:?} disabled={disabled}"
                         );
                         let layout = settings_layout(&set, (8.4, 17.5), (1280.0, 820.0), 8.4, 1.0);
@@ -413,8 +424,8 @@ fn settings_new_control_surfaces_and_inks_meet_their_adjacent_backgrounds() {
                             &layout.rows[0],
                             &set.rows[0],
                             &palette,
-                            (theme.background, accent, theme.foreground),
-                            true,
+                            theme.background,
+                            (settings::SettingsRowFill::Focused, None),
                             1.0,
                         );
                         assert_eq!(
@@ -493,7 +504,7 @@ fn settings_rich_hint_cache_recolours_unchanged_text_after_theme_and_metrics_cha
     }
 }
 
-#[test]
+crate::visual_parity_tests::parity_scene! {
 fn settings_cold_open_loads_bundled_bold_for_title_headings_and_labels() {
     let _serial = gpu_tests::gpu_test_guard();
     let Some((mut renderer, mut cfg)) = headless_tests::renderer(1280, 820) else {
@@ -507,18 +518,14 @@ fn settings_cold_open_loads_bundled_bold_for_title_headings_and_labels() {
     fonts::load_bundled_font(&mut renderer.font_system, kettle_config::font::REGULAR);
     renderer.bundled_style_faces_loaded = false;
     renderer.chrome_style_key = 0;
-    let _ = renderer
-        .render_frame(&[], &TabBar::hidden(), &cfg, &Overlay::default())
-        .unwrap();
+    headless_tests::capture(&mut renderer, &cfg, &[], &Overlay::default());
     assert!(!renderer.bundled_style_faces_loaded);
     let set = grouped();
     let overlay = Overlay {
         settings: Some(set.clone()),
         ..Default::default()
     };
-    let _ = renderer
-        .render_frame(&[], &TabBar::hidden(), &cfg, &overlay)
-        .unwrap();
+    headless_tests::capture(&mut renderer, &cfg, &[], &overlay);
     assert!(renderer.bundled_style_faces_loaded);
     let layout = settings_layout(
         &set,
@@ -544,7 +551,10 @@ fn settings_cold_open_loads_bundled_bold_for_title_headings_and_labels() {
             assert_eq!(face.weight, fontdb::Weight::BOLD, "{}", item.text);
         }
     }
-    eprintln!("SETTINGS_BOLD_GPU_PASS: {:?}", renderer.gpu.adapter_info());
+    if renderer.backend() == RendererBackend::Gpu {
+        eprintln!("SETTINGS_BOLD_GPU_PASS: {:?}", renderer.gpu().adapter_info());
+    }
+}
 }
 
 #[test]
