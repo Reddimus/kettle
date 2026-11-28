@@ -5930,7 +5930,9 @@ fn titlebar_settings_gear_is_legible_and_inside_its_button() {
                      present={present}"
                 );
                 if !present {
-                    assert_eq!(glyph_ink(&frame, gear, strip), None, "{case}: drew a gear");
+                    // Above the strip's bottom hairline, which runs under it.
+                    let above = (gear.0, gear.1, gear.2, gear.3 - scale.round());
+                    assert_eq!(glyph_ink(&frame, above, strip), None, "{case}: drew a gear");
                     continue;
                 }
                 let mut colors = chrome::Colors::default();
@@ -6146,11 +6148,9 @@ fn gnome_header_hairline_is_painted_in_both_themes_and_focus_states() {
                     }
                     let first = bar.segments[0].rect;
                     let under = pixel(&frame, first.0 + first.2 * 0.5, row);
-                    if tabs == 1 {
-                        assert_eq!(under, line, "{case}: the line runs under the title");
-                    } else {
-                        assert_ne!(under, line, "{case}: the line crosses the active tab");
-                    }
+                    // The active tab is a pill floating above the line, so
+                    // the line runs under it as under a lone title.
+                    assert_eq!(under, line, "{case}: the line runs under the first tab");
                 }
             }
         }

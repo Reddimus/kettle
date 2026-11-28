@@ -6,6 +6,14 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- In the macOS title bar strip (`macos-titlebar-style = tabs`) and the GNOME
+  header, the active and hovered tabs are now rounded pills inset in the strip,
+  and a one-point hairline runs unbroken along the strip's bottom. Tab edges no
+  longer line up with, or cut into, vertical pane splits directly below. Tabs
+  keep their even widths and full-height click and drag targets.
+
 ## [6.0.0] — 2026-11-27
 
 ### Added

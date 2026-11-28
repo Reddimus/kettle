@@ -1501,6 +1501,7 @@ impl Renderer {
                 theme.foreground,
                 overlay.window_focused,
             );
+            let mut strip_separator = Vec::new();
             if !cfg.tab_bar_pos.is_vertical() {
                 let tabs = tab_strip::horizontal_tab_quads(
                     tabbar,
@@ -1512,6 +1513,7 @@ impl Renderer {
                     cfg.tab_bar_pos,
                     self.scale,
                 );
+                strip_separator = tabs.separator;
                 // Replacing the shared base avoids applying terminal alpha twice.
                 // Wallpaper panes blend their tint over the wallpaper instead.
                 if background_has_wallpaper(cfg) {
@@ -1801,6 +1803,9 @@ impl Renderer {
                     None,
                 );
             }
+            // The header's or title bar's hairline goes over the band-high
+            // button fills above, so it runs unbroken under the whole strip.
+            quads.extend(strip_separator);
             // Drag-in-progress ghost. While the user holds a
             // left button down on the tab bar, paint a
             // translucent overlay copy of the active segment centered
@@ -4881,11 +4886,10 @@ impl Renderer {
                 if hovered && !cfg.tab_bar_pos.is_vertical() {
                     tab_strip::rounded_fill(
                         &mut quads,
-                        (
-                            cx + 5.0,
-                            cy + 5.0,
-                            (ccw - 10.0).max(0.0),
-                            (cch - 10.0).max(0.0),
+                        tab_strip::close_hover_rect(
+                            s.close,
+                            tab_strip::inset_pill_tabs(tabbar),
+                            self.scale,
                         ),
                         6.0 * self.scale,
                         (true, true),

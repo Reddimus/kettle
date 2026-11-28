@@ -6717,8 +6717,14 @@ points from the lane's ends and 6 apart, as libadwaita lays out a header.
 Find (`TabBar::search`) toggles the search bar through `toggle_header_find`
 from a press, ctl or AccessKit, shows toggled while Find is open and gives way
 first in a narrow lane. `header_hairline_rects` draws a one-point line, 1.5:1
-against the header and the terminal, along the header's bottom, broken under
-an active tab.
+against the header and the terminal, along the header's bottom. In the GNOME
+header with tabs and in the macOS title bar strip (`tab_strip::inset_pill_tabs`)
+the active and hovered tabs paint as pills inset 4 points from the band's top
+and bottom and 3 from the tab's sides (`tab_pill_rect`), all four corners
+rounded, with the active accent a 2-point bar inside the pill
+(`tab_pill_accent_rect`); the hit rects still span the band, and the line runs
+unbroken under the pills, painted after the strip's buttons
+(`HorizontalTabQuads::separator`). Other strips keep band-high tabs.
 `TabBar::window_controls`
 carries the same physical rectangles, localized names and hover/press state
 to painting, pointer routing, AccessKit and
