@@ -12388,12 +12388,12 @@ mod restore_content_tests {
             vec![PaneContent {
                 remote: false,
                 lines: ["drop", "first", "second"]
-                    .map(|s| (s.into(), false, vec![]))
+                    .map(|s| (s.into(), false, vec![], vec![]))
                     .into(),
             }],
             vec![PaneContent {
                 remote: true,
-                lines: vec![("remote secret".into(), false, vec![])],
+                lines: vec![("remote secret".into(), false, vec![], vec![])],
             }],
         ];
         let mut mux = Mux::new();
@@ -12459,7 +12459,7 @@ mod restore_content_tests {
         };
         let content = vec![vec![PaneContent {
             remote: false,
-            lines: vec![("old content".into(), false, vec![])],
+            lines: vec![("old content".into(), false, vec![], vec![])],
         }]];
         let mut mux = Mux::new();
         let outcome = mux.restore_geometry_with_content(
@@ -12551,7 +12551,7 @@ mod restore_content_tests {
         };
         let content = vec![vec![PaneContent {
             remote: false,
-            lines: vec![("old content".into(), false, vec![])],
+            lines: vec![("old content".into(), false, vec![], vec![])],
         }]];
         let mut mux = Mux::new();
         mux.restore_geometry_with_content(

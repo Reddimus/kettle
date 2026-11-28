@@ -1242,7 +1242,7 @@ fn a_config_launch_never_reads_or_writes_the_default_files() {
         &session,
         vec![vec![vec![crate::session_content::PaneContent {
             remote: false,
-            lines: vec![("MARK-A".into(), false, vec![])],
+            lines: vec![("MARK-A".into(), false, vec![], vec![])],
         }]]],
     );
     writer.submit_job(crate::session::SaveJob {

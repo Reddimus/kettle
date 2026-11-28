@@ -3001,7 +3001,7 @@ mod content_writer_tests {
             &session,
             vec![vec![vec![crate::session_content::PaneContent {
                 remote: false,
-                lines: vec![(marker.into(), false, vec![])],
+                lines: vec![(marker.into(), false, vec![], vec![])],
             }]]],
         );
         (session, content)
@@ -3360,7 +3360,12 @@ mod content_writer_tests {
                 session,
                 vec![vec![vec![crate::session_content::PaneContent {
                     remote: false,
-                    lines: vec![("x".repeat(crate::session_content::MAX_BYTES), false, vec![])],
+                    lines: vec![(
+                        "x".repeat(crate::session_content::MAX_BYTES),
+                        false,
+                        vec![],
+                        vec![],
+                    )],
                 }]]],
             ))
         };

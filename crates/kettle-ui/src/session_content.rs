@@ -316,6 +316,7 @@ mod tests {
                     "\x1b[1;31m世界 e\u{301}\x1b[0m".into(),
                     false,
                     vec![(10, true), (13, true), (14, false), (17, true)],
+                    vec![(0, 2), (3, 4)],
                 )],
             }]]],
         );
@@ -363,18 +364,29 @@ mod tests {
                 &session,
                 vec![vec![vec![PaneContent {
                     remote: false,
-                    lines: vec![(line, false, vec![])],
+                    lines: vec![(line, false, vec![], vec![])],
                 }]]],
             )
             .save(&path)
             .unwrap();
             assert!(load(&path, &session).is_none());
         }
+        // A protected run that reaches past the row's one cell.
         ContentSnapshot::new(
             &session,
             vec![vec![vec![PaneContent {
                 remote: false,
-                lines: vec![("safe".into(), false, vec![])],
+                lines: vec![("safe".into(), false, vec![(4, false)], vec![(0, 2)])],
+            }]]],
+        )
+        .save(&path)
+        .unwrap();
+        assert!(load(&path, &session).is_none());
+        ContentSnapshot::new(
+            &session,
+            vec![vec![vec![PaneContent {
+                remote: false,
+                lines: vec![("safe".into(), false, vec![], vec![])],
             }]]],
         )
         .save(&path)
@@ -392,7 +404,7 @@ mod tests {
             &session(),
             vec![vec![vec![PaneContent {
                 remote: false,
-                lines: vec![("x".repeat(MAX_BYTES), false, vec![])],
+                lines: vec![("x".repeat(MAX_BYTES), false, vec![], vec![])],
             }]]],
         );
         assert!(snapshot.save(&path).is_err());

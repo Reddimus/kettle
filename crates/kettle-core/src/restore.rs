@@ -9,9 +9,11 @@ use alacritty_terminal::term::Term;
 
 pub const MAX_RESTORE_LINES: usize = 10_000;
 pub const MAX_RESTORE_LINE_BYTES: usize = 16 * 1024;
-/// SGR text, soft-wrap state, and (UTF-8 end offset, grapheme mode) per cell.
-/// Boundaries prevent a new terminal's mode from changing saved cell widths.
-pub type RestoreRow = (String, bool, Vec<(usize, bool)>);
+/// SGR text, soft-wrap state, (UTF-8 end offset, grapheme mode) per cell, and
+/// the runs of cells DECSCA protects, as `[start, end)` indexes into those
+/// cells. Boundaries prevent a new terminal's mode from changing saved cell
+/// widths.
+pub type RestoreRow = (String, bool, Vec<(usize, bool)>, Vec<(usize, usize)>);
 
 /// The document row (see `Grid::history_origin`) of the oldest row the primary
 /// grid still holds. Rows only ever leave from this end: scrolled out of
@@ -144,6 +146,7 @@ pub fn snapshot_from<T: EventListener>(
     for row in (start..end).rev() {
         let mut line = String::new();
         let mut cells = Vec::new();
+        let mut protected: Vec<(usize, usize)> = Vec::new();
         let mut previous = None;
         let mut wrapped = grid[Point::new(Line(row), Column(grid.columns() - 1))]
             .flags
@@ -214,29 +217,49 @@ pub fn snapshot_from<T: EventListener>(
             if !part.is_empty() {
                 line.push_str(&part);
                 cells.push((line.len(), cell.flags.contains(Flags::GRAPHEME)));
+                // DECSCA protection is not SGR: it is saved as runs of cells.
+                if cell.flags.contains(Flags::PROTECTED) {
+                    let index = cells.len() - 1;
+                    match protected.last_mut() {
+                        Some((_, end)) if *end == index => *end += 1,
+                        _ => protected.push((index, index + 1)),
+                    }
+                }
             }
         }
         line.push_str("\x1b[0m");
+        // `["…",false,[…],[…]],` around the text, then each cell's and run's
+        // JSON, with room to spare.
         let cost = line.len()
             + line.bytes().filter(|&b| b == 0x1b).count() * 5
             + line.bytes().filter(|&b| b == b'"' || b == b'\\').count()
-            + 16
+            + 19
             + cells
                 .iter()
                 .map(|(end, _)| end.ilog10() as usize + 11)
+                .sum::<usize>()
+            + protected
+                .iter()
+                .map(|&(start, end)| json_digits(start) + json_digits(end) + 4)
                 .sum::<usize>();
         if cost > *budget {
             break;
         }
         *budget -= cost;
-        rows.push((line, wrapped, cells));
+        rows.push((line, wrapped, cells, protected));
     }
     rows.reverse();
     rows
 }
 
+/// How many digits `n` takes in JSON.
+fn json_digits(n: usize) -> usize {
+    n.checked_ilog10().map_or(1, |digits| digits as usize + 1)
+}
+
 /// What a cell's saved SGR records: colours and every SGR text attribute.
-/// `PROTECTED` is DECSCA, not SGR, and links never cross the boundary.
+/// `PROTECTED` is DECSCA, not SGR: the row saves it as runs of cells. Links
+/// never cross the boundary.
 fn cell_style(
     cell: &alacritty_terminal::term::cell::Cell,
 ) -> (AnsiColor, AnsiColor, Option<AnsiColor>, Flags) {
@@ -311,11 +334,21 @@ pub fn valid_line(line: &str) -> bool {
     !rest.chars().any(char::is_control)
 }
 
-/// Validate cell boundaries before slicing or generating trusted mode changes.
+/// Validate cell boundaries and protected runs before slicing or generating
+/// trusted mode changes.
 pub fn valid_row(row: &RestoreRow) -> bool {
-    let (text, _, cells) = row;
+    let (text, _, cells, protected) = row;
     if !valid_line(text) || cells.len() > text.len() {
         return false;
+    }
+    // Each run holds at least one cell, follows the one before and stays
+    // within the row's cells.
+    let mut next = 0;
+    for &(first, end) in protected {
+        if first < next || first >= end || end > cells.len() {
+            return false;
+        }
+        next = end;
     }
     let mut start = 0;
     for &(end, _) in cells {
@@ -388,17 +421,31 @@ pub fn replay(
         alacritty_terminal::vte::ansi::StdSyncHandler,
     >::new();
     let mut continues = false;
-    for (index, (line, wrapped, cells)) in lines.iter().enumerate() {
+    for (index, (line, wrapped, cells, protected)) in lines.iter().enumerate() {
         let row = output.len();
         let mut start = 0;
-        for &(end, grapheme) in cells {
+        // DECSCA, like the cell modes, comes from validated runs. SGR resets
+        // leave it alone, and it is off again before the row ends, so nothing
+        // else the row or the new shell writes is protected.
+        let mut runs = protected.iter().copied().peekable();
+        let mut protecting = false;
+        for (cell, &(end, grapheme)) in cells.iter().enumerate() {
             output.push_str(if grapheme {
                 "\x1b[?2027l\x1b[?2027h"
             } else {
                 "\x1b[?2027l"
             });
+            while runs.next_if(|&(_, run_end)| run_end <= cell).is_some() {}
+            let protect = runs.peek().is_some_and(|&(first, _)| first <= cell);
+            if protect != protecting {
+                output.push_str(if protect { "\x1b[1\"q" } else { "\x1b[0\"q" });
+                protecting = protect;
+            }
             dimmed(&mut output, &line[start..end]);
             start = end;
+        }
+        if protecting {
+            output.push_str("\x1b[0\"q");
         }
         dimmed(&mut output, &line[start..]);
         // A line break clears a pending wrap, so a blank resolves it first in
@@ -1086,14 +1133,122 @@ mod tests {
     #[test]
     fn corrupt_cell_boundaries_are_rejected_without_slicing_or_parsing() {
         for row in [
-            ("é".into(), false, vec![(1, true)]),
-            ("abc".into(), false, vec![(4, true)]),
-            ("abc".into(), false, vec![(2, true), (1, false)]),
-            ("\x1b[31mred".into(), false, vec![(2, true)]),
+            ("é".into(), false, vec![(1, true)], vec![]),
+            ("abc".into(), false, vec![(4, true)], vec![]),
+            ("abc".into(), false, vec![(2, true), (1, false)], vec![]),
+            ("\x1b[31mred".into(), false, vec![(2, true)], vec![]),
         ] {
             assert!(!valid_row(&row));
             assert!(replay(&[row], "divider", 40, true).is_none());
         }
+    }
+
+    #[test]
+    fn corrupt_protected_runs_are_rejected() {
+        let cells = vec![(1, false), (2, false), (3, false)];
+        for runs in [
+            vec![(0, 0)],
+            vec![(2, 1)],
+            vec![(0, 4)],
+            vec![(1, 3), (0, 1)],
+            vec![(0, 2), (1, 3)],
+        ] {
+            let row = ("abc".to_string(), false, cells.clone(), runs);
+            assert!(!valid_row(&row));
+            assert!(replay(&[row], "divider", 40, true).is_none());
+        }
+        assert!(valid_row(&(
+            "abc".into(),
+            false,
+            cells,
+            vec![(0, 1), (1, 3)]
+        )));
+    }
+
+    /// DECSCA protection is not SGR, and the snapshot used to drop it, so a
+    /// selective erase after a restore wiped the text a program had protected.
+    #[test]
+    fn restored_protected_text_survives_a_selective_erase() {
+        let mut source = terminal();
+        Processor::new().advance(&mut source, b"\x1b[1\"qKEEP\x1b[0\"q free\r\nnext");
+        let saved = snapshot(&source, 1000, &mut usize::MAX.clone());
+        assert_eq!(saved[0].3, vec![(0, 4)]);
+        assert_eq!(saved[1].3, vec![]);
+        let mut restored = terminal();
+        let mut parser = Processor::new();
+        parser.advance(
+            &mut restored,
+            replay(&saved, "divider", 40, true).unwrap().as_bytes(),
+        );
+        parser.advance(&mut restored, b"new");
+        let protected = |term: &Term<EventProxy>, line: i32, col: usize| {
+            term.grid()[Point::new(Line(line), Column(col))]
+                .flags
+                .contains(Flags::PROTECTED)
+        };
+        assert!((0..4).all(|col| protected(&restored, 0, col)));
+        assert!((4..9).all(|col| !protected(&restored, 0, col)));
+        // The next row, the divider and the new shell's text stay unprotected.
+        for line in 1..4 {
+            assert!((0..4).all(|col| !protected(&restored, line, col)));
+        }
+        parser.advance(&mut restored, b"\x1b[?2J");
+        let text: String = (0..9)
+            .map(|col| restored.grid()[Point::new(Line(0), Column(col))].c)
+            .collect();
+        assert_eq!(text, "KEEP     ");
+        assert_eq!(restored.grid()[Point::new(Line(1), Column(0))].c, ' ');
+    }
+
+    /// Protection follows each cell across wide characters and soft wraps, and
+    /// ends with its row.
+    #[test]
+    fn restored_protection_matches_the_source_cell_by_cell() {
+        let mut script =
+            b"\x1b[1\"q\xe4\xb8\x96\xe7\x95\x8c\x1b[0\"qab\x1b[1\"qc\x1b[0\"q\r\n".to_vec();
+        script.extend_from_slice(b"\x1b[1\"q");
+        script.extend_from_slice(&[b'p'; 45]);
+        script.extend_from_slice(b"\x1b[0\"q tail\r\n");
+        let (source, restored, rows) = round_trip(&script);
+        assert!(rows >= 3);
+        for k in 0..rows {
+            for col in 0..40 {
+                assert_eq!(
+                    saved_cell(&restored, k, col)
+                        .flags
+                        .contains(Flags::PROTECTED),
+                    saved_cell(&source, k, col).flags.contains(Flags::PROTECTED),
+                    "row {k} column {col}"
+                );
+            }
+        }
+        assert!(saved_cell(&restored, 0, 1).flags.contains(Flags::PROTECTED));
+        assert!(saved_cell(&restored, 2, 4).flags.contains(Flags::PROTECTED));
+        assert!(!saved_cell(&restored, 2, 5).flags.contains(Flags::PROTECTED));
+    }
+
+    #[test]
+    fn restore_byte_budget_counts_protected_runs() {
+        let mut term = terminal();
+        // Every other cell protected: 20 runs on each 40-column row.
+        let row: Vec<u8> = (0..20)
+            .flat_map(|_| b"\x1b[1\"qa\x1b[0\"qb".iter().copied())
+            .collect();
+        for _ in 0..3 {
+            Processor::new().advance(&mut term, &row);
+        }
+        let mut saved_any = false;
+        for limit in (64..4096).step_by(16) {
+            let mut budget = limit;
+            let rows = snapshot(&term, 1000, &mut budget);
+            assert!(rows.iter().all(|row| row.3.len() == 20));
+            assert!(
+                serde_json::to_vec(&rows).unwrap().len() <= limit,
+                "budget {limit}"
+            );
+            saved_any |= !rows.is_empty();
+        }
+        assert!(saved_any);
     }
 
     #[test]
@@ -1117,7 +1272,7 @@ mod tests {
     #[test]
     fn restored_sgr_resets_cannot_remove_faint_styling() {
         let mut term = terminal();
-        let rows = vec![("\x1b[mplain\x1b[22m text".into(), false, vec![])];
+        let rows = vec![("\x1b[mplain\x1b[22m text".into(), false, vec![], vec![])];
         Processor::new().advance(
             &mut term,
             replay(&rows, "divider", 40, true).unwrap().as_bytes(),
@@ -1191,7 +1346,7 @@ mod tests {
         let text = "needle世界 e\u{301} 👩‍💻";
         let lines: Vec<RestoreRow> = ["before", text, "after", "four", "five"]
             .into_iter()
-            .map(|s| (s.into(), false, vec![]))
+            .map(|s| (s.into(), false, vec![], vec![]))
             .collect();
         let mut term = terminal();
         Processor::new().advance(
@@ -1294,7 +1449,7 @@ mod tests {
 
     fn one_row_seed() -> String {
         replay(
-            &[("saved output".into(), false, vec![])],
+            &[("saved output".into(), false, vec![], vec![])],
             "Restored divider",
             40,
             false,
