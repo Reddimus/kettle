@@ -2158,14 +2158,16 @@ fn overflow_arrows_light_point_and_name_what_a_press_does() {
     assert!(source.contains("hovered_scroll_right: ws.hovered_scroll_arrow == Some(true),"));
 }
 
-/// Must 4 and D8 of the 6.0 UI review: a tab whose title the strip cut had
-/// no way to read it whole. Resting the pointer on such a tab, off its close
-/// button, now shows the full title (the whole working directory for a tab
-/// named by its folder) in a tooltip hung from the tab; a tab shown whole,
-/// its close button and a lone title-bar title have none.
+/// Resting the pointer on a tab off its close button shows its full title
+/// (the whole working directory for a tab named by its folder) in a tooltip
+/// hung from the tab, followed by its go-to-tab shortcut when multiple tabs
+/// are open and a binding exists. A lone tab only tooltips when its title is
+/// shortened; a close button and a lone title-bar title have none.
 #[test]
 fn a_cut_tab_title_shows_whole_in_a_tooltip() {
-    use super::chrome::{StripTooltipContext, shown_strip_tooltip, strip_tooltip_target};
+    use super::chrome::{
+        StripTooltipContext, shown_strip_tooltip, strip_tooltip_target, tab_goto_hint,
+    };
     use std::time::{Duration, Instant};
     let long = "Tab 2: Build and deploy the production cluster migration script";
     let path = "~/Repos/kettle/crates/kettle-ui";
@@ -2193,6 +2195,9 @@ fn a_cut_tab_title_shows_whole_in_a_tooltip() {
         seg(2, 200.0, "kettle-ui", Some(path)),
     ];
     let bindings = kettle_config::keybinds::defaults();
+    let key0 = tab_goto_hint(&bindings, 0).expect("default tab 1 binding");
+    let key1 = tab_goto_hint(&bindings, 1).expect("default tab 2 binding");
+    let key2 = tab_goto_hint(&bindings, 2).expect("default tab 3 binding");
     let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
     let context = StripTooltipContext {
         modal_open: false,
@@ -2208,32 +2213,44 @@ fn a_cut_tab_title_shows_whole_in_a_tooltip() {
         strip_tooltip_target(ws, bar, &context)
     };
     let at = |ws: &mut crate::window_state::WindowState, x: f64| at_on(ws, &bar, x);
-    assert_eq!(at(&mut ws, 20.0), None, "a title shown whole");
+    let short = at(&mut ws, 20.0).expect("a multi-tab title shows its shortcut");
+    assert_eq!(short.text, format!("vim  {key0}"));
     let tip = at(&mut ws, 120.0).expect("a cut title");
     assert_eq!(
         tip.target,
         crate::tooltip::TooltipTarget::TabTitle(1)
     );
-    assert_eq!(tip.text, long);
+    assert_eq!(tip.text, format!("{long}  {key1}"));
     assert_eq!(tip.anchor, Some(bar.segments[1].rect));
     assert_eq!(at(&mut ws, 185.0), None, "the close button names nothing");
     let folder = at(&mut ws, 220.0).expect("a folder shown by its leaf");
-    assert_eq!(folder.text, path);
+    assert_eq!(folder.text, format!("{path}  {key2}"));
     // It waits for a rest, as every chrome tooltip does.
     let t0 = Instant::now();
     ws.tooltip.hover(Some((tip.target, tip.rect)), Some((120.0, 14.0)), t0);
     ws.native_pointer = Some(winit::dpi::PhysicalPosition::new(120.0, 14.0));
     assert_eq!(shown_strip_tooltip(&ws, &bar, &context, t0), None);
+    let expected_long = format!("{long}  {key1}");
     assert_eq!(
         shown_strip_tooltip(&ws, &bar, &context, t0 + Duration::from_millis(500))
             .map(|tip| tip.text)
             .as_deref(),
-        Some(long)
+        Some(expected_long.as_str())
     );
     let mut lone = kettle_render::TabBar::hidden();
     lone.height = 28.0;
+    lone.segments = vec![seg(0, 0.0, "vim", None)];
+    assert_eq!(
+        at_on(&mut ws, &lone, 20.0),
+        None,
+        "a single uncut tab has no tooltip"
+    );
     lone.segments = vec![seg(0, 0.0, long, None)];
-    assert!(at_on(&mut ws, &lone, 20.0).is_some());
+    assert_eq!(
+        at_on(&mut ws, &lone, 20.0).map(|tip| tip.text).as_deref(),
+        Some(long),
+        "a single cut tab shows only its full title"
+    );
     lone.lone_title = true;
     assert_eq!(
         at_on(&mut ws, &lone, 20.0),
@@ -2682,4 +2699,216 @@ fn the_last_drag_step_to_an_end_schedules_no_wake() {
     assert!(source.contains(
         "let (step, rest) = tab_drag_arrow_pass( ws.tab_drag_arrow, over, (ws.mux.active, ws.mux.tabs.len()), now, ); ws.tab_drag_arrow = rest;"
     ));
+}
+
+/// Horizontal tabs never reserve an inline shortcut-hint lane, so `hint` stays
+/// `None` and the title lane stays identical and centered regardless of title
+/// length.
+#[test]
+fn horizontal_tabs_omit_inline_hints_and_keep_title_lanes_centered() {
+    let source = include_str!("chrome.rs");
+    let horizontal = source
+        .split_once("fn tab_bar_at_height(")
+        .unwrap()
+        .1
+        .split_once("pub(super) fn title_edit_rect(")
+        .unwrap()
+        .0;
+    assert!(horizontal.contains("let hint: Option<String> = None;"));
+    assert!(
+        !horizontal.contains("tab_goto_hint("),
+        "horizontal tabs should not pass inline go-to-tab hints"
+    );
+
+    let rect = (100.0_f32, 0.0, 220.0, 28.0);
+    let titles = [
+        "~",
+        "shell",
+        "~/Repos/kettle/crates/kettle-ui/src/app/chrome.rs",
+    ];
+    for show_controls in [false, true] {
+        for close_enabled in [false, true] {
+            let layouts: Vec<_> = titles
+                .iter()
+                .map(|title| {
+                    kettle_render::horizontal_tab_content_layout(
+                        rect,
+                        show_controls,
+                        close_enabled,
+                        0.0,
+                        title,
+                        None,
+                        8.0,
+                    )
+                })
+                .collect();
+            for (title, content) in titles.iter().zip(&layouts) {
+                assert_eq!(content.hint, None, "no inline hint for {title:?}");
+                assert_eq!(
+                    content.title, layouts[0].title,
+                    "title lane must not shift with title length ({title:?})"
+                );
+                if !(show_controls && close_enabled) {
+                    let left_margin = content.title.0 - rect.0;
+                    let right_margin = (rect.0 + rect.2) - (content.title.0 + content.title.2);
+                    assert_eq!(
+                        left_margin, right_margin,
+                        "resting title lane must be symmetric ({title:?})"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Hovering a tab in a multi-tab strip shows `{full_title}  {shortcut}` when
+/// `GotoTab` is bound for that tab (whether the title fits or is truncated),
+/// falls back to the full title only when truncated if unbound or past tab 9,
+/// and stays silent on close buttons and `lone_title`.
+#[test]
+fn multi_tab_hover_tooltip_includes_shortcut_for_uncut_and_cut_titles() {
+    use super::chrome::{
+        StripTooltipContext, strip_tooltip_target, tab_goto_hint, tab_title_region,
+    };
+    let long = "~/Projects/acme/platform/services/cluster-deploy-script";
+    let seg = |idx: usize, x: f32, title: &str, path: Option<&str>| {
+        let rect = (x, 0.0, 120.0, 28.0);
+        let close = (x + 92.0, 0.0, 28.0, 28.0);
+        kettle_render::TabSeg {
+            idx,
+            rect,
+            title_rect: (x + 8.0, 0.0, 84.0, 28.0),
+            hint: None,
+            close,
+            title: title.into(),
+            path: path.map(Into::into),
+            active: idx == 0,
+            activity: kettle_render::TabActivity::Normal,
+        }
+    };
+    let mut bar = kettle_render::TabBar::hidden();
+    bar.height = 28.0;
+    bar.band = (0.0, 0.0, 600.0, 28.0);
+    bar.segments = vec![
+        seg(0, 0.0, "~", None),
+        seg(1, 120.0, long, None),
+        seg(9, 240.0, "ten", None),
+        seg(10, 360.0, long, None),
+    ];
+
+    let defaults = kettle_config::keybinds::defaults();
+    let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+    let context = StripTooltipContext {
+        modal_open: false,
+        bindings: &defaults,
+        tr: &tr,
+        tab_format: "{title}",
+        tab_cell_width: 8.0,
+    };
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    ws.window_focused = true;
+    let probe = |ws: &mut crate::window_state::WindowState,
+                 bar: &kettle_render::TabBar,
+                 ctx: &StripTooltipContext<'_>,
+                 x: f64| {
+        ws.native_pointer = Some(winit::dpi::PhysicalPosition::new(x, 14.0));
+        strip_tooltip_target(ws, bar, ctx)
+    };
+
+    let key0 = tab_goto_hint(&defaults, 0).expect("default tab 1 binding");
+    let key1 = tab_goto_hint(&defaults, 1).expect("default tab 2 binding");
+
+    // Uncut short title on a bound tab shows `{title}  {key}`.
+    let tip0 = probe(&mut ws, &bar, &context, 30.0).expect("uncut bound tab");
+    assert_eq!(tip0.target, crate::tooltip::TooltipTarget::TabTitle(0));
+    assert_eq!(tip0.text, format!("~  {key0}"));
+    assert_eq!(tip0.anchor, Some(bar.segments[0].rect));
+    assert_eq!(tip0.rect, tab_title_region(&bar.segments[0]));
+
+    // Truncated title on a bound tab shows `{full_title}  {key}`.
+    let tip1 = probe(&mut ws, &bar, &context, 150.0).expect("cut bound tab");
+    assert_eq!(tip1.target, crate::tooltip::TooltipTarget::TabTitle(1));
+    assert_eq!(tip1.text, format!("{long}  {key1}"));
+
+    // Tabs beyond 9 have no go-to-tab shortcut: uncut has no tooltip, cut shows only title.
+    assert_eq!(probe(&mut ws, &bar, &context, 270.0), None);
+    let tip10 = probe(&mut ws, &bar, &context, 390.0).expect("cut 11th tab");
+    assert_eq!(tip10.text, long);
+
+    // Close button and lone_title never show a tab tooltip.
+    assert_eq!(probe(&mut ws, &bar, &context, 105.0), None);
+    bar.lone_title = true;
+    assert_eq!(probe(&mut ws, &bar, &context, 30.0), None);
+    bar.lone_title = false;
+
+    // Removing GotoTab(0) makes uncut tab 0 silent while keeping cut tab 1's shortcut.
+    let mut unbound = defaults.clone();
+    unbound.retain(|_, action| *action != Action::GotoTab(0));
+    let unbound_ctx = StripTooltipContext {
+        bindings: &unbound,
+        ..context
+    };
+    assert_eq!(probe(&mut ws, &bar, &unbound_ctx, 30.0), None);
+    assert_eq!(
+        probe(&mut ws, &bar, &unbound_ctx, 150.0)
+            .map(|tip| tip.text)
+            .as_deref(),
+        Some(format!("{long}  {key1}").as_str())
+    );
+}
+
+/// Hovering a single-tab strip only shows a tooltip when the title is cut,
+/// without appending a go-to-tab shortcut.
+#[test]
+fn single_tab_hover_tooltip_only_shows_when_title_is_cut() {
+    use super::chrome::{StripTooltipContext, strip_tooltip_target};
+    let long = "Single tab with a very long title that overflows the tab lane";
+    let make_bar = |title: &str, path: Option<&str>| {
+        let mut bar = kettle_render::TabBar::hidden();
+        bar.height = 28.0;
+        bar.band = (0.0, 0.0, 200.0, 28.0);
+        bar.segments = vec![kettle_render::TabSeg {
+            idx: 0,
+            rect: (0.0, 0.0, 120.0, 28.0),
+            title_rect: (8.0, 0.0, 84.0, 28.0),
+            hint: None,
+            close: (92.0, 0.0, 28.0, 28.0),
+            title: title.into(),
+            path: path.map(Into::into),
+            active: true,
+            activity: kettle_render::TabActivity::Normal,
+        }];
+        bar
+    };
+    let bindings = kettle_config::keybinds::defaults();
+    let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+    let context = StripTooltipContext {
+        modal_open: false,
+        bindings: &bindings,
+        tr: &tr,
+        tab_format: "{title}",
+        tab_cell_width: 8.0,
+    };
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    ws.window_focused = true;
+    ws.native_pointer = Some(winit::dpi::PhysicalPosition::new(30.0, 14.0));
+
+    let uncut = make_bar("~", None);
+    assert_eq!(strip_tooltip_target(&ws, &uncut, &context), None);
+
+    let cut = make_bar(long, None);
+    assert_eq!(
+        strip_tooltip_target(&ws, &cut, &context)
+            .map(|tip| tip.text)
+            .as_deref(),
+        Some(long)
+    );
+
+    let folder = make_bar("kettle-ui", Some("~/Repos/kettle/crates/kettle-ui"));
+    assert_eq!(
+        strip_tooltip_target(&ws, &folder, &context)
+            .map(|tip| tip.text)
+            .as_deref(),
+        Some("~/Repos/kettle/crates/kettle-ui")
+    );
 }
