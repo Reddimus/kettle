@@ -57,6 +57,14 @@ Appearance row (and any other changed row) shows a Reset chip, value controls
 are taller and fixed-width, and Window blur reads Unavailable with the saved
 setting in its description. The PR description shows each before and after.
 
+The eight `settings` captures were then replaced by PR #975 from the Linux CI
+job in
+[run 46152207849](https://github.com/Reddimus/kettle/actions/runs/46152207849),
+artifact `ui-states-46152207849-1`, in the same environment: toggle rows use
+a fixed-size symbol switch (vertical bar when on, open ring when off), and
+unavailable switches show their status word (`Unavailable` / `No disponible`)
+beside the hollow track. The PR description shows each before and after.
+
 The states pin these visible arrangements:
 
 | State | Expected content |
