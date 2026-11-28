@@ -1038,6 +1038,10 @@ pub(crate) struct TitlebarStrip {
     pub(crate) width: f32,
     pub(crate) arrow: f32,
     pub(crate) strip: f32,
+    /// The start of the first tab, relative to the strip, when it fits.
+    pub(crate) offset: f32,
+    /// The index and position of a centered strip's middle seam.
+    pub(crate) midpoint: Option<(usize, f32)>,
     /// The active tab, tab count, slots and strip width the last layout
     /// saw. When one of them changes the strip scrolls the active tab
     /// into view: a new tab, a tab chosen from the keyboard, a close, a
@@ -1056,6 +1060,8 @@ pub(crate) struct HeldTabs {
     pub(crate) tabs: usize,
     pub(crate) strip: u32,
     pub(crate) width: f32,
+    pub(crate) offset: f32,
+    pub(crate) midpoint: Option<(usize, f32)>,
     pub(crate) arrow: f32,
     pub(crate) first: usize,
     /// Slots between the arrows, 0 when the strip did not overflow.
@@ -1071,6 +1077,8 @@ impl TitlebarStrip {
             tabs,
             strip: self.strip.to_bits(),
             width: self.width,
+            offset: self.offset,
+            midpoint: self.midpoint,
             arrow: self.arrow,
             first: self.first,
             slots: self.slots,

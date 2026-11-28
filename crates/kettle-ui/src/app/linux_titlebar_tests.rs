@@ -109,6 +109,8 @@ fn linux_header_one_and_many_tabs_leave_controls_and_empty_drag_space() {
             assert_eq!(trail, controls_start - (search.0 - 6.0 * scale));
             let strip = controls_start - lead - trail;
             let lane = TitlebarLane {
+                band_width: width,
+                left_inset: lead,
                 strip,
                 arrow: (LINUX_HEADER_BUTTON * scale).min(height),
                 min: 80.0 * scale,
@@ -501,7 +503,7 @@ fn gnome_header_bar(width: f32, scale: f32, layout: &str, tabs: usize) -> TabBar
     let height = LINUX_HEADER_HEIGHT * scale;
     let band = (0.0, 0.0, width * scale, height);
     let lane = horizontal_tab_lane(band, preferences.reservations(band.2, height));
-    let geometry = horizontal_tab_geometry(lane, scale, (true, true), (tabs, 0), &cfg);
+    let geometry = horizontal_tab_geometry(lane, band.2, scale, (true, true), (tabs, 0), &cfg);
     let mut bar = TabBar::hidden();
     bar.height = height;
     bar.band = band;

@@ -84,7 +84,7 @@ def titlebar_geometry(geometry):
         close = tab["close"]
         if close["width"]:
             assert close["width"] >= 20 * scale and close["height"] >= 20 * scale
-    # Tabs split the lane evenly from its start, and leave a window-drag lane
+    # Tabs divide their span evenly and leave a window-drag lane
     # (48 points, narrowing to 16 only in a very narrow window) before the
     # gear or `+`, past `›` too while the strip scrolls.
     arrows = bar.get("scroll_right") or {"width": 0}

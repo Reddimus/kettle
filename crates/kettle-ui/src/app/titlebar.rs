@@ -614,7 +614,14 @@ mod tests {
                 let left = left * scale;
                 let h = 28.0 * scale;
                 let lane = (left, 0.0, width - left, h);
-                let g = horizontal_tab_geometry(lane, scale, (false, true), (1, 0), &cfg);
+                let g = horizontal_tab_geometry(
+                    lane,
+                    lane.0 + lane.2,
+                    scale,
+                    (false, true),
+                    (1, 0),
+                    &cfg,
+                );
                 let layout = &g.layout;
                 let rect = (left + layout.xs[0].unwrap(), 0.0, layout.width, h);
                 assert_eq!(rect.0, left, "the lone tab starts the lane");

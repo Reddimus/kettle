@@ -4350,10 +4350,13 @@ submenus, and localized accessibility names, shortcuts, popup state and screen
 order. Plain-strip geometry and CPU quad guards retain their prior output.
 
 `app/titlebar_tabs_tests.rs` covers title-bar tab strips on macOS (windowed
-and fullscreen) and in the GNOME header at 1x, 1.5x and 2x: the even split
-before the drag lane, a lone macOS tab filling the lane from its start and
-standing for the window title, the drag lane kept in every width, count and
-scroll state, the scaled minimum with `‹ ›` and `scroll-tabbar = false`, the
+and fullscreen) and in the GNOME header at 1x, 1.5x and 2x. They check equal
+widths and exact midpoint seams for two, four and six tabs on macOS and with
+GNOME's one-button and three-button layouts, the narrow fallback, the
+draggable gap before the first tab, a lone macOS tab filling the lane from
+its start and standing for the window title, the drag lane kept across
+widths, tab counts and scroll states, the scaled minimum with `‹ ›` and
+`scroll-tabbar = false`, the
 narrowing order (gear, drag lane, tab), the active tab revealed on a new tab,
 Go to Tab, next/previous, a close, a resize and a scale change while the
 wheel and arrows scroll freely, the hold after a close with the pointer and
