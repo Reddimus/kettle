@@ -139,6 +139,7 @@ pub(crate) fn fit_header_title(
 /// face it was shaped in. A frame with the same key reuses the shaping.
 #[derive(Clone, Debug, PartialEq, Hash)]
 pub(crate) struct HeaderTitleKey {
+    idx: usize,
     title: String,
     path: Option<String>,
     format: String,
@@ -146,6 +147,28 @@ pub(crate) struct HeaderTitleKey {
     lane: u32,
     scale: u32,
     family: String,
+}
+
+impl HeaderTitleKey {
+    fn for_segment(
+        seg: &TabSeg,
+        lane_width: f32,
+        format: &str,
+        notice: &str,
+        scale: f32,
+        family: String,
+    ) -> Self {
+        Self {
+            idx: seg.idx,
+            title: seg.title.clone(),
+            path: seg.path.clone(),
+            format: format.to_owned(),
+            notice: notice.to_owned(),
+            lane: lane_width.to_bits(),
+            scale: scale.to_bits(),
+            family,
+        }
+    }
 }
 
 impl Renderer {
@@ -182,19 +205,12 @@ impl Renderer {
         };
         let attrs = header_title_attrs(loaded, fallback);
         let metrics = header_title_metrics(self.scale);
-        let key = HeaderTitleKey {
-            title: seg.title.clone(),
-            path: seg.path.clone(),
-            format: format.to_owned(),
-            notice: notice.to_owned(),
-            lane: lane_width.to_bits(),
-            scale: self.scale.to_bits(),
-            family: if loaded {
-                HEADER_TITLE_FAMILY.to_owned()
-            } else {
-                fallback.to_owned()
-            },
+        let family = if loaded {
+            HEADER_TITLE_FAMILY.to_owned()
+        } else {
+            fallback.to_owned()
         };
+        let key = HeaderTitleKey::for_segment(seg, lane_width, format, notice, self.scale, family);
         if self.header_title_key.as_ref() == Some(&key) {
             return;
         }
@@ -375,5 +391,42 @@ mod tests {
             assert_eq!((x.fract(), y.fract()), (0.0, 0.0));
             assert_eq!(header_title_origin(lane, 500.0 * scale, line).0, lane.0);
         }
+    }
+
+    /// Switching between two tabs with identical title and path but different
+    /// tab indices invalidates the header title cache so `{n}` updates.
+    #[test]
+    fn header_title_key_changes_when_tab_index_changes_with_numbered_format() {
+        let mut s0 = seg("shell", Some("~/repo"));
+        let mut s1 = seg("shell", Some("~/repo"));
+        s0.idx = 0;
+        s1.idx = 1;
+        let format = "[{n}] {title}";
+        let k0 = HeaderTitleKey::for_segment(
+            &s0,
+            400.0,
+            format,
+            "",
+            1.0,
+            HEADER_TITLE_FAMILY.to_owned(),
+        );
+        let k1 = HeaderTitleKey::for_segment(
+            &s1,
+            400.0,
+            format,
+            "",
+            1.0,
+            HEADER_TITLE_FAMILY.to_owned(),
+        );
+        assert_ne!(k0, k1);
+        let width = |text: &str| crate::labels::display_width(text) as f32 * 10.0;
+        assert_eq!(
+            fit_header_title(&s0, format, "", 400.0, width),
+            "[1] ~/repo"
+        );
+        assert_eq!(
+            fit_header_title(&s1, format, "", 400.0, width),
+            "[2] ~/repo"
+        );
     }
 }

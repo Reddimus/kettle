@@ -15,15 +15,15 @@ pub(super) fn linux_titlebar_policy(cfg: &Config) -> bool {
 }
 
 /// Whether Kettle's Linux header renders tabs in a dedicated second row below
-/// the header bar (2+ tabs, `tab-bar = always`, title edit, or dock preview).
+/// the header bar (2+ tabs, `tab-bar = always`, or inline title edit).
 pub(super) fn linux_two_row_tabs(
     linux_header: bool,
     tabs: usize,
-    busy: (bool, bool),
+    editing: bool,
     mode: TabBarMode,
     pos: TabBarPos,
 ) -> bool {
-    linux_header && pos == TabBarPos::Top && !lone_header_title(linux_header, tabs, busy, mode, pos)
+    linux_header && pos == TabBarPos::Top && (tabs > 1 || editing || mode == TabBarMode::Always)
 }
 
 /// Desktops whose compositor offers no server-side decorations (Mutter and

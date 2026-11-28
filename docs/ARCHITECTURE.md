@@ -6697,13 +6697,16 @@ path; colour-scheme reports use the resulting palette's lightness.
 ### Linux Wayland header bar
 
 `linux-titlebar-style = tabs` draws a native-looking libadwaita header bar when
-Wayland negotiates client decorations. With one tab, no title edit or dock
-preview, `tab-bar` not `always`, and the bar at the top, `lone_header_title`
-keeps a single 46 logical pixel row (`TabBar::lone_title = true`,
-`header_height = 0.0`): `+` and Find/`≡`/window controls flank the window title
-in bundled Fira Sans Bold (`header_title`). When multiple tabs are open, or with
-`tab-bar = always`, an inline tab-title edit, or a dock preview, `linux_two_row_tabs`
-switches to an 82 logical pixel two-row header (`header_height = 46 * scale` for
+Wayland negotiates client decorations. With one tab, no title edit, `tab-bar`
+not `always`, and the bar at the top, `lone_header_title` keeps a single 46
+logical pixel row (`TabBar::lone_title = true`, `header_height = 0.0`): `+` and
+Find/`≡`/window controls flank the window title in bundled Fira Sans Bold
+(`header_title`), and any dock preview paints its tab and insertion marker inside
+that existing 46 logical pixel header without resizing panes. When multiple tabs
+are open, or with `tab-bar = always` or an inline tab-title edit,
+`linux_two_row_tabs` switches to an 82 logical pixel two-row header
+(`header_height = 46 * scale` for the `AdwHeaderBar` row plus
+`LINUX_TAB_ROW_HEIGHT = 36 * scale` for `AdwTabBar`):
 the `AdwHeaderBar` row plus `LINUX_TAB_ROW_HEIGHT = 36 * scale` for `AdwTabBar`):
 Row 1 keeps `+`, Find, `≡`, `window_controls`, and the window-centered active
 tab title in `TabBar::header_title_rect` (`prepare_header_title_in`), while Row 2

@@ -1170,3 +1170,83 @@ fn a_lone_macos_titlebar_tab_stands_for_the_window_title() {
         source.contains("ifdouble{native::double_click(window);returntrue;}iflone{returnfalse;}")
     );
 }
+
+/// Closing a tab with the pointer keeps the surviving tabs' outer `lead`,
+/// `strip`, and exact screen positions across transitions that would otherwise
+/// switch between centered and asymmetric macOS strip math (such as closing
+/// 2 -> 1 in a 360 pt window with a 28 pt titlebar, or 3 -> 2 at 500 pt).
+#[test]
+fn pointer_close_hold_preserves_strip_across_centered_and_narrow_fallback_transitions() {
+    let cfg = Config::default();
+    for (width, band_h, before_n) in [(360.0_f32, 28.0_f32, 2_usize), (500.0, 32.0, 3)] {
+        let lane = (78.0, 0.0, width - 78.0, band_h);
+        let mut state = TitlebarStrip::default();
+        let before = horizontal_tab_geometry_in(
+            lane,
+            1.0,
+            (false, true),
+            (before_n, 0),
+            &cfg,
+            (&mut state, true),
+        );
+        let surviving_x_before = lane.0 + before.lead + before.layout.xs[0].unwrap();
+        let surviving_w_before = before.layout.width;
+        let after_n = before_n - 1;
+        state.held = state.held_after_close(after_n);
+
+        let held = horizontal_tab_geometry_in(
+            lane,
+            1.0,
+            (false, true),
+            (after_n, 0),
+            &cfg,
+            (&mut state, true),
+        );
+        assert!(
+            state.held.is_some(),
+            "{width}pt ({before_n} -> {after_n}): hold dropped prematurely"
+        );
+        assert_eq!(held.lead, before.lead, "{width}pt");
+        assert_eq!(held.strip, before.strip, "{width}pt");
+        assert_eq!(
+            lane.0 + held.lead + held.layout.xs[0].unwrap(),
+            surviving_x_before,
+            "{width}pt: surviving tab shifted x"
+        );
+        assert_eq!(held.layout.width, surviving_w_before, "{width}pt");
+
+        // Leaving the strip releases the hold into the normal layout.
+        let released = horizontal_tab_geometry_in(
+            lane,
+            1.0,
+            (false, true),
+            (after_n, 0),
+            &cfg,
+            (&mut state, false),
+        );
+        assert!(state.held.is_none(), "{width}pt");
+        assert!(released.layout.width >= surviving_w_before);
+
+        // Resizing the window also releases an active hold.
+        let mut state = TitlebarStrip::default();
+        horizontal_tab_geometry_in(
+            lane,
+            1.0,
+            (false, true),
+            (before_n, 0),
+            &cfg,
+            (&mut state, true),
+        );
+        state.held = state.held_after_close(after_n);
+        let resized = (lane.0, lane.1, lane.2 + 80.0, lane.3);
+        horizontal_tab_geometry_in(
+            resized,
+            1.0,
+            (false, true),
+            (after_n, 0),
+            &cfg,
+            (&mut state, true),
+        );
+        assert!(state.held.is_none(), "{width}pt: resize must release hold");
+    }
+}

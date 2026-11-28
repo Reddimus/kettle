@@ -1038,6 +1038,12 @@ pub(crate) struct TitlebarStrip {
     pub(crate) width: f32,
     pub(crate) arrow: f32,
     pub(crate) strip: f32,
+    /// Outer lead offset, drag reserve/floor, and lane `(x, width)` used when
+    /// laying out `strip`, so a pointer-close hold preserves absolute tab edges.
+    pub(crate) lead: f32,
+    pub(crate) drag: f32,
+    pub(crate) floor: f32,
+    pub(crate) lane: (u32, u32),
     /// The active tab, tab count, slots and strip width the last layout
     /// saw. When one of them changes the strip scrolls the active tab
     /// into view: a new tab, a tab chosen from the keyboard, a close, a
@@ -1060,6 +1066,10 @@ pub(crate) struct HeldTabs {
     pub(crate) first: usize,
     /// Slots between the arrows, 0 when the strip did not overflow.
     pub(crate) slots: usize,
+    pub(crate) lead: f32,
+    pub(crate) drag: f32,
+    pub(crate) floor: f32,
+    pub(crate) lane: (u32, u32),
 }
 
 impl TitlebarStrip {
@@ -1074,6 +1084,10 @@ impl TitlebarStrip {
             arrow: self.arrow,
             first: self.first,
             slots: self.slots,
+            lead: self.lead,
+            drag: self.drag,
+            floor: self.floor,
+            lane: self.lane,
         })
     }
 

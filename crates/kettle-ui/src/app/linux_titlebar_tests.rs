@@ -500,7 +500,7 @@ fn gnome_header_bar(width: f32, scale: f32, layout: &str, tabs: usize) -> TabBar
     let cfg = Config::default();
     let preferences = crate::window_buttons::ButtonLayout::parse(layout).unwrap();
     let header_h = LINUX_HEADER_HEIGHT * scale;
-    let two_row = linux_two_row_tabs(true, tabs, (false, false), cfg.tab_bar, cfg.tab_bar_pos);
+    let two_row = linux_two_row_tabs(true, tabs, false, cfg.tab_bar, cfg.tab_bar_pos);
     let height = if two_row {
         header_h + LINUX_TAB_ROW_HEIGHT * scale
     } else {
@@ -633,6 +633,32 @@ fn lone_header_title_only_for_one_tab_in_the_linux_header() {
     ] {
         assert!(source.contains(wiring), "missing {wiring}");
     }
+}
+
+/// Hovering a torn tab over a single-tab `tab-bar = auto` GNOME window
+/// switches the 46 pt header out of `lone_title` so the insertion preview
+/// paints inside the existing header band without growing to 82 pt and
+/// clipping terminal rows.
+#[test]
+fn dock_preview_keeps_single_tab_gnome_header_at_46pt() {
+    use TabBarMode as M;
+    assert!(!lone_header_title(
+        true,
+        1,
+        (false, true),
+        M::Auto,
+        TabBarPos::Top
+    ));
+    assert!(!linux_two_row_tabs(true, 1, false, M::Auto, TabBarPos::Top));
+    assert!(linux_two_row_tabs(true, 2, false, M::Auto, TabBarPos::Top));
+    assert!(linux_two_row_tabs(true, 1, true, M::Auto, TabBarPos::Top));
+    assert!(linux_two_row_tabs(
+        true,
+        1,
+        false,
+        M::Always,
+        TabBarPos::Top
+    ));
 }
 
 /// A press on the lone title does what one on empty header space does:

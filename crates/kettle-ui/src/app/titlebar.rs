@@ -329,7 +329,7 @@ impl App {
             return if linux_two_row_tabs(
                 true,
                 ws.mux.tabs.len(),
-                (ws.editing_title.is_some(), ws.dock_preview.is_some()),
+                ws.editing_title.is_some(),
                 self.cfg.tab_bar,
                 self.cfg.tab_bar_pos,
             ) {

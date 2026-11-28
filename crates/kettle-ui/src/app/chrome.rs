@@ -2119,6 +2119,10 @@ pub(super) fn titlebar_tab_layout(
         width: layout.width,
         arrow: layout.arrow_width,
         strip,
+        lead: 0.0,
+        drag: lane.drag,
+        floor: lane.floor,
+        lane: (0, 0),
         seen: Some((active, n, slots, bits)),
         held: None,
     };
@@ -2273,46 +2277,88 @@ pub(super) fn horizontal_tab_geometry_in(
     };
     let settings_rect = (0.0, 0.0, 0.0, 0.0);
     if titlebar && !linux {
+        let lane_key = (lane.0.to_bits(), lane.2.to_bits());
+        if hold
+            && let Some(held) = state.held
+            && held.tabs == n
+            && held.lane == lane_key
+        {
+            let held_strip = f32::from_bits(held.strip);
+            let titlebar_lane = TitlebarLane {
+                strip: held_strip,
+                arrow,
+                min,
+                drag: held.drag,
+                floor: held.floor,
+                scroll: cfg.scroll_tabbar,
+            };
+            let layout = titlebar_tab_layout(n, active, &titlebar_lane, state, true);
+            if state.held.is_some() {
+                state.lead = held.lead;
+                state.drag = held.drag;
+                state.floor = held.floor;
+                state.lane = lane_key;
+                return HorizontalTabGeometry {
+                    arrow_rect,
+                    plus_rect,
+                    search_rect,
+                    settings_rect,
+                    lead: held.lead,
+                    strip: held_strip,
+                    layout,
+                };
+            }
+        }
         let window_w = lane.0 + lane.2;
         let base_side = lane.0.max(button_w);
         let need = titlebar_tab_room(n, min, arrow, cfg.scroll_tabbar);
         let centered_span = window_w - 2.0 * base_side;
         let full_side = TITLEBAR_DRAG_LANE_SIDE * scale;
         let floor_side = TITLEBAR_DRAG_LANE_SIDE_FLOOR * scale;
-        let (lead, strip, layout) = if centered_span >= need + 2.0 * floor_side {
-            let drag_side = ((centered_span - need) * 0.5).clamp(floor_side, full_side);
-            let side_reserve = base_side + drag_side;
-            let lead = (side_reserve - lane.0).max(0.0);
-            let strip = (window_w - 2.0 * side_reserve).max(0.0);
-            let titlebar_lane = TitlebarLane {
-                strip,
-                arrow,
-                min,
-                drag: 0.0,
-                floor: 0.0,
-                scroll: cfg.scroll_tabbar,
+        let (lead, strip, used_drag, used_floor, layout) =
+            if centered_span >= need + 2.0 * floor_side {
+                let drag_side = ((centered_span - need) * 0.5).clamp(floor_side, full_side);
+                let side_reserve = base_side + drag_side;
+                let lead = (side_reserve - lane.0).max(0.0);
+                let strip = (window_w - 2.0 * side_reserve).max(0.0);
+                let titlebar_lane = TitlebarLane {
+                    strip,
+                    arrow,
+                    min,
+                    drag: 0.0,
+                    floor: 0.0,
+                    scroll: cfg.scroll_tabbar,
+                };
+                (
+                    lead,
+                    strip,
+                    0.0,
+                    0.0,
+                    titlebar_tab_layout(n, active, &titlebar_lane, state, hold),
+                )
+            } else {
+                let strip = tab_segment_strip_width(lane.2, button_w, 0.0);
+                let floor = TITLEBAR_DRAG_LANE_FLOOR * scale;
+                let titlebar_lane = TitlebarLane {
+                    strip,
+                    arrow,
+                    min,
+                    drag,
+                    floor,
+                    scroll: cfg.scroll_tabbar,
+                };
+                (
+                    0.0,
+                    strip,
+                    drag,
+                    floor,
+                    titlebar_tab_layout(n, active, &titlebar_lane, state, hold),
+                )
             };
-            (
-                lead,
-                strip,
-                titlebar_tab_layout(n, active, &titlebar_lane, state, hold),
-            )
-        } else {
-            let strip = tab_segment_strip_width(lane.2, button_w, 0.0);
-            let titlebar_lane = TitlebarLane {
-                strip,
-                arrow,
-                min,
-                drag,
-                floor: TITLEBAR_DRAG_LANE_FLOOR * scale,
-                scroll: cfg.scroll_tabbar,
-            };
-            (
-                0.0,
-                strip,
-                titlebar_tab_layout(n, active, &titlebar_lane, state, hold),
-            )
-        };
+        state.lead = lead;
+        state.drag = used_drag;
+        state.floor = used_floor;
+        state.lane = lane_key;
         return HorizontalTabGeometry {
             arrow_rect,
             plus_rect,
