@@ -1331,6 +1331,7 @@ impl Renderer {
             tab_tooltip_text: String::new(),
             tab_tooltip_fit: (0, 0, 0),
             settings_gear_mask: Default::default(),
+            settings_checkmark_mask: Default::default(),
             header_icon_masks: Default::default(),
             header_title_face: None,
             header_title_buffer,

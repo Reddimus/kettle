@@ -711,6 +711,18 @@ fn settings_outlines_text_and_focus_reach_their_floors() {
                 {
                     fail(format!("{at} focus bar {:.3}", both(palette.focus)));
                 }
+                if ratio(palette.switch_on_thumb, palette.switch_on_track) < ICON_CONTRAST {
+                    fail(format!(
+                        "{at} switch thumb/track {:.3}",
+                        ratio(palette.switch_on_thumb, palette.switch_on_track)
+                    ));
+                }
+                if ratio(palette.switch_on_track, bg) < ICON_CONTRAST {
+                    fail(format!(
+                        "{at} switch track/bg {:.3}",
+                        ratio(palette.switch_on_track, bg)
+                    ));
+                }
                 for (role, ink, surface, share) in [
                     (
                         "description",
@@ -805,8 +817,9 @@ fn the_painter_uses_the_swept_helpers() {
         "scrollback::scrollback_pill_quads(&mutmenu_q,pill,surface,self.scale);",
         "scrollback::kept_history_label_quads(&mutmenu_q,label,rest.fill);",
         "letpalette=settings::settings_colors(",
-        "settings::settings_row_surfaces(row,data,&palette,(theme.background,acc,on_ink),(row_fill,set.hover),self.scale,)",
-        "letcolor=settings::settings_text_color(set,item.kind,&palette,(theme,acc,on_ink),&mutself.chrome_colors,);",
+        "settings::settings_row_surfaces(row,data,&palette,theme.background,(row_fill,set.hover),self.scale,)",
+        "settings::push_switch_checkmark(",
+        "letcolor=settings::settings_text_color(set,item.kind,&palette,theme,&mutself.chrome_colors,);",
         "settings::settings_focus_bar(row.rect,bar,self.scale),focus,",
         "settings::settings_focus_bar(*r,bar,self.scale),focus,",
     ] {
@@ -817,4 +830,51 @@ fn the_painter_uses_the_swept_helpers() {
     // sidebar divider keep the quiet border.
     assert_eq!(source.matches("border,1.0,6.0);").count(), 1);
     assert!(!source.contains("{acc}else{border}"));
+}
+
+#[test]
+fn switch_on_colors_clears_three_to_one_across_all_themes_and_midtone_fallbacks() {
+    for name in Theme::list() {
+        let theme = Theme::by_name(name);
+        for linear in [true, false] {
+            for accent in [theme.accent, theme.palette[4], Rgb::new(0xbb, 0x99, 0xf8)] {
+                let (track, thumb) = settings::switch_on_colors(theme.background, accent, linear);
+                let thumb_ratio = color::contrast_ratio(thumb, track);
+                let bg_ratio = color::contrast_ratio(track, theme.background);
+                assert!(
+                    thumb_ratio >= ICON_CONTRAST,
+                    "{name} linear={linear} accent={accent:?}: thumb/track {thumb_ratio:.3}"
+                );
+                assert!(
+                    bg_ratio >= ICON_CONTRAST,
+                    "{name} linear={linear} accent={accent:?}: track/bg {bg_ratio:.3}"
+                );
+            }
+        }
+    }
+    // Exercise mid-tone backgrounds (0.067 < L < 0.10) where white cannot
+    // clear 3:1 against both ends and the dark-thumb fallback engages.
+    for bg in [
+        Rgb::new(76, 76, 76),
+        Rgb::new(82, 82, 82),
+        Rgb::new(0, 0, 0),
+        Rgb::new(255, 255, 255),
+    ] {
+        for accent in [
+            Rgb::new(122, 162, 247),
+            Rgb::new(255, 255, 0),
+            Rgb::new(255, 255, 255),
+            Rgb::new(0, 0, 0),
+        ] {
+            let (track, thumb) = settings::switch_on_colors(bg, accent, true);
+            assert!(
+                color::contrast_ratio(thumb, track) >= ICON_CONTRAST,
+                "bg={bg:?} accent={accent:?} thumb/track"
+            );
+            assert!(
+                color::contrast_ratio(track, bg) >= ICON_CONTRAST,
+                "bg={bg:?} accent={accent:?} track/bg"
+            );
+        }
+    }
 }

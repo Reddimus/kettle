@@ -62,146 +62,265 @@ fn settings_slots_fit_english_spanish_and_measured_pseudo_text() {
     }
 }
 
-/// A switch's label is centred in the room beside its knob: after the knob
-/// when it is off (the knob sits at the left), before it when on (the knob
-/// is at the right), and it fits beside the knob in both languages' longest
-/// words.
+/// Every toggle row uses the same fixed capsule size regardless of language,
+/// state, value text or unavailability, emits no text inside the track, and
+/// places unavailable status text right-aligned outside the track with an 8 px
+/// gap.
 #[test]
-fn switch_labels_clear_the_knob() {
+fn switches_use_uniform_capsule_and_place_unavailable_status_outside() {
     use super::{SettingsControl, SettingsTextKind};
-    let row = |value: &str, on: bool| SettingsRow {
-        label: "Cursor blink".into(),
-        value: value.into(),
-        control: SettingsControl::Toggle(on),
-        ..Default::default()
-    };
+    let row =
+        |label: &str, value: &str, on: bool, unavailable: bool, value_cols: usize| SettingsRow {
+            label: label.into(),
+            value: value.into(),
+            control: SettingsControl::Toggle(on),
+            unavailable,
+            value_cols,
+            reset: Some(true),
+            ..Default::default()
+        };
     let cases = [
-        ("On", true),
-        ("Off", false),
-        ("Desactivado", true),
-        ("Desactivado", false),
+        ("Cursor blink", "On", true, false, 3),
+        ("Cursor blink", "Off", false, false, 3),
+        ("Parpadeo del cursor", "Activado", true, false, 11),
+        ("Parpadeo del cursor", "Desactivado", false, false, 11),
+        ("Window blur", "Unavailable", true, true, 11),
+        ("Desenfoque de ventana", "Comprobando…", true, true, 13),
     ];
     let set = SettingsOverlay {
         categories: vec!["Appearance".into()],
-        rows: cases.iter().map(|(text, on)| row(text, *on)).collect(),
+        reset_label: "Reset".into(),
+        rows: cases
+            .iter()
+            .map(|(label, text, on, unavailable, cols)| row(label, text, *on, *unavailable, *cols))
+            .collect(),
         ..Default::default()
     };
-    let layout = settings_layout(&set, (8.0, 16.0), (1280.0, 820.0), 8.0, 1.0);
-    let items = super::settings::settings_text_items(&set, &layout, 8.0);
-    for (index, (text, on)) in cases.into_iter().enumerate() {
-        let chip = layout.rows[index].chip_rect;
-        let knob = super::settings::settings_toggle_knob(chip.3, 1.0);
-        let value = items
-            .iter()
-            .find(|item| item.kind == SettingsTextKind::Value(index))
-            .unwrap()
-            .rect;
-        let (start, end) = if on {
-            (chip.0 + 4.0, chip.0 + chip.2 - 4.0 - knob - 2.0)
-        } else {
-            (chip.0 + 4.0 + knob + 2.0, chip.0 + chip.2 - 4.0)
-        };
-        let width = text.chars().count() as f32 * 8.0;
-        assert!((value.2 - width).abs() < 0.01, "{text} {on}: {value:?}");
-        assert!(
-            (value.0 + value.2 * 0.5 - (start + end) * 0.5).abs() < 0.01,
-            "{text} {on}: {value:?} not centred in {start}..{end}"
+    for scale in [1.0_f32, 2.0] {
+        let layout = settings_layout(
+            &set,
+            (8.4 * scale, 17.5 * scale),
+            (1280.0 * scale, 820.0 * scale),
+            8.4 * scale,
+            scale,
         );
-        assert!(value.0 >= start && value.0 + value.2 <= end, "{text} {on}");
+        let control_h = super::settings_control_height(17.5);
+        let (expected_w, expected_h) = super::settings::settings_toggle_size(control_h);
+        let items = super::settings::settings_text_items(&set, &layout, 8.4 * scale);
+        for (index, (_, text, _, unavailable, _)) in cases.iter().enumerate() {
+            let geom = &layout.rows[index];
+            let chip = geom.chip_rect;
+            assert!(
+                (chip.2 - expected_w * scale).abs() < 0.01
+                    && (chip.3 - expected_h * scale).abs() < 0.01,
+                "row {index} {scale}x: {chip:?}"
+            );
+            let slot_center = geom.rect.1 + 1.0 * scale + control_h * 0.5 * scale;
+            assert!(
+                (chip.1 + chip.3 * 0.5 - slot_center).abs() < 0.01,
+                "row {index} {scale}x not vertically centred"
+            );
+            let value_item = items
+                .iter()
+                .find(|item| item.kind == SettingsTextKind::Value(index));
+            if *unavailable {
+                let status = geom
+                    .status_rect
+                    .expect("unavailable toggle reserves status_rect");
+                assert!(
+                    (chip.0 - (status.0 + status.2) - 8.0 * scale).abs() < 0.01,
+                    "row {index} {scale}x: 8 px gap before toggle"
+                );
+                let item = value_item.expect("unavailable toggle emits status text");
+                assert_eq!(item.text, *text);
+                assert!(
+                    (item.rect.0 + item.rect.2 - (status.0 + status.2)).abs() < 0.01,
+                    "row {index} {scale}x: status text right-aligned"
+                );
+                assert!(item.rect.0 >= status.0 - 0.01);
+                assert!(item.rect.0 + item.rect.2 <= chip.0 - 8.0 * scale + 0.01);
+                assert!(geom.label_rect.0 + geom.label_rect.2 <= status.0 + 0.01);
+                if let Some(reset) = geom.reset {
+                    assert!(
+                        (status.0 - (reset.rect.0 + reset.rect.2) - 4.0 * scale).abs() < 0.01,
+                        "row {index} {scale}x: 4 px gap between Reset and status"
+                    );
+                }
+            } else {
+                assert_eq!(geom.status_rect, None, "row {index}");
+                assert!(
+                    value_item.is_none(),
+                    "row {index}: no text inside an available switch track"
+                );
+                if let Some(reset) = geom.reset {
+                    assert!(
+                        (chip.0 - (reset.rect.0 + reset.rect.2) - 4.0 * scale).abs() < 0.01,
+                        "row {index} {scale}x: 4 px gap between Reset and switch"
+                    );
+                }
+            }
+        }
     }
 }
 
 #[test]
-fn translated_switch_labels_fit_beside_painted_knobs_after_width_clamping() {
+fn fixed_capsule_switches_clamp_cleanly_and_keep_thumbs_inside_track() {
     use super::{SettingsControl, SettingsHit, SettingsTextKind, display_width};
     for language in [Language::Es, Language::En] {
         let tr = Translator::new(language);
         for on in [true, false] {
             for disabled in [false, true] {
-                let text = tr.text(if on {
-                    Text::SettingsValueOn
-                } else {
-                    Text::SettingsValueOff
-                });
-                let set = SettingsOverlay {
-                    rows: vec![SettingsRow {
-                        label: tr.text(Text::SettingsFieldCursorBlink).into(),
-                        value: text.into(),
-                        control: SettingsControl::Toggle(on),
-                        disabled,
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                };
-                for (surface, cell, text_cw, full_label) in [
-                    ((360.0, 600.0), (24.0, 48.0), 24.0, false),
-                    ((1280.0, 820.0), (8.0, 16.0), 8.0, true),
-                    ((2000.0, 1200.0), (24.0, 48.0), 24.0, true),
-                    ((360.0, 600.0), (48.0, 48.0), 24.0, false),
-                    ((360.0, 600.0), (6.0, 48.0), 24.0, false),
-                    ((720.0, 1200.0), (48.0, 96.0), 48.0, false),
-                    ((120.0, 120.0), (8.0, 16.0), 24.0, false),
-                    ((56.0, 120.0), (8.0, 16.0), 24.0, false),
-                ] {
-                    let layout = settings_layout(&set, cell, surface, text_cw, 1.0);
-                    let row = &layout.rows[0];
-                    let chip = row.chip_rect;
-                    let diameter = super::settings::settings_toggle_knob(chip.3, 1.0);
-                    let items = super::settings::settings_text_items(&set, &layout, text_cw);
-                    let value = items
-                        .iter()
-                        .find(|item| item.kind == SettingsTextKind::Value(0))
-                        .unwrap();
-                    let context = format!(
-                        "{language:?} on={on} disabled={disabled} surface={surface:?} cell={cell:?} text_cw={text_cw}: {:?} {:?} in {chip:?}",
-                        value.text, value.rect
-                    );
-                    assert!(
-                        value.rect.2 >= 0.0
-                            && value.rect.0 >= chip.0
-                            && value.rect.0 + value.rect.2 <= chip.0 + chip.2 + 0.1,
-                        "{context}"
-                    );
-                    let advance = display_width(&value.text) as f32 * text_cw;
-                    assert!(advance <= value.rect.2 + 0.1, "{context}");
-                    let knob_left = if on && !disabled {
-                        chip.0 + chip.2 - diameter - 3.0
+                for unavailable in [false, true] {
+                    let text = if unavailable {
+                        tr.text(Text::SettingsValueUnavailable)
+                    } else if on {
+                        tr.text(Text::SettingsValueOn)
                     } else {
-                        chip.0 + 3.0
+                        tr.text(Text::SettingsValueOff)
                     };
-                    if !value.text.is_empty() {
-                        assert!(
-                            value.rect.0 + advance <= knob_left
-                                || value.rect.0 >= knob_left + diameter,
-                            "painted label overlaps knob: {context}"
+                    let set = SettingsOverlay {
+                        rows: vec![SettingsRow {
+                            label: tr.text(Text::SettingsFieldCursorBlink).into(),
+                            value: text.into(),
+                            control: SettingsControl::Toggle(on),
+                            disabled,
+                            unavailable,
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    };
+                    for (surface, cell, text_cw) in [
+                        ((360.0, 600.0), (24.0, 48.0), 24.0),
+                        ((1280.0, 820.0), (8.0, 16.0), 8.0),
+                        ((2000.0, 1200.0), (24.0, 48.0), 24.0),
+                        ((360.0, 600.0), (48.0, 48.0), 24.0),
+                        ((360.0, 600.0), (6.0, 48.0), 24.0),
+                        ((720.0, 1200.0), (48.0, 96.0), 48.0),
+                        ((120.0, 120.0), (8.0, 16.0), 24.0),
+                        ((56.0, 120.0), (8.0, 16.0), 24.0),
+                    ] {
+                        let layout = settings_layout(&set, cell, surface, text_cw, 1.0);
+                        let row = &layout.rows[0];
+                        let chip = row.chip_rect;
+                        let on_right = super::settings::settings_knob_on_right(&set.rows[0]);
+                        let thumb = super::settings::settings_switch_thumb(
+                            chip,
+                            on_right,
+                            unavailable,
+                            1.0,
+                        );
+                        let context = format!(
+                            "{language:?} on={on} disabled={disabled} unavailable={unavailable} surface={surface:?} cell={cell:?} text_cw={text_cw}: chip={chip:?} thumb={thumb:?}"
                         );
                         assert!(
-                            value.rect.0 + value.rect.2 <= knob_left
-                                || value.rect.0 >= knob_left + diameter,
-                            "label bounds overlap knob: {context}"
+                            chip.0 >= row.rect.0 - 0.1
+                                && chip.0 + chip.2 <= row.rect.0 + row.rect.2 + 0.1,
+                            "{context}"
                         );
-                    }
-                    if full_label {
-                        assert_eq!(value.text, text, "{context}");
-                    }
-                    if surface.0 == 360.0 && language == Language::Es && on && !disabled {
-                        assert!((chip.2 - 145.92).abs() < 0.01);
-                        assert!((diameter - 57.6).abs() < 0.01, "{diameter}");
                         assert!(
-                            !value.text.is_empty(),
-                            "a clamped switch must retain a fitted label"
+                            thumb.0 >= chip.0 - 0.1
+                                && thumb.0 + thumb.2 <= chip.0 + chip.2 + 0.1
+                                && thumb.1 >= chip.1 - 0.1
+                                && thumb.1 + thumb.3 <= chip.1 + chip.3 + 0.1,
+                            "thumb escapes track: {context}"
                         );
-                    }
-                    for x in [chip.0 + chip.2 * 0.5, knob_left + diameter * 0.5] {
-                        if x >= chip.0 && x < chip.0 + chip.2 {
-                            assert_eq!(
-                                layout.pointer_hit((x, chip.1 + chip.3 * 0.5), None),
-                                SettingsHit::Field(0)
+                        if !unavailable && !disabled && chip.3 >= 22.0 {
+                            let d_on =
+                                super::settings::settings_switch_thumb(chip, true, false, 1.0).2;
+                            let d_off =
+                                super::settings::settings_switch_thumb(chip, false, false, 1.0).2;
+                            assert!(d_on > d_off, "ON thumb must exceed OFF thumb: {context}");
+                        }
+                        let items = super::settings::settings_text_items(&set, &layout, text_cw);
+                        let value = items
+                            .iter()
+                            .find(|item| item.kind == SettingsTextKind::Value(0));
+                        if !unavailable {
+                            assert!(value.is_none(), "no track text when available: {context}");
+                        } else if let Some(status) = row.status_rect {
+                            assert!(
+                                status.0 >= row.label_rect.0 + row.label_rect.2 - 0.1
+                                    && status.0 + status.2 <= chip.0 - 8.0 + 0.1,
+                                "status overlaps label or switch: {context}"
                             );
+                            if let Some(value) = value {
+                                let advance = display_width(&value.text) as f32 * text_cw;
+                                assert!(advance <= value.rect.2 + 0.1, "{context}");
+                                assert!(
+                                    value.rect.0 >= status.0 - 0.1
+                                        && value.rect.0 + value.rect.2 <= status.0 + status.2 + 0.1,
+                                    "{context}"
+                                );
+                            }
+                        } else {
+                            assert!(value.is_none(), "{context}");
+                        }
+                        for x in [chip.0 + chip.2 * 0.5, thumb.0 + thumb.2 * 0.5] {
+                            if x >= chip.0 && x < chip.0 + chip.2 {
+                                assert_eq!(
+                                    layout.pointer_hit((x, chip.1 + chip.3 * 0.5), None),
+                                    SettingsHit::Field(0)
+                                );
+                            }
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn switch_checkmark_mask_is_non_empty_cached_and_bounded_at_1x_and_2x() {
+    use super::settings::{CheckmarkMask, checkmark_mask, push_switch_checkmark};
+    let mut cache = CheckmarkMask::default();
+    for (scale, side) in [(1.0_f32, 12_u32), (2.0, 24)] {
+        let mask = checkmark_mask(side);
+        assert_eq!(mask.len(), (side * side) as usize, "{scale}x");
+        assert!(
+            mask.contains(&255),
+            "{scale}x checkmark must have solid interior coverage"
+        );
+        assert!(
+            mask.iter().any(|&c| c > 0 && c < 255),
+            "{scale}x checkmark must have supersampled edge coverage"
+        );
+        // Corners remain clear inside the circular thumb.
+        assert_eq!(mask[0], 0, "{scale}x top-left corner");
+        assert_eq!(mask[(side - 1) as usize], 0, "{scale}x top-right corner");
+        assert_eq!(
+            mask[((side - 1) * side) as usize],
+            0,
+            "{scale}x bottom-left corner"
+        );
+        assert_eq!(
+            mask[(side * side - 1) as usize],
+            0,
+            "{scale}x bottom-right corner"
+        );
+        let first = cache.get(side).as_ptr();
+        assert_eq!(cache.get(side).as_ptr(), first, "{scale}x cache hit");
+        assert_eq!(cache.get(side), mask.as_slice());
+
+        let thumb = (100.0 * scale, 50.0 * scale, 19.0 * scale, 19.0 * scale);
+        let mut quads = Vec::new();
+        push_switch_checkmark(
+            &mut quads,
+            thumb,
+            kettle_config::Rgb::new(0, 120, 255),
+            &mut cache,
+        );
+        assert!(!quads.is_empty(), "{scale}x checkmark quads");
+        for q in &quads {
+            assert!(
+                q.pos[0] >= thumb.0 - 0.5
+                    && q.pos[1] >= thumb.1 - 0.5
+                    && q.pos[0] + q.size[0] <= thumb.0 + thumb.2 + 0.5
+                    && q.pos[1] + q.size[1] <= thumb.1 + thumb.3 + 0.5,
+                "{scale}x quad {:?}/{:?} escaped thumb {thumb:?}",
+                q.pos,
+                q.size
+            );
         }
     }
 }

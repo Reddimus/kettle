@@ -39,7 +39,7 @@ fn a_search_marks_no_category_as_open() {
             set,
             SettingsTextKind::Category(index),
             &palette,
-            (&theme, theme.accent, theme.foreground),
+            &theme,
             colors,
         )
     };
@@ -235,13 +235,12 @@ fn hover_prelight_stays_apart_from_the_keyboard_focus() {
     assert_ne!(settings_pressable(bg), bg);
     let layout = settings_layout(&set, (8.4, 17.5), (1280.0, 820.0), 8.4, 1.0);
     let row = |index: usize| layout.rows.iter().find(|row| row.index == index).unwrap();
-    let ink = (bg, theme.accent, theme.foreground);
     let surfaces = |index: usize, hover| {
         settings_row_surfaces(
             row(index),
             &set.rows[index],
             &palette,
-            ink,
+            bg,
             (SettingsRowFill::Hovered, hover),
             1.0,
         )
@@ -338,32 +337,37 @@ fn hover_inks_meet_their_floors() {
                     (SettingsHover::Reset(2), SettingsTextKind::Reset(2)),
                 ] {
                     set.hover = Some(hover);
-                    let ink = settings_text_color(
-                        &set,
-                        kind,
-                        &palette,
-                        (&theme, accent, theme.foreground),
-                        &mut colors,
-                    );
+                    let ink = settings_text_color(&set, kind, &palette, &theme, &mut colors);
                     if ratio(ink, super::settings::settings_pressable(bg)) + 0.005 < TEXT_CONTRAST {
                         failures.push(format!("{at}: {hover:?} text"));
                     }
                 }
-                // A switch's label on its own hover fill, on and off.
-                for on in [true, false] {
-                    set.rows[1].control = SettingsControl::Toggle(on);
-                    set.hover = Some(SettingsHover::Switch(1));
-                    let ink = settings_text_color(
-                        &set,
-                        SettingsTextKind::Value(1),
-                        &palette,
-                        (&theme, accent, theme.foreground),
-                        &mut colors,
-                    );
-                    let fill = super::settings::settings_pressable(if on { accent } else { bg });
-                    if ratio(ink, fill) + 0.005 < TEXT_CONTRAST {
-                        failures.push(format!("{at}: switch on={on} text"));
-                    }
+                // Active switch track/thumb contrast and unavailable external
+                // status contrast across all row fills.
+                if ratio(palette.switch_on_thumb, palette.switch_on_track) + 0.005 < ICON_CONTRAST {
+                    failures.push(format!(
+                        "{at}: switch thumb/track {:.3}",
+                        ratio(palette.switch_on_thumb, palette.switch_on_track)
+                    ));
+                }
+                if ratio(palette.switch_on_track, bg) + 0.005 < ICON_CONTRAST {
+                    failures.push(format!(
+                        "{at}: switch track/bg {:.3}",
+                        ratio(palette.switch_on_track, bg)
+                    ));
+                }
+                set.rows[0].control = SettingsControl::Toggle(true);
+                set.rows[0].unavailable = true;
+                set.hover = Some(SettingsHover::Switch(0));
+                let status_ink = settings_text_color(
+                    &set,
+                    SettingsTextKind::Value(0),
+                    &palette,
+                    &theme,
+                    &mut colors,
+                );
+                if ratio(status_ink, hover) + 0.005 < TEXT_CONTRAST {
+                    failures.push(format!("{at}: hovered unavailable switch status"));
                 }
             }
         }
@@ -373,8 +377,8 @@ fn hover_inks_meet_their_floors() {
 
 /// The focused row's switch answers the pointer: the row keeps its focus
 /// fill and bar, and the switch's own fill takes a button's hover mix, on
-/// or off. Before, a switch hit counted as the row, whose prelight the
-/// focus fill hides, so nothing changed.
+/// or off. Active switches use a solid accent track with a larger elevated
+/// thumb; inactive switches use a bordered well track with a smaller thumb.
 #[test]
 fn a_switch_under_the_pointer_answers_it_on_the_focused_row() {
     use super::color::contrast_ratio as ratio;
@@ -385,38 +389,52 @@ fn a_switch_under_the_pointer_answers_it_on_the_focused_row() {
     let (bg, accent) = (theme.background, theme.accent);
     let mut colors = chrome::Colors::default();
     let palette = settings_colors(&theme, accent, true, &mut colors);
-    for on in [true, false] {
+    let mut thumb_diameters = [0.0_f32; 2];
+    for (slot, on) in [false, true].into_iter().enumerate() {
         let mut set = hover_panel();
         set.rows[1].control = SettingsControl::Toggle(on);
         set.hover = Some(SettingsHover::Switch(1));
         assert_eq!(settings_row_fill(&set, 1), SettingsRowFill::Focused);
         let layout = settings_layout(&set, (8.4, 17.5), (1280.0, 820.0), 8.4, 1.0);
         let row = layout.rows.iter().find(|row| row.index == 1).unwrap();
-        let fill = |hover| {
+        let surfaces = |hover| {
             settings_row_surfaces(
                 row,
                 &set.rows[1],
                 &palette,
-                (bg, accent, theme.foreground),
+                bg,
                 (SettingsRowFill::Focused, hover),
                 1.0,
-            )[0]
-            .fill
+            )
         };
-        let resting = if on { accent } else { bg };
-        assert_eq!(fill(None), resting);
+        let resting = if on {
+            palette.switch_on_track
+        } else {
+            palette.well
+        };
+        let rest_shapes = surfaces(None);
+        assert_eq!(rest_shapes[0].fill, resting);
         assert_eq!(
-            fill(Some(SettingsHover::Switch(1))),
+            rest_shapes[0].width,
+            if on { 0.0 } else { 2.0 },
+            "on={on} border width"
+        );
+        thumb_diameters[slot] = rest_shapes[1].rect.2;
+        assert_eq!(
+            surfaces(Some(SettingsHover::Switch(1)))[0].fill,
             settings_pressable(resting)
         );
-        assert_eq!(fill(Some(SettingsHover::Switch(0))), resting);
-        let ink = settings_text_color(
-            &set,
-            SettingsTextKind::Value(1),
-            &palette,
-            (&theme, accent, theme.foreground),
-            &mut colors,
-        );
-        assert!(ratio(ink, settings_pressable(resting)) >= 4.5, "on={on}");
+        assert_eq!(surfaces(Some(SettingsHover::Switch(0)))[0].fill, resting);
+        if on {
+            assert_eq!(rest_shapes[1].fill, palette.switch_on_thumb);
+            assert!(ratio(palette.switch_on_thumb, palette.switch_on_track) >= 3.0);
+            assert!(ratio(palette.switch_on_track, bg) >= 3.0);
+        }
     }
+    assert!(
+        thumb_diameters[1] > thumb_diameters[0],
+        "ON thumb ({}) must be larger than OFF thumb ({})",
+        thumb_diameters[1],
+        thumb_diameters[0]
+    );
 }

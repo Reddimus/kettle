@@ -4568,6 +4568,7 @@ mod control_size_tests {
         for language in [Language::En, Language::Es] {
             let tr = Translator::new(language);
             for (surface, all_fit) in [((1280.0, 820.0), true), ((640.0, 820.0), false)] {
+                let mut toggle_size: Option<(f32, f32)> = None;
                 for (key, row) in widest_rows(&cfg, &tr) {
                     let set = kettle_render::SettingsOverlay {
                         rows: vec![row.clone()],
@@ -4577,26 +4578,29 @@ mod control_size_tests {
                     let layout = kettle_render::settings_layout(&set, (cw, line), surface, cw, 1.0);
                     let geometry = &layout.rows[0];
                     let chip = geometry.chip_rect;
-                    let knob = match row.control {
-                        kettle_render::SettingsControl::Toggle(_) => {
-                            kettle_render::settings_control_height(line) - 4.0
-                        }
-                        _ => 0.0,
-                    };
-                    let arrows = if row.control == kettle_render::SettingsControl::Choice {
-                        4
-                    } else {
-                        0
-                    };
-                    let need = (row.value_cols + arrows) as f32 * cw;
-                    let fits = need <= chip.2 - 8.0 - knob + 0.01;
-                    let inner = geometry.rect.2;
-                    let label = kettle_render::display_width(&row.label) as f32 * cw;
                     let context = format!("{language:?} {surface:?} {key}");
-                    if all_fit || label + 18.0 + need + 20.0 + knob <= inner {
-                        assert!(fits, "{context}: {need} in {chip:?}");
+                    if matches!(row.control, kettle_render::SettingsControl::Toggle(_)) {
+                        let expected = *toggle_size.get_or_insert((chip.2, chip.3));
+                        assert_eq!(
+                            (chip.2, chip.3),
+                            expected,
+                            "{context}: all toggle switches share one fixed capsule size"
+                        );
                     } else {
-                        assert!(chip.2 >= inner * 0.48 - 0.01, "{context}");
+                        let arrows = if row.control == kettle_render::SettingsControl::Choice {
+                            4
+                        } else {
+                            0
+                        };
+                        let need = (row.value_cols + arrows) as f32 * cw;
+                        let fits = need <= chip.2 - 8.0 + 0.01;
+                        let inner = geometry.rect.2;
+                        let label = kettle_render::display_width(&row.label) as f32 * cw;
+                        if all_fit || label + 18.0 + need + 20.0 <= inner {
+                            assert!(fits, "{context}: {need} in {chip:?}");
+                        } else {
+                            assert!(chip.2 >= inner * 0.48 - 0.01, "{context}");
+                        }
                     }
                     assert!(geometry.reset.is_some(), "{context}: no Reset");
                 }

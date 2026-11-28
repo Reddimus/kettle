@@ -717,6 +717,8 @@ pub struct Renderer {
     /// The Settings gear's coverage at its last side length, so a frame
     /// reuses it instead of rasterizing the gear again.
     settings_gear_mask: tab_strip::GearMask,
+    /// The Settings toggle checkmark's coverage at its last side length.
+    settings_checkmark_mask: settings::CheckmarkMask,
     /// The GNOME header's icons and window-button discs, by icon and side.
     header_icon_masks: header_icons::IconMasks,
     /// Whether the bundled title face is in `font_system`; `None` until the
@@ -3544,7 +3546,7 @@ impl Renderer {
                             set,
                             item.kind,
                             &palette,
-                            (theme, accent, theme.foreground),
+                            theme,
                             &mut self.chrome_colors,
                         )
                     } else {
@@ -5437,15 +5439,6 @@ impl Renderer {
                 hover,
                 ..
             } = palette;
-            // Ink on a switched-on toggle: whichever theme end stands out more
-            // against the accent, for its knob and its label.
-            let on_ink = if color::contrast_ratio(theme.foreground, acc)
-                >= color::contrast_ratio(theme.background, acc)
-            {
-                theme.foreground
-            } else {
-                theme.background
-            };
             let rgba = |c: Rgb, a| {
                 [
                     c.r as f32 / 255.0,
@@ -5554,7 +5547,7 @@ impl Renderer {
                     row,
                     data,
                     &palette,
-                    (theme.background, acc, on_ink),
+                    theme.background,
                     (row_fill, set.hover),
                     self.scale,
                 ) {
@@ -5565,6 +5558,16 @@ impl Renderer {
                         surface.stroke,
                         surface.width / self.scale,
                         surface.radius / self.scale,
+                    );
+                }
+                if settings::settings_knob_on_right(data) && !data.unavailable {
+                    let thumb =
+                        settings::settings_switch_thumb(row.chip_rect, true, false, self.scale);
+                    settings::push_switch_checkmark(
+                        &mut menu_q,
+                        thumb,
+                        palette.switch_on_track,
+                        &mut self.settings_checkmark_mask,
                     );
                 }
                 if let Some(reset) = row.reset
@@ -5601,7 +5604,7 @@ impl Renderer {
                     set,
                     item.kind,
                     &palette,
-                    (theme, acc, on_ink),
+                    theme,
                     &mut self.chrome_colors,
                 );
                 menu_areas.push(TextArea {
@@ -5630,7 +5633,7 @@ impl Renderer {
                         set,
                         settings::SettingsTextKind::Value(set.focused_row),
                         &palette,
-                        (theme, accent, theme.foreground),
+                        theme,
                         &mut self.chrome_colors,
                     ))
                 } else {
