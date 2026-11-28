@@ -8,11 +8,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ### Changed
 
-- In the macOS title bar strip (`macos-titlebar-style = tabs`) and the GNOME
-  header, the active and hovered tabs are now rounded pills inset in the strip,
-  and a one-point hairline runs unbroken along the strip's bottom. Tab edges no
-  longer line up with, or cut into, vertical pane splits directly below. Tabs
-  keep their even widths and full-height click and drag targets.
+- In the macOS title bar strip (`macos-titlebar-style = tabs`), tabs are now
+  centered horizontally on the window midline between symmetric end reserves and
+  split drag lanes (moving Settings into the `+ ▾` dropdown so the titlebar
+  drops the separate gear button). In the GNOME Wayland header
+  (`linux-titlebar-style = tabs`), a single-tab window keeps the compact 46
+  logical pixel header with a centered title, while opening two or more tabs
+  adds a 36 logical pixel full-width tab row below it so equal-width tabs line
+  up cleanly with pane splits regardless of window-button layout. In both
+  strips, active and hovered tabs paint as rounded inset pills and a one-point
+  hairline runs unbroken along the bottom of each strip row.
 
 ## [6.0.0] — 2026-11-27
 
