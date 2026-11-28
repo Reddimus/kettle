@@ -954,7 +954,7 @@ fn finding_tear_off_anchor_includes_status_bar() {
         "native tear-off anchors must use the destination tab band"
     );
     assert!(
-        source.contains("self.tear_off_tab_band(ws, (size.width, size.height), height)"),
+        source.contains("self.tear_off_tab_band(ws, (size.width, size.height), dest_h)"),
         "Wayland tear-off anchors must use the destination tab band"
     );
 }

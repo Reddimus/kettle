@@ -8,6 +8,8 @@ pub(super) fn tab_bar_geometry_json(
 ) -> serde_json::Value {
     serde_json::json!({
         "height": bar.height,
+        "header_height": bar.header_height,
+        "header_title_rect": bar.header_title_rect.map(rect_json),
         "y": bar.y,
         "new_tab": rect_json(bar.new_tab),
         "new_tab_menu": rect_json(bar.new_tab_menu),
@@ -1038,7 +1040,7 @@ impl App {
         let tab_cell_w = if bar.in_titlebar {
             self.overlay_text_cell_width(target)
                 * kettle_render::titlebar_tab_text_scale(
-                    bar.height,
+                    bar.tab_row_height(),
                     self.overlay_text_line_height(target),
                     scale,
                     !bar.lone_title,

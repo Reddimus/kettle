@@ -494,38 +494,73 @@ fn only_desktops_without_server_decorations_get_the_kettle_header() {
 
 /// The header `App::tab_bar_at_height` builds for a window `width` points
 /// wide at `scale`, with GNOME's `layout` of window buttons and `tabs` tabs,
-/// from the same geometry functions it calls.
+/// from the same geometry functions it calls (single-row for a lone title,
+/// two-row once there are two or more tabs).
 fn gnome_header_bar(width: f32, scale: f32, layout: &str, tabs: usize) -> TabBar {
     let cfg = Config::default();
     let preferences = crate::window_buttons::ButtonLayout::parse(layout).unwrap();
-    let height = LINUX_HEADER_HEIGHT * scale;
+    let header_h = LINUX_HEADER_HEIGHT * scale;
+    let two_row = linux_two_row_tabs(true, tabs, (false, false), cfg.tab_bar, cfg.tab_bar_pos);
+    let height = if two_row {
+        header_h + LINUX_TAB_ROW_HEIGHT * scale
+    } else {
+        header_h
+    };
     let band = (0.0, 0.0, width * scale, height);
-    let lane = horizontal_tab_lane(band, preferences.reservations(band.2, height));
-    let geometry = horizontal_tab_geometry(lane, scale, (true, true), (tabs, 0), &cfg);
+    let control_band = (0.0, 0.0, width * scale, header_h);
+    let lane = horizontal_tab_lane(control_band, preferences.reservations(band.2, header_h));
+    let mut strip_state = TitlebarStrip::default();
+    let (tab_row_y, tab_row_h) = if two_row {
+        (header_h, height - header_h)
+    } else {
+        (0.0, header_h)
+    };
+    let geometry = if two_row {
+        linux_two_row_tab_geometry_in(
+            band,
+            tab_row_y,
+            tab_row_h,
+            scale,
+            (tabs, 0),
+            &preferences,
+            &cfg,
+            (&mut strip_state, false),
+        )
+    } else {
+        horizontal_tab_geometry(lane, scale, (true, true), (tabs, 0), &cfg)
+    };
     let mut bar = TabBar::hidden();
     bar.height = height;
     bar.band = band;
     bar.in_titlebar = true;
     bar.linux_header = true;
     bar.lone_title = lone_header_title(true, tabs, (false, false), cfg.tab_bar, cfg.tab_bar_pos);
+    bar.header_height = if two_row { header_h } else { 0.0 };
+    bar.header_title_rect =
+        two_row.then(|| linux_header_title_rect(control_band, scale, &preferences));
     bar.new_tab = geometry.plus_rect;
     bar.new_tab_menu = geometry.arrow_rect;
     bar.search = geometry.search_rect;
     bar.window_controls = linux_window_control_layout_with_preferences(
-        band,
+        control_band,
         false,
         None,
         None,
         &Default::default(),
         &preferences,
     );
+    let x0 = if two_row {
+        band.0
+    } else {
+        lane.0 + geometry.lead
+    };
     for (idx, x) in geometry.layout.xs.iter().enumerate() {
         let w = if idx + 1 == tabs {
             geometry.layout.last_width
         } else {
             geometry.layout.width
         };
-        let rect = (lane.0 + geometry.lead + x.unwrap(), 0.0, w, height);
+        let rect = (x0 + x.unwrap(), tab_row_y, w, tab_row_h);
         let content = kettle_render::horizontal_tab_content_layout(
             rect,
             tabs > 1,
@@ -669,9 +704,9 @@ fn lone_header_title_presses_like_empty_header_space() {
             Some(Control(kettle_render::WindowControl::Close))
         );
         // tab-bar = always keeps the tab look, and its presses.
-        let mut always = gnome_header_bar(1000.0, scale, ":minimize,maximize,close", 1);
-        always.lone_title = false;
-        assert_eq!(linux_header_press(&always, (x, y), 0, false), None);
+        let always = gnome_header_bar(1000.0, scale, ":minimize,maximize,close", 2);
+        let tab_point = centre(always.segments[0].rect);
+        assert_eq!(linux_header_press(&always, tab_point, 0, false), None);
         // Screen readers still find the tab, selected, under the title.
         let nodes = tab_accessibility_projection(&bar, &[7], false, &Default::default());
         let (_, tab) = nodes
@@ -690,7 +725,8 @@ fn lone_header_title_presses_like_empty_header_space() {
                 (title.1 + title.3) as f64
             )
         );
-        // Two tabs: each is a tab again, and empty space is still space.
+        // Two tabs: Row 2 tabs stay with the tab strip; Row 1 header space
+        // around the centered title still moves the window.
         let two = gnome_header_bar(1000.0, scale, ":minimize,maximize,close", 2);
         assert!(!two.lone_title);
         for tab in &two.segments {
@@ -700,12 +736,14 @@ fn lone_header_title_presses_like_empty_header_space() {
                 assert_eq!(linux_header_press(&two, (tx, ty), button, false), None);
             }
         }
-        let last = two.segments[1].rect;
-        // Between the last tab and Find, the first button after the tabs.
-        assert!(two.search.0 > last.0 + last.2);
-        let space = ((last.0 + last.2 + two.search.0) * 0.5, y);
+        let title_pos = centre(two.header_title_rect.unwrap());
         assert_eq!(
-            linux_header_press(&two, space, 0, false),
+            linux_header_press(&two, title_pos, 0, false),
+            Some(Title(G::Drag))
+        );
+        let before_find = (two.search.0 - 12.0 * scale, 23.0 * scale);
+        assert_eq!(
+            linux_header_press(&two, before_find, 0, false),
             Some(Title(G::Drag))
         );
     }
@@ -757,9 +795,30 @@ fn gnome_header_plus_leads_and_agrees_everywhere() {
                 );
                 assert!(menu.0 > plus.0 + plus.2, "{case}: ≡ {menu:?} not after +");
                 assert!(menu.0 + menu.2 < right, "{case}: ≡ {menu:?} under a button");
-                for tab in &bar.segments {
-                    assert!(tab.rect.0 >= plus.0 + plus.2, "{case}: a tab before +");
-                    assert!(tab.rect.0 + tab.rect.2 <= menu.0, "{case}: a tab past ≡");
+                if tabs == 1 {
+                    for tab in &bar.segments {
+                        assert!(tab.rect.0 >= plus.0 + plus.2, "{case}: a tab before +");
+                        assert!(tab.rect.0 + tab.rect.2 <= menu.0, "{case}: a tab past ≡");
+                    }
+                } else {
+                    let row1_h = LINUX_HEADER_HEIGHT * scale;
+                    for tab in &bar.segments {
+                        assert_eq!(tab.rect.1, row1_h, "{case}: tab outside Row 2");
+                        assert!(
+                            tab.rect.0 >= 0.0 && tab.rect.0 + tab.rect.2 <= bar.band.2,
+                            "{case}"
+                        );
+                    }
+                    if let Some(title) = bar.header_title_rect {
+                        assert!(
+                            title.0 >= plus.0 + plus.2,
+                            "{case}: header title overlaps +"
+                        );
+                        assert!(
+                            title.0 + title.2 <= menu.0,
+                            "{case}: header title overlaps ≡"
+                        );
+                    }
                 }
                 let (px, py) = centre(plus);
                 assert_eq!(
@@ -878,9 +937,19 @@ fn gnome_header_find_agrees_everywhere() {
                     "{case}: Find sits just before ≡"
                 );
                 for tab in &bar.segments {
+                    if tabs == 1 {
+                        assert!(
+                            tab.rect.0 + tab.rect.2 <= find.0 - 6.0 * scale + 1e-3,
+                            "{case}"
+                        );
+                    } else {
+                        assert_eq!(tab.rect.1, LINUX_HEADER_HEIGHT * scale, "{case}");
+                    }
+                }
+                if let Some(title) = bar.header_title_rect {
                     assert!(
-                        tab.rect.0 + tab.rect.2 <= find.0 - 6.0 * scale + 1e-3,
-                        "{case}"
+                        title.0 + title.2 <= find.0 - 6.0 * scale + 1e-3,
+                        "{case}: Row 1 header title overlaps Find"
                     );
                 }
                 let (fx, fy) = centre(find);
@@ -1086,4 +1155,46 @@ fn fn_body<'a>(source: &'a str, name: &str) -> &'a str {
         .split("\n    }")
         .next()
         .unwrap()
+}
+
+/// Two-row GNOME headers center the active title in Row 1 and align Row 2's
+/// full-width equal tabs to the window midline regardless of whether window
+/// buttons sit on the right, on the left, split across both, or are omitted.
+#[test]
+fn two_row_gnome_header_aligns_split_tabs_across_all_button_layouts() {
+    for scale in [1.0_f32, 1.5, 2.0] {
+        for width in [640.0_f32, 1000.0, 1280.0] {
+            for layout in [
+                ":minimize,maximize,close",
+                ":close",
+                "close,minimize,maximize:",
+                "close,minimize:maximize",
+                ":",
+            ] {
+                let bar = gnome_header_bar(width, scale, layout, 2);
+                let case = format!("{scale}x {width} {layout:?}");
+                let header_h = LINUX_HEADER_HEIGHT * scale;
+                let row_h = LINUX_TAB_ROW_HEIGHT * scale;
+                assert_eq!(bar.header_height, header_h, "{case}");
+                assert_eq!(bar.tab_row_y(), header_h, "{case}");
+                assert_eq!(bar.tab_row_height(), row_h, "{case}");
+                assert_eq!(bar.height, header_h + row_h, "{case}");
+                assert_eq!(bar.segments.len(), 2, "{case}");
+                let half = width * scale * 0.5;
+                assert!((bar.segments[0].rect.2 - half).abs() < 0.01, "{case}");
+                assert!((bar.segments[1].rect.2 - half).abs() < 0.01, "{case}");
+                assert!((bar.segments[1].rect.0 - half).abs() < 0.01, "{case}");
+                let title = bar.header_title_rect.expect("Row 1 title");
+                assert!((title.0 + title.2 * 0.5 - half).abs() < 0.01, "{case}");
+                assert!(title.0 >= bar.new_tab.0 + bar.new_tab.2, "{case}");
+                assert!(title.0 + title.2 <= bar.search.0, "{case}");
+                assert!(linux_title_space(
+                    &bar,
+                    title.0 + title.2 * 0.5,
+                    header_h * 0.5
+                ));
+                assert!(!linux_title_space(&bar, half * 0.5, header_h + row_h * 0.5));
+            }
+        }
+    }
 }

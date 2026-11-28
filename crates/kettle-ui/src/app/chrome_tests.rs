@@ -1079,22 +1079,22 @@ fn macos_titlebar_lane(width: f32, scale: f32) -> kettle_render::Rect4 {
     (78.0 * scale, 0.0, (width - 78.0) * scale, 32.0 * scale)
 }
 
-/// The gear remains separate from the joined pair; other strips keep their controls.
+/// The macOS titlebar omits the redundant Settings gear, joins `+` and `▾`,
+/// and centers its tab cluster with balanced drag space around the window.
 #[test]
-fn macos_titlebar_settings_gear_leads_the_new_tab_pair() {
+fn macos_titlebar_omits_settings_gear_and_centers_tabs() {
     use super::chrome::{HorizontalTabGeometry, horizontal_tab_geometry};
     let cfg = kettle_config::Config::default();
     for scale in [1.0, 2.0] {
-        // 400 pt stands in for the narrow window C03 asks about; the
-        // panel harness never sized one. There a lone tab keeps the gear,
-        // and tabs that scroll give it up for their arrows.
-        for width in [400.0, 640.0, 1280.0] {
+        for width in [400.0, 640.0, 1000.0, 1280.0] {
             let lane = macos_titlebar_lane(width, scale);
-            for tabs in [1, 3, 20] {
+            let window_w = lane.0 + lane.2;
+            for tabs in [1, 2, 3, 20] {
                 let HorizontalTabGeometry {
                     arrow_rect,
                     plus_rect,
                     settings_rect,
+                    lead,
                     layout,
                     ..
                 } = horizontal_tab_geometry(lane, scale, (false, true), (tabs, 0), &cfg);
@@ -1102,21 +1102,8 @@ fn macos_titlebar_settings_gear_leads_the_new_tab_pair() {
                 assert_eq!((arrow_rect, plus_rect), (menu, plus));
                 assert_eq!(plus.0 + plus.2, menu.0);
                 let case = format!("{width}px @{scale}x, {tabs} tabs");
-                if width == 400.0 && tabs > 1 {
-                    assert_eq!(settings_rect.2, 0.0, "{case}: a gear beside narrowed tabs");
-                    continue;
-                }
-                assert!(settings_rect.2 > 0.0, "{case}: no gear");
-                assert_eq!((settings_rect.2, settings_rect.3), (plus.2, plus.3), "{case}");
-                assert_eq!(settings_rect.1, menu.1, "{case}");
-                let gap = plus.0 - (settings_rect.0 + settings_rect.2);
-                assert!(gap >= 8.0 * scale - 0.01, "{case}: gap {gap}");
-                assert!(
-                    settings_rect.0 >= lane.0 && settings_rect.1 >= lane.1,
-                    "{case}: gear outside the band"
-                );
-                assert!(settings_rect.1 + settings_rect.3 <= lane.1 + lane.3 + 0.01);
-                // The tabs give the gear its room: none reaches under it.
+                assert_eq!(settings_rect, (0.0, 0.0, 0.0, 0.0), "{case}: unexpected gear");
+                let tab_start = lane.0 + lead;
                 for (i, x) in layout.xs.iter().enumerate() {
                     let Some(x) = x else { continue };
                     let w = if i + 1 == tabs {
@@ -1124,15 +1111,17 @@ fn macos_titlebar_settings_gear_leads_the_new_tab_pair() {
                     } else {
                         layout.width
                     };
+                    assert!(tab_start + x >= lane.0 - 0.01, "{case}");
                     assert!(
-                        lane.0 + x + w <= settings_rect.0 + 0.01,
-                        "{case}: tab {i} ends at {} past the gear at {}",
-                        lane.0 + x + w,
-                        settings_rect.0
+                        tab_start + x + w <= plus_rect.0 - super::TITLEBAR_DRAG_LANE_SIDE * scale + 0.01,
+                        "{case}: tab {i} overlaps trailing drag reserve"
                     );
                 }
+                if tabs == 2 && layout.arrow_left.is_none() {
+                    let seam = tab_start + layout.xs[1].unwrap();
+                    assert!((seam - window_w * 0.5).abs() < 0.01, "{case}: seam {seam}");
+                }
             }
-            // No gear on a plain strip or in a Kettle-drawn GNOME header.
             for header in [(false, false), (true, true), (true, false)] {
                 let geometry = horizontal_tab_geometry(lane, scale, header, (2, 0), &cfg);
                 assert_eq!(geometry.settings_rect, (0.0, 0.0, 0.0, 0.0), "{header:?}");
@@ -1141,33 +1130,23 @@ fn macos_titlebar_settings_gear_leads_the_new_tab_pair() {
     }
 }
 
-/// The gear costs the tabs its width and gap, never a tab: it shows only
-/// while the lane keeps the whole drag lane and room for the tabs at
-/// `tab-min-width` beside every control (one tab between both scroll arrows
-/// once they overflow), and `▾ +` never hide.
+/// Regardless of strip width or overflow, the macOS titlebar never emits a
+/// Settings gear and keeps `+ ▾` intact.
 #[test]
-fn macos_titlebar_settings_gear_hides_only_in_a_lane_too_narrow_for_a_tab() {
+fn macos_titlebar_never_emits_settings_gear_at_any_width() {
     use super::chrome::horizontal_tab_geometry;
     let cfg = kettle_config::Config::default();
     for scale in [1.0, 2.0] {
         let probe = macos_titlebar_lane(1280.0, scale);
-        let (_, plus, reserve) = super::chrome::titlebar_new_tab_controls(probe, scale);
-        let extra = plus.2 + 8.0 * scale;
-        for tabs in [1_usize, 20] {
-            // 20 tabs scroll: one between the 32-point arrows.
-            let arrows = if tabs > 1 { 2.0 * probe.3 } else { 0.0 };
-            let threshold = reserve
-                + extra
-                + arrows
-                + (cfg.tab_min_width + super::TITLEBAR_DRAG_LANE) * scale;
-            for (lane_width, shown) in [(threshold, true), (threshold - 1.0, false)] {
-                let lane = (probe.0, 0.0, lane_width, probe.3);
+        for tabs in [1_usize, 2, 20] {
+            for width in [260.0_f32, 400.0, 640.0, 1280.0] {
+                let lane = (probe.0, 0.0, width * scale, probe.3);
                 let geometry = horizontal_tab_geometry(lane, scale, (false, true), (tabs, 0), &cfg);
-                assert_eq!(geometry.settings_rect.2 > 0.0, shown, "{lane_width} @{scale}x");
+                assert_eq!(geometry.settings_rect, (0.0, 0.0, 0.0, 0.0));
                 let (menu, plus_now, _) = super::chrome::titlebar_new_tab_controls(lane, scale);
                 assert_eq!(geometry.arrow_rect, menu);
                 assert_eq!(geometry.plus_rect, plus_now);
-                assert!(plus_now.2 == plus.2 && menu.2 > 0.0);
+                assert!(plus_now.2 > 0.0 && menu.2 > 0.0);
             }
         }
     }
@@ -1192,7 +1171,13 @@ fn macos_titlebar_settings_gear_hit_tests_share_its_rect() {
         bar.in_titlebar = true;
         bar.new_tab = geometry.plus_rect;
         bar.new_tab_menu = geometry.arrow_rect;
-        bar.settings = geometry.settings_rect;
+        assert_eq!(geometry.settings_rect, (0.0, 0.0, 0.0, 0.0));
+        bar.settings = (
+            geometry.plus_rect.0 - 40.0 * scale,
+            0.0,
+            32.0 * scale,
+            32.0 * scale,
+        );
         let gear = bar.settings;
         let (cx, cy) = (gear.0 + gear.2 * 0.5, gear.1 + gear.3 * 0.5);
         assert!(!empty_titlebar_space(&bar, cx, cy), "a press on the gear drags");
@@ -1241,7 +1226,7 @@ fn macos_titlebar_settings_gear_is_a_named_button_for_accesskit_and_ctl() {
     bar.band = lane;
     bar.new_tab = geometry.plus_rect;
     bar.new_tab_menu = geometry.arrow_rect;
-    bar.settings = geometry.settings_rect;
+    bar.settings = (geometry.plus_rect.0 - 80.0, 0.0, 64.0, 64.0);
     let gear = bar.settings;
     let bounds = accesskit::Rect::new(
         gear.0 as f64,
@@ -1380,7 +1365,7 @@ fn a_screen_reader_click_on_the_settings_gear_opens_settings() {
     bar.band = lane;
     bar.new_tab = geometry.plus_rect;
     bar.new_tab_menu = geometry.arrow_rect;
-    bar.settings = geometry.settings_rect;
+    bar.settings = (geometry.plus_rect.0 - 80.0, 0.0, 64.0, 64.0);
     let tr = kettle_i18n::Translator::default();
     let nodes = tab_accessibility_projection(&bar, &[7], false, &tr);
     let action_of = |label: &str| {
@@ -1395,14 +1380,11 @@ fn a_screen_reader_click_on_the_settings_gear_opens_settings() {
     assert_eq!(tab_button_action(accessibility_tab_id(7, false)), None);
 }
 
-/// A tab torn off a macOS title bar is held by its pointer in the lone tab
-/// the new window paints: from the lane's start, at least `tab-min-width`
-/// wide, and clear of the drag lane and the Settings gear. The torn window's
-/// grip once assumed `▾ +` alone, so in a narrow window it held the pointer
-/// in a full-width tab that ran under the gear.
+/// A tab torn off a macOS title bar is held by its pointer in the centered
+/// lone tab the new window paints, clearing the symmetric split drag lanes.
 #[test]
-fn a_tab_torn_off_a_macos_title_bar_is_held_in_the_lone_tab_beside_the_gear() {
-    use super::chrome::{titlebar_settings_control, titlebar_tear_off_grab_x};
+fn a_tab_torn_off_a_macos_title_bar_is_held_in_the_centered_lone_tab() {
+    use super::chrome::{horizontal_tab_geometry, titlebar_tear_off_grab_x};
     let cfg = kettle_config::Config::default();
     let buttons = crate::window_buttons::ButtonLayout {
         left: Vec::new(),
@@ -1412,21 +1394,22 @@ fn a_tab_torn_off_a_macos_title_bar_is_held_in_the_lone_tab_beside_the_gear() {
         for width in (500..=660).step_by(4).map(|w| w as f32).chain([1280.0]) {
             let band = macos_titlebar_lane(width, scale);
             let case = format!("{width}pt @{scale}x");
-            let (_, plus, reserve) = super::chrome::titlebar_new_tab_controls(band, scale);
-            let (gear, _) =
-                titlebar_settings_control(plus, band.2, reserve, scale, cfg.tab_min_width);
-            assert!(gear.2 > 0.0, "{case}: no gear");
+            let g = horizontal_tab_geometry(band, scale, (false, true), (1, 0), &cfg);
+            assert_eq!(g.settings_rect, (0.0, 0.0, 0.0, 0.0), "{case}");
             let in_tab = f64::from(32.0 * scale);
             let grab = titlebar_tear_off_grab_x(&cfg, band, (false, true), scale, &buttons, in_tab);
             let x = (grab - in_tab) as f32;
-            let tab_w = super::chrome::tear_off_destination_tab(&cfg, band, (false, true), scale, &buttons).2;
-            assert_eq!(x, band.0, "{case}: the grip counts from the lane's start");
+            let tab_w =
+                super::chrome::tear_off_destination_tab(&cfg, band, (false, true), scale, &buttons)
+                    .2;
+            assert_eq!(x, band.0 + g.lead, "{case}: the grip counts from the tab's start");
             assert!(tab_w >= cfg.tab_min_width * scale, "{case}: tab {tab_w} px wide");
+            assert!((x + tab_w * 0.5 - width * scale * 0.5).abs() < 0.01, "{case}");
             assert!(
-                x + tab_w + super::TITLEBAR_DRAG_LANE * scale <= gear.0 + 0.01,
-                "{case}: the held tab ends at {} under the gear at {}",
+                g.plus_rect.0 - (x + tab_w) >= super::TITLEBAR_DRAG_LANE_SIDE * scale - 0.01,
+                "{case}: the held tab ends at {} too close to + at {}",
                 x + tab_w,
-                gear.0
+                g.plus_rect.0
             );
         }
     }
@@ -1453,7 +1436,7 @@ fn the_settings_gear_takes_a_press_ahead_of_open_settings() {
 }
 
 /// The strip of a macOS title bar `width` pt wide at `scale` with one tab:
-/// its `▾ +` and Settings gear, as press, release and hover read them.
+/// its joined `+ ▾` controls, as press, release and hover read them.
 fn macos_titlebar_strip(width: f32, scale: f32) -> kettle_render::TabBar {
     let cfg = kettle_config::Config::default();
     let lane = macos_titlebar_lane(width, scale);
@@ -1466,6 +1449,17 @@ fn macos_titlebar_strip(width: f32, scale: f32) -> kettle_render::TabBar {
     bar.new_tab = geometry.plus_rect;
     bar.new_tab_menu = geometry.arrow_rect;
     bar.settings = geometry.settings_rect;
+    bar
+}
+
+fn macos_titlebar_strip_with_gear(width: f32, scale: f32) -> kettle_render::TabBar {
+    let mut bar = macos_titlebar_strip(width, scale);
+    bar.settings = (
+        bar.new_tab.0 - 40.0 * scale,
+        bar.band.1,
+        32.0 * scale,
+        32.0 * scale,
+    );
     bar
 }
 
@@ -1486,7 +1480,7 @@ fn point_at(ws: &mut crate::window_state::WindowState, (x, y): (f32, f32)) {
 fn a_press_then_release_on_the_settings_gear_opens_settings() {
     use super::chrome::{press_settings_gear, release_settings_gear};
     for scale in [1.0, 2.0] {
-        let strip = || macos_titlebar_strip(1280.0, scale);
+        let strip = || macos_titlebar_strip_with_gear(1280.0, scale);
         let bar = strip();
         let gear = centre_of(bar.settings);
         let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
@@ -1521,7 +1515,7 @@ fn a_press_then_release_on_the_settings_gear_opens_settings() {
 #[test]
 fn with_settings_open_a_press_on_the_gear_arms_it() {
     use super::chrome::{arm_settings_gear_over_settings, release_settings_gear};
-    let strip = || macos_titlebar_strip(1280.0, 2.0);
+    let strip = || macos_titlebar_strip_with_gear(1280.0, 2.0);
     let bar = strip();
     let gear = centre_of(bar.settings);
     let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
@@ -1548,7 +1542,7 @@ fn with_settings_open_a_press_on_the_gear_arms_it() {
 #[test]
 fn moving_onto_or_off_the_settings_gear_changes_the_tab_bar_hover() {
     use super::chrome::{NewTabHoverTarget, hover_tab_bar};
-    let bar = macos_titlebar_strip(1280.0, 1.0);
+    let bar = macos_titlebar_strip_with_gear(1280.0, 1.0);
     let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
     let gear = centre_of(bar.settings);
     point_at(&mut ws, gear);
@@ -1587,7 +1581,7 @@ fn moving_onto_or_off_the_settings_gear_changes_the_tab_bar_hover() {
 #[test]
 fn the_strip_under_a_modal_shows_no_hover() {
     use super::chrome::{NewTabHoverTarget, hover_tab_bar};
-    let mut bar = macos_titlebar_strip(1280.0, 1.0);
+    let mut bar = macos_titlebar_strip_with_gear(1280.0, 1.0);
     let h = bar.height;
     bar.segments.push(kettle_render::TabSeg {
         idx: 0,
@@ -1709,7 +1703,7 @@ fn compact_header_controls_join_plus_then_menu() {
         let menu = geometry.arrow_rect;
         assert_eq!(plus.0 + plus.2, menu.0);
         assert_eq!(menu.2, 28.0 * scale);
-        assert_eq!(geometry.settings_rect.0 + geometry.settings_rect.2 + 8.0 * scale, plus.0);
+        assert_eq!(geometry.settings_rect, (0.0, 0.0, 0.0, 0.0));
     }
 }
 
@@ -1717,7 +1711,7 @@ fn compact_header_controls_join_plus_then_menu() {
 fn compact_header_accessible_names_follow_tooltips_and_screen_order() {
     use super::*;
     let mut bar = macos_titlebar_strip(1280.0, 1.0);
-    // Desired geometry, independent of the geometry regression above.
+    // Verify accessible ordering when settings, new_tab, and menu are populated.
     bar.new_tab = (1212.0, 0.0, 32.0, 32.0);
     bar.new_tab_menu = (1244.0, 0.0, 28.0, 32.0);
     bar.settings = (1172.0, 0.0, 32.0, 32.0);
@@ -1732,7 +1726,7 @@ fn compact_header_accessible_names_follow_tooltips_and_screen_order() {
 
 
 /// A tab torn off a title bar is held at its grip into the destination's
-/// lone tab, which starts the lane and stops short of the drag lane; the grip
+/// centered lone tab, which clears the left and right drag lanes; the grip
 /// stays inside it.
 #[test]
 fn compact_header_tearoff_clamps_grip_to_actual_destination() {
@@ -1744,8 +1738,8 @@ fn compact_header_tearoff_clamps_grip_to_actual_destination() {
             let band = macos_titlebar_lane(width, scale);
             let geometry = super::chrome::horizontal_tab_geometry(band, scale, (false, true), (1, 0), &cfg);
             let tab = tear_off_destination_tab(&cfg, band, (false, true), scale, &buttons);
-            assert_eq!(tab.0, band.0);
-            assert_eq!(tab.2, geometry.strip - super::TITLEBAR_DRAG_LANE * scale);
+            assert_eq!(tab.0, band.0 + geometry.lead);
+            assert_eq!(tab.2, geometry.strip);
             for offset in [-1.0, 32.0, 270.0, 100_000.0] {
                 let grip = titlebar_tear_off_grab_x(&cfg, band, (false, true), scale, &buttons, offset);
                 if offset == 32.0 { assert_eq!(grip, f64::from(tab.0) + 32.0); }
@@ -1765,8 +1759,9 @@ fn compact_header_divider_is_menu_control_and_gaps_remain_draggable() {
     assert_eq!(new_tab_hover_target(&bar, x, 16.0), Some(NewTabHoverTarget::Menu));
     assert!(titlebar_control_at(&bar, x, 16.0));
     assert!(!empty_titlebar_space(&bar, x, 16.0));
-    assert!(empty_titlebar_space(&bar, bar.settings.0 - 2.0, 16.0));
-    assert!(empty_titlebar_space(&bar, bar.settings.0 + bar.settings.2 + 4.0, 16.0));
+    assert_eq!(bar.settings, (0.0, 0.0, 0.0, 0.0));
+    assert!(empty_titlebar_space(&bar, bar.band.0 + 4.0, 16.0));
+    assert!(empty_titlebar_space(&bar, bar.new_tab.0 - 12.0, 16.0));
 }
 
 /// Plain strips keep their full-width-aligned layout; the GNOME header's
@@ -1797,7 +1792,7 @@ fn compact_header_preserves_plain_geometry_and_splits_gnome_tabs_evenly() {
 #[test]
 fn compact_header_ax_popup_shortcuts_and_all_layout_orders() {
     use super::*;
-    let mut bar = macos_titlebar_strip(1280.0, 1.0);
+    let mut bar = macos_titlebar_strip_with_gear(1280.0, 1.0);
     let tr = kettle_i18n::Translator::default();
     let bindings = kettle_config::keybinds::defaults();
     // Default hints are the same live values used by tooltips.
@@ -1865,38 +1860,32 @@ fn compact_header_sweep_keeps_controls_tabs_and_fullscreen_drag_space_disjoint()
     use super::*;
     let cfg = kettle_config::Config::default();
     for scale in [1.0, 1.5, 2.0] {
-        for width in [400.0, 640.0, 1280.0] {
+        for width in [400.0, 640.0, 1000.0, 1280.0] {
             for fullscreen in [false, true] {
                 let left = if fullscreen { 0.0 } else { 78.0 * scale };
                 let lane = (left, 0.0, width * scale - left, 32.0 * scale);
-                for count in [1, 3, 20] {
+                for count in [1, 2, 3, 20] {
                     for active in [0, count - 1] {
                         let g = chrome::horizontal_tab_geometry(lane, scale, (false, true), (count, active), &cfg);
                         assert!(g.layout.xs[active].is_some());
                         assert_eq!(g.plus_rect.0 + g.plus_rect.2, g.arrow_rect.0);
-                        let gear = g.settings_rect.2 > 0.0;
-                        if gear {
-                            assert!(g.settings_rect.0 + g.settings_rect.2 + 8.0 * scale <= g.plus_rect.0);
-                        }
-                        let controls = if gear { g.settings_rect.0 } else { g.plus_rect.0 };
-                        // Without the gear a narrow strip may have taken
-                        // part of the drag lane, never past its floor.
-                        let lane_left = if gear {
-                            super::TITLEBAR_DRAG_LANE
-                        } else {
-                            super::TITLEBAR_DRAG_LANE_FLOOR
-                        } * scale;
-                        let mut end = lane.0;
+                        assert_eq!(g.settings_rect, (0.0, 0.0, 0.0, 0.0));
+                        let controls = g.plus_rect.0;
+                        let mut end = lane.0 + g.lead;
                         for (i, x) in g.layout.xs.iter().enumerate() {
                             let Some(x) = x else { continue };
                             let w = if i + 1 == count { g.layout.last_width } else { g.layout.width };
-                            assert!(lane.0 + x + 0.01 >= end, "{width} @{scale}, {count} tabs, fullscreen={fullscreen}: {} < {end}", lane.0 + x);
-                            end = lane.0 + x + w;
-                            assert!(end + lane_left <= controls + 0.01);
+                            assert!(lane.0 + g.lead + x + 0.01 >= end, "{width} @{scale}, {count} tabs, fullscreen={fullscreen}: {} < {end}", lane.0 + g.lead + x);
+                            end = lane.0 + g.lead + x + w;
+                            assert!(end + super::TITLEBAR_DRAG_LANE_SIDE_FLOOR * scale <= controls + 0.01);
                             assert!(w >= cfg.tab_min_width * scale || g.layout.arrow_left.is_some());
                         }
                         if count == 1 {
                             assert_eq!(g.layout.xs[0], Some(0.0));
+                        }
+                        if count == 2 && g.layout.arrow_left.is_none() {
+                            let seam = lane.0 + g.lead + g.layout.xs[1].unwrap();
+                            assert!((seam - width * scale * 0.5).abs() < 0.01);
                         }
                     }
                 }
@@ -2484,7 +2473,7 @@ fn a_modal_taking_the_pointer_cancels_a_held_strip_button() {
         release_strip_button,
     };
     let strip = || {
-        let mut bar = macos_titlebar_strip(1280.0, 1.0);
+        let mut bar = macos_titlebar_strip_with_gear(1280.0, 1.0);
         bar.search = (200.0, bar.band.1, 28.0, bar.height);
         bar
     };

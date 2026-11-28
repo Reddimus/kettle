@@ -1283,9 +1283,7 @@ impl App {
         let origin = if ws.linux_titlebar {
             MenuOrigin::MainMenu
         } else {
-            MenuOrigin::NewTab {
-                compact: cfg!(target_os = "macos") && ws.macos_titlebar_tabs,
-            }
+            MenuOrigin::NewTab { compact: false }
         };
         self.show_new_tab_menu(ws, shells.as_deref(), origin, (px, py));
     }

@@ -51,7 +51,12 @@ pub(super) fn titlebar_band_metrics(
 pub(super) fn inset_titlebar_band(band: Rect, titlebar: Option<TitlebarBand>) -> Rect {
     titlebar.map_or(band, |t| {
         let left = t.left.min(band.2);
-        (band.0 + left, band.1, (band.2 - left).max(0.0), t.height)
+        (
+            band.0 + left,
+            band.1,
+            (band.2 - left).max(0.0),
+            band.3.max(t.height),
+        )
     })
 }
 
@@ -315,6 +320,24 @@ impl App {
     }
 
     pub(super) fn tab_strip_height(&self, ws: &WindowState) -> f32 {
+        if ws.linux_titlebar {
+            let scale = ws
+                .window
+                .as_ref()
+                .map_or(ws.startup_scale, |w| w.scale_factor() as f32);
+            let header_h = LINUX_HEADER_HEIGHT * scale;
+            return if linux_two_row_tabs(
+                true,
+                ws.mux.tabs.len(),
+                (ws.editing_title.is_some(), ws.dock_preview.is_some()),
+                self.cfg.tab_bar,
+                self.cfg.tab_bar_pos,
+            ) {
+                header_h + LINUX_TAB_ROW_HEIGHT * scale
+            } else {
+                header_h
+            };
+        }
         Self::macos_titlebar_band(ws).map_or_else(
             || {
                 let scale = ws.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32);
@@ -616,8 +639,12 @@ mod tests {
                 let lane = (left, 0.0, width - left, h);
                 let g = horizontal_tab_geometry(lane, scale, (false, true), (1, 0), &cfg);
                 let layout = &g.layout;
-                let rect = (left + layout.xs[0].unwrap(), 0.0, layout.width, h);
-                assert_eq!(rect.0, left, "the lone tab starts the lane");
+                let rect = (left + g.lead + layout.xs[0].unwrap(), 0.0, layout.width, h);
+                assert!(rect.0 >= left, "the lone tab clears traffic lights");
+                assert!(
+                    (rect.0 + rect.2 * 0.5 - width * 0.5).abs() < 0.01,
+                    "the lone tab stays centered"
+                );
                 for hovered in [false, true] {
                     let content = kettle_render::horizontal_tab_content_layout(
                         rect,
@@ -634,7 +661,9 @@ mod tests {
                     assert_eq!(content.close.3 > 0.0, hovered);
                 }
                 assert!(
-                    rect.0 + rect.2 + TITLEBAR_DRAG_LANE * scale <= left + g.strip + 0.01,
+                    g.plus_rect.0 - (rect.0 + rect.2) >= TITLEBAR_DRAG_LANE_SIDE * scale - 0.01
+                        && (rect.0 - left) + (g.plus_rect.0 - (rect.0 + rect.2))
+                            >= TITLEBAR_DRAG_LANE * scale - 0.01,
                     "room remains for native window drag"
                 );
                 for target in [g.arrow_rect, g.plus_rect] {
