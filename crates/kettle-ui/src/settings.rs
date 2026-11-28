@@ -4559,8 +4559,9 @@ mod control_size_tests {
     /// Every row's widest value, in English and Spanish, shows whole in the
     /// default window (1280x820 at the 14 px font's 8.4x17.5 cell). In the
     /// narrow one (640x820) it does wherever it fits beside the whole label,
-    /// and elsewhere keeps about half the row. Every changed row keeps a
-    /// Reset chip in both, its word or its icon.
+    /// and elsewhere keeps about half the row. Switches hold no words and
+    /// keep their one fixed track. Every changed row keeps a Reset chip in
+    /// both, its word or its icon.
     #[test]
     fn longest_values_stay_whole_where_they_fit() {
         let cfg = Config::default();
@@ -4577,28 +4578,31 @@ mod control_size_tests {
                     let layout = kettle_render::settings_layout(&set, (cw, line), surface, cw, 1.0);
                     let geometry = &layout.rows[0];
                     let chip = geometry.chip_rect;
-                    let knob = match row.control {
-                        kettle_render::SettingsControl::Toggle(_) => {
-                            kettle_render::settings_control_height(line) - 4.0
-                        }
-                        _ => 0.0,
-                    };
+                    let context = format!("{language:?} {surface:?} {key}");
+                    assert!(geometry.reset.is_some(), "{context}: no Reset");
+                    if let kettle_render::SettingsControl::Toggle(_) = row.control {
+                        // A switch shows symbols, not its words: every one is
+                        // the same fixed track, whatever its widest value.
+                        let (w, h) = kettle_render::settings_switch_size(
+                            kettle_render::settings_control_height(line),
+                        );
+                        assert_eq!((chip.2, chip.3), (w, h), "{context}");
+                        continue;
+                    }
                     let arrows = if row.control == kettle_render::SettingsControl::Choice {
                         4
                     } else {
                         0
                     };
                     let need = (row.value_cols + arrows) as f32 * cw;
-                    let fits = need <= chip.2 - 8.0 - knob + 0.01;
+                    let fits = need <= chip.2 - 8.0 + 0.01;
                     let inner = geometry.rect.2;
                     let label = kettle_render::display_width(&row.label) as f32 * cw;
-                    let context = format!("{language:?} {surface:?} {key}");
-                    if all_fit || label + 18.0 + need + 20.0 + knob <= inner {
+                    if all_fit || label + 18.0 + need + 20.0 <= inner {
                         assert!(fits, "{context}: {need} in {chip:?}");
                     } else {
                         assert!(chip.2 >= inner * 0.48 - 0.01, "{context}");
                     }
-                    assert!(geometry.reset.is_some(), "{context}: no Reset");
                 }
             }
         }

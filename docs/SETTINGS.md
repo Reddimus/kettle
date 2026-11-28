@@ -7,8 +7,11 @@ leaves it as it is, on the same option and search.
 
 The centered window has a category sidebar and a search field. The right pane
 shows the category title, a short description under each option, and a value
-control. On/Off switches show their state with a knob as well as the label,
-choices have arrows, and quantities
+control. On/Off switches are all one size and show their state without
+words: off, an outlined track with the knob at the left and an open ring;
+on, a filled track with a white knob at the right and a bar. The filled
+track keeps 3:1 contrast against the panel and the knob against the track
+in every theme. Choices have arrows, and quantities
 show their units. A control keeps one width while its value changes. The
 highlighted option has a bar at its left edge as well as a tint, which stands
 out from the panel (at least 1.3:1) in light and dark themes alike. An option
@@ -170,7 +173,7 @@ four-logical-pixel gap. Free text and shortcut fields have no Reset.
 | Option | Config key | Notes |
 |---|---|---|
 | Background opacity | `background-opacity` | 20–100% (stored as 0.0–1.0) |
-| Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window. Where the session cannot blur (GNOME and other Wayland compositors without KWin's blur protocol, X11 including KDE Plasma on X11, and Windows without its system backdrop, such as Windows 10), the switch reads **Unavailable** instead of On, unfilled with a hollow knob, the row says "This session cannot blur; saved setting: On. Opacity still applies.", the footer drops its blur hint on this row and Background opacity, and background opacity still works. The switch still turns blur off, and turning it on there asks for no new window, since one would not blur either. On Wayland, for the moment (at most half a second) while Kettle asks the compositor, it reads **Checking…** rather than On. The switch is as wide as the others on macOS, where neither state occurs |
+| Window blur | `window-blur` | native backdrop blur where the window system supports it; changing the startup surface requires a new window. Where the session cannot blur (GNOME and other Wayland compositors without KWin's blur protocol, X11 including KDE Plasma on X11, and Windows without its system backdrop, such as Windows 10), the switch is unfilled with a hollow knob and **Unavailable** shows beside it, the row says "This session cannot blur; saved setting: On. Opacity still applies.", the footer drops its blur hint on this row and Background opacity, and background opacity still works. The switch still turns blur off, and turning it on there asks for no new window, since one would not blur either. On Wayland, for the moment (at most half a second) while Kettle asks the compositor, **Checking…** shows beside the switch instead. The switch keeps the same size as every other switch in every state |
 | Window padding | `window-padding-x` | 0–40 px |
 | Show pane titlebars | `show-titlebar` | On / Off |
 

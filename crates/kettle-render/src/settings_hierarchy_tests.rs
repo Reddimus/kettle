@@ -321,7 +321,7 @@ fn settings_reset_segments_share_an_outline_and_switches_keep_four_logical_pixel
                     row,
                     &set.rows[0],
                     &palette,
-                    (theme.background, theme.accent, theme.foreground),
+                    theme.background,
                     (settings::SettingsRowFill::Focused, None),
                     scale,
                 );
@@ -398,18 +398,25 @@ fn settings_new_control_surfaces_and_inks_meet_their_adjacent_backgrounds() {
                         set.rows[0].unavailable = true;
                         let well =
                             matches!(control, SettingsControl::Value | SettingsControl::Text);
+                        let switch = matches!(control, SettingsControl::Toggle(_));
                         let ink = settings_text_color(
                             &set,
                             SettingsTextKind::Value(0),
                             &palette,
-                            (&theme, accent, theme.foreground),
+                            &theme,
                             &mut colors,
                         );
+                        // A switch's state word sits on the focused row's
+                        // fill, before the track.
+                        let text_surface = if well {
+                            palette.well
+                        } else if switch {
+                            palette.selected
+                        } else {
+                            theme.background
+                        };
                         assert!(
-                            color::contrast_ratio(
-                                ink,
-                                if well { palette.well } else { theme.background }
-                            ) >= 4.5,
+                            color::contrast_ratio(ink, text_surface) >= 4.5,
                             "{name} {control:?} disabled={disabled}"
                         );
                         let layout = settings_layout(&set, (8.4, 17.5), (1280.0, 820.0), 8.4, 1.0);
@@ -417,7 +424,7 @@ fn settings_new_control_surfaces_and_inks_meet_their_adjacent_backgrounds() {
                             &layout.rows[0],
                             &set.rows[0],
                             &palette,
-                            (theme.background, accent, theme.foreground),
+                            theme.background,
                             (settings::SettingsRowFill::Focused, None),
                             1.0,
                         );
