@@ -1425,7 +1425,7 @@ pub(crate) fn settings_text_items(
             // A switch's track holds symbols, not words; only an
             // unavailable one says its state, right-aligned before it.
             if let Some(status) = row.status_rect {
-                let cols = (status.2 / cw.max(1.0)).floor().max(0.0) as usize;
+                let cols = ((status.2 + 0.01) / cw.max(1.0)).floor().max(0.0) as usize;
                 let text = fit_single_line_label(&data.value, cols);
                 let width = (display_width(&text) as f32 * cw).min(status.2);
                 centred_items.push(SettingsTextItem {

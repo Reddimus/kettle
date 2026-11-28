@@ -601,6 +601,29 @@ fn switch_parts_reach_three_to_one_in_every_theme() {
     }
 }
 
+/// A fractional cell advance such as `10.2` px at 1x must not lose the
+/// trailing column of an external status label to `f32` rounding.
+#[test]
+fn unavailable_status_preserves_full_label_at_fractional_cell_advance() {
+    let tr = Translator::new(Language::Es);
+    let set = switches(&tr);
+    let cw = 10.2_f32;
+    let line = 20.0_f32;
+    let layout = settings_layout(&set, (cw, line), (1280.0, 820.0), cw, 1.0);
+    let unavailable = layout
+        .rows
+        .iter()
+        .find(|row| set.rows[row.index].value == "No disponible")
+        .expect("unavailable row");
+    assert!(unavailable.status_rect.is_some());
+    let items = settings_text_items(&set, &layout, cw);
+    let emitted = items
+        .iter()
+        .find(|item| item.kind == SettingsTextKind::Value(unavailable.index))
+        .expect("status text item");
+    assert_eq!(emitted.text, "No disponible");
+}
+
 /// The track keeps the accent where it already reaches every floor, so a
 /// theme's own switch colour is unchanged wherever it can be.
 #[test]
