@@ -672,6 +672,7 @@ impl App {
         ws.card_press = None;
         ws.scrollback_pill_press = None;
         ws.cancel_strip_presses();
+        ws.tab_hint_peek.clear();
         ws.dragging_split = None;
         ws.pane_drag = None;
         // The press that opens a question also owns its later release.
@@ -4473,6 +4474,7 @@ impl App {
         ws.card_press = None;
         ws.scrollback_pill_press = None;
         ws.cancel_strip_presses();
+        ws.tab_hint_peek.clear();
         ws.dragging_split = None;
         ws.pane_drag = None;
         // The modal that opens takes the keyboard from a preview lane, even

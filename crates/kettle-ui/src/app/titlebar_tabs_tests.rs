@@ -213,7 +213,8 @@ fn a_lone_macos_titlebar_tab_fills_the_lane_from_its_start() {
     assert!(body.contains(
         "iflone_title{letwindow_width=band.0+band.2;content.title=centered_title_lane(content.title,window_width*0.5);}"
     ));
-    assert!(body.contains("lethint=ifws.macos_titlebar_tabs&&n==1{None}"));
+    assert!(body.contains("letinline_hint:Option<&str>=None;"));
+    assert!(body.contains("hint:None,"));
 }
 
 /// Every title-bar strip leaves empty space for moving the window between

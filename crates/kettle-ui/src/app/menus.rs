@@ -821,6 +821,7 @@ impl App {
         ws.card_press = None;
         ws.scrollback_pill_press = None;
         ws.cancel_strip_presses();
+        ws.tab_hint_peek.clear();
         ws.last_mouse_cell = None;
         ws.tab_drag_active = false;
         ws.tab_drag_press = None;

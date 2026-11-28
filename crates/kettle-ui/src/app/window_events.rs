@@ -185,6 +185,7 @@ impl App {
                 // cursor icon so the affordance updates the moment Ctrl
                 // is pressed/released over a link.
                 self.sync_cursor_icon(ws);
+                self.sync_tab_hint_peek(ws);
             }
             // Terminator parity: winit CursorLeft/Entered events transition the
             // detach FSM. CursorLeft → DraggingOutside; CursorEntered →
@@ -1496,6 +1497,7 @@ impl App {
                     }
                 }
                 if !f {
+                    ws.tab_hint_peek.clear();
                     ws.release_titlebar_buttons();
                     let at = (ws.cursor.x as f32, ws.cursor.y as f32);
                     self.track_titlebar_pointer(ws, TitlebarPointer::Release(at.0, at.1));
@@ -1740,6 +1742,11 @@ impl App {
                 if key_dismisses_link_hover(event.state, &event.logical_key, event.physical_key) {
                     dismiss_link_hover(ws);
                     self.dismiss_selection_hint(ws);
+                    if ws.tab_hint_peek.clear()
+                        && let Some(window) = &ws.window
+                    {
+                        window.request_redraw();
+                    }
                 }
                 // A key press returns focus from a card that assistive
                 // technology focused to the pane, where the key goes.

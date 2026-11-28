@@ -600,6 +600,70 @@ pub(crate) enum PointerPreview {
 /// How long "No hints here" stays on its pane.
 pub(crate) const NO_HINTS_NOTICE_LIFETIME: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// How long the go-to-tab modifier must be held alone before horizontal tab
+/// number badges appear, so quick chords and modifier-clicks do not flash them.
+pub(crate) const TAB_HINT_PEEK_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// State machine for modifier-hold numeric badges on the horizontal tab strip.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum TabHintPeek {
+    #[default]
+    Idle,
+    Armed(std::time::Instant),
+    Visible,
+}
+
+impl TabHintPeek {
+    pub(crate) fn is_visible(self) -> bool {
+        matches!(self, Self::Visible)
+    }
+
+    /// Update from a modifier transition. Arms when `eligible` from `Idle`,
+    /// preserves an in-flight arm or visible state, and clears otherwise.
+    /// Returns `true` when previously `Visible` and now cleared (needs redraw).
+    pub(crate) fn update(&mut self, eligible: bool, now: std::time::Instant) -> bool {
+        if eligible {
+            if matches!(*self, Self::Idle) {
+                *self = Self::Armed(now);
+            }
+            false
+        } else {
+            self.clear()
+        }
+    }
+
+    /// Clear to `Idle`. Returns `true` when previously `Visible` (needs redraw).
+    pub(crate) fn clear(&mut self) -> bool {
+        let was_visible = matches!(*self, Self::Visible);
+        *self = Self::Idle;
+        was_visible
+    }
+
+    /// Advance an armed timer at `now`. Returns `(became_visible, next_wake)`.
+    pub(crate) fn poll(&mut self, now: std::time::Instant) -> (bool, Option<std::time::Instant>) {
+        match *self {
+            Self::Armed(since) => {
+                let due = since + TAB_HINT_PEEK_DELAY;
+                if now >= due {
+                    *self = Self::Visible;
+                    (true, None)
+                } else {
+                    (false, Some(due))
+                }
+            }
+            Self::Idle | Self::Visible => (false, None),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn deadline(self) -> Option<std::time::Instant> {
+        match self {
+            Self::Armed(since) => Some(since + TAB_HINT_PEEK_DELAY),
+            Self::Idle | Self::Visible => None,
+        }
+    }
+}
+
 /// The pane status that says quick select found nothing to label, so the
 /// key that asked for it does not seem to do nothing.
 #[derive(Debug, Default)]
@@ -1689,6 +1753,8 @@ pub(crate) struct WindowState {
     pub(crate) mouse_override_hint: MouseOverrideHint,
     /// "No hints here" after quick select found nothing; see `NoHintsNotice`.
     pub(crate) no_hints_notice: NoHintsNotice,
+    /// Modifier-hold numeric badge peek on horizontal tabs.
+    pub(crate) tab_hint_peek: TabHintPeek,
     /// The open picker's scroll, pointer and preview state; see `PickerView`.
     pub(crate) picker_view: PickerView,
     /// The first `Resized` after window creation is the initial
@@ -1758,6 +1824,7 @@ impl WindowState {
         // The viewer takes the pointer: a title-bar button held under it
         // does not act on its release, even once the viewer has closed.
         self.cancel_strip_presses();
+        self.tab_hint_peek.clear();
         self.preview_overlay = Some(overlay);
     }
 
@@ -2146,6 +2213,7 @@ impl WindowState {
             resize_overlay_label: None,
             mouse_override_hint: MouseOverrideHint::default(),
             no_hints_notice: NoHintsNotice::default(),
+            tab_hint_peek: TabHintPeek::Idle,
             picker_view: PickerView::default(),
             seen_first_resize: false,
             spawned_at: std::time::Instant::now(),

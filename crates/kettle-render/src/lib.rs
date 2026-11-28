@@ -55,7 +55,8 @@ mod settings;
 mod tab_strip;
 mod terminal;
 pub use tab_strip::{
-    HorizontalTabContent, activity_lane, horizontal_tab_content_layout, tab_text_scale,
+    HorizontalTabContent, activity_lane, horizontal_tab_content_layout, tab_peek_badge_rect,
+    tab_text_scale,
 };
 mod theme;
 mod theme_picker;
@@ -146,13 +147,14 @@ pub use overlays::{
     ConfirmDialogButton, ConfirmDialogDetail, ConfirmDialogFinding, ConfirmDialogOverlay,
     ContextMenu, ContextMenuRow, HintLabel, ImePreedit, MediaPasteReceiptGeometry,
     MediaPasteReceiptHit, MediaPasteReceiptKind, MediaPasteReceiptOverlay, MenuStatus, MenuToggle,
-    NotificationGeometry, Overlay, StatusBar, TabActivity, TabBar, TabSeg, TitleEditOverlay,
-    UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay, WindowControl, WindowControlButton,
-    context_menu_row_rects, format_media_size, hint_label_rect, media_paste_receipt_geometry, menu,
-    menu_option_row, menu_row_chars, menu_row_description_left, menu_row_option,
-    notification_geometry, notification_geometry_with_notices, persistent_notice_geometry,
-    persistent_notice_geometry_at_bottom, tab_drag, theme_picker_prefix, title_edit_prefix,
-    toast_text_rows, update_toast_columns, update_toast_geometry,
+    NotificationGeometry, Overlay, StatusBar, TabActivity, TabBar, TabPeekBadge, TabSeg,
+    TitleEditOverlay, UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay, WindowControl,
+    WindowControlButton, context_menu_row_rects, format_media_size, hint_label_rect,
+    media_paste_receipt_geometry, menu, menu_option_row, menu_row_chars, menu_row_description_left,
+    menu_row_option, notification_geometry, notification_geometry_with_notices,
+    persistent_notice_geometry, persistent_notice_geometry_at_bottom, tab_drag,
+    theme_picker_prefix, title_edit_prefix, toast_text_rows, update_toast_columns,
+    update_toast_geometry,
 };
 use overlays::{
     MAX_LANE_IMAGES, NEW_TAB_MENU_GLYPH, NEW_TAB_PLUS_GLYPH, context_menu_panel_width,
@@ -649,6 +651,8 @@ pub struct Renderer {
     pane_titlebar_buffers: Vec<TextBuffer>,
     tab_buffers: Vec<TextBuffer>,
     tab_hint_buffers: Vec<TextBuffer>,
+    tab_peek_badge_buffers: Vec<TextBuffer>,
+    tab_peek_badge_texts: Vec<String>,
     hint_buffers: Vec<TextBuffer>,
     pane_status_buffers: Vec<TextBuffer>,
     /// One text buffer per row of the right-click context menu. Reused
@@ -1064,6 +1068,7 @@ impl Renderer {
                 self.card_label_texts.clear();
                 invalidate_pane_titlebar_texts(&mut self.pane_titlebar_texts);
                 self.tab_texts.clear();
+                self.tab_peek_badge_texts.clear();
                 self.tab_tooltip_text.clear();
                 self.tab_tooltip_fit = (0, 0, 0);
                 self.tab_close_text.clear();
@@ -2899,6 +2904,41 @@ impl Renderer {
                 }
                 buf.shape_until_scroll(&mut self.font_system, false);
             }
+            let show_peek_badges = overlay.window_focused
+                && !cfg.tab_bar_pos.is_vertical()
+                && !tabbar.lone_title
+                && !tabbar.peek_badges.is_empty();
+            if show_peek_badges {
+                while self.tab_peek_badge_buffers.len() < tabbar.peek_badges.len() {
+                    self.tab_peek_badge_buffers
+                        .push(TextBuffer::new(&mut self.font_system, tab_metrics));
+                }
+                while self.tab_peek_badge_texts.len() < tabbar.peek_badges.len() {
+                    self.tab_peek_badge_texts.push(String::new());
+                }
+                self.tab_peek_badge_buffers
+                    .truncate(tabbar.peek_badges.len());
+                self.tab_peek_badge_texts.truncate(tabbar.peek_badges.len());
+                for (bi, badge) in tabbar.peek_badges.iter().enumerate() {
+                    let buf = &mut self.tab_peek_badge_buffers[bi];
+                    buf.set_metrics(tab_metrics);
+                    buf.set_size(Some(badge.rect.2), Some(badge.rect.3));
+                    buf.set_wrap(Wrap::None);
+                    if self.tab_peek_badge_texts[bi] != badge.label {
+                        buf.set_text(
+                            &badge.label,
+                            &Attrs::new().family(Family::Name(&family)),
+                            Shaping::Advanced,
+                            None,
+                        );
+                        self.tab_peek_badge_texts[bi].clone_from(&badge.label);
+                    }
+                    buf.shape_until_scroll(&mut self.font_system, false);
+                }
+            } else {
+                self.tab_peek_badge_buffers.clear();
+                self.tab_peek_badge_texts.clear();
+            }
             // Shared `✕` glyph buffer for every tab's close button.
             // Sized once; positioned per-tab via TextArea below.
             self.tab_close_buffer.set_metrics(close_metrics);
@@ -4077,6 +4117,37 @@ impl Renderer {
                 let rest = pill_colors.rest;
                 scrollback::vi_mode_chip_quads(&mut menu_q, chip, rest.fill);
                 text(chip.text_origin, chip.rect, rest.ink);
+            }
+        }
+        if have_tabs
+            && overlay.window_focused
+            && !cfg.tab_bar_pos.is_vertical()
+            && !tabbar.lone_title
+            && !tabbar.peek_badges.is_empty()
+        {
+            let accent = self.ui_accent(cfg, theme);
+            let (fill, ink) =
+                tab_strip::tab_peek_badge_colors(theme, accent, &mut self.chrome_colors);
+            for (bi, badge) in tabbar.peek_badges.iter().enumerate() {
+                let Some(buf) = self.tab_peek_badge_buffers.get(bi) else {
+                    break;
+                };
+                tab_strip::push_tab_peek_badge_quads(&mut menu_q, badge.rect, fill, self.scale);
+                let glyph_w = buf
+                    .layout_runs()
+                    .map(|run| run.line_w)
+                    .fold(0.0_f32, f32::max);
+                let left = badge.rect.0 + ((badge.rect.2 - glyph_w) * 0.5).max(0.0);
+                let top = badge.rect.1 + ((badge.rect.3 - tab_ch) * 0.5).max(0.0);
+                menu_areas.push(TextArea {
+                    buffer: buf,
+                    left,
+                    top,
+                    scale: 1.0,
+                    bounds: text_bounds_for_rect(badge.rect),
+                    default_color: gc(ink),
+                    custom_glyphs: &[],
+                });
             }
         }
         if let Some(bounds) = tab_tooltip {
@@ -5995,6 +6066,14 @@ impl Renderer {
             self.tab_texts.hash(&mut h);
             for segment in &tabbar.segments {
                 segment.hint.as_ref().map(|(_, text)| text).hash(&mut h);
+            }
+            for badge in &tabbar.peek_badges {
+                badge.idx.hash(&mut h);
+                badge.label.hash(&mut h);
+                badge.rect.0.to_bits().hash(&mut h);
+                badge.rect.1.to_bits().hash(&mut h);
+                badge.rect.2.to_bits().hash(&mut h);
+                badge.rect.3.to_bits().hash(&mut h);
             }
             self.tabbar_text.hash(&mut h);
             self.status_bar_text.hash(&mut h);

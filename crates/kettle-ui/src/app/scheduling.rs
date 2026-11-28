@@ -757,6 +757,21 @@ impl App {
             at.saturating_duration_since(now)
                 .max(std::time::Duration::from_millis(1))
         });
+        let (tab_hint_peek_due, tab_hint_peek_wake) = if self.tab_hint_peek_eligible(ws) {
+            ws.tab_hint_peek.poll(now)
+        } else {
+            (ws.tab_hint_peek.clear(), None)
+        };
+        if tab_hint_peek_due
+            && !render_hidden
+            && let Some(window) = &ws.window
+        {
+            window.request_redraw();
+        }
+        let tab_hint_peek_wait = tab_hint_peek_wake.map(|at| {
+            at.saturating_duration_since(now)
+                .max(std::time::Duration::from_millis(1))
+        });
         // A tab drag resting on an overflow arrow scrolls the strip.
         let tab_drag_scroll_wait = self.scroll_tab_drag_at_arrow(ws, now).map(|at| {
             at.saturating_duration_since(now)
@@ -932,6 +947,8 @@ impl App {
                 || ws.accessibility_pending
                 || dpi_fallback_wait.is_some()
                 || pty_resize_retry_wait.is_some()
+                || tab_hint_peek_due
+                || tab_hint_peek_wait.is_some()
                 || ws
                     .renderer
                     .as_ref()
@@ -1055,6 +1072,9 @@ impl App {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = tooltip_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = tab_hint_peek_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = tab_drag_scroll_wait {

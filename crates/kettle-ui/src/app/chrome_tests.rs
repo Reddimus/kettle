@@ -2208,17 +2208,19 @@ fn a_cut_tab_title_shows_whole_in_a_tooltip() {
         strip_tooltip_target(ws, bar, &context)
     };
     let at = |ws: &mut crate::window_state::WindowState, x: f64| at_on(ws, &bar, x);
-    assert_eq!(at(&mut ws, 20.0), None, "a title shown whole");
+    let key = |idx| super::chrome::tab_goto_hint(&bindings, idx).unwrap();
+    let short_tip = at(&mut ws, 20.0).expect("multi-tab shortcut tooltip on short title");
+    assert_eq!(short_tip.text, format!("vim  {}", key(0)));
     let tip = at(&mut ws, 120.0).expect("a cut title");
     assert_eq!(
         tip.target,
         crate::tooltip::TooltipTarget::TabTitle(1)
     );
-    assert_eq!(tip.text, long);
+    assert_eq!(tip.text, format!("{long}  {}", key(1)));
     assert_eq!(tip.anchor, Some(bar.segments[1].rect));
     assert_eq!(at(&mut ws, 185.0), None, "the close button names nothing");
     let folder = at(&mut ws, 220.0).expect("a folder shown by its leaf");
-    assert_eq!(folder.text, path);
+    assert_eq!(folder.text, format!("{path}  {}", key(2)));
     // It waits for a rest, as every chrome tooltip does.
     let t0 = Instant::now();
     ws.tooltip.hover(Some((tip.target, tip.rect)), Some((120.0, 14.0)), t0);
@@ -2228,12 +2230,20 @@ fn a_cut_tab_title_shows_whole_in_a_tooltip() {
         shown_strip_tooltip(&ws, &bar, &context, t0 + Duration::from_millis(500))
             .map(|tip| tip.text)
             .as_deref(),
-        Some(long)
+        Some(format!("{long}  {}", key(1)).as_str())
     );
+    // Single-tab strips keep cut-title-only behavior without shortcut suffixes.
+    let mut lone_short = kettle_render::TabBar::hidden();
+    lone_short.height = 28.0;
+    lone_short.segments = vec![seg(0, 0.0, "vim", None)];
+    assert_eq!(at_on(&mut ws, &lone_short, 20.0), None);
     let mut lone = kettle_render::TabBar::hidden();
     lone.height = 28.0;
     lone.segments = vec![seg(0, 0.0, long, None)];
-    assert!(at_on(&mut ws, &lone, 20.0).is_some());
+    assert_eq!(
+        at_on(&mut ws, &lone, 20.0).map(|tip| tip.text).as_deref(),
+        Some(long)
+    );
     lone.lone_title = true;
     assert_eq!(
         at_on(&mut ws, &lone, 20.0),
@@ -2682,4 +2692,192 @@ fn the_last_drag_step_to_an_end_schedules_no_wake() {
     assert!(source.contains(
         "let (step, rest) = tab_drag_arrow_pass( ws.tab_drag_arrow, over, (ws.mux.active, ws.mux.tabs.len()), now, ); ws.tab_drag_arrow = rest;"
     ));
+}
+
+#[test]
+fn tab_goto_peek_modifiers_follow_platform_defaults_custom_rebinds_and_unbinds() {
+    use super::chrome::{tab_goto_peek_modifiers, tab_goto_peek_modifiers_for_platform};
+    use kettle_config::{Action, Bindings, Key, Mods, Trigger};
+    use winit::keyboard::ModifiersState;
+
+    // Host defaults resolve to SUPER on macOS and ALT on Linux/Windows.
+    let defaults = kettle_config::keybinds::defaults();
+    let expected_host = if cfg!(target_os = "macos") {
+        ModifiersState::SUPER
+    } else {
+        ModifiersState::ALT
+    };
+    assert_eq!(tab_goto_peek_modifiers(&defaults), Some(expected_host));
+
+    // Explicit macOS (Cmd+1..9 + Alt+1..9) vs Linux/Windows (Alt+1..9) maps.
+    let mut macos_map = Bindings::new();
+    let mut linux_map = Bindings::new();
+    for n in 1u8..=9 {
+        let key = Key::Char((b'0' + n) as char);
+        macos_map.insert(Trigger::new(Mods::SUPER, key), Action::GotoTab(n - 1));
+        macos_map.insert(Trigger::new(Mods::ALT, key), Action::GotoTab(n - 1));
+        linux_map.insert(Trigger::new(Mods::ALT, key), Action::GotoTab(n - 1));
+    }
+    assert_eq!(
+        tab_goto_peek_modifiers_for_platform(&macos_map, true),
+        Some(ModifiersState::SUPER)
+    );
+    assert_eq!(
+        tab_goto_peek_modifiers_for_platform(&linux_map, false),
+        Some(ModifiersState::ALT)
+    );
+
+    // Custom consistent rebind (e.g. Ctrl+Alt+1..9).
+    let mut custom = Bindings::new();
+    for n in 1u8..=9 {
+        custom.insert(
+            Trigger::new(Mods::CTRL | Mods::ALT, Key::Char((b'0' + n) as char)),
+            Action::GotoTab(n - 1),
+        );
+    }
+    assert_eq!(
+        tab_goto_peek_modifiers(&custom),
+        Some(ModifiersState::CONTROL | ModifiersState::ALT)
+    );
+
+    // Inconsistent modifier sets across bound tabs disable peek.
+    custom.insert(Trigger::new(Mods::SUPER, Key::Char('2')), Action::GotoTab(1));
+    custom.remove(&Trigger::new(Mods::CTRL | Mods::ALT, Key::Char('2')));
+    assert_eq!(tab_goto_peek_modifiers(&custom), None);
+
+    // Bare key (no modifiers) disables peek.
+    let mut bare = Bindings::new();
+    bare.insert(Trigger::new(Mods::empty(), Key::F(1)), Action::GotoTab(0));
+    assert_eq!(tab_goto_peek_modifiers(&bare), None);
+
+    // Completely unbound GotoTab disables peek.
+    assert_eq!(tab_goto_peek_modifiers(&Bindings::new()), None);
+}
+
+#[test]
+fn tab_hint_peek_transitions_deadlines_and_cancellation_paths() {
+    use crate::window_state::{TAB_HINT_PEEK_DELAY, TabHintPeek};
+    use std::time::{Duration, Instant};
+
+    let t0 = Instant::now();
+    let mut peek = TabHintPeek::Idle;
+    assert!(!peek.is_visible());
+    assert_eq!(peek.poll(t0), (false, None));
+
+    // Arm on eligible modifier press; no redraw yet, deadline scheduled at +150ms.
+    assert!(!peek.update(true, t0));
+    assert_eq!(peek, TabHintPeek::Armed(t0));
+    assert_eq!(peek.deadline(), Some(t0 + TAB_HINT_PEEK_DELAY));
+    assert_eq!(
+        peek.poll(t0 + Duration::from_millis(100)),
+        (false, Some(t0 + TAB_HINT_PEEK_DELAY))
+    );
+
+    // Re-updating while armed does not push back the deadline.
+    assert!(!peek.update(true, t0 + Duration::from_millis(120)));
+    assert_eq!(peek, TabHintPeek::Armed(t0));
+
+    // Reaching +150ms transitions to Visible and requests a redraw with no further wake.
+    assert_eq!(peek.poll(t0 + TAB_HINT_PEEK_DELAY), (true, None));
+    assert!(peek.is_visible());
+    assert_eq!(peek.poll(t0 + Duration::from_secs(1)), (false, None));
+
+    // Clearing from Visible returns true (redraw to hide badges).
+    assert!(peek.clear());
+    assert_eq!(peek, TabHintPeek::Idle);
+    // Clearing from Idle or Armed returns false (never painted).
+    assert!(!peek.clear());
+    peek.update(true, t0);
+    assert!(!peek.update(false, t0 + Duration::from_millis(50)));
+    assert_eq!(peek, TabHintPeek::Idle);
+
+    // Verify event-loop wiring: ModifiersChanged preserves cursor sync and
+    // updates peek; non-modifier key press, focus loss, modals, and scheduler
+    // eligibility all clear/poll without polling loops.
+    let src: String = super::production_source()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mods_arm = src
+        .split("WindowEvent::ModifiersChanged(")
+        .nth(1)
+        .and_then(|rest| rest.split("WindowEvent::").next())
+        .expect("ModifiersChanged arm");
+    assert!(mods_arm.contains("self.sync_cursor_icon(ws);"));
+    assert!(mods_arm.contains("self.sync_tab_hint_peek(ws);"));
+
+    let key_arm = src
+        .split("WindowEvent::KeyboardInput { event, .. } => {")
+        .nth(1)
+        .and_then(|rest| rest.split("let toast_owns_key").next())
+        .expect("KeyboardInput arm");
+    assert!(key_arm.contains("if ws.tab_hint_peek.clear()"));
+
+    let focus_arm = src
+        .split("WindowEvent::Focused(f) => {")
+        .nth(1)
+        .and_then(|rest| rest.split("WindowEvent::Occluded").next())
+        .expect("Focused arm");
+    assert!(focus_arm.contains("ws.tab_hint_peek.clear();"));
+
+    assert!(src.contains("self.hovered_link_at_cursor(ws).is_none()"));
+    assert!(src.contains("ws.tab_hint_peek.poll(now)"));
+    assert!(src.contains("if let Some(next) = tab_hint_peek_wait"));
+}
+
+#[test]
+fn multi_tab_tooltips_append_shortcut_while_single_tab_and_unbound_stay_clean() {
+    use super::chrome::{StripTooltipContext, strip_tooltip_target};
+    let make_seg = |idx: usize, x: f32, title: &str| kettle_render::TabSeg {
+        idx,
+        rect: (x, 0.0, 140.0, 28.0),
+        title_rect: (x + 8.0, 0.0, 104.0, 28.0),
+        hint: None,
+        close: (x + 112.0, 0.0, 28.0, 28.0),
+        title: title.into(),
+        path: None,
+        active: idx == 0,
+        activity: kettle_render::TabActivity::Normal,
+    };
+    let tr = kettle_i18n::Translator::new(kettle_i18n::Language::En);
+    let mut ws = crate::window_state::WindowState::new(0, crate::mux::Mux::new());
+    ws.window_focused = true;
+
+    let mut bar = kettle_render::TabBar::hidden();
+    bar.height = 28.0;
+    bar.band = (0.0, 0.0, 420.0, 28.0);
+    bar.segments = vec![
+        make_seg(0, 0.0, "shell"),
+        make_seg(1, 140.0, "editor"),
+        make_seg(9, 280.0, "tenth"),
+    ];
+
+    let defaults = kettle_config::keybinds::defaults();
+    let ctx = StripTooltipContext {
+        modal_open: false,
+        bindings: &defaults,
+        tr: &tr,
+        tab_format: "{title}",
+        tab_cell_width: 8.0,
+    };
+    let expected_key = super::chrome::tab_goto_hint(&defaults, 1).unwrap();
+    ws.native_pointer = Some(winit::dpi::PhysicalPosition::new(160.0, 14.0));
+    let tip = strip_tooltip_target(&ws, &bar, &ctx).expect("bound tab in multi-tab strip");
+    assert_eq!(tip.text, format!("editor  {expected_key}"));
+
+    // Tab 10 (idx 9) has no GotoTab binding and a short title: no tooltip.
+    ws.native_pointer = Some(winit::dpi::PhysicalPosition::new(300.0, 14.0));
+    assert_eq!(strip_tooltip_target(&ws, &bar, &ctx), None);
+
+    // With GotoTab unbound completely, short tabs show no tooltip.
+    let empty = kettle_config::Bindings::new();
+    let unbound_ctx = StripTooltipContext {
+        modal_open: false,
+        bindings: &empty,
+        tr: &tr,
+        tab_format: "{title}",
+        tab_cell_width: 8.0,
+    };
+    ws.native_pointer = Some(winit::dpi::PhysicalPosition::new(160.0, 14.0));
+    assert_eq!(strip_tooltip_target(&ws, &bar, &unbound_ctx), None);
 }

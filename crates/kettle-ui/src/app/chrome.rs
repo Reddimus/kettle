@@ -242,6 +242,7 @@ impl App {
                 scroll_right: (0.0, 0.0, 0.0, 0.0),
                 hovered_scroll_left: false,
                 hovered_scroll_right: false,
+                peek_badges: Vec::new(),
             };
         }
         let labels = ws.mux.tab_labels(&self.ui_text);
@@ -340,13 +341,10 @@ impl App {
                 if i == active && !recording_notice.is_empty() {
                     full_label = format!("{recording_notice} {full_label}");
                 }
-                // A lone title-bar tab stands for the window's title: its
-                // go-to-tab key would go nowhere.
-                let hint = if ws.macos_titlebar_tabs && n == 1 {
-                    None
-                } else {
-                    tab_goto_hint(&self.cfg.keybinds, i)
-                };
+                // Horizontal tabs stay free of inline shortcut hints at rest so
+                // titles keep symmetric centering and full path budget; numeric
+                // badges overlay on modifier hold instead.
+                let inline_hint: Option<&str> = None;
                 let cell_w = self.overlay_text_cell_width(ws);
                 let cell_w = if ws.macos_titlebar_tabs {
                     cell_w
@@ -362,7 +360,7 @@ impl App {
                     self.cfg.close_button_on_tab,
                     kettle_render::activity_lane(activity, scale),
                     &full_label,
-                    hint.as_deref(),
+                    inline_hint,
                     cell_w,
                 );
                 // GNOME centres a header bar's title on the window.
@@ -375,7 +373,7 @@ impl App {
                     idx: i,
                     rect,
                     title_rect: content.title,
-                    hint: content.hint.zip(hint),
+                    hint: None,
                     // ✕ hit zone = the trailing `height`-wide square.
                     close,
                     title: label.text.clone(),
@@ -385,6 +383,42 @@ impl App {
                 }
             })
             .collect();
+        let peek_badges = if ws.tab_hint_peek.is_visible()
+            && ws.window_focused
+            && !self.any_modal_open(ws)
+            && n > 1
+            && !lone_title
+        {
+            let line_h = self.overlay_text_line_height(ws);
+            let text_scale = if ws.macos_titlebar_tabs {
+                kettle_render::tab_text_scale(height, line_h)
+            } else {
+                1.0
+            };
+            let cell = (
+                self.overlay_text_cell_width(ws) * text_scale,
+                line_h * text_scale,
+            );
+            segments
+                .iter()
+                .filter(|seg| {
+                    seg.idx < 9
+                        && tab_shown(seg)
+                        && tab_goto_hint(&self.cfg.keybinds, seg.idx).is_some()
+                })
+                .filter_map(|seg| {
+                    let label = (seg.idx + 1).to_string();
+                    let rect = kettle_render::tab_peek_badge_rect(seg.rect, &label, cell, scale)?;
+                    Some(kettle_render::TabPeekBadge {
+                        idx: seg.idx,
+                        rect,
+                        label,
+                    })
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let segments_hovered = segments
             .iter()
             .find(|s| chrome_pointer(ws).is_some_and(|(x, y)| rect_contains(s.rect, x, y)))
@@ -459,6 +493,7 @@ impl App {
             scroll_right: to_btn(layout.arrow_right),
             hovered_scroll_left: ws.hovered_scroll_arrow == Some(false),
             hovered_scroll_right: ws.hovered_scroll_arrow == Some(true),
+            peek_badges,
         };
         self.attach_strip_tooltip(ws, &mut bar);
         bar
@@ -643,9 +678,34 @@ impl App {
             scroll_right: arrow(layout.plus.saturating_sub(1)),
             hovered_scroll_left: ws.hovered_scroll_arrow == Some(false),
             hovered_scroll_right: ws.hovered_scroll_arrow == Some(true),
+            peek_badges: Vec::new(),
         };
         self.attach_strip_tooltip(ws, &mut bar);
         bar
+    }
+
+    /// Whether holding the go-to-tab modifier may currently arm or keep
+    /// horizontal tab number overlay badges visible.
+    pub(super) fn tab_hint_peek_eligible(&self, ws: &WindowState) -> bool {
+        let Some(peek_mods) = tab_goto_peek_modifiers(&self.cfg.keybinds) else {
+            return false;
+        };
+        ws.window_focused
+            && !self.any_modal_open(ws)
+            && !self.cfg.tab_bar_pos.is_vertical()
+            && ws.mux.tabs.len() > 1
+            && self.hovered_link_at_cursor(ws).is_none()
+            && ws.mods == peek_mods
+    }
+
+    /// Update the modifier-hold tab badge state after `ModifiersChanged`.
+    pub(super) fn sync_tab_hint_peek(&self, ws: &mut WindowState) {
+        let eligible = self.tab_hint_peek_eligible(ws);
+        if ws.tab_hint_peek.update(eligible, std::time::Instant::now())
+            && let Some(window) = &ws.window
+        {
+            window.request_redraw();
+        }
     }
 
     /// What a primary release does after a press on `+` or GNOME's Find
@@ -1333,9 +1393,11 @@ pub(super) fn strip_tooltip_target(
     strip(target, text, rect)
 }
 
-/// The tab under the pointer, off its close button, when the strip shows
-/// its title shortened: the tooltip names the whole title. A lone title-bar
-/// title stands for the window and has none.
+/// The tab under the pointer, off its close button. In a multi-tab strip, a
+/// tab with a bound go-to-tab shortcut shows `{full_title}  {key}` so the
+/// shortcut stays discoverable on hover; otherwise (single tab or unbound tab)
+/// only a shortened title produces a tooltip. A lone title-bar title stands for
+/// the window and has none.
 fn cut_tab_title_tooltip(
     ws: &WindowState,
     bar: &TabBar,
@@ -1350,15 +1412,26 @@ fn cut_tab_title_tooltip(
     if seg.close.2 > 0.0 && rect_contains(seg.close, x, y) {
         return None;
     }
-    kettle_render::tab_segment_label_cut(
+    let shortcut = (bar.segments.len() > 1)
+        .then(|| tab_goto_hint(context.bindings, seg.idx))
+        .flatten();
+    let is_cut = kettle_render::tab_segment_label_cut(
         seg,
         context.tab_format,
         context.tab_cell_width,
         &bar.recording_notice,
-    )
-    .then(|| ChromeTooltip {
+    );
+    if !is_cut && shortcut.is_none() {
+        return None;
+    }
+    let full_title = seg.path.as_deref().unwrap_or(&seg.title);
+    let text = shortcut.map_or_else(
+        || full_title.to_owned(),
+        |key| format!("{full_title}  {key}"),
+    );
+    Some(ChromeTooltip {
         target: crate::tooltip::TooltipTarget::TabTitle(seg.idx),
-        text: seg.path.as_deref().unwrap_or(&seg.title).to_owned(),
+        text,
         anchor: Some(seg.rect),
         rect: tab_title_region(seg),
     })
@@ -2312,6 +2385,54 @@ pub(super) fn tab_goto_hint(
 ) -> Option<String> {
     let index = u8::try_from(index).ok().filter(|index| *index < 9)?;
     kettle_config::keybinds::ui_hint_label(bindings, &Action::GotoTab(index))
+}
+
+/// The modifier set held to reveal numeric overlay badges on horizontal tabs,
+/// derived dynamically from the live `Action::GotoTab(0..9)` bindings. Returns
+/// `None` when unbound, modifier-free, or inconsistent across bound tabs.
+pub(super) fn tab_goto_peek_modifiers(
+    bindings: &kettle_config::keybinds::Bindings,
+) -> Option<winit::keyboard::ModifiersState> {
+    tab_goto_peek_modifiers_for_platform(bindings, cfg!(target_os = "macos"))
+}
+
+pub(super) fn tab_goto_peek_modifiers_for_platform(
+    bindings: &kettle_config::keybinds::Bindings,
+    prefer_command: bool,
+) -> Option<winit::keyboard::ModifiersState> {
+    let mut shared: Option<kettle_config::Mods> = None;
+    for index in 0u8..9 {
+        let Some(trigger) = kettle_config::keybinds::hint_trigger(
+            bindings,
+            &Action::GotoTab(index),
+            prefer_command,
+        ) else {
+            continue;
+        };
+        if trigger.mods.is_empty() {
+            return None;
+        }
+        match shared {
+            None => shared = Some(trigger.mods),
+            Some(prev) if prev == trigger.mods => {}
+            Some(_) => return None,
+        }
+    }
+    let mods = shared?;
+    let mut state = winit::keyboard::ModifiersState::empty();
+    if mods.contains(kettle_config::Mods::SHIFT) {
+        state |= winit::keyboard::ModifiersState::SHIFT;
+    }
+    if mods.contains(kettle_config::Mods::CTRL) {
+        state |= winit::keyboard::ModifiersState::CONTROL;
+    }
+    if mods.contains(kettle_config::Mods::ALT) {
+        state |= winit::keyboard::ModifiersState::ALT;
+    }
+    if mods.contains(kettle_config::Mods::SUPER) {
+        state |= winit::keyboard::ModifiersState::SUPER;
+    }
+    Some(state)
 }
 
 pub(super) fn titlebar_new_tab_controls(band: Rect, scale: f32) -> (Rect, Rect, f32) {

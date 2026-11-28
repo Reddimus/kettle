@@ -1529,6 +1529,18 @@ pub struct TabSeg {
     pub activity: TabActivity,
 }
 
+/// Compact numeric shortcut pill drawn over the leading edge of a visible
+/// horizontal tab while the go-to-tab modifier is held.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabPeekBadge {
+    /// Tab index in `TabBar::segments`.
+    pub idx: usize,
+    /// Pill bounding rectangle in physical pixels.
+    pub rect: Rect4,
+    /// Numeric shortcut label (`"1"`..`"9"`).
+    pub label: String,
+}
+
 /// Thin status-bar strip at the top or bottom of the
 /// surface. Disabled by default; when on, the App sets `height` > 0
 /// and supplies a pre-formatted single-line string.
@@ -1708,6 +1720,9 @@ pub struct TabBar {
     /// rects the press uses.
     pub hovered_scroll_left: bool,
     pub hovered_scroll_right: bool,
+    /// Compact numeric shortcut pills painted over visible horizontal tabs
+    /// while the go-to-tab modifier is held.
+    pub peek_badges: Vec<TabPeekBadge>,
 }
 
 impl TabBar {
@@ -1751,6 +1766,7 @@ impl TabBar {
             scroll_right: (0.0, 0.0, 0.0, 0.0),
             hovered_scroll_left: false,
             hovered_scroll_right: false,
+            peek_badges: Vec::new(),
         }
     }
 }

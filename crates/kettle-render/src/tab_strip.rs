@@ -114,6 +114,77 @@ pub fn horizontal_tab_content_layout(
     }
 }
 
+/// Compact numeric overlay pill anchored at the leading edge of a visible
+/// horizontal tab (`x + 6 * scale`, vertically centred). Painted over the tab
+/// surface when the go-to-tab modifier is held so `title_rect` never shifts.
+/// Returns `None` when the segment is parked off-screen or too narrow to hold
+/// the badge without overflowing.
+pub fn tab_peek_badge_rect(
+    segment: Rect4,
+    label: &str,
+    cell: (f32, f32),
+    scale: f32,
+) -> Option<Rect4> {
+    let (sx, sy, sw, sh) = segment;
+    let scale = scale.max(0.5);
+    if label.is_empty()
+        || !sx.is_finite()
+        || !sy.is_finite()
+        || !sw.is_finite()
+        || !sh.is_finite()
+        || sx < -1000.0
+        || sw <= 0.0
+        || sh <= 0.0
+    {
+        return None;
+    }
+    let lead = (6.0 * scale).round();
+    let pad_x = (5.0 * scale).round().max(3.0);
+    let pad_y = (2.0 * scale).round().max(1.0);
+    let text_w = (display_width(label).max(1) as f32 * cell.0.max(1.0)).ceil();
+    let pill_h = (cell.1.max(1.0) + pad_y * 2.0)
+        .min((sh - 4.0 * scale).max(1.0))
+        .round()
+        .max(1.0);
+    let pill_w = (text_w + pad_x * 2.0).max(pill_h).round();
+    if lead + pill_w + (2.0 * scale).round() > sw {
+        return None;
+    }
+    let x = (sx + lead).round();
+    let y = (sy + (sh - pill_h) * 0.5).round();
+    Some((x, y, pill_w, pill_h))
+}
+
+/// Opaque accent fill and WCAG AA text ink for a tab peek badge. Picks
+/// whichever theme end (`foreground` or `background`) stands out more against
+/// `accent` and resolves it to `TEXT_CONTRAST` via `chrome::Colors`.
+pub(crate) fn tab_peek_badge_colors(
+    theme: &kettle_config::Theme,
+    accent: Rgb,
+    colors: &mut crate::chrome::Colors,
+) -> (Rgb, Rgb) {
+    let on_ink = if crate::color::contrast_ratio(theme.foreground, accent)
+        >= crate::color::contrast_ratio(theme.background, accent)
+    {
+        theme.foreground
+    } else {
+        theme.background
+    };
+    let text = colors.text(on_ink, accent);
+    (accent, text)
+}
+
+/// Rounded opaque pill quad for one tab peek badge.
+pub(crate) fn push_tab_peek_badge_quads(
+    quads: &mut Vec<QuadInstance>,
+    badge: Rect4,
+    fill: Rgb,
+    scale: f32,
+) {
+    let radius = (badge.3 * 0.3).min(6.0 * scale.max(0.5));
+    rounded_fill(quads, badge, radius, (true, true), (fill, 1.0), None);
+}
+
 /// Where a tab's `kind` activity marker draws: a box of [`marker_side`]
 /// device pixels whose right edge leaves the lane's gap before the title text
 /// at `label_left`, centred on the title line. `None` when the box would not
@@ -3038,5 +3109,76 @@ mod scroll_arrow_tests {
         assert_eq!(shown, title, "the whole title");
         let src: String = crate::production_source().split_whitespace().collect();
         assert!(src.contains("letwrap_width=(sw-16.0*self.scale).max(1.0);"));
+    }
+
+    #[test]
+    fn tab_peek_badge_anchors_at_leading_edge_without_shifting_title_rect() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let segment = (78.0 * scale, 0.0, 180.0 * scale, 32.0 * scale);
+            let cell = (8.0 * scale, 16.0 * scale);
+            let rest =
+                horizontal_tab_content_layout(segment, true, true, 0.0, "shell", None, cell.0);
+            assert!(rest.hint.is_none());
+            // Without an inline hint, the title stays symmetrically centered in
+            // the full lane before the close button.
+            assert_eq!(rest.title.0, segment.0 + 8.0);
+            assert_eq!(rest.title.0 + rest.title.2, rest.close.0);
+
+            for n in 1..=9 {
+                let label = n.to_string();
+                let badge = tab_peek_badge_rect(segment, &label, cell, scale)
+                    .unwrap_or_else(|| panic!("badge {label} at {scale}x"));
+                assert_eq!(badge.0, (segment.0 + 6.0 * scale).round());
+                let mid_y = badge.1 + badge.3 * 0.5;
+                let seg_mid_y = segment.1 + segment.3 * 0.5;
+                assert!((mid_y - seg_mid_y).abs() <= 1.0, "vertically centered");
+                assert!(badge.1 >= segment.1 && badge.1 + badge.3 <= segment.1 + segment.3);
+                assert!(badge.0 >= segment.0 && badge.0 + badge.2 <= segment.0 + segment.2);
+                assert!(badge.2 >= badge.3, "pill is at least square");
+
+                let mut quads = Vec::new();
+                push_tab_peek_badge_quads(&mut quads, badge, Rgb::new(0x7a, 0xa2, 0xf7), scale);
+                assert!(!quads.is_empty());
+                assert!(
+                    quads.iter().all(|q| q.color[3] == 1.0),
+                    "opaque overlay pill"
+                );
+            }
+            // Parked off-screen tabs and tiny segments produce no badge.
+            let parked = (-100_000.0, 0.0, 180.0 * scale, 32.0 * scale);
+            assert_eq!(tab_peek_badge_rect(parked, "1", cell, scale), None);
+            let narrow = (0.0, 0.0, 12.0 * scale, 32.0 * scale);
+            assert_eq!(tab_peek_badge_rect(narrow, "1", cell, scale), None);
+            assert_eq!(tab_peek_badge_rect(segment, "", cell, scale), None);
+        }
+    }
+
+    #[test]
+    fn tab_peek_badge_colors_meet_wcag_aa_across_all_bundled_themes() {
+        let mut colors = crate::chrome::Colors::default();
+        let mut failures = Vec::new();
+        for name in kettle_config::Theme::list() {
+            let theme = kettle_config::Theme::by_name(name);
+            for accent in [
+                theme.accent,
+                theme.palette[3],
+                theme.palette[4],
+                theme.background,
+                theme.foreground,
+            ] {
+                let (fill, ink) = tab_peek_badge_colors(&theme, accent, &mut colors);
+                assert_eq!(fill, accent);
+                let ratio = crate::color::contrast_ratio(ink, fill);
+                if ratio < crate::chrome::TEXT_CONTRAST {
+                    failures.push(format!("{name} accent={accent:?}: {ratio:.3}:1"));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} badge contrast failures: {}",
+            failures.len(),
+            failures.into_iter().take(10).collect::<Vec<_>>().join("; ")
+        );
     }
 }
