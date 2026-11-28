@@ -555,7 +555,11 @@ fn switch_parts_reach_three_to_one_in_every_theme() {
                                     &[track.fill, row_surface],
                                 );
                             } else {
-                                check_on(&format!("{role} track/panel"), track.fill, &[bg]);
+                                check_on(
+                                    &format!("{role} track/row"),
+                                    track.fill,
+                                    &[bg, row_surface],
+                                );
                             }
                             for part in &surfaces[1..] {
                                 let inside = part.rect.0 >= track.rect.0 - 0.01
@@ -598,6 +602,109 @@ fn switch_parts_reach_three_to_one_in_every_theme() {
         let theme = Theme::by_name(name);
         let (_, thumb) = switch_on_colors(theme.background, theme.accent, true);
         assert_eq!(thumb, white, "{name}");
+    }
+}
+
+/// Kettle Day with GNOME's lilac accent keeps 3:1 contrast for an ON switch
+/// even on the focused and hovered row surfaces.
+#[test]
+fn kettle_day_lilac_on_switch_keeps_focused_and_hovered_contrast() {
+    let mut colors = chrome::Colors::default();
+    let theme = Theme::by_name("Kettle Day");
+    let accent = Rgb::new(0xbb, 0x99, 0xf8);
+    let tr = Translator::new(Language::En);
+    let set = switches(&tr);
+    let layout = settings_layout(&set, (8.4, 17.5), (1280.0, 820.0), 8.4, 1.0);
+    let row = &layout.rows[0];
+    let data = &set.rows[0];
+    for linear in [true, false] {
+        let palette = settings_colors(&theme, accent, linear, &mut colors);
+        for (fill_kind, around) in [
+            (SettingsRowFill::Focused, palette.selected),
+            (SettingsRowFill::Hovered, palette.hover),
+        ] {
+            for hover in [None, Some(SettingsHover::Switch(row.index))] {
+                let surfaces = settings_row_surfaces(
+                    row,
+                    data,
+                    &palette,
+                    theme.background,
+                    (fill_kind, hover),
+                    1.0,
+                );
+                let track = &surfaces[0];
+                if track.width > 0.0 {
+                    assert!(ratio(track.stroke, track.fill) >= ICON_CONTRAST);
+                    assert!(ratio(track.stroke, around) >= ICON_CONTRAST);
+                } else {
+                    assert!(ratio(track.fill, around) >= ICON_CONTRAST);
+                }
+            }
+        }
+    }
+}
+
+/// A clamped switch track keeps any painted symbol disjoint from the thumb and
+/// omits symbols that cannot clear it.
+#[test]
+fn clamped_switch_track_never_overlaps_thumb_with_symbol() {
+    let mut colors = chrome::Colors::default();
+    let theme = Theme::by_name("TokyoNight Night");
+    let palette = settings_colors(&theme, theme.accent, true, &mut colors);
+    let tr = Translator::new(Language::En);
+    let set = switches(&tr);
+    let scale = 1.0_f32;
+    let layout = settings_layout(&set, (33.6, 70.0), (160.0, 900.0), 33.6, scale);
+    for (row_idx, data_idx) in [(0, 0), (1, 1)] {
+        let mut row = layout.rows[row_idx].clone();
+        let d = settings_switch_thumb(row.chip_rect.3, scale);
+        for width in [row.chip_rect.2, 84.0_f32] {
+            row.chip_rect.2 = width;
+            let surfaces = settings_row_surfaces(
+                &row,
+                &set.rows[data_idx],
+                &palette,
+                theme.background,
+                (SettingsRowFill::Panel, None),
+                scale,
+            );
+            let track = surfaces[0].rect;
+            let thumb_y = track.1 + track.3 / 2.0 - d / 2.0;
+            let thumb = surfaces
+                .iter()
+                .map(|s| s.rect)
+                .find(|r| {
+                    (r.2 - d).abs() < 0.01 && (r.3 - d).abs() < 0.01 && (r.1 - thumb_y).abs() < 0.01
+                })
+                .expect("thumb rect");
+            let mut symbol_count = 0;
+            for sym in surfaces.iter().skip(1).filter(|s| {
+                (s.rect.2 - d).abs() >= 0.01
+                    && row
+                        .reset
+                        .is_none_or(|r| (r.rect.0 - s.rect.0).abs() >= 0.01)
+            }) {
+                symbol_count += 1;
+                assert!(
+                    sym.rect.0 >= track.0 && sym.rect.0 + sym.rect.2 <= track.0 + track.2,
+                    "symbol out of track bounds: sym={:?} track={track:?}",
+                    sym.rect
+                );
+                let left_clear = sym.rect.0 + sym.rect.2 + scale <= thumb.0 + 0.01;
+                let right_clear = thumb.0 + thumb.2 + scale <= sym.rect.0 + 0.01;
+                assert!(
+                    left_clear || right_clear,
+                    "symbol overlaps thumb on clamped track {track:?}: sym={:?} thumb={thumb:?}",
+                    sym.rect
+                );
+            }
+            if data_idx == 0 && width > d + 20.0 {
+                assert_eq!(
+                    symbol_count, 1,
+                    "ON bar should still render when space clears thumb"
+                );
+            }
+        }
     }
 }
 

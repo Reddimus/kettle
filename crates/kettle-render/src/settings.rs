@@ -1681,19 +1681,19 @@ pub(crate) fn settings_row_surfaces(
         (SettingsRowFill::Focused, _, false) => palette.selected_control,
         (SettingsRowFill::Hovered, _, false) => palette.hover_control,
     };
+    let row_around = match row_fill {
+        SettingsRowFill::Panel => bg,
+        SettingsRowFill::Focused => palette.selected,
+        SettingsRowFill::Hovered => palette.hover,
+    };
     // A switch's outline divides its own track, which the pointer moves,
     // from the row's fill around it: it is resolved against both.
     let switch_stroke = if switch {
         use super::chrome::ICON_CONTRAST;
-        let around = match row_fill {
-            SettingsRowFill::Panel => bg,
-            SettingsRowFill::Focused => palette.selected,
-            SettingsRowFill::Hovered => palette.hover,
-        };
         if data.unavailable {
-            super::color::with_min_contrast_on_both(control, fill, around, ICON_CONTRAST, false)
+            super::color::with_min_contrast_on_both(control, fill, row_around, ICON_CONTRAST, false)
         } else {
-            settings_outline(control, fill, around)
+            settings_outline(control, fill, row_around)
         }
     } else {
         control
@@ -1750,9 +1750,11 @@ pub(crate) fn settings_row_surfaces(
             0.0,
         );
     } else if switch {
-        // On, the solid track needs no outline of its own.
+        // On, the solid track needs an outline only where an extreme accent/row
+        // combination leaves it below `SWITCH_CONTRAST` against the row fill.
         let (stroke, width) = if on {
-            (fill, 0.0)
+            let need = super::color::contrast_ratio(fill, row_around) < SWITCH_CONTRAST;
+            (switch_stroke, if need { scale } else { 0.0 })
         } else {
             (switch_stroke, scale)
         };
@@ -1798,33 +1800,24 @@ pub(crate) fn settings_row_surfaces(
             shape(thumb, ink, ink, 0.0, d / 2.0);
             let stroke = settings_switch_stroke(scale);
             let size = settings_switch_symbol(h).max(2.0 * stroke);
-            let centre = symbol_x + d / 2.0;
-            if on {
-                shape(
-                    (
-                        (centre - stroke / 2.0).round(),
-                        (middle - size / 2.0).round(),
-                        stroke,
-                        size,
-                    ),
-                    ink,
-                    ink,
-                    0.0,
-                    stroke / 2.0,
-                );
+            let symbol_w = if on { stroke } else { size };
+            let (free_start, free_end) = if settings_knob_on_right(data) {
+                (x + inset, thumb.0)
             } else {
-                shape(
-                    (
-                        (centre - size / 2.0).round(),
-                        (middle - size / 2.0).round(),
-                        size,
-                        size,
-                    ),
-                    fill,
-                    ink,
-                    stroke,
-                    size / 2.0,
-                );
+                (thumb.0 + d, x + w - inset)
+            };
+            let min_x = (free_start + scale).ceil();
+            let max_x = (free_end - symbol_w - scale).floor();
+            if max_x >= min_x {
+                let sx = (symbol_x + (d - symbol_w) / 2.0)
+                    .round()
+                    .clamp(min_x, max_x);
+                let sy = (middle - size / 2.0).round();
+                if on {
+                    shape((sx, sy, stroke, size), ink, ink, 0.0, stroke / 2.0);
+                } else {
+                    shape((sx, sy, size, size), fill, ink, stroke, size / 2.0);
+                }
             }
         }
     }
