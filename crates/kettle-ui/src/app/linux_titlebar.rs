@@ -2,6 +2,8 @@
 use super::*;
 
 pub(super) const LINUX_HEADER_HEIGHT: f32 = crate::window_buttons::HEADER_HEIGHT;
+/// Dedicated second-row tab strip height beneath a GNOME header bar.
+pub(super) const LINUX_TAB_ROW_HEIGHT: f32 = 36.0;
 const LINUX_RESIZE_GRIP: f32 = 6.0;
 
 #[cfg(any(test, target_os = "linux"))]
@@ -10,6 +12,18 @@ pub(super) fn linux_titlebar_policy(cfg: &Config) -> bool {
         && !cfg.borderless
         && cfg.tab_bar_pos == TabBarPos::Top
         && cfg.tab_bar != TabBarMode::Off
+}
+
+/// Whether Kettle's Linux header renders tabs in a dedicated second row below
+/// the header bar (2+ tabs, `tab-bar = always`, or inline title edit).
+pub(super) fn linux_two_row_tabs(
+    linux_header: bool,
+    tabs: usize,
+    editing: bool,
+    mode: TabBarMode,
+    pos: TabBarPos,
+) -> bool {
+    linux_header && pos == TabBarPos::Top && (tabs > 1 || editing || mode == TabBarMode::Always)
 }
 
 /// Desktops whose compositor offers no server-side decorations (Mutter and
@@ -76,9 +90,12 @@ pub(super) fn linux_title_double_click(
 
 /// Whether `(x, y)` is on what GNOME treats as the title bar itself: empty
 /// header space, or the lone title, which stands for the window's title as
-/// it does in a macOS title bar. With several tabs each is a tab, and its
-/// presses stay with the tab strip.
+/// it does in a macOS title bar. With two-row headers, only the upper header
+/// row is title space; clicks on the lower tab row stay with the tab strip.
 pub(super) fn linux_title_space(bar: &TabBar, x: f32, y: f32) -> bool {
+    if bar.header_height > 0.0 && y >= bar.tab_row_y() {
+        return false;
+    }
     empty_titlebar_space(bar, x, y)
         || bar.lone_title
             && rect_contains(bar.band, x, y)
@@ -374,7 +391,12 @@ pub(super) fn linux_startup_surface_with_header(
     scale: f32,
     monitor: Option<StartupMonitor>,
 ) -> (u32, u32) {
-    let height = (surface.1 as f32 + LINUX_HEADER_HEIGHT * scale - previous_height)
+    let chrome_h = if cfg.tab_bar == TabBarMode::Always && cfg.tab_bar_pos == TabBarPos::Top {
+        (LINUX_HEADER_HEIGHT + LINUX_TAB_ROW_HEIGHT) * scale
+    } else {
+        LINUX_HEADER_HEIGHT * scale
+    };
+    let height = (surface.1 as f32 + chrome_h - previous_height)
         .round()
         .max(1.0);
     let height = if cfg.window_width.is_none() && cfg.window_height.is_none() {

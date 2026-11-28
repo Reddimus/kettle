@@ -145,9 +145,9 @@ class TitlebarGeometryTests(unittest.TestCase):
                         "band": rect(78, 0, 722, 28),
                         "new_tab": rect(736, 0, 28, 28),
                         "new_tab_menu": rect(764, 0, 28, 28),
-                        "segments": [{"rect": rect(78, 0, 560, 28),
-                                      "title_rect": rect(86, 0, 544, 28),
-                                      "close": rect(638, 0, 0, 0),
+                        "segments": [{"rect": rect(104, 0, 592, 28),
+                                      "title_rect": rect(112, 0, 576, 28),
+                                      "close": rect(668, 0, 0, 0),
                                       "hint": None, "hovered": False,
                                       "fitted_title": "",
                                       "label": "Kettle caption fixture"}]},
@@ -161,9 +161,9 @@ class TitlebarGeometryTests(unittest.TestCase):
             tab["close"] = dict(x=560, y=0, width=0, height=0)
             tab["hint"] = None
             if control == "close":
-                tab["close"].update(x=532, width=28, height=28)
+                tab["close"].update(x=668, width=28, height=28)
             else:
-                tab["hint"] = {"text": "Cmd+1", "rect": dict(x=492, y=0, width=40, height=28)}
+                tab["hint"] = {"text": "Cmd+1", "rect": dict(x=620, y=0, width=40, height=28)}
             with self.assertRaises(AssertionError):
                 checker.titlebar_geometry(geometry)
 
@@ -173,31 +173,31 @@ class TitlebarGeometryTests(unittest.TestCase):
                 geometry = self.fixture(scale)
                 tab = geometry["tab_bar"]["segments"][0]
                 tab["hovered"] = count == 1
-                tab["close"].update(x=452 * scale, width=28 * scale, height=28 * scale)
+                tab["close"].update(x=668 * scale, width=28 * scale, height=28 * scale)
                 if count == 2:
                     def segment(x, index):
                         return dict(tab, hovered=False,
-                                    rect=dict(x=x * scale, y=0, width=280 * scale, height=28 * scale),
+                                    rect=dict(x=x * scale, y=0, width=296 * scale, height=28 * scale),
                                     title_rect=dict(x=(x + 8) * scale, y=0,
-                                                    width=188 * scale, height=28 * scale),
-                                    close=dict(x=(x + 252) * scale, y=0,
+                                                    width=204 * scale, height=28 * scale),
+                                    close=dict(x=(x + 268) * scale, y=0,
                                                width=28 * scale, height=28 * scale),
                                     hint={"text": f"Cmd+{index}", "rect": dict(
-                                        x=(x + 204) * scale, y=0, width=40 * scale, height=28 * scale)})
-                    geometry["tab_bar"]["segments"] = [segment(78, 1), segment(358, 2)]
+                                        x=(x + 220) * scale, y=0, width=40 * scale, height=28 * scale)})
+                    geometry["tab_bar"]["segments"] = [segment(104, 1), segment(400, 2)]
                 checker.titlebar_geometry(geometry)
 
-    def test_tabs_start_the_lane_split_it_evenly_and_leave_a_drag_lane(self):
+    def test_tabs_center_split_evenly_and_leave_drag_lanes(self):
         def shift(g):
-            g["tab_bar"]["segments"][0]["rect"].update(x=320)
-            g["tab_bar"]["segments"][0]["title_rect"].update(x=328)
+            g["tab_bar"]["segments"][0]["rect"].update(x=160)
+            g["tab_bar"]["segments"][0]["title_rect"].update(x=168)
         def crowd(g):
-            g["tab_bar"]["segments"][0]["rect"].update(width=680)
-            g["tab_bar"]["segments"][0]["title_rect"].update(width=600)
+            g["tab_bar"]["segments"][0]["rect"].update(x=78, width=646)
+            g["tab_bar"]["segments"][0]["title_rect"].update(x=86, width=630)
         def uneven(g):
             tab = g["tab_bar"]["segments"][0]
-            other = dict(tab, rect=dict(tab["rect"], x=338, width=300),
-                         title_rect=dict(tab["title_rect"], x=346, width=284))
+            other = dict(tab, rect=dict(tab["rect"], x=364, width=332),
+                         title_rect=dict(tab["title_rect"], x=372, width=316))
             tab["rect"].update(width=260)
             tab["title_rect"].update(width=244)
             g["tab_bar"]["segments"].append(other)
@@ -208,11 +208,11 @@ class TitlebarGeometryTests(unittest.TestCase):
             mutate(geometry)
             with self.assertRaises(AssertionError, msg=mutate.__name__):
                 checker.titlebar_geometry(geometry)
-        # `›` right after the tabs shown keeps the lane.
+        # `›` right after the tabs shown keeps the drag lane.
         geometry = self.fixture()
-        geometry["tab_bar"]["scroll_right"] = dict(x=638, y=0, width=28, height=28)
-        geometry["tab_bar"]["segments"][0]["rect"].update(width=532)
-        geometry["tab_bar"]["segments"][0]["title_rect"].update(width=516)
+        geometry["tab_bar"]["scroll_right"] = dict(x=668, y=0, width=28, height=28)
+        geometry["tab_bar"]["segments"][0]["rect"].update(width=564)
+        geometry["tab_bar"]["segments"][0]["title_rect"].update(width=548)
         checker.titlebar_geometry(geometry)
 
     def test_titlebar_geometry_uses_scaled_band(self):
@@ -221,15 +221,18 @@ class TitlebarGeometryTests(unittest.TestCase):
             checker.titlebar_geometry(geometry)
             geometry["fullscreen"] = True
             geometry["tab_bar"]["band"]["x"] = 0
-            # Without the traffic lights the lone tab starts at the edge.
+            geometry["tab_bar"]["band"]["width"] = 800 * scale
+            # With fullscreen releasing traffic lights, centered tabs keep symmetric
+            # reserves around window midline (`band.width = 800`, midline still `400`).
+            geometry["tab_bar"]["segments"][0]["rect"].update(x=104 * scale, width=592 * scale)
+            checker.titlebar_geometry(geometry)
+            # An off-center single tab not starting at band.x fails.
+            geometry["tab_bar"]["segments"][0]["rect"].update(x=40 * scale, width=592 * scale)
+            geometry["tab_bar"]["segments"][0]["title_rect"].update(x=48 * scale)
             with self.assertRaises(AssertionError):
                 checker.titlebar_geometry(geometry)
-            tab = geometry["tab_bar"]["segments"][0]
-            tab["rect"].update(x=0)
-            tab["title_rect"].update(x=8 * scale)
-            checker.titlebar_geometry(geometry)
 
-    def test_settings_gear_must_sit_apart_from_the_new_tab_pair(self):
+    def test_macos_titlebar_rejects_settings_gear(self):
         for scale in (1, 2):
             def gear(x, width=28):
                 return dict(x=x * scale, y=0, width=width * scale, height=28 * scale)
@@ -238,11 +241,8 @@ class TitlebarGeometryTests(unittest.TestCase):
             geometry["tab_bar"]["settings"] = gear(0, 0)
             checker.titlebar_geometry(geometry)
             geometry["tab_bar"]["settings"] = gear(700)
-            checker.titlebar_geometry(geometry)
-            for bad in (gear(704), gear(700, 16), gear(70)):
-                geometry["tab_bar"]["settings"] = bad
-                with self.assertRaises(AssertionError):
-                    checker.titlebar_geometry(geometry)
+            with self.assertRaises(AssertionError):
+                checker.titlebar_geometry(geometry)
 
     def test_titlebar_geometry_rejects_overlap_missing_title_and_small_controls(self):
         for mutate in (

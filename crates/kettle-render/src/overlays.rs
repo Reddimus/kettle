@@ -1609,6 +1609,12 @@ pub struct TabBar {
     /// accent line, hover fill or close button, and its title is resolved
     /// against the header. A second tab brings back the tab look.
     pub lone_title: bool,
+    /// Row 1 header bar height above a dedicated tab strip row (`0.0` for
+    /// single-row strips; `46 * scale` on a two-row GNOME header).
+    pub header_height: f32,
+    /// Centered Row 1 title lane for a two-row GNOME header when tabs sit
+    /// on the dedicated row below it.
+    pub header_title_rect: Option<Rect4>,
     /// Recording warning, independent of the configurable tab format.
     pub recording_notice: String,
     /// Bar height in px (0 = hidden).
@@ -1711,6 +1717,16 @@ pub struct TabBar {
 }
 
 impl TabBar {
+    /// Height of the strip row holding tabs and overflow controls.
+    pub fn tab_row_height(&self) -> f32 {
+        (self.height - self.header_height).max(0.0)
+    }
+
+    /// Top Y of the strip row holding tabs and overflow controls.
+    pub fn tab_row_y(&self) -> f32 {
+        self.y + self.header_height
+    }
+
     pub fn hidden() -> Self {
         TabBar {
             window_controls: Vec::new(),
@@ -1724,6 +1740,8 @@ impl TabBar {
             in_titlebar: false,
             linux_header: false,
             lone_title: false,
+            header_height: 0.0,
+            header_title_rect: None,
             recording_notice: String::new(),
             height: 0.0,
             y: 0.0,

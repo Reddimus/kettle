@@ -42,10 +42,9 @@ fn tab_width(layout: &TabStripLayout, i: usize) -> f32 {
     }
 }
 
-/// Where the trailing controls start: the gear or `+` on macOS, Find or `≡`
+/// Where the trailing controls start: `+` on macOS, Find or `≡`
 /// in the GNOME header (whose `+` leads), else the lane's end.
-fn trailing_controls(lane: Rect, g: &HorizontalTabGeometry) -> f32 {
-    let linux = g.lead > 0.0;
+fn trailing_controls(lane: Rect, linux: bool, g: &HorizontalTabGeometry) -> f32 {
     let controls = if linux {
         [g.search_rect, g.arrow_rect]
     } else {
@@ -118,21 +117,29 @@ fn painted_bar(lane: Rect, header: (bool, bool), g: &HorizontalTabGeometry) -> T
     bar
 }
 
-/// Tabs divide what the lane leaves after its controls and the drag lane
-/// evenly, from the strip's start, on macOS and in the GNOME header. They
-/// were capped at 240 points (scaled with the bar) and left-packed, leaving
-/// the rest of the bar empty.
+/// Tabs divide the available strip room evenly and keep balanced drag space:
+/// on macOS they center symmetrically around the window midline with split
+/// drag reserves on both sides, while the two-row GNOME header puts full-width
+/// tabs on Row 2 directly under the header bar.
 #[test]
 fn titlebar_tabs_divide_the_lane_before_the_drag_lane_evenly() {
     let cfg = Config::default();
+    let buttons = crate::window_buttons::ButtonLayout::default();
     for scale in SCALES {
-        for width in [800.0, 1000.0, 1280.0, 1920.0] {
+        for width in [640.0, 800.0, 1000.0, 1280.0, 1920.0] {
             for (name, lane, header) in lanes(width, scale) {
                 for n in [2_usize, 3, 4] {
+                    if width < 800.0 && (n > 3 || (header.0 && n > 2)) {
+                        continue;
+                    }
                     for active in [0, n - 1] {
                         let g = horizontal_tab_geometry(lane, scale, header, (n, active), &cfg);
                         let case = format!("{name} {width}pt @{scale}x, {n} tabs");
-                        let room = g.strip - TITLEBAR_DRAG_LANE * scale;
+                        let room = if header.0 {
+                            g.strip - TITLEBAR_DRAG_LANE * scale
+                        } else {
+                            g.strip
+                        };
                         assert!(room / n as f32 >= cfg.tab_min_width * scale, "{case}");
                         let even = room / n as f32;
                         assert!(
@@ -146,26 +153,76 @@ fn titlebar_tabs_divide_the_lane_before_the_drag_lane_evenly() {
                             assert!((x - i as f32 * even).abs() < 0.01, "{case}: tab {i} at {x}");
                         }
                         assert!(g.layout.arrow_left.is_none() && g.layout.arrow_right.is_none());
-                        // The last tab ends where the drag lane starts.
-                        let gap = trailing_controls(lane, &g) - painted_end(lane, &g);
-                        let drag = TITLEBAR_DRAG_LANE * scale;
-                        assert!(gap >= drag - 0.01, "{case}: {gap} before the controls");
-                        // Past the drag lane, only the controls' own margin.
-                        assert!(gap <= drag + 12.0 * scale + 0.01, "{case}: {gap} left over");
+                        let controls = trailing_controls(lane, header.0, &g);
+                        let end = painted_end(lane, &g);
+                        let right_gap = controls - end;
+                        if header.0 {
+                            let drag = TITLEBAR_DRAG_LANE * scale;
+                            assert!(
+                                right_gap >= drag - 0.01,
+                                "{case}: {right_gap} before controls"
+                            );
+                            assert!(
+                                right_gap <= drag + 12.0 * scale + 0.01,
+                                "{case}: {right_gap}"
+                            );
+                        } else {
+                            let left_gap = lane.0 + g.lead - lane.0;
+                            assert!(
+                                right_gap >= TITLEBAR_DRAG_LANE_SIDE * scale - 0.01,
+                                "{case}: right_gap {right_gap}"
+                            );
+                            assert!(
+                                left_gap + right_gap >= TITLEBAR_DRAG_LANE * scale - 0.01,
+                                "{case}: combined drag {} < 48pt",
+                                left_gap + right_gap
+                            );
+                            let mid = (lane.0 + g.lead + end) * 0.5;
+                            assert!(
+                                (mid - width * scale * 0.5).abs() < 0.01,
+                                "{case}: mid {mid}"
+                            );
+                            if n == 2 {
+                                let seam = lane.0 + g.lead + g.layout.xs[1].unwrap();
+                                assert!(
+                                    (seam - width * scale * 0.5).abs() < 0.01,
+                                    "{case}: seam {seam}"
+                                );
+                            }
+                        }
                     }
+                }
+            }
+            // Two-row GNOME header divides the entire window width evenly.
+            let header_h = LINUX_HEADER_HEIGHT * scale;
+            let row_h = LINUX_TAB_ROW_HEIGHT * scale;
+            let band = (0.0, 0.0, width * scale, header_h + row_h);
+            for n in [2_usize, 3, 4] {
+                let g = linux_two_row_tab_geometry_in(
+                    band,
+                    header_h,
+                    row_h,
+                    scale,
+                    (n, 0),
+                    &buttons,
+                    &cfg,
+                    (&mut TitlebarStrip::default(), false),
+                );
+                let even = width * scale / n as f32;
+                assert!((g.layout.width - even).abs() < 0.01);
+                if n == 2 {
+                    assert!((g.layout.xs[1].unwrap() - width * scale * 0.5).abs() < 0.01);
                 }
             }
         }
     }
 }
 
-/// On macOS a lone tab is laid out like any tab: from the lane's start
-/// (past the traffic lights, or the window's edge in fullscreen) across the
-/// lane to the drag lane. It was sized to its title and centred on the
-/// window. The torn-off window's lone tab, which a tear's grip is measured
-/// into, is the same tab.
+/// On macOS a lone tab is centered symmetrically between the traffic lights
+/// and the right controls, with split drag reserves on both sides. The
+/// torn-off window's lone tab uses the same geometry.
 #[test]
-fn a_lone_macos_titlebar_tab_fills_the_lane_from_its_start() {
+fn a_lone_macos_titlebar_tab_is_centered_with_split_drag_lanes() {
     let cfg = Config::default();
     let buttons = crate::window_buttons::ButtonLayout::default();
     for scale in SCALES {
@@ -176,10 +233,14 @@ fn a_lone_macos_titlebar_tab_fills_the_lane_from_its_start() {
                 let case = format!("{width}pt @{scale}x fullscreen={fullscreen}");
                 assert_eq!(g.layout.xs, vec![Some(0.0)], "{case}");
                 let w = g.layout.last_width;
-                assert_eq!(w, g.strip - TITLEBAR_DRAG_LANE * scale, "{case}");
+                assert_eq!(w, g.strip, "{case}");
                 assert!(w >= cfg.tab_min_width * scale, "{case}: {w}");
                 let tab = tear_off_destination_tab(&cfg, lane, (false, true), scale, &buttons);
-                assert_eq!(tab, (lane.0, lane.1, w, lane.3), "{case}");
+                assert_eq!(tab, (lane.0 + g.lead, lane.1, w, lane.3), "{case}");
+                assert!(
+                    (tab.0 + tab.2 * 0.5 - width * scale * 0.5).abs() < 0.01,
+                    "{case}: lone tab not centered"
+                );
                 for in_tab in [0.0_f64, 40.0, 4000.0] {
                     let grab = titlebar_tear_off_grab_x(
                         &cfg,
@@ -190,7 +251,8 @@ fn a_lone_macos_titlebar_tab_fills_the_lane_from_its_start() {
                         in_tab,
                     );
                     let margin = f64::from(8.0 * scale);
-                    let expected = f64::from(lane.0) + in_tab.clamp(margin, f64::from(w) - margin);
+                    let expected =
+                        f64::from(lane.0 + g.lead) + in_tab.clamp(margin, f64::from(w) - margin);
                     assert!(
                         (grab - expected).abs() < 0.01,
                         "{case}: {grab} for {in_tab}"
@@ -216,11 +278,8 @@ fn a_lone_macos_titlebar_tab_fills_the_lane_from_its_start() {
     assert!(body.contains("lethint=ifws.macos_titlebar_tabs&&n==1{None}"));
 }
 
-/// Every title-bar strip leaves empty space for moving the window between
-/// what it paints (the last tab, or `›` while it scrolls) and its trailing
-/// controls: the whole drag lane while a minimum-width tab fits beside it,
-/// and never less than the lane's floor. Overflowing strips once ran `›`
-/// up against the gear.
+/// Every title-bar strip keeps empty drag space between its controls and tabs
+/// at every width and tab count.
 #[test]
 fn titlebar_strips_always_keep_a_drag_lane() {
     for scroll in [true, false] {
@@ -240,23 +299,32 @@ fn titlebar_strips_always_keep_a_drag_lane() {
                             if g.strip < 2.0 {
                                 continue;
                             }
-                            let gap = trailing_controls(lane, &g) - painted_end(lane, &g);
+                            let gap = trailing_controls(lane, header.0, &g) - painted_end(lane, &g);
                             let min = cfg.tab_min_width * scale;
                             let drag = TITLEBAR_DRAG_LANE * scale;
                             let floor = (TITLEBAR_DRAG_LANE_FLOOR * scale).min(g.strip);
-                            assert!(gap >= floor - 0.01, "{case}: {gap} before the controls");
-                            // Whole while the tabs' least room at the minimum
-                            // (one between the arrows once they scroll) fits.
-                            let arrow = if header.0 {
-                                (LINUX_HEADER_BUTTON * scale).min(lane.3)
+                            let start = lane.0 + g.lead;
+                            let left_gap = start - lane.0;
+                            if header.0 {
+                                assert!(gap >= floor - 0.01, "{case}: {gap} before the controls");
+                                let arrow = (LINUX_HEADER_BUTTON * scale).min(lane.3);
+                                if g.strip >= titlebar_tab_room(n, min, arrow, scroll) + drag {
+                                    assert!(gap >= drag - 0.01, "{case}: {gap} before controls");
+                                }
                             } else {
-                                lane.3
-                            };
-                            if g.strip >= titlebar_tab_room(n, min, arrow, scroll) + drag {
-                                assert!(gap >= drag - 0.01, "{case}: {gap} before the controls");
+                                assert!(
+                                    gap >= (TITLEBAR_DRAG_LANE_SIDE_FLOOR * scale)
+                                        .min(gap.max(0.0))
+                                        - 0.01,
+                                    "{case}: {gap} before controls"
+                                );
+                                assert!(
+                                    left_gap + gap >= floor - 0.01,
+                                    "{case}: combined drag {} < {floor}",
+                                    left_gap + gap
+                                );
                             }
                             // Nothing reaches under the traffic lights or `+`.
-                            let start = lane.0 + g.lead;
                             for x in g.layout.xs.iter().flatten() {
                                 assert!(start + x >= lane.0 - 0.01, "{case}");
                             }
@@ -277,7 +345,7 @@ fn titlebar_strips_always_keep_a_drag_lane() {
 /// Tabs never narrow below `tab-min-width`, which is in logical pixels like
 /// every other measure of the strip: past it the strip scrolls, with `‹` at
 /// its start and `›` right after the tabs shown, and the drag lane after
-/// that. At 2x the minimum was half what was set.
+/// that.
 #[test]
 fn titlebar_tabs_keep_the_minimum_and_scroll_between_arrows() {
     let cfg = Config::default();
@@ -293,15 +361,15 @@ fn titlebar_tabs_keep_the_minimum_and_scroll_between_arrows() {
                         let arrow = l.arrow_width;
                         assert!(arrow > 0.0, "{case}: no arrows");
                         assert_eq!(l.arrow_left, Some(0.0), "{case}");
-                        // As many whole tabs as fit beside both arrows and
-                        // the drag lane, which narrows toward its floor first
-                        // to keep one at the minimum; past that the active
-                        // tab shows alone, narrowed to the room.
-                        let drag = expected_drag(g.strip, n, min, arrow, scale);
+                        let drag = if !header.0 && g.lead > 0.0 {
+                            0.0
+                        } else {
+                            expected_drag(g.strip, n, min, arrow, scale)
+                        };
                         let room = g.strip - drag - 2.0 * arrow;
                         if room >= min {
                             assert_eq!(l.width, min, "{case}");
-                        } else {
+                        } else if header.0 {
                             assert!((drag - TITLEBAR_DRAG_LANE_FLOOR * scale).abs() < 0.01);
                         }
                         let min = min.min(room);
@@ -340,7 +408,11 @@ fn titlebar_tabs_keep_the_minimum_and_scroll_between_arrows() {
     for scale in SCALES {
         for (name, lane, header) in lanes(800.0, scale) {
             let g = horizontal_tab_geometry(lane, scale, header, (40, 39), &cfg);
-            let room = g.strip - TITLEBAR_DRAG_LANE * scale;
+            let room = if !header.0 && g.lead > 0.0 {
+                g.strip
+            } else {
+                g.strip - TITLEBAR_DRAG_LANE * scale
+            };
             assert!(
                 g.layout.arrow_left.is_none() && g.layout.arrow_right.is_none(),
                 "{name}"
@@ -367,19 +439,13 @@ fn expected_drag(strip: f32, n: usize, min: f32, arrow: f32, scale: f32) -> f32 
         .min(strip)
 }
 
-/// However many tabs a narrowing title bar holds, it gives up the gear
-/// first, then narrows the drag lane to its floor, and only then a tab below
-/// the minimum. With 20 tabs a 400-point macOS window once kept the gear and
-/// the whole drag lane and showed one 70-point tab between the arrows.
+/// However many tabs a narrowing title bar holds, it narrows its drag reserves
+/// to their floor before letting a tab shrink below `tab-min-width`.
 #[test]
 fn a_narrowing_title_bar_gives_way_in_order_for_any_tab_count() {
     let cfg = Config::default();
     for scale in SCALES {
-        let (min, drag, floor) = (
-            cfg.tab_min_width * scale,
-            TITLEBAR_DRAG_LANE * scale,
-            TITLEBAR_DRAG_LANE_FLOOR * scale,
-        );
+        let (min, floor) = (cfg.tab_min_width * scale, TITLEBAR_DRAG_LANE_FLOOR * scale);
         for n in [1_usize, 2, 3, 20] {
             for width in (150..=900).step_by(5).map(|w| w as f32) {
                 for (name, lane, header) in lanes(width, scale) {
@@ -388,29 +454,23 @@ fn a_narrowing_title_bar_gives_way_in_order_for_any_tab_count() {
                         continue;
                     }
                     let case = format!("{name} {width}pt @{scale}x, {n} tabs");
-                    let start = lane.0 + g.lead;
                     let narrowest = (0..n)
                         .filter(|i| g.layout.xs[*i].is_some())
                         .map(|i| tab_width(&g.layout, i))
                         .fold(f32::INFINITY, f32::min);
-                    let lane_left = start + g.strip - painted_end(lane, &g);
-                    let gear = g.settings_rect.2 > 0.0;
-                    if gear {
-                        assert!(
-                            narrowest >= min - 0.01,
-                            "{case}: a {narrowest} tab beside the gear"
-                        );
-                        assert!(
-                            lane_left >= drag - 0.01,
-                            "{case}: a {lane_left} lane beside the gear"
-                        );
-                    }
+                    let controls = trailing_controls(lane, header.0, &g);
+                    let right_gap = controls - painted_end(lane, &g);
+                    let left_gap = lane.0 + g.lead - lane.0;
                     if narrowest < min - 0.01 {
-                        assert!(!gear, "{case}");
-                        assert!(
-                            (lane_left - floor.min(g.strip)).abs() < 0.01,
-                            "{case}: a {narrowest} tab beside a {lane_left} lane"
-                        );
+                        if header.0 {
+                            assert!(
+                                (right_gap - 6.0 * scale - floor.min(g.strip)).abs() < 0.5
+                                    || right_gap <= floor + 6.0 * scale + 0.01,
+                                "{case}: narrowest {narrowest}, right_gap {right_gap}"
+                            );
+                        } else {
+                            assert!(left_gap + right_gap >= floor.min(g.strip) - 0.01, "{case}");
+                        }
                     }
                 }
             }
@@ -418,60 +478,36 @@ fn a_narrowing_title_bar_gives_way_in_order_for_any_tab_count() {
     }
 }
 
-/// As a macOS window narrows, the gear goes first, while a minimum-width
-/// tab and the whole drag lane still fit beside the other controls; then the
-/// drag lane narrows to its floor; only then does a lone tab narrow below
-/// the minimum, filling what is left.
+/// As a macOS window narrows, the split centered drag reserves narrow from
+/// 24 pt to 8 pt per side, then fall back cleanly while preserving a trailing
+/// drag lane before a lone tab narrows below `tab-min-width`.
 #[test]
-fn a_narrowing_title_bar_drops_the_gear_then_the_drag_lane_then_the_minimum() {
+fn a_narrowing_macos_title_bar_narrows_drag_lanes_before_the_tab_minimum() {
     let cfg = Config::default();
     for scale in [1.0_f32, 2.0] {
-        let (min, drag, floor) = (
-            cfg.tab_min_width * scale,
-            TITLEBAR_DRAG_LANE * scale,
-            TITLEBAR_DRAG_LANE_FLOOR * scale,
-        );
-        let mut seen_gear = (false, false);
-        for width in (150..=700).rev().map(|w| w as f32) {
+        let min = cfg.tab_min_width * scale;
+        let floor = TITLEBAR_DRAG_LANE_FLOOR * scale;
+        for width in (180..=700).rev().map(|w| w as f32) {
             let lane = mac_lane(width, scale, false);
             let g = horizontal_tab_geometry(lane, scale, (false, true), (1, 0), &cfg);
             let case = format!("{width}pt @{scale}x");
-            let (_, plus, reserve) = super::chrome::titlebar_new_tab_controls(lane, scale);
-            let gear_room = lane.2 - reserve - (plus.2 + 8.0 * scale);
-            let gear = g.settings_rect.2 > 0.0;
-            assert_eq!(gear, gear_room >= min + drag, "{case}");
-            if gear {
-                seen_gear.0 = true;
-            } else {
-                seen_gear.1 = true;
-            }
+            assert_eq!(g.settings_rect, (0.0, 0.0, 0.0, 0.0), "{case}");
             if g.strip < 2.0 {
                 continue;
             }
             let tab = g.layout.last_width;
-            let lane_left = g.strip - tab;
-            if g.strip >= min + drag {
-                assert_eq!(tab, g.strip - drag, "{case}");
-                assert!((lane_left - drag).abs() < 0.01, "{case}: {lane_left}");
-            } else if g.strip >= min + floor {
-                assert!(
-                    (tab - min).abs() < 0.01,
-                    "{case}: the drag lane narrows first"
-                );
-                assert!(
-                    lane_left < drag + 0.01 && lane_left >= floor - 0.01,
-                    "{case}"
-                );
+            let right_drag = g.plus_rect.0 - (lane.0 + g.lead + tab);
+            if tab < min - 0.01 {
+                assert!(g.lead == 0.0, "{case}: centered while below minimum");
+                assert!((g.strip - tab - floor.min(g.strip)).abs() < 0.01, "{case}");
             } else {
                 assert!(
-                    (lane_left - floor.min(g.strip)).abs() < 0.01,
-                    "{case}: {lane_left}"
+                    right_drag >= TITLEBAR_DRAG_LANE_SIDE_FLOOR * scale - 0.01,
+                    "{case}"
                 );
-                assert!(tab < min, "{case}");
             }
             assert_eq!(g.layout.xs, vec![Some(0.0)], "{case}");
         }
-        assert_eq!(seen_gear, (true, true), "@{scale}x");
     }
 }
 
@@ -772,7 +808,11 @@ fn a_close_with_the_pointer_holds_the_tabs_until_the_pointer_leaves() {
                     &cfg,
                     (&mut state, false),
                 );
-                let even = (left.strip - TITLEBAR_DRAG_LANE * scale) / (n - 1) as f32;
+                let even = if !header.0 && left.lead > 0.0 {
+                    left.strip / (n - 1) as f32
+                } else {
+                    (left.strip - TITLEBAR_DRAG_LANE * scale) / (n - 1) as f32
+                };
                 assert!((left.layout.width - even).abs() < 0.01, "{case}");
                 assert!(state.held.is_none(), "{case}");
             }
@@ -1000,12 +1040,24 @@ fn titlebar_hit_tests_follow_the_painted_tabs() {
                 // The drag lane, whole while the strip scrolls too, is
                 // empty title bar.
                 let end = painted_end(lane, &g);
-                let controls = trailing_controls(lane, &g);
-                assert!(
-                    controls - end >= TITLEBAR_DRAG_LANE * scale - 0.01,
-                    "{case}: {} before the controls",
-                    controls - end
-                );
+                let controls = trailing_controls(lane, header.0, &g);
+                let start = lane.0 + g.lead;
+                if header.0 {
+                    assert!(
+                        controls - end >= TITLEBAR_DRAG_LANE * scale - 0.01,
+                        "{case}: {} before the controls",
+                        controls - end
+                    );
+                } else {
+                    assert!(
+                        controls - end >= TITLEBAR_DRAG_LANE_SIDE * scale - 0.01
+                            && (start - lane.0) + (controls - end)
+                                >= TITLEBAR_DRAG_LANE * scale - 0.01,
+                        "{case}: left {} right {} before the controls",
+                        start - lane.0,
+                        controls - end
+                    );
+                }
                 let lane_mid = (end + controls) * 0.5;
                 assert!(
                     empty_titlebar_space(&bar, lane_mid, y),
@@ -1117,4 +1169,84 @@ fn a_lone_macos_titlebar_tab_stands_for_the_window_title() {
     assert!(
         source.contains("ifdouble{native::double_click(window);returntrue;}iflone{returnfalse;}")
     );
+}
+
+/// Closing a tab with the pointer keeps the surviving tabs' outer `lead`,
+/// `strip`, and exact screen positions across transitions that would otherwise
+/// switch between centered and asymmetric macOS strip math (such as closing
+/// 2 -> 1 in a 360 pt window with a 28 pt titlebar, or 3 -> 2 at 500 pt).
+#[test]
+fn pointer_close_hold_preserves_strip_across_centered_and_narrow_fallback_transitions() {
+    let cfg = Config::default();
+    for (width, band_h, before_n) in [(360.0_f32, 28.0_f32, 2_usize), (500.0, 32.0, 3)] {
+        let lane = (78.0, 0.0, width - 78.0, band_h);
+        let mut state = TitlebarStrip::default();
+        let before = horizontal_tab_geometry_in(
+            lane,
+            1.0,
+            (false, true),
+            (before_n, 0),
+            &cfg,
+            (&mut state, true),
+        );
+        let surviving_x_before = lane.0 + before.lead + before.layout.xs[0].unwrap();
+        let surviving_w_before = before.layout.width;
+        let after_n = before_n - 1;
+        state.held = state.held_after_close(after_n);
+
+        let held = horizontal_tab_geometry_in(
+            lane,
+            1.0,
+            (false, true),
+            (after_n, 0),
+            &cfg,
+            (&mut state, true),
+        );
+        assert!(
+            state.held.is_some(),
+            "{width}pt ({before_n} -> {after_n}): hold dropped prematurely"
+        );
+        assert_eq!(held.lead, before.lead, "{width}pt");
+        assert_eq!(held.strip, before.strip, "{width}pt");
+        assert_eq!(
+            lane.0 + held.lead + held.layout.xs[0].unwrap(),
+            surviving_x_before,
+            "{width}pt: surviving tab shifted x"
+        );
+        assert_eq!(held.layout.width, surviving_w_before, "{width}pt");
+
+        // Leaving the strip releases the hold into the normal layout.
+        let released = horizontal_tab_geometry_in(
+            lane,
+            1.0,
+            (false, true),
+            (after_n, 0),
+            &cfg,
+            (&mut state, false),
+        );
+        assert!(state.held.is_none(), "{width}pt");
+        assert!(released.layout.width >= surviving_w_before);
+
+        // Resizing the window also releases an active hold.
+        let mut state = TitlebarStrip::default();
+        horizontal_tab_geometry_in(
+            lane,
+            1.0,
+            (false, true),
+            (before_n, 0),
+            &cfg,
+            (&mut state, true),
+        );
+        state.held = state.held_after_close(after_n);
+        let resized = (lane.0, lane.1, lane.2 + 80.0, lane.3);
+        horizontal_tab_geometry_in(
+            resized,
+            1.0,
+            (false, true),
+            (after_n, 0),
+            &cfg,
+            (&mut state, true),
+        );
+        assert!(state.held.is_none(), "{width}pt: resize must release hold");
+    }
 }

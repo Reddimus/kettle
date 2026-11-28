@@ -802,7 +802,7 @@ impl App {
             _ => (0.0, 0.0),
         };
         let bar = self.tab_bar(ws);
-        let bar_h = f64::from(self.tab_bar_h(ws)).max(8.0);
+        let bar_h = f64::from(bar.tab_row_height()).max(8.0);
         let seg = bar.segments.iter().find(|s| s.active).map(|s| s.rect);
         let in_seg_x = seg
             .map(|(sx, _, seg_w, _)| f64::from((cx - sx).clamp(16.0, (seg_w - 16.0).max(16.0))))
@@ -813,7 +813,24 @@ impl App {
             .unwrap_or(12.0)
             .min(f64::from(size.height) - 24.0);
         let strip_w = f64::from(self.cfg.tab_bar_width).max(8.0);
-        let destination_band = self.tear_off_tab_band(ws, (size.width, size.height), bar_h as f32);
+        let dest_h = if ws.linux_titlebar {
+            let s = src.scale_factor() as f32;
+            if self.cfg.tab_bar == TabBarMode::Always {
+                (LINUX_HEADER_HEIGHT + LINUX_TAB_ROW_HEIGHT) * s
+            } else {
+                LINUX_HEADER_HEIGHT * s
+            }
+        } else {
+            bar_h as f32
+        };
+        let destination_band = self.tear_off_tab_band(ws, (size.width, size.height), dest_h);
+        let destination_tab = tear_off_destination_tab(
+            &self.cfg,
+            destination_band,
+            (ws.linux_titlebar, ws.macos_titlebar_tabs),
+            src.scale_factor() as f32,
+            &self.linux_button_layout(ws),
+        );
         let in_seg_x = if ws.macos_titlebar_tabs {
             titlebar_tear_off_grab_x(
                 &self.cfg,
@@ -827,7 +844,10 @@ impl App {
             in_seg_x
         };
         let grab = match self.cfg.tab_bar_pos {
-            TabBarPos::Top => (ftc.0 + in_seg_x, ftc.1 + bar_h * 0.5),
+            TabBarPos::Top => (
+                ftc.0 + in_seg_x,
+                ftc.1 + f64::from(destination_tab.1) + f64::from(destination_tab.3) * 0.5,
+            ),
             TabBarPos::Bottom => (
                 ftc.0 + in_seg_x,
                 ftc.1 + f64::from(destination_band.1) + bar_h * 0.5,
@@ -1783,17 +1803,32 @@ impl App {
             let along_x = (press.0 - f64::from(x)).clamp(8.0, f64::from(width.max(16.0)) - 8.0);
             let along_y = (press.1 - f64::from(y)).clamp(4.0, f64::from(height.max(8.0)) - 4.0);
             let size = window.inner_size();
-            let destination_band = self.tear_off_tab_band(ws, (size.width, size.height), height);
+            let scale_f = window.scale_factor() as f32;
+            let dest_h = if ws.linux_titlebar {
+                if self.cfg.tab_bar == TabBarMode::Always {
+                    (LINUX_HEADER_HEIGHT + LINUX_TAB_ROW_HEIGHT) * scale_f
+                } else {
+                    LINUX_HEADER_HEIGHT * scale_f
+                }
+            } else {
+                height
+            };
+            let destination_band = self.tear_off_tab_band(ws, (size.width, size.height), dest_h);
             let destination_tab = tear_off_destination_tab(
                 &self.cfg,
                 destination_band,
                 (ws.linux_titlebar, ws.macos_titlebar_tabs),
-                window.scale_factor() as f32,
+                scale_f,
                 &self.linux_button_layout(ws),
             );
             let along_x = wayland_tab_anchor_x(self.cfg.tab_bar_pos, destination_tab, along_x);
             match self.cfg.tab_bar_pos {
-                TabBarPos::Top => (along_x, along_y),
+                TabBarPos::Top => (
+                    along_x,
+                    f64::from(destination_tab.1)
+                        + (press.1 - f64::from(y))
+                            .clamp(4.0, f64::from(destination_tab.3.max(8.0)) - 4.0),
+                ),
                 TabBarPos::Bottom => (along_x, f64::from(destination_band.1) + along_y),
                 TabBarPos::Left => (
                     along_x,

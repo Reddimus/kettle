@@ -64,18 +64,14 @@ def titlebar_geometry(geometry):
     assert abs(plus["x"] + plus["width"] - menu["x"]) <= 0.5, (
         "new-tab halves must join in + then dropdown order"
     )
-    # The Settings gear leads the pair, apart from it, when the lane has room.
+    # The macOS titlebar omits a redundant Settings gear (available in the app
+    # menu, Cmd+,, and the + dropdown).
     gear = bar.get("settings") or {"width": 0}
-    if gear["width"]:
-        assert gear["width"] >= 20 * scale and gear["height"] >= 20 * scale, "settings"
-        assert gear["x"] >= band["x"], "settings gear overlaps traffic lights"
-        assert gear["x"] + gear["width"] + 8 * scale <= plus["x"] + 0.5, (
-            "settings gear must sit apart from the new-tab pair"
-        )
+    assert gear["width"] == 0, "macOS titlebar must omit the settings gear"
     shown = [tab for tab in bar["segments"] if tab["rect"]["x"] >= -1000]  # parked overflow tabs
     for tab in shown:
         rect = tab["rect"]
-        assert rect["x"] >= band["x"], "tab overlaps traffic lights"
+        assert rect["x"] >= band["x"] - 0.5, "tab overlaps traffic lights"
         assert rect["height"] == band["height"], "tab escaped titlebar band"
         title = tab["title_rect"]
         assert rect["x"] - 1 <= title["x"] and (
@@ -84,20 +80,35 @@ def titlebar_geometry(geometry):
         close = tab["close"]
         if close["width"]:
             assert close["width"] >= 20 * scale and close["height"] >= 20 * scale
-    # Tabs split the lane evenly from its start, and leave a window-drag lane
-    # (48 points, narrowing to 16 only in a very narrow window) before the
-    # gear or `+`, past `›` too while the strip scrolls.
+    # Tabs split the centered lane evenly and keep split drag reserves on both
+    # sides (at least 24 pt on the right and 48 pt combined when not narrow),
+    # falling back cleanly in ultra-narrow windows.
     arrows = bar.get("scroll_right") or {"width": 0}
     if len(shown) > 1 and not arrows["width"]:
         widths = sorted(tab["rect"]["width"] for tab in shown)
         assert widths[-1] - widths[0] <= 1, "tabs must split the title bar evenly"
     if shown:
+        surface_w = band["x"] + band["width"]
+        start = min(tab["rect"]["x"] for tab in shown)
+        left_arrow = bar.get("scroll_left") or {"width": 0}
+        if left_arrow["width"]:
+            start = min(start, left_arrow["x"])
         end = max(tab["rect"]["x"] + tab["rect"]["width"] for tab in shown)
         if arrows["width"]:
             end = max(end, arrows["x"] + arrows["width"])
-        controls = gear["x"] if gear["width"] else min(plus["x"], menu["x"])
-        lane = 48 if band["width"] >= 400 * scale else 16
-        assert controls - end >= lane * scale - 1, "no window-drag lane before the controls"
+        controls = min(plus["x"], menu["x"])
+        left_drag = start - band["x"]
+        right_drag = controls - end
+        assert right_drag >= 16 * scale - 1, "no window-drag lane before the controls"
+        assert left_drag + right_drag >= 16 * scale - 1, "no window-drag room around tabs"
+        if band["width"] >= 400 * scale and len(shown) <= 2:
+            assert right_drag >= 24 * scale - 1, "insufficient drag lane before controls"
+            assert left_drag + right_drag >= 48 * scale - 1, "insufficient split drag lanes"
+        if left_drag > 1.0 and not arrows["width"]:
+            cluster_mid = (start + end) * 0.5
+            assert abs(cluster_mid - surface_w * 0.5) <= 1.5, (
+                f"tab cluster midline {cluster_mid} off window midline {surface_w * 0.5}"
+            )
     if len(bar["segments"]) == 1:
         tab = bar["segments"][0]
         assert tab["hint"] is None, "single tab must hide its shortcut hint"
@@ -105,7 +116,13 @@ def titlebar_geometry(geometry):
             assert tab["close"]["width"] == tab["close"]["height"] == 0, (
                 "idle single tab must hide its close button"
             )
-        assert abs(tab["rect"]["x"] - band["x"]) <= 1, "single tab must start the title bar"
+        assert tab["rect"]["x"] >= band["x"] - 1, "single tab overlaps traffic lights"
+        if not arrows["width"]:
+            surface_w = band["x"] + band["width"]
+            tab_mid = tab["rect"]["x"] + tab["rect"]["width"] * 0.5
+            assert abs(tab_mid - surface_w * 0.5) <= 1.5 or abs(tab["rect"]["x"] - band["x"]) <= 1, (
+                "single tab must center on window or start at the traffic-light inset"
+            )
         assert tab["label"].strip(), "single-tab title is missing"
 
 

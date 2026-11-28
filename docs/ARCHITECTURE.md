@@ -1954,8 +1954,8 @@ arms and the cursor icon) does not; both derive from one
 window). Chrome under a pointer modal takes no press, so it shows no hover:
 `chrome_pointer` is `None` then, and `hover_tab_bar` clears the tab, `✕`,
 button and window-control hover, with the hand cursor and tooltips they drive,
-on the first frame after a modal opens. The Settings gear keeps its hover over
-open Settings, where a press on it still arms it. The pure
+on the first frame after a modal opens. When a strip includes a Settings gear,
+it keeps its hover over open Settings, where a press on it still arms it. The pure
 `search_pointer_route` decides each pointer event by geometry: a press inside
 the lane goes to the bar's controls, a press above it is ordinary grid input,
 and motion or release follow whichever gesture is live (an editor drag keeps
@@ -2199,17 +2199,18 @@ window from it, and a second press within the double-click interval runs
 drag; a double-click uses `AppleActionOnDoubleClick`, defaulting to zoom. Tabs
 retain their separate reorder/tear-off/re-dock gestures.
 
-`app::chrome::titlebar_tab_layout` lays out the macOS title bar and Kettle's
-GNOME header alike. Tabs split the lane left between the controls and a 48 pt
-drag lane (`TITLEBAR_DRAG_LANE`) evenly from its start, a lone tab included
-(the GNOME header still draws its lone tab as a window-centred title). Below
-`tab-min-width`, scaled by the display scale like every other strip measure,
-the strip overflows: whole tabs at the minimum between `‹` at its start and
-`›` right after them, then the drag lane. `titlebar_tab_room` is the least
-room the tabs need at the minimum (all of them while they fit, one between
-both arrows once they overflow). A narrowing window loses the Settings gear
-once that room and the whole drag lane no longer fit beside the controls,
-then narrows the drag lane to 16 pt, then a tab. The window's
+`app::chrome::titlebar_tab_layout` lays out the macOS title bar strip, while
+`linux_two_row_tab_geometry_in` handles multi-tab GNOME headers. On macOS,
+tabs sit centered horizontally around the window midline inside symmetric end
+reserves (`base_side = left_inset.max(controls_w)`, plus `TITLEBAR_DRAG_LANE_SIDE`
+= 24 pt on each side), with no Settings gear on the title bar. When a window
+narrows past what symmetric reserves can fit at `tab-min-width`, the right end
+fixes to `+ ▾` plus the drag lane and the tab lane uses the full available
+middle span; below `tab-min-width`, weighted `scroll-tabbar` overflow keeps
+whole tabs at the minimum between `‹` and `›`, and each side drag lane narrows
+toward `TITLEBAR_DRAG_LANE_SIDE_FLOOR` (8 pt) before a tab narrows. `titlebar_tab_room`
+is the least room the tabs need at the minimum (all of them while they fit, one
+between both arrows once they overflow). The window's
 `TitlebarStrip` (a `Cell` on `WindowState`, so every `tab_bar` reads and
 updates one strip) keeps the first tab shown: the arrows, the wheel and
 horizontal swipes scroll it without touching the selection, and a change of
@@ -2249,14 +2250,15 @@ side and its line at the button's height, so a glyph stays centred and
 unclipped; click targets do not change.
 `app::chrome::horizontal_new_tab_controls` keeps the plain strip's geometry.
 The macOS titlebar instead joins `+` and a 28 pt dropdown with an internal
-divider, shared hover fill and an 8 pt gap before the separate Settings gear.
-A tear-off measures its grip into the destination window's lone tab, which
-starts the strip, and clamps the grab offset inside that tab.
+divider and shared hover fill at the trailing edge of the strip, leaving
+Settings, the command palette, Shortcuts, Help, and About directly accessible
+in that dropdown (`MenuOrigin::NewTab { compact: false }`).
+A tear-off measures its grip into the destination window's centered lone tab
+and clamps the grab offset inside that tab.
 The menu owns its origin through shell-discovery replacement and submenu
-navigation. Only the macOS new-tab menu omits Settings through About; its
-origin also supplies the accessible name and expanded/pressed state, and
+navigation, supplies the accessible name and expanded/pressed state, and
 clears with the menu. The AccessKit tab list holds only the tabs; the
-strip's own buttons (New tab, the new-tab menu, the gear, and in the GNOME
+strip's own buttons (New tab, the new-tab menu, and in the GNOME
 header Find, the main menu and the window buttons) sit beside it in a
 `Toolbar` named "Tab bar controls" (`tab_strip_roots`), and each container's
 children follow the strip's screen order.
@@ -6694,32 +6696,51 @@ path; colour-scheme reports use the resulting palette's lightness.
 
 ### Linux Wayland header bar
 
-`linux-titlebar-style = tabs` reuses the macOS titlebar strip when Wayland
-negotiates client decorations, with a fixed 46 logical pixel height. The
-shared `WindowState::macos_titlebar_tabs` flag retains its historical name;
+`linux-titlebar-style = tabs` draws a native-looking libadwaita header bar when
+Wayland negotiates client decorations. With one tab, no title edit, `tab-bar`
+not `always`, and the bar at the top, `lone_header_title` keeps a single 46
+logical pixel row (`TabBar::lone_title = true`, `header_height = 0.0`): `+` and
+Find/`≡`/window controls flank the window title in bundled Fira Sans Bold
+(`header_title`), and any dock preview paints its tab and insertion marker inside
+that existing 46 logical pixel header without resizing panes. When multiple tabs
+are open, or with `tab-bar = always` or an inline tab-title edit,
+`linux_two_row_tabs` switches to an 82 logical pixel two-row header
+(`header_height = 46 * scale` for the `AdwHeaderBar` row plus
+`LINUX_TAB_ROW_HEIGHT = 36 * scale` for `AdwTabBar`):
+the `AdwHeaderBar` row plus `LINUX_TAB_ROW_HEIGHT = 36 * scale` for `AdwTabBar`):
+Row 1 keeps `+`, Find, `≡`, `window_controls`, and the window-centered active
+tab title in `TabBar::header_title_rect` (`prepare_header_title_in`), while Row 2
+lays out tabs across the full `0..width` span via `linux_two_row_tab_geometry_in`
+so an even number of tabs aligns directly with equal pane splits regardless of
+left/right/split window-button placement. `linux_title_space` restricts header
+drag/double-click/menu handling to Row 1 (`y < tab_row_y()`), and `header_hairline_rects`
+draws both the Row 1–Row 2 divider hairline and the bottom strip hairline.
+The shared `WindowState::macos_titlebar_tabs` flag retains its historical name;
 `linux_titlebar` identifies windows that also need Kettle window controls.
-Top tabs, the leading new-tab button and the trailing main menu share the
-header with reserved button lanes (three right-side buttons by default);
-`horizontal_tab_geometry` reports the room `+` takes as `lead`, and tab
-positions count from past it. `lone_header_title` sets `TabBar::lone_title`
-for the Linux header with one tab, no title edit or dock preview, `tab-bar`
-not `always` and the bar at the top. The painter then skips the tab surface,
-accent line and hover fill and resolves the title against the header
-(`tab_strip::tab_paint_state`); the strip drops the close button and hint, and
-`linux_title_space` routes presses on the title like empty header space. The
-lone title is shaped in the bundled Fira Sans Bold (`header_title`), registered
-under a family of its own so no installed font matches it, at GNOME's 11 pt,
-centred on the header and fitted to its lane by measured width with the tab
-strip's own shortenings; only Linux builds embed the face. `+`, Find and the
-main menu are GNOME's `tab-new`, `edit-find` and `open-menu` symbolic icons,
-rasterized as coverage masks (`header_icons`) in 34-point flat buttons, 7
-points from the lane's ends and 6 apart, as libadwaita lays out a header.
+For the lone title, the painter skips the tab surface, accent line and hover
+fill and resolves the title against the header (`tab_strip::tab_paint_state`);
+the strip drops the close button and hint, and `linux_title_space` routes
+presses on the title like empty header space. The header title is shaped in
+Fira Sans Bold, registered under a family of its own so no installed font
+matches it, at GNOME's 11 pt, centred on the header and fitted to its lane by
+measured width with the tab strip's own shortenings; only Linux builds embed the
+face. `+`, Find and the main menu are GNOME's `tab-new`, `edit-find` and
+`open-menu` symbolic icons, rasterized as coverage masks (`header_icons`) in
+34-point flat buttons, 7 points from the lane's ends and 6 apart, as
+libadwaita lays out a header.
 Find (`TabBar::search`) toggles the search bar through `toggle_header_find`
 from a press, ctl or AccessKit, shows toggled while Find is open and gives way
-first in a narrow lane. `header_hairline_rects` draws a one-point line, 1.5:1
-against the header and the terminal, along the header's bottom, broken under
-an active tab.
-`TabBar::window_controls`
+first in a narrow Row 1 title lane. `header_hairline_rects` draws one-point
+lines, 1.5:1 against the header and the terminal, along the header's bottom
+edges. In the two-row GNOME header and in the macOS title bar strip
+(`tab_strip::inset_pill_tabs`) the active and hovered tabs paint as pills inset
+from Row 2 / the band's top and bottom and 3 points from the tab's sides
+(`tab_pill_rect`), all four corners rounded, with the active accent a 2-point
+bar inside the pill (`tab_pill_accent_rect`); the hit rects still span the row,
+and the hairline runs unbroken under the pills, painted after the strip's
+buttons (`HorizontalTabQuads::separator`). Other strips keep band-high tabs.
+`TabBar::header_height`, `TabBar::header_title_rect`, and `TabBar::window_controls`
+carry physical coordinates to painting, pointer routing, AccessKit, and `kettle ctl ui_geometry`.
 carries the same physical rectangles, localized names and hover/press state
 to painting, pointer routing, AccessKit and
 `kettle ctl ui_geometry`. Terminal layout, status/search bands, title editing

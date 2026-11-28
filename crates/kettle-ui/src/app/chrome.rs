@@ -112,7 +112,16 @@ impl App {
             tr: &self.ui_text,
             tab_format: &self.cfg.tab_format,
             tab_cell_width: if bar.in_titlebar {
-                cell * kettle_render::tab_text_scale(bar.height, self.overlay_text_line_height(ws))
+                let scale = ws
+                    .window
+                    .as_ref()
+                    .map_or(ws.startup_scale, |w| w.scale_factor() as f32);
+                cell * kettle_render::titlebar_tab_text_scale(
+                    bar.tab_row_height(),
+                    self.overlay_text_line_height(ws),
+                    scale,
+                    !bar.lone_title,
+                )
             } else {
                 cell
             },
@@ -177,9 +186,13 @@ impl App {
     pub(super) fn tab_bar_at_height(&self, ws: &WindowState, height: f32) -> TabBar {
         let band = self.tab_band(ws, height);
         let button_layout = self.linux_button_layout(ws);
-        let window_controls = self.linux_window_controls(ws, band, &button_layout);
+        let scale = ws
+            .window
+            .as_ref()
+            .map_or(ws.startup_scale, |w| w.scale_factor() as f32);
+        let header_h = LINUX_HEADER_HEIGHT * scale;
         let (left_controls, right_controls) = if ws.linux_titlebar {
-            button_layout.reservations(band.2, height)
+            button_layout.reservations(band.2, header_h.min(height))
         } else {
             (0.0, 0.0)
         };
@@ -193,6 +206,13 @@ impl App {
             return self.tab_bar_vertical(ws, band, height);
         }
         if ws.editing_title.is_some() {
+            let two_row = ws.linux_titlebar && height > header_h + 0.5;
+            let control_band = if two_row {
+                (band.0, band.1, band.2, header_h)
+            } else {
+                band
+            };
+            let window_controls = self.linux_window_controls(ws, control_band, &button_layout);
             let strip_w = if is_vertical {
                 self.cfg.tab_bar_width
             } else {
@@ -214,6 +234,8 @@ impl App {
                 in_titlebar: ws.macos_titlebar_tabs,
                 linux_header: ws.linux_titlebar,
                 lone_title: false,
+                header_height: if two_row { header_h } else { 0.0 },
+                header_title_rect: None,
                 recording_notice: String::new(),
                 height,
                 y,
@@ -261,10 +283,20 @@ impl App {
             self.cfg.tab_bar,
             self.cfg.tab_bar_pos,
         );
-        let scale = ws
-            .window
-            .as_ref()
-            .map_or(ws.startup_scale, |w| w.scale_factor() as f32);
+        let two_row = ws.linux_titlebar && !lone_title && height > header_h + 0.5;
+        let control_band = if two_row {
+            (band.0, band.1, band.2, header_h)
+        } else {
+            band
+        };
+        let window_controls = self.linux_window_controls(ws, control_band, &button_layout);
+        let (tab_row_y, tab_row_h) = if two_row {
+            (y + header_h, (height - header_h).max(0.0))
+        } else {
+            (y, height)
+        };
+        let header_title_rect =
+            two_row.then(|| linux_header_title_rect(control_band, scale, &button_layout));
         let active = ws.mux.active;
         // A close with the pointer holds a title-bar strip while the pointer
         // stays on it; a lone GNOME title is no tab and is never held.
@@ -282,14 +314,27 @@ impl App {
             lead,
             strip,
             layout,
-        } = horizontal_tab_geometry_in(
-            tab_lane,
-            scale,
-            (ws.linux_titlebar, ws.macos_titlebar_tabs),
-            (n, active),
-            &self.cfg,
-            (&mut strip_state, hold),
-        );
+        } = if two_row {
+            linux_two_row_tab_geometry_in(
+                band,
+                tab_row_y,
+                tab_row_h,
+                scale,
+                (n, active),
+                &button_layout,
+                &self.cfg,
+                (&mut strip_state, hold),
+            )
+        } else {
+            horizontal_tab_geometry_in(
+                tab_lane,
+                scale,
+                (ws.linux_titlebar, ws.macos_titlebar_tabs),
+                (n, active),
+                &self.cfg,
+                (&mut strip_state, hold),
+            )
+        };
         ws.titlebar_strip.set(strip_state);
         if held
             && strip_state.held.is_none()
@@ -297,8 +342,8 @@ impl App {
         {
             window.request_redraw();
         }
-        // Tab positions count from past the GNOME header's leading `+`.
-        let x0 = x0 + lead;
+        // Tab positions count from past the GNOME header's leading `+` or centered inset.
+        let x0 = (if two_row { band.0 } else { x0 }) + lead;
         // Tabs scrolled out of view are parked off-screen (kept in the segment
         // list, idx-indexed, so reorder / dock / ghost logic is undisturbed).
         let now = std::time::Instant::now();
@@ -326,7 +371,7 @@ impl App {
                 } else {
                     layout.width
                 };
-                let rect = (x, y, seg_w, height);
+                let rect = (x, tab_row_y, seg_w, tab_row_h);
                 // A tab narrowed below its close button's width has no room
                 // for one: the button would reach past it onto the arrows.
                 let hovered = chrome_pointer(ws).is_some_and(|(x, y)| rect_contains(rect, x, y));
@@ -350,7 +395,12 @@ impl App {
                 let cell_w = self.overlay_text_cell_width(ws);
                 let cell_w = if ws.macos_titlebar_tabs {
                     cell_w
-                        * kettle_render::tab_text_scale(height, self.overlay_text_line_height(ws))
+                        * kettle_render::titlebar_tab_text_scale(
+                            tab_row_h,
+                            self.overlay_text_line_height(ws),
+                            scale,
+                            !lone_title,
+                        )
                 } else {
                     cell_w
                 };
@@ -390,8 +440,11 @@ impl App {
             .find(|s| chrome_pointer(ws).is_some_and(|(x, y)| rect_contains(s.rect, x, y)))
             .map(|s| s.idx);
         let arrow_width = layout.arrow_width;
-        let to_btn =
-            |ox: Option<f32>| ox.map_or((0.0, 0.0, 0.0, 0.0), |x| (x0 + x, y, arrow_width, height));
+        let to_btn = |ox: Option<f32>| {
+            ox.map_or((0.0, 0.0, 0.0, 0.0), |x| {
+                (x0 + x, tab_row_y, arrow_width, tab_row_h)
+            })
+        };
         let mut bar = TabBar {
             window_controls,
             pressed_new_tab: ws.pressed_new_tab,
@@ -415,6 +468,8 @@ impl App {
             in_titlebar: ws.macos_titlebar_tabs,
             linux_header: ws.linux_titlebar,
             lone_title,
+            header_height: if two_row { header_h } else { 0.0 },
+            header_title_rect,
             recording_notice,
             height,
             y,
@@ -451,7 +506,12 @@ impl App {
             // anchored to the visible edge before or after the landing slot.
             insert_marker: ws.dock_preview.map(|idx| {
                 let x = horizontal_tab_insert_x(&layout, idx, strip);
-                (x0 + x, y, kettle_render::tab_drag::INSERT_MARKER_PX, height)
+                (
+                    x0 + x,
+                    tab_row_y,
+                    kettle_render::tab_drag::INSERT_MARKER_PX,
+                    tab_row_h,
+                )
             }),
             // Tear-off UX: the dock-highlight canvas.
             band,
@@ -484,6 +544,9 @@ impl App {
             row_h,
         );
         if ws.linux_titlebar {
+            if bar.header_height > 0.0 {
+                return (0.0, bar.tab_row_y(), sw, bar.tab_row_height());
+            }
             let (left, right) = self.linux_button_layout(ws).reservations(sw, bar.height);
             return (
                 rect.0 + left,
@@ -591,6 +654,8 @@ impl App {
             in_titlebar: false,
             linux_header: false,
             lone_title: false,
+            header_height: 0.0,
+            header_title_rect: None,
             recording_notice: String::new(),
             height,
             y: strip_y,
@@ -1173,28 +1238,6 @@ pub(super) fn horizontal_new_tab_controls(
         (0.0, 0.0, 0.0, 0.0)
     };
     (menu, plus, reserve)
-}
-
-/// The separate Settings gear before the joined pair. Its size follows `+`,
-/// and its 8 pt gap keeps it outside the split button. It shows while the lane
-/// still keeps `room` beside every control: the room the tabs need at the
-/// minimum (one between both scroll arrows once they overflow) and the whole
-/// drag lane, so it is the first to go in a narrowing window. Returns the
-/// rect and the reservation it adds, both zero when hidden.
-pub(super) fn titlebar_settings_control(
-    plus: kettle_render::Rect4,
-    lane_width: f32,
-    reserve: f32,
-    scale: f32,
-    room: f32,
-) -> (kettle_render::Rect4, f32) {
-    let gap = 8.0 * scale;
-    let side = plus.2;
-    let extra = side + gap;
-    if side <= 0.0 || lane_width - reserve - extra < room.max(1.0) {
-        return ((0.0, 0.0, 0.0, 0.0), 0.0);
-    }
-    ((plus.0 - gap - side, plus.1, side, plus.3), extra)
 }
 
 /// The live shortcut a strip control's tooltip names: whatever key runs the
@@ -1937,16 +1980,21 @@ fn new_tab_dropdown_visible() -> bool {
 
 /// The empty title-bar space, in points, kept between the last tab (or `›`)
 /// and the trailing controls so there is always somewhere to move the window
-/// from and to double-click. 48 points is half again a 28-32 point title bar:
-/// wider than any control beside it, so a press-and-drag or a double-click
-/// (which allows 4 points of travel) lands there without aiming, and still
-/// under 4% of a 1280-point window.
+/// from and to double-click.
 pub(super) const TITLEBAR_DRAG_LANE: f32 = 48.0;
 
 /// The least the drag lane narrows to, in points, in a window too narrow for
-/// a minimum-width tab beside the full lane: a lone tab narrows below
-/// `tab-min-width` only once the lane is down to this.
+/// a minimum-width tab beside the full lane.
 pub(super) const TITLEBAR_DRAG_LANE_FLOOR: f32 = 16.0;
+
+/// Per-side empty drag space, in points, reserved equally on both sides of
+/// the centered macOS title-bar tab cluster so split tabs share the window's
+/// midline while leaving generous drag affordance at both ends.
+pub(super) const TITLEBAR_DRAG_LANE_SIDE: f32 = 24.0;
+
+/// Minimum per-side drag reserve, in points, before a narrowing macOS window
+/// falls back to the uncentered lane.
+pub(super) const TITLEBAR_DRAG_LANE_SIDE_FLOOR: f32 = 8.0;
 
 /// The room a title-bar strip lays its tabs out in, all in physical pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2071,6 +2119,10 @@ pub(super) fn titlebar_tab_layout(
         width: layout.width,
         arrow: layout.arrow_width,
         strip,
+        lead: 0.0,
+        drag: lane.drag,
+        floor: lane.floor,
+        lane: (0, 0),
         seen: Some((active, n, slots, bits)),
         held: None,
     };
@@ -2206,7 +2258,7 @@ pub(super) fn horizontal_tab_geometry_in(
     } else {
         lane.3
     };
-    let (arrow_rect, plus_rect, search_rect, lead, mut button_w) = if linux {
+    let (arrow_rect, plus_rect, search_rect, lead, button_w) = if linux {
         let controls = linux_header_tab_controls(lane, scale, new_tab_dropdown_visible());
         (
             controls.menu,
@@ -2223,15 +2275,99 @@ pub(super) fn horizontal_tab_geometry_in(
         };
         (menu, plus, (0.0, 0.0, 0.0, 0.0), 0.0, reserve)
     };
-    // Only a macOS title bar gets the gear: Linux's header and plain strips
-    // keep Settings in their `≡` / `▾` menus. It goes first as the window
-    // narrows, before the drag lane or a tab gives way.
-    let mut settings_rect = (0.0, 0.0, 0.0, 0.0);
+    let settings_rect = (0.0, 0.0, 0.0, 0.0);
     if titlebar && !linux {
-        let room = titlebar_tab_room(n, min, arrow, cfg.scroll_tabbar) + drag;
-        let (rect, extra) = titlebar_settings_control(plus_rect, lane.2, button_w, scale, room);
-        settings_rect = rect;
-        button_w += extra;
+        let lane_key = (lane.0.to_bits(), lane.2.to_bits());
+        if hold
+            && let Some(held) = state.held
+            && held.tabs == n
+            && held.lane == lane_key
+        {
+            let held_strip = f32::from_bits(held.strip);
+            let titlebar_lane = TitlebarLane {
+                strip: held_strip,
+                arrow,
+                min,
+                drag: held.drag,
+                floor: held.floor,
+                scroll: cfg.scroll_tabbar,
+            };
+            let layout = titlebar_tab_layout(n, active, &titlebar_lane, state, true);
+            if state.held.is_some() {
+                state.lead = held.lead;
+                state.drag = held.drag;
+                state.floor = held.floor;
+                state.lane = lane_key;
+                return HorizontalTabGeometry {
+                    arrow_rect,
+                    plus_rect,
+                    search_rect,
+                    settings_rect,
+                    lead: held.lead,
+                    strip: held_strip,
+                    layout,
+                };
+            }
+        }
+        let window_w = lane.0 + lane.2;
+        let base_side = lane.0.max(button_w);
+        let need = titlebar_tab_room(n, min, arrow, cfg.scroll_tabbar);
+        let centered_span = window_w - 2.0 * base_side;
+        let full_side = TITLEBAR_DRAG_LANE_SIDE * scale;
+        let floor_side = TITLEBAR_DRAG_LANE_SIDE_FLOOR * scale;
+        let (lead, strip, used_drag, used_floor, layout) =
+            if centered_span >= need + 2.0 * floor_side {
+                let drag_side = ((centered_span - need) * 0.5).clamp(floor_side, full_side);
+                let side_reserve = base_side + drag_side;
+                let lead = (side_reserve - lane.0).max(0.0);
+                let strip = (window_w - 2.0 * side_reserve).max(0.0);
+                let titlebar_lane = TitlebarLane {
+                    strip,
+                    arrow,
+                    min,
+                    drag: 0.0,
+                    floor: 0.0,
+                    scroll: cfg.scroll_tabbar,
+                };
+                (
+                    lead,
+                    strip,
+                    0.0,
+                    0.0,
+                    titlebar_tab_layout(n, active, &titlebar_lane, state, hold),
+                )
+            } else {
+                let strip = tab_segment_strip_width(lane.2, button_w, 0.0);
+                let floor = TITLEBAR_DRAG_LANE_FLOOR * scale;
+                let titlebar_lane = TitlebarLane {
+                    strip,
+                    arrow,
+                    min,
+                    drag,
+                    floor,
+                    scroll: cfg.scroll_tabbar,
+                };
+                (
+                    0.0,
+                    strip,
+                    drag,
+                    floor,
+                    titlebar_tab_layout(n, active, &titlebar_lane, state, hold),
+                )
+            };
+        state.lead = lead;
+        state.drag = used_drag;
+        state.floor = used_floor;
+        state.lane = lane_key;
+        return HorizontalTabGeometry {
+            arrow_rect,
+            plus_rect,
+            search_rect,
+            settings_rect,
+            lead,
+            strip,
+            layout,
+        };
     }
     let strip = tab_segment_strip_width(lane.2 - lead, button_w, 0.0);
     let layout = if titlebar {
@@ -2258,6 +2394,64 @@ pub(super) fn horizontal_tab_geometry_in(
     }
 }
 
+/// Centered Row 1 title lane for a two-row GNOME header bar.
+pub(super) fn linux_header_title_rect(
+    header_band: Rect,
+    scale: f32,
+    button_layout: &crate::window_buttons::ButtonLayout,
+) -> Rect {
+    let lane = horizontal_tab_lane(
+        header_band,
+        button_layout.reservations(header_band.2, header_band.3),
+    );
+    let controls = linux_header_tab_controls(lane, scale, new_tab_dropdown_visible());
+    let left = lane.0 + controls.lead + 8.0;
+    let right = (lane.0 + lane.2 - controls.trail - 8.0).max(left);
+    let raw = (left, header_band.1, right - left, header_band.3);
+    centered_title_lane(raw, header_band.0 + header_band.2 * 0.5)
+}
+
+/// Layout of a two-row GNOME header bar: Row 1 holds `+`, `🔍`, `≡`, window
+/// controls, and the centered active title; Row 2 holds full-width tabs.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn linux_two_row_tab_geometry_in(
+    band: Rect,
+    tab_row_y: f32,
+    tab_row_h: f32,
+    scale: f32,
+    (n, active): (usize, usize),
+    button_layout: &crate::window_buttons::ButtonLayout,
+    cfg: &Config,
+    (state, hold): (&mut TitlebarStrip, bool),
+) -> HorizontalTabGeometry {
+    let header_h = (tab_row_y - band.1).max(LINUX_HEADER_HEIGHT * scale);
+    let header_band = (band.0, band.1, band.2, header_h);
+    let header_lane = horizontal_tab_lane(
+        header_band,
+        button_layout.reservations(header_band.2, header_band.3),
+    );
+    let controls = linux_header_tab_controls(header_lane, scale, new_tab_dropdown_visible());
+    let strip = band.2.max(0.0);
+    let lane = TitlebarLane {
+        strip,
+        arrow: tab_row_h.max(1.0),
+        min: cfg.tab_min_width * scale,
+        drag: 0.0,
+        floor: 0.0,
+        scroll: cfg.scroll_tabbar,
+    };
+    let layout = titlebar_tab_layout(n, active, &lane, state, hold);
+    HorizontalTabGeometry {
+        arrow_rect: controls.menu,
+        plus_rect: controls.plus,
+        search_rect: controls.search,
+        settings_rect: (0.0, 0.0, 0.0, 0.0),
+        lead: 0.0,
+        strip,
+        layout,
+    }
+}
+
 /// The lone tab a torn-off window's title bar paints, in its own `band`:
 /// the tab its pointer grip is measured into, on every platform. In a title
 /// bar it starts where the strip does and fills it up to the drag lane.
@@ -2271,15 +2465,24 @@ pub(super) fn tear_off_destination_tab(
     if cfg.tab_bar_pos.is_vertical() || !header.1 {
         return band;
     }
-    let reservations = if header.0 {
-        buttons.reservations(band.2, band.3)
-    } else {
-        (0.0, 0.0)
-    };
-    let lane = horizontal_tab_lane(band, reservations);
-    let geometry = horizontal_tab_geometry(lane, scale, header, (1, 0), cfg);
+    if header.0 {
+        let header_h = LINUX_HEADER_HEIGHT * scale;
+        if cfg.tab_bar == TabBarMode::Always && band.3 > header_h + 0.5 {
+            return (band.0, band.1 + header_h, band.2, band.3 - header_h);
+        }
+        let reservations = buttons.reservations(band.2, band.3);
+        let lane = horizontal_tab_lane(band, reservations);
+        let geometry = horizontal_tab_geometry(lane, scale, header, (1, 0), cfg);
+        return (
+            lane.0 + geometry.lead + geometry.layout.xs[0].unwrap_or(0.0),
+            band.1,
+            geometry.layout.last_width,
+            band.3,
+        );
+    }
+    let geometry = horizontal_tab_geometry(band, scale, header, (1, 0), cfg);
     (
-        lane.0 + geometry.lead + geometry.layout.xs[0].unwrap_or(0.0),
+        band.0 + geometry.lead + geometry.layout.xs[0].unwrap_or(0.0),
         band.1,
         geometry.layout.last_width,
         band.3,

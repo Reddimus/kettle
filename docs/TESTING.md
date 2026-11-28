@@ -4228,22 +4228,33 @@ KDE Plasma on Wayland, where blur works without the note.
 
 ### Linux header bar
 
-Portable `app::linux_titlebar_tests` cover 46 logical pixel header geometry,
-one and many tabs, window-control names/actions and hit bounds in English and
-Spanish, resize edges/corners, empty-space button routing, startup grids and
-winit feature drift. The existing portal fixture also covers GNOME button-layout
-snapshots, live changes and owner replacement on Linux. Renderer tests cover
-28-point button geometry, rounded hover/pressed fills and
-4.5:1 focused / 3:1 unfocused glyph contrast across bundled themes. Header tests
-also cover narrow control lanes, localized tooltips and ctl geometry parity,
-when the lone tab is drawn as the title, presses on that title (drag, 400 ms
-double-click, window menu, ignored middle press) beside two-tab presses left to
-the tab strip, and the leading `+` agreeing across hit tests, AccessKit and ctl
-at 1x and 2x with left-side buttons. Renderer tests check that a lone title
-paints no tab surface, accent or hover fill and keeps 4.5:1 focused and 3:1
-unfocused against the header in TokyoNight Night and Kettle Day, the header
-hairline's 1.5:1 floor and its break under an active tab, the `+` tooltip
-anchor, and that `≡` is drawn as a 14 by 12 point icon at every font size.
+Portable `app::linux_titlebar_tests` cover 46 logical pixel single-row and 82
+logical pixel two-row header geometry (46 px header row + 36 px full-width tab
+row), one and many tabs, Row 2 full-width tab alignment with equal split dividers
+across left/right/split/single/zero window-control layouts, window-control
+names/actions and hit bounds in English and Spanish, resize edges/corners,
+empty-space button routing, startup grids and winit feature drift. The existing
+portal fixture also covers GNOME button-layout snapshots, live changes and owner
+replacement on Linux. Renderer tests cover 34-point header button geometry,
+rounded hover/pressed fills and 4.5:1 focused / 3:1 unfocused glyph contrast
+across bundled themes. Header tests also cover narrow control lanes, localized
+tooltips and ctl geometry parity, when the lone tab is drawn as the title,
+presses on that title (drag, 400 ms double-click, window menu, ignored middle
+press) beside two-tab presses in Row 1 and Row 2, and the leading `+` and Find
+agreeing across hit tests, AccessKit and ctl at 1x and 2x with left-side
+buttons. Renderer tests check that a lone title paints no tab surface, accent or
+hover fill and keeps 4.5:1 focused and 3:1 unfocused against the header in
+TokyoNight Night and Kettle Day, the header hairline's 1.5:1 floor and its
+two-row divider + bottom lines running unbroken under the Row 2 pill tabs, the
+`+` tooltip anchor, and that `≡` is drawn as a 16 by 16 point icon at every font
+size, alongside GPU parity rendering of the two-row header (`gnome_two_row_header_renders_title_hairlines_and_inset_pills`).
+`tab_strip::inset_pill_tests` checks title bar pills at 1x, 1.5x and 2x: all
+four corners cut, clear of the band's edges, the accent inside the pill, the
+separator's full width and colour, a translucent pill's surface quads cutting
+the band exactly, dividers and the close hover chip inside the pill, enlarged
+titlebar text staying clear of the pill accent, and plain
+strips keeping band-high tabs; `titlebar_pill_accent_stays_clear_of_enlarged_title`
+verifies this rendered in a 28-point titlebar at 1x and 2x.
 Run the kettle-config, kettle-i18n, kettle-ui and kettle-render suites, then
 host clippy with `--all-targets -- -D warnings`. The Linux CI matrix compiles
 and runs the same suites on Linux, where the header code is built. Cross-clippy with
@@ -4350,28 +4361,31 @@ submenus, and localized accessibility names, shortcuts, popup state and screen
 order. Plain-strip geometry and CPU quad guards retain their prior output.
 
 `app/titlebar_tabs_tests.rs` covers title-bar tab strips on macOS (windowed
-and fullscreen) and in the GNOME header at 1x, 1.5x and 2x: the even split
-before the drag lane, a lone macOS tab filling the lane from its start and
-standing for the window title, the drag lane kept in every width, count and
+and fullscreen) at 1x, 1.5x and 2x, plus the two-row GNOME header tab row:
+midline-centered layout inside symmetric end reserves (traffic-light inset and
+trailing `+ ▾`, plus 24 pt drag lanes per side, without a Settings gear), the
+asymmetric fallback on narrower widths before overflow, a centered lone macOS
+tab standing for the window title, the drag lane kept in every width, count and
 scroll state, the scaled minimum with `‹ ›` and `scroll-tabbar = false`, the
-narrowing order (gear, drag lane, tab), the active tab revealed on a new tab,
-Go to Tab, next/previous, a close, a resize and a scale change while the
-wheel and arrows scroll freely, the hold after a close with the pointer and
-what ends it, and hit tests, reorder targets, dock insertion, the insert
-marker and the accessibility tree following the painted tabs. A seeded run
+narrowing order (each side drag lane down to 8 pt, then a tab), the active tab
+revealed on a new tab, Go to Tab, next/previous, a close, a resize and a scale
+change while the wheel and arrows scroll freely, the hold after a close with the
+pointer and what ends it, and hit tests, reorder targets, dock insertion, the
+insert marker and the accessibility tree following the painted tabs. A seeded run
 of 4000 random event sequences (new tabs at the end or after the current
 one, closes from the keyboard and held pointer closes, Go to Tab, clicks,
 scrolling, resizes, scale changes, the pointer entering and leaving) checks
 that every event that moves the selection leaves the active tab on screen,
-and the narrowing sweep checks, for any tab count, that the gear and then
-the drag lane give way before a tab narrows below the minimum. Run
+and the narrowing sweep checks, for any tab count, that the drag lanes give way
+down to 8 pt per side before a tab narrows below the minimum. Run
 `cargo test -p kettle-ui titlebar_tabs_tests`. The native-titlebar checker
-asserts the same rules on the live `ui_geometry` (lone tab at the strip's
-start, even split, drag lane) and `scripts/test-native-titlebar.py` pins them
-with fixtures. Run the native-titlebar Python
-self-test for the joined-control fixtures. GPU, live fullscreen reveal,
-window dragging, double-click preferences and VoiceOver require their native
-runner; CPU tests alone do not verify those interactions.
+asserts the same rules on the live `ui_geometry` (centered strip with split
+drag lanes on macOS, even split, no Settings gear) and
+`scripts/test-native-titlebar.py` pins them with fixtures. Run the
+native-titlebar Python self-test for the joined-control and centered-lane
+fixtures. GPU, live fullscreen reveal, window dragging, double-click
+preferences and VoiceOver require their native runner; CPU tests alone do not
+verify those interactions.
 
 ### Settings hierarchy regressions
 

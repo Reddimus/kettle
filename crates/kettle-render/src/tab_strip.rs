@@ -541,13 +541,176 @@ pub(crate) fn header_hairline(strip: Rgb, canvas: Rgb, foreground: Rgb) -> Rgb {
     )
 }
 
+/// Whether `bar`'s active and hovered tabs paint as pills inset in the
+/// strip: a macOS title bar strip or a GNOME header with tabs. Their hit
+/// rects still span the whole band; only the paint floats, so the tabs'
+/// edges never line up with the vertical pane splits below the strip.
+pub(crate) fn inset_pill_tabs(bar: &TabBar) -> bool {
+    bar.in_titlebar && !bar.lone_title
+}
+
+/// Gap between a pill and the band's top and bottom edges at 1x.
+const TAB_PILL_V_PAD: f32 = 4.0;
+/// Gap between a pill and its tab's leading and trailing edges at 1x.
+const TAB_PILL_H_PAD: f32 = 3.0;
+/// Corner radius of a pill, and of the strip's other rounded fills, at 1x.
+const TAB_PILL_RADIUS: f32 = 6.0;
+/// Smallest side a pill shrinks to on a tiny tab, at 1x.
+const TAB_PILL_MIN: f32 = 4.0;
+
+/// The pill a title bar tab paints inside its hit rect `tab`: inset
+/// [`TAB_PILL_V_PAD`] from the band's top and bottom and [`TAB_PILL_H_PAD`]
+/// from the tab's sides, in whole device pixels. The insets shrink on a tiny
+/// tab so the pill keeps at least [`TAB_PILL_MIN`] points per side. The
+/// insets are symmetric, so the pill shares the tab's centre and the title
+/// and close glyph centred in the tab stay centred in it.
+pub(crate) fn tab_pill_rect(tab: Rect4, scale: f32) -> Rect4 {
+    let (x, y, w, h) = tab;
+    let min = TAB_PILL_MIN * scale;
+    let v = (TAB_PILL_V_PAD * scale)
+        .round()
+        .min(((h - min) * 0.5).max(0.0).floor());
+    let hp = (TAB_PILL_H_PAD * scale)
+        .round()
+        .min(((w - min) * 0.5).max(0.0).floor());
+    (x + hp, y + v, w - hp * 2.0, h - v * 2.0)
+}
+
+/// The active pill's accent: a bar `2` device pixels per point thick on the
+/// pill's terminal-facing edge, inset from that edge by the same amount and
+/// from its sides by the corner radius, so it stays on the pill's straight
+/// run and never reaches the strip's edge. `None` on a pill too small for it.
+pub(crate) fn tab_pill_accent_rect(pill: Rect4, scale: f32, bottom_strip: bool) -> Option<Rect4> {
+    let (x, y, w, h) = pill;
+    let thickness = (2.0 * scale).round().max(1.0);
+    let inset = (2.0 * scale).round();
+    let radius = (TAB_PILL_RADIUS * scale).min(w * 0.5).min(h * 0.5);
+    let width = w - radius * 2.0;
+    if width < thickness || h < thickness + inset * 2.0 {
+        return None;
+    }
+    let top = if bottom_strip {
+        y + inset
+    } else {
+        y + h - inset - thickness
+    };
+    Some((x + radius, top, width, thickness))
+}
+
+/// Vertical span `(top, height)` inside an inset titlebar pill that stays clear
+/// of the inner accent bar by at least one point (`gap`).
+pub(crate) fn tab_pill_text_span(
+    band_y: f32,
+    band_height: f32,
+    scale: f32,
+    bottom_strip: bool,
+) -> (f32, f32) {
+    let pill = tab_pill_rect(
+        (
+            0.0,
+            band_y,
+            (TAB_PILL_RADIUS * 2.0 + 16.0) * scale,
+            band_height,
+        ),
+        scale,
+    );
+    let gap = scale.round().max(1.0);
+    let accent_room = match tab_pill_accent_rect(pill, scale, bottom_strip) {
+        Some(accent) => {
+            let room = if bottom_strip {
+                accent.1 + accent.3 - pill.1
+            } else {
+                pill.1 + pill.3 - accent.1
+            };
+            room.max(0.0) + gap
+        }
+        None => 0.0,
+    };
+    let clear_top = if bottom_strip {
+        pill.1 + accent_room
+    } else {
+        pill.1
+    };
+    (clear_top, (pill.3 - accent_room).max(1.0))
+}
+
+/// Fit titlebar tab text into the band, or into the pill's clear text span when
+/// `inset_pills` paints an inner accent inside the pill so enlarged text
+/// stays clear of the accent.
+pub fn titlebar_tab_text_scale(
+    band_height: f32,
+    line_height: f32,
+    scale: f32,
+    inset_pills: bool,
+) -> f32 {
+    if inset_pills {
+        tab_text_scale(
+            tab_pill_text_span(0.0, band_height, scale, false).1,
+            line_height,
+        )
+    } else {
+        tab_text_scale(band_height, line_height)
+    }
+}
+
+/// Vertical lane for a titlebar pill label: keeps `title_rect` unchanged when
+/// centering `line_height` already clears the inner accent, and shifts it just
+/// enough otherwise so titles never cross the accent.
+pub(crate) fn tab_pill_title_lane(
+    title_rect: Rect4,
+    scale: f32,
+    bottom_strip: bool,
+    line_height: f32,
+) -> Rect4 {
+    let (clear_top, clear_h) = tab_pill_text_span(title_rect.1, title_rect.3, scale, bottom_strip);
+    let centered_top = title_rect.1 + ((title_rect.3 - line_height) * 0.5).max(0.0);
+    let max_top = (clear_top + clear_h - line_height).max(clear_top);
+    let clamped_top = centered_top.clamp(clear_top, max_top);
+    if (clamped_top - centered_top).abs() < 1e-3 {
+        return title_rect;
+    }
+    (
+        title_rect.0,
+        clamped_top,
+        title_rect.2,
+        line_height.min(clear_h),
+    )
+}
+
+/// The hover chip behind a tab's close glyph in its `close` rect. It keeps
+/// 5 px off the rect's edges, and on a pill tab at least one point inside
+/// the pill too, so the chip never pokes past the pill's top, bottom or end.
+pub(crate) fn close_hover_rect(close: Rect4, pill: bool, scale: f32) -> Rect4 {
+    let (x, y, w, h) = close;
+    let inset = if pill {
+        5.0_f32.max((TAB_PILL_V_PAD * scale).round() + scale.round().max(1.0))
+    } else {
+        5.0
+    };
+    (
+        x + inset,
+        y + inset,
+        (w - inset * 2.0).max(0.0),
+        (h - inset * 2.0).max(0.0),
+    )
+}
+
 /// The hairline's spans along the bottom of the header `band`, one device
 /// pixel per point thick: the full width, less the active tab, which joins
-/// the terminal below it. A lone title is no tab, so the line runs under it.
+/// the terminal below it. A lone title is no tab, so the line runs under it,
+/// and a title bar strip's pill tabs float above it, so it runs under them.
 pub(crate) fn header_hairline_rects(bar: &TabBar, band: Rect4, scale: f32) -> Vec<Rect4> {
     let (x, y, w, h) = band;
     let thickness = scale.round().max(1.0).min(h);
     let top = y + h - thickness;
+    let mut rects = Vec::new();
+    if bar.header_height > 0.0 && bar.header_height < h {
+        rects.push((x, y + bar.header_height - thickness, w, thickness));
+    }
+    if inset_pill_tabs(bar) {
+        rects.push((x, top, w, thickness));
+        return rects;
+    }
     let gap = bar
         .segments
         .iter()
@@ -555,13 +718,15 @@ pub(crate) fn header_hairline_rects(bar: &TabBar, band: Rect4, scale: f32) -> Ve
         .map(|tab| (tab.rect.0.max(x), (tab.rect.0 + tab.rect.2).min(x + w)))
         .filter(|(start, end)| end > start);
     match gap {
-        Some((start, end)) => [(x, start), (end, x + w)]
-            .into_iter()
-            .filter(|(left, right)| right > left)
-            .map(|(left, right)| (left, top, right - left, thickness))
-            .collect(),
-        None => vec![(x, top, w, thickness)],
+        Some((start, end)) => rects.extend(
+            [(x, start), (end, x + w)]
+                .into_iter()
+                .filter(|(left, right)| right > left)
+                .map(|(left, right)| (left, top, right - left, thickness)),
+        ),
+        None => rects.push((x, top, w, thickness)),
     }
+    rects
 }
 
 /// The fills behind the new-tab controls at rest. A plain strip's `▾` sits
@@ -583,6 +748,10 @@ pub(crate) struct HorizontalTabQuads {
     /// Translucent tab backgrounds, including their opaque accent line.
     /// Use the terminal's replacing base layer unless a wallpaper is present.
     pub surface: Vec<QuadInstance>,
+    /// The hairline between a header or title bar strip and the terminal.
+    /// Painted after the strip's own buttons, whose fills span the band, so
+    /// none of them breaks the line.
+    pub separator: Vec<QuadInstance>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -601,20 +770,37 @@ pub(crate) fn horizontal_tab_quads(
     let mut band = vec![rect(band.0, band.1, band.2, band.3, chrome, 1.0)];
     let mut surface = Vec::new();
     let bottom = pos == TabBarPos::Bottom;
+    let pills = inset_pill_tabs(bar);
     let hover = tab_title_background(false, true, false, background.0, chrome, theme.foreground);
     let divider = crate::chrome::tab_detail(chrome, theme.foreground, false);
     for (i, tab) in bar.segments.iter().enumerate() {
         let (active, hovered) = tab_paint_state(bar, tab);
         if active || hovered {
             let start = quads.len();
-            rounded_fill(
-                &mut quads,
-                tab.rect,
-                6.0 * scale,
-                (!bottom, bottom),
-                if active { background } else { (hover, 1.0) },
-                active.then_some((accent, (3.0 * scale).round(), bottom)),
-            );
+            let fill = if active { background } else { (hover, 1.0) };
+            if pills {
+                let pill = tab_pill_rect(tab.rect, scale);
+                rounded_fill(
+                    &mut quads,
+                    pill,
+                    TAB_PILL_RADIUS * scale,
+                    (true, true),
+                    fill,
+                    None,
+                );
+                if active && let Some((x, y, w, h)) = tab_pill_accent_rect(pill, scale, bottom) {
+                    quads.push(rect(x, y, w, h, accent, 1.0));
+                }
+            } else {
+                rounded_fill(
+                    &mut quads,
+                    tab.rect,
+                    TAB_PILL_RADIUS * scale,
+                    (!bottom, bottom),
+                    fill,
+                    active.then_some((accent, (3.0 * scale).round(), bottom)),
+                );
+            }
             if active && background.1 < 1.0 {
                 // Cut with the actual surface slices so the rounded corners'
                 // outside stays chrome without painting beneath the tab.
@@ -634,26 +820,35 @@ pub(crate) fn horizontal_tab_quads(
             && (tab.rect.0 + tab.rect.2 - next.rect.0).abs() < 1.0
         {
             let (x, y, w, h) = tab.rect;
+            // Between pills the divider spans the pill interior rather than
+            // the band, so it lines up with the pills on either side.
+            let inset = if pills {
+                tab_pill_rect(tab.rect, scale).1 - y + (3.0 * scale).round()
+            } else {
+                6.0
+            };
             quads.push(rect(
                 x + w - 1.0,
-                y + 6.0,
+                y + inset,
                 1.0,
-                (h - 12.0).max(0.0),
+                (h - inset * 2.0).max(0.0),
                 divider,
                 1.0,
             ));
         }
     }
     band.extend(quads);
-    if bar.linux_header {
+    let mut separator = Vec::new();
+    if bar.linux_header || pills {
         let line = header_hairline(chrome, background.0, theme.foreground);
         for (x, y, w, h) in header_hairline_rects(bar, bounds, scale) {
-            band.push(rect(x, y, w, h, line, 1.0));
+            separator.push(rect(x, y, w, h, line, 1.0));
         }
     }
     HorizontalTabQuads {
         chrome: band,
         surface,
+        separator,
     }
 }
 
@@ -1416,6 +1611,17 @@ mod tests {
             .map(|q| q.color)
     }
 
+    /// The strip's opaque layer as the painter stacks it: the band and its
+    /// tabs, then the separator over the strip's buttons.
+    fn painted(quads: &HorizontalTabQuads) -> Vec<QuadInstance> {
+        quads
+            .chrome
+            .iter()
+            .chain(&quads.separator)
+            .copied()
+            .collect()
+    }
+
     #[test]
     fn horizontal_translucent_active_surface_matches_terminal_alpha() {
         use kettle_config::{BackgroundType, Config, Theme};
@@ -1768,10 +1974,12 @@ mod tests {
     }
 
     /// A GNOME header 800 points wide at `scale` with `tabs` tabs, the first
-    /// active: one is a 400-point window title, more are 240-point tabs.
+    /// active: one is a 400-point window title, more are 240-point tabs. The
+    /// header replaces the title bar, as the UI marks it.
     fn gnome_header(tabs: usize, scale: f32) -> TabBar {
         let h = 46.0 * scale;
         let mut bar = TabBar::hidden();
+        bar.in_titlebar = true;
         bar.linux_header = true;
         bar.lone_title = tabs == 1;
         bar.height = h;
@@ -1792,7 +2000,7 @@ mod tests {
     /// A lone GNOME-header title is the header itself: inside its rect there
     /// is no tab surface, accent line or hover fill, opaque or over a
     /// translucent window, and its top edge samples as the header. A second
-    /// tab brings the active tab's fill and 3-pixel accent back.
+    /// tab brings the active pill's fill and 2-pixel accent back.
     #[test]
     fn lone_header_title_paints_no_surface_accent_or_hover() {
         let cfg = kettle_config::Config::default();
@@ -1855,7 +2063,7 @@ mod tests {
                             == Some(accent_color)
                     })
                     .count();
-                assert_eq!(rows, (3.0 * scale).round() as usize, "{name} {scale}x");
+                assert_eq!(rows, (2.0 * scale).round() as usize, "{name} {scale}x");
             }
         }
     }
@@ -1902,8 +2110,8 @@ mod tests {
 
     /// The hairline under the GNOME header keeps 1.5:1 against the header
     /// and the terminal, one device pixel per point thick on the header's
-    /// last row. It runs the full width under a lone title, stops at the
-    /// active tab, which joins the terminal, and no other strip has one.
+    /// last row. It runs the full width under a lone title and under the
+    /// pill tabs, which float above it, and a plain strip has none.
     #[test]
     fn gnome_header_hairline_separates_it_from_the_terminal() {
         let cfg = kettle_config::Config::default();
@@ -1934,32 +2142,28 @@ mod tests {
                         TabBarPos::Top,
                         scale,
                     );
+                    let painted = painted(&quads);
                     let thickness = scale.round();
                     let case = format!("{name} {scale}x {tabs} tabs");
                     let column = |x: f32| {
                         (0..h as u32)
-                            .filter(|&y| {
-                                sample(&quads.chrome, x, y as f32 + 0.5) == Some(line_color)
-                            })
+                            .filter(|&y| sample(&painted, x, y as f32 + 0.5) == Some(line_color))
                             .collect::<Vec<_>>()
                     };
                     let bottom: Vec<u32> = (h as u32 - thickness as u32..h as u32).collect();
                     let active = bar.segments[0].rect;
                     for x in [0.5, w * 0.5, w - 0.5, active.0 + active.2 * 0.5] {
-                        let under_tab = tabs > 1 && x >= active.0 && x < active.0 + active.2;
-                        if under_tab {
-                            assert!(column(x).is_empty(), "{case}: a line under the tab");
-                        } else {
-                            assert_eq!(column(x), bottom, "{case}: x={x}");
-                            assert_eq!(
-                                sample(&quads.chrome, x, h - thickness - 0.5),
-                                Some(header),
-                                "{case}: x={x}"
-                            );
-                        }
+                        assert_eq!(column(x), bottom, "{case}: x={x}");
+                        assert_eq!(
+                            sample(&painted, x, h - thickness - 0.5),
+                            Some(header),
+                            "{case}: x={x}"
+                        );
                     }
                     let mut plain = bar;
                     plain.linux_header = false;
+                    plain.in_titlebar = false;
+                    plain.lone_title = false;
                     let quads = horizontal_tab_quads(
                         &plain,
                         plain.band,
@@ -1970,6 +2174,7 @@ mod tests {
                         TabBarPos::Top,
                         scale,
                     );
+                    assert!(quads.separator.is_empty(), "{case}: a plain strip");
                     assert!(
                         !quads.chrome.iter().any(|q| q.color == line_color),
                         "{case}: a plain strip has no hairline"
@@ -2012,6 +2217,7 @@ mod tests {
             assert_eq!(tooltip_anchor(&bar), bar.band);
             bar.pressed_new_tab = false;
             bar.linux_header = false;
+            bar.in_titlebar = false;
             assert_eq!(tooltip_anchor(&bar), bar.band);
         }
     }
@@ -3038,5 +3244,439 @@ mod scroll_arrow_tests {
         assert_eq!(shown, title, "the whole title");
         let src: String = crate::production_source().split_whitespace().collect();
         assert!(src.contains("letwrap_width=(sw-16.0*self.scale).max(1.0);"));
+    }
+}
+
+#[cfg(test)]
+mod inset_pill_tests {
+    use super::*;
+    use crate::TabActivity;
+
+    fn sample(quads: &[QuadInstance], x: f32, y: f32) -> Option<[f32; 4]> {
+        quads
+            .iter()
+            .rev()
+            .find(|q| {
+                x >= q.pos[0]
+                    && x < q.pos[0] + q.size[0]
+                    && y >= q.pos[1]
+                    && y < q.pos[1] + q.size[1]
+            })
+            .map(|q| q.color)
+    }
+
+    fn color(c: Rgb) -> [f32; 4] {
+        rect(0.0, 0.0, 1.0, 1.0, c, 1.0).color
+    }
+
+    /// A macOS title bar strip at `scale`: the band starts after the
+    /// traffic lights and holds three 160-point tabs, the first active and
+    /// the second hovered, split evenly as the UI lays them out.
+    fn titlebar(scale: f32) -> TabBar {
+        titlebar_with(scale, 3)
+    }
+
+    /// [`titlebar`] with `tabs` 160-point tabs.
+    fn titlebar_with(scale: f32, tabs: usize) -> TabBar {
+        let h = 32.0 * scale;
+        let mut bar = TabBar::hidden();
+        bar.in_titlebar = true;
+        bar.height = h;
+        bar.band = (78.0 * scale, 0.0, 560.0 * scale, h);
+        for i in 0..tabs {
+            let r = ((78.0 + i as f32 * 160.0) * scale, 0.0, 160.0 * scale, h);
+            bar.segments.push(crate::TabSeg {
+                idx: i,
+                rect: r,
+                title_rect: r,
+                hint: None,
+                close: (r.0 + r.2 - h, 0.0, h, h),
+                title: "shell".into(),
+                path: None,
+                active: i == 0,
+                activity: TabActivity::Normal,
+            });
+        }
+        bar.hovered_tab_idx = Some(1);
+        bar
+    }
+
+    fn paint(bar: &TabBar, alpha: f32, scale: f32) -> (HorizontalTabQuads, kettle_config::Theme) {
+        let theme = kettle_config::Theme::by_name("TokyoNight Night");
+        let quads = horizontal_tab_quads(
+            bar,
+            (0.0, 0.0, 720.0 * scale, bar.height),
+            &theme,
+            (theme.background, alpha),
+            theme.palette[0],
+            Rgb::new(0xff, 0x00, 0xff),
+            TabBarPos::Top,
+            scale,
+        );
+        (quads, theme)
+    }
+
+    #[test]
+    fn pill_insets_and_tiny_tabs_keep_a_minimum_size() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let tab = (100.0, 0.0, 160.0 * scale, 32.0 * scale);
+            let (x, y, w, h) = tab_pill_rect(tab, scale);
+            let (v, hp) = ((4.0 * scale).round(), (3.0 * scale).round());
+            assert_eq!(
+                (x, y, w, h),
+                (100.0 + hp, v, tab.2 - hp * 2.0, tab.3 - v * 2.0)
+            );
+            // Symmetric insets keep the tab's centre, where its title and
+            // close glyph are centred.
+            assert_eq!(x + w * 0.5, tab.0 + tab.2 * 0.5);
+            assert_eq!(y + h * 0.5, tab.1 + tab.3 * 0.5);
+            for side in [0.0_f32, 1.0, 4.0, 6.0, 9.0, 12.0] {
+                let side = side * scale;
+                let (_, _, pw, ph) = tab_pill_rect((0.0, 0.0, side, side), scale);
+                let floor = (4.0 * scale).min(side);
+                assert!(pw >= floor && ph >= floor, "{scale}x {side}: {pw}x{ph}");
+                assert!(pw <= side && ph <= side);
+            }
+        }
+    }
+
+    /// The active and hovered tabs paint pills with all four corners
+    /// rounded, clear of the band's top and bottom and of the tab's sides,
+    /// so no tab edge reaches the pane splits under the strip. The active
+    /// pill's accent sits inside it, off its bottom edge.
+    #[test]
+    fn titlebar_tabs_paint_inset_pills_rounded_on_all_corners() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let bar = titlebar(scale);
+            let (quads, theme) = paint(&bar, 1.0, scale);
+            let painted: Vec<QuadInstance> = quads
+                .chrome
+                .iter()
+                .chain(&quads.separator)
+                .copied()
+                .collect();
+            let strip = color(theme.palette[0]);
+            let accent = color(Rgb::new(0xff, 0x00, 0xff));
+            let hover = color(crate::chrome::strip_hover(
+                theme.palette[0],
+                theme.foreground,
+                false,
+            ));
+            for (i, fill) in [(0, color(theme.background)), (1, hover)] {
+                let tab = bar.segments[i].rect;
+                let pill = tab_pill_rect(tab, scale);
+                let (cx, cy) = (tab.0 + tab.2 * 0.5, tab.1 + tab.3 * 0.5);
+                let case = format!("{scale}x tab {i}");
+                assert_eq!(sample(&quads.chrome, cx, cy), Some(fill), "{case}");
+                // Clear of the band's top and bottom and the tab's sides.
+                assert_eq!(
+                    sample(&quads.chrome, cx, pill.1 - 0.5),
+                    Some(strip),
+                    "{case}"
+                );
+                assert_eq!(
+                    sample(&quads.chrome, cx, pill.1 + pill.3 + 0.5),
+                    Some(strip),
+                    "{case}"
+                );
+                assert_eq!(
+                    sample(&quads.chrome, pill.0 - 0.5, cy),
+                    Some(strip),
+                    "{case}"
+                );
+                assert_eq!(
+                    sample(&quads.chrome, pill.0 + pill.2 + 0.5, cy),
+                    Some(strip),
+                    "{case}"
+                );
+                // All four corners are cut.
+                for (px, py) in [
+                    (pill.0 + 0.5, pill.1 + 0.5),
+                    (pill.0 + pill.2 - 0.5, pill.1 + 0.5),
+                    (pill.0 + 0.5, pill.1 + pill.3 - 0.5),
+                    (pill.0 + pill.2 - 0.5, pill.1 + pill.3 - 0.5),
+                ] {
+                    assert_eq!(sample(&quads.chrome, px, py), Some(strip), "{case} corner");
+                }
+                // The bottom row under every tab is the separator, not a tab.
+                assert_ne!(sample(&painted, cx, tab.3 - 0.5), Some(fill), "{case}");
+            }
+            let active = tab_pill_rect(bar.segments[0].rect, scale);
+            let rows: Vec<f32> = (0..bar.height as u32)
+                .map(|y| y as f32 + 0.5)
+                .filter(|&y| sample(&quads.chrome, active.0 + active.2 * 0.5, y) == Some(accent))
+                .collect();
+            assert_eq!(rows.len(), (2.0 * scale).round() as usize, "{scale}x");
+            assert!(
+                rows.iter()
+                    .all(|&y| y > active.1 && y < active.1 + active.3)
+            );
+            assert!(rows[rows.len() - 1] < active.1 + active.3 - (2.0 * scale).round());
+            // The accent keeps off the pill's rounded ends.
+            assert_ne!(sample(&quads.chrome, active.0 + 1.0, rows[0]), Some(accent));
+            let hovered = bar.segments[1].rect;
+            assert!(
+                !quads
+                    .chrome
+                    .iter()
+                    .any(|q| q.color == accent && q.pos[0] >= hovered.0),
+                "{scale}x: the hovered pill has no accent"
+            );
+        }
+    }
+
+    /// The hairline under a title bar strip with tabs runs the full width,
+    /// unbroken under the pills, in the header's 1.5:1 colour, as the last
+    /// layer so the strip's buttons cannot break it.
+    #[test]
+    fn titlebar_separator_runs_the_full_width_under_the_pills() {
+        for scale in [1.0_f32, 2.0] {
+            let bar = titlebar(scale);
+            let band = (0.0, 0.0, 720.0 * scale, bar.height);
+            let thickness = scale.round();
+            assert_eq!(
+                header_hairline_rects(&bar, band, scale),
+                vec![(0.0, bar.height - thickness, band.2, thickness)]
+            );
+            let (quads, theme) = paint(&bar, 1.0, scale);
+            let line = header_hairline(theme.palette[0], theme.background, theme.foreground);
+            assert_eq!(quads.separator.len(), 1);
+            assert_eq!(quads.separator[0].color, color(line));
+            assert_eq!(quads.separator[0].pos, [0.0, bar.height - thickness]);
+            assert_eq!(quads.separator[0].size, [band.2, thickness]);
+            for against in [theme.palette[0], theme.background] {
+                assert!(
+                    crate::color::contrast_ratio(line, against) >= HEADER_HAIRLINE_CONTRAST - 1e-9
+                );
+            }
+            // The GNOME header with tabs runs it unbroken too.
+            let mut header = bar;
+            header.linux_header = true;
+            assert_eq!(header_hairline_rects(&header, band, scale).len(), 1);
+            // A plain strip has none and keeps its gap logic for headers.
+            header.in_titlebar = false;
+            assert_eq!(header_hairline_rects(&header, band, scale).len(), 2);
+            header.linux_header = false;
+            assert!(paint(&header, 1.0, scale).0.separator.is_empty());
+        }
+    }
+
+    /// Over a translucent window the active pill's fill and accent move to
+    /// the surface layer and the band is cut by exactly those quads: every
+    /// pixel of the band is painted by one layer, never both or neither,
+    /// and the surface stays inside the pill.
+    #[test]
+    fn translucent_pill_cuts_the_band_with_its_own_quads() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let bar = titlebar(scale);
+            let (quads, theme) = paint(&bar, 0.86, scale);
+            let pill = tab_pill_rect(bar.segments[0].rect, scale);
+            assert!(!quads.surface.is_empty());
+            for q in &quads.surface {
+                assert!(
+                    q.pos[0] >= pill.0 - 0.01
+                        && q.pos[1] >= pill.1 - 0.01
+                        && q.pos[0] + q.size[0] <= pill.0 + pill.2 + 0.01
+                        && q.pos[1] + q.size[1] <= pill.1 + pill.3 + 0.01,
+                    "{scale}x: surface outside the pill"
+                );
+            }
+            let expected = rect(0.0, 0.0, 1.0, 1.0, theme.background, 0.86).color;
+            assert_eq!(
+                sample(&quads.surface, pill.0 + pill.2 * 0.5, pill.1 + pill.3 * 0.5),
+                Some(expected)
+            );
+            for py in 0..bar.height as u32 {
+                for px in 0..(720.0 * scale) as u32 {
+                    let (px, py) = (px as f32 + 0.5, py as f32 + 0.5);
+                    assert_ne!(
+                        sample(&quads.surface, px, py).is_some(),
+                        sample(&quads.chrome, px, py).is_some(),
+                        "{scale}x: {px},{py}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Dividers between resting tabs span the pill interior, and the close
+    /// button's hover chip stays inside the pill at every scale.
+    #[test]
+    fn dividers_and_close_hover_fit_the_pill() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let mut bar = titlebar_with(scale, 4);
+            bar.hovered_tab_idx = None;
+            let (quads, _) = paint(&bar, 1.0, scale);
+            let second = bar.segments[1].rect;
+            let divider = quads
+                .chrome
+                .iter()
+                .find(|q| q.size[0] == 1.0 && q.pos[0] == second.0 + second.2 - 1.0)
+                .expect("a divider between resting tabs");
+            let inset = (4.0 * scale).round() + (3.0 * scale).round();
+            assert_eq!(divider.pos[1], inset, "{scale}x");
+            assert_eq!(divider.size[1], second.3 - inset * 2.0, "{scale}x");
+            for tab in &bar.segments {
+                let pill = tab_pill_rect(tab.rect, scale);
+                let chip = close_hover_rect(tab.close, true, scale);
+                assert!(chip.2 > 0.0 && chip.3 > 0.0);
+                assert!(
+                    chip.0 >= pill.0
+                        && chip.1 > pill.1
+                        && chip.0 + chip.2 < pill.0 + pill.2
+                        && chip.1 + chip.3 < pill.1 + pill.3,
+                    "{scale}x: chip {chip:?} outside pill {pill:?}"
+                );
+            }
+            let close = bar.segments[0].close;
+            assert_eq!(
+                close_hover_rect(close, false, scale),
+                (close.0 + 5.0, close.1 + 5.0, close.2 - 10.0, close.3 - 10.0)
+            );
+        }
+    }
+
+    /// A strip outside the title bar keeps its band-high tabs: the active
+    /// tab joins the terminal with its accent on the band's outer edge,
+    /// dividers keep their 6 px inset, and nothing separates it.
+    #[test]
+    fn plain_strip_keeps_band_high_tabs() {
+        for scale in [1.0_f32, 2.0] {
+            let mut bar = titlebar(scale);
+            bar.in_titlebar = false;
+            bar.hovered_tab_idx = None;
+            let (quads, theme) = paint(&bar, 1.0, scale);
+            assert!(quads.separator.is_empty());
+            let tab = bar.segments[0].rect;
+            let cx = tab.0 + tab.2 * 0.5;
+            assert_eq!(
+                sample(&quads.chrome, cx, 0.5),
+                Some(color(Rgb::new(0xff, 0x00, 0xff)))
+            );
+            assert_eq!(
+                sample(&quads.chrome, cx, tab.3 - 0.5),
+                Some(color(theme.background))
+            );
+            let second = bar.segments[1].rect;
+            let divider = quads
+                .chrome
+                .iter()
+                .find(|q| q.size[0] == 1.0 && q.pos[0] == second.0 + second.2 - 1.0)
+                .expect("a divider between resting tabs");
+            assert_eq!(divider.pos[1], 6.0);
+            assert_eq!(divider.size[1], second.3 - 12.0);
+        }
+    }
+
+    #[test]
+    fn enlarged_titlebar_text_clears_pill_accent_without_shifting_tall_strips() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            for band in [28.0_f32, 32.0, 38.0, 46.0] {
+                for font_size in [14.0_f32, 24.0, 48.0] {
+                    let bh = band * scale;
+                    let raw_line = font_size * 1.25 * scale;
+                    let text_scale = titlebar_tab_text_scale(bh, raw_line, scale, true);
+                    let scaled_line = raw_line * text_scale;
+                    let tab = (78.0 * scale, 0.0, 180.0 * scale, bh);
+                    let title_rect = (86.0 * scale, 0.0, 140.0 * scale, bh);
+                    let pill = tab_pill_rect(tab, scale);
+                    let accent = tab_pill_accent_rect(pill, scale, false).unwrap();
+                    let gap = scale.round().max(1.0);
+                    let (clear_top, clear_h) = tab_pill_text_span(0.0, bh, scale, false);
+                    assert!(
+                        scaled_line <= clear_h + 1e-3,
+                        "{scale}x band {band} font {font_size}: line {scaled_line} > clear {clear_h}"
+                    );
+                    let lane = tab_pill_title_lane(title_rect, scale, false, scaled_line);
+                    let (_, label_top) =
+                        tab_label_origin(lane, "Hgypq", (8.0 * scale * text_scale, scaled_line));
+                    assert!(
+                        label_top >= clear_top - 1e-3 && label_top >= pill.1 - 1e-3,
+                        "{scale}x band {band} font {font_size}: label_top {label_top} < pill.1 {}",
+                        pill.1
+                    );
+                    assert!(
+                        label_top + scaled_line <= accent.1 - gap + 1e-3,
+                        "{scale}x band {band} font {font_size}: bottom {} enters accent {} (gap {gap})",
+                        label_top + scaled_line,
+                        accent.1
+                    );
+                    if (band == 38.0 || band == 46.0) && font_size == 14.0 {
+                        assert_eq!(text_scale, 1.0);
+                        assert_eq!(lane, title_rect);
+                    }
+                }
+            }
+            assert_eq!(
+                titlebar_tab_text_scale(28.0 * scale, 24.0 * 1.25 * scale, scale, false),
+                tab_text_scale(28.0 * scale, 24.0 * 1.25 * scale)
+            );
+        }
+    }
+
+    #[test]
+    fn two_row_gnome_header_draws_two_hairlines_and_keeps_pills_in_row_two() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let header_h = 46.0 * scale;
+            let row_h = 36.0 * scale;
+            let total_h = header_h + row_h;
+            let w = 1000.0 * scale;
+            let mut bar = TabBar::hidden();
+            bar.in_titlebar = true;
+            bar.linux_header = true;
+            bar.height = total_h;
+            bar.header_height = header_h;
+            bar.band = (0.0, 0.0, w, total_h);
+            bar.header_title_rect = Some((120.0 * scale, 0.0, 760.0 * scale, header_h));
+            for i in 0..2 {
+                let r = (i as f32 * 500.0 * scale, header_h, 500.0 * scale, row_h);
+                bar.segments.push(crate::TabSeg {
+                    idx: i,
+                    rect: r,
+                    title_rect: r,
+                    hint: None,
+                    close: (r.0 + r.2 - row_h, header_h, row_h, row_h),
+                    title: format!("tab {i}"),
+                    path: None,
+                    active: i == 0,
+                    activity: TabActivity::Normal,
+                });
+            }
+            let thickness = scale.round();
+            assert_eq!(
+                header_hairline_rects(&bar, bar.band, scale),
+                vec![
+                    (0.0, header_h - thickness, w, thickness),
+                    (0.0, total_h - thickness, w, thickness),
+                ]
+            );
+            let theme = kettle_config::Theme::by_name("TokyoNight Night");
+            let strip = theme.palette[0];
+            let accent = Rgb::new(0xff, 0x00, 0xff);
+            let quads = horizontal_tab_quads(
+                &bar,
+                bar.band,
+                &theme,
+                (theme.background, 0.86),
+                strip,
+                accent,
+                TabBarPos::Top,
+                scale,
+            );
+            assert_eq!(quads.separator.len(), 2, "{scale}x");
+            assert!(!quads.surface.is_empty(), "{scale}x");
+            let pill0 = tab_pill_rect(bar.segments[0].rect, scale);
+            assert!(pill0.1 > header_h);
+            for q in &quads.surface {
+                assert!(
+                    q.pos[1] >= pill0.1 - 0.01 && q.pos[1] + q.size[1] <= pill0.1 + pill0.3 + 0.01
+                );
+            }
+            assert_eq!(
+                sample(&quads.chrome, 250.0 * scale, header_h * 0.5),
+                Some(color(strip)),
+                "{scale}x: Row 1 stays uniform header chrome"
+            );
+        }
     }
 }
