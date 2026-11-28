@@ -592,7 +592,7 @@ fn an_overflowing_tab_strip_keeps_its_tabs_between_the_arrows() {
                 assert!(l.xs[active].is_some(), "{strip} px, {n} tabs: active shown");
                 for (i, x) in l.xs.iter().enumerate() {
                     let Some(x) = *x else { continue };
-                    let w = if i + 1 == n { l.last_width } else { l.width };
+                    let w = l.tab_width(i);
                     assert!(
                         x >= arrow_w - 0.01 && x + w <= right + 0.01,
                         "{strip} px, {n} tabs, active {active}: tab {i} at {x}..{} leaves {arrow_w}..{right}",
@@ -826,6 +826,8 @@ fn horizontal_tab_height_is_shared_with_restore_content_and_status_bands() {
 fn titlebar_lane(strip: f32, min: f32, scroll: bool) -> super::TitlebarLane {
     super::TitlebarLane {
         strip,
+        band_width: 0.0,
+        left_inset: 0.0,
         arrow: 28.0,
         min,
         drag: super::TITLEBAR_DRAG_LANE,
@@ -949,6 +951,8 @@ fn narrow_chrome_keeps_active_title_and_separate_controls_reachable() {
                         let strip = band.2 - reserve;
                         let layout = if titlebar {
                             let lane = TitlebarLane {
+                                band_width: band.0 + band.2,
+                                left_inset: left,
                                 arrow: band.3,
                                 min: 120.0 * scale,
                                 drag: TITLEBAR_DRAG_LANE * scale,
@@ -961,11 +965,7 @@ fn narrow_chrome_keeps_active_title_and_separate_controls_reachable() {
                             tab_strip_layout(n, active, strip, reserve, band.3, 120.0 * scale, true)
                         };
                         let x = left + layout.xs[active].expect("active tab stays visible");
-                        let width = if active + 1 == n {
-                            layout.last_width
-                        } else {
-                            layout.width
-                        };
+                        let width = layout.tab_width(active);
                         assert!(x + width <= menu.0 - 4.0 * scale + 0.01);
                         let content = kettle_render::horizontal_tab_content_layout(
                             (x, y, width, band.3),
@@ -1097,7 +1097,7 @@ fn macos_titlebar_settings_gear_leads_the_new_tab_pair() {
                     settings_rect,
                     layout,
                     ..
-                } = horizontal_tab_geometry(lane, scale, (false, true), (tabs, 0), &cfg);
+                } = horizontal_tab_geometry(lane, width * scale, scale, (false, true), (tabs, 0), &cfg);
                 let (menu, plus, _) = super::chrome::titlebar_new_tab_controls(lane, scale);
                 assert_eq!((arrow_rect, plus_rect), (menu, plus));
                 assert_eq!(plus.0 + plus.2, menu.0);
@@ -1119,11 +1119,7 @@ fn macos_titlebar_settings_gear_leads_the_new_tab_pair() {
                 // The tabs give the gear its room: none reaches under it.
                 for (i, x) in layout.xs.iter().enumerate() {
                     let Some(x) = x else { continue };
-                    let w = if i + 1 == tabs {
-                        layout.last_width
-                    } else {
-                        layout.width
-                    };
+                    let w = layout.tab_width(i);
                     assert!(
                         lane.0 + x + w <= settings_rect.0 + 0.01,
                         "{case}: tab {i} ends at {} past the gear at {}",
@@ -1134,7 +1130,7 @@ fn macos_titlebar_settings_gear_leads_the_new_tab_pair() {
             }
             // No gear on a plain strip or in a Kettle-drawn GNOME header.
             for header in [(false, false), (true, true), (true, false)] {
-                let geometry = horizontal_tab_geometry(lane, scale, header, (2, 0), &cfg);
+                let geometry = horizontal_tab_geometry(lane, width * scale, scale, header, (2, 0), &cfg);
                 assert_eq!(geometry.settings_rect, (0.0, 0.0, 0.0, 0.0), "{header:?}");
             }
         }
@@ -1162,7 +1158,7 @@ fn macos_titlebar_settings_gear_hides_only_in_a_lane_too_narrow_for_a_tab() {
                 + (cfg.tab_min_width + super::TITLEBAR_DRAG_LANE) * scale;
             for (lane_width, shown) in [(threshold, true), (threshold - 1.0, false)] {
                 let lane = (probe.0, 0.0, lane_width, probe.3);
-                let geometry = horizontal_tab_geometry(lane, scale, (false, true), (tabs, 0), &cfg);
+                let geometry = horizontal_tab_geometry(lane, lane.0 + lane.2, scale, (false, true), (tabs, 0), &cfg);
                 assert_eq!(geometry.settings_rect.2 > 0.0, shown, "{lane_width} @{scale}x");
                 let (menu, plus_now, _) = super::chrome::titlebar_new_tab_controls(lane, scale);
                 assert_eq!(geometry.arrow_rect, menu);
@@ -1185,7 +1181,7 @@ fn macos_titlebar_settings_gear_hit_tests_share_its_rect() {
     let cfg = kettle_config::Config::default();
     for scale in [1.0, 2.0] {
         let lane = macos_titlebar_lane(1280.0, scale);
-        let geometry = horizontal_tab_geometry(lane, scale, (false, true), (1, 0), &cfg);
+        let geometry = horizontal_tab_geometry(lane, lane.0 + lane.2, scale, (false, true), (1, 0), &cfg);
         let mut bar = kettle_render::TabBar::hidden();
         bar.height = lane.3;
         bar.band = lane;
@@ -1235,7 +1231,7 @@ fn macos_titlebar_settings_gear_is_a_named_button_for_accesskit_and_ctl() {
     use super::chrome::horizontal_tab_geometry;
     let cfg = kettle_config::Config::default();
     let lane = macos_titlebar_lane(1280.0, 2.0);
-    let geometry = horizontal_tab_geometry(lane, 2.0, (false, true), (1, 0), &cfg);
+    let geometry = horizontal_tab_geometry(lane, lane.0 + lane.2, 2.0, (false, true), (1, 0), &cfg);
     let mut bar = kettle_render::TabBar::hidden();
     bar.height = lane.3;
     bar.band = lane;
@@ -1374,7 +1370,7 @@ fn a_screen_reader_click_on_the_settings_gear_opens_settings() {
     use super::*;
     let cfg = kettle_config::Config::default();
     let lane = macos_titlebar_lane(1280.0, 2.0);
-    let geometry = horizontal_tab_geometry(lane, 2.0, (false, true), (1, 0), &cfg);
+    let geometry = horizontal_tab_geometry(lane, lane.0 + lane.2, 2.0, (false, true), (1, 0), &cfg);
     let mut bar = kettle_render::TabBar::hidden();
     bar.height = lane.3;
     bar.band = lane;
@@ -1458,7 +1454,7 @@ fn macos_titlebar_strip(width: f32, scale: f32) -> kettle_render::TabBar {
     let cfg = kettle_config::Config::default();
     let lane = macos_titlebar_lane(width, scale);
     let geometry =
-        super::chrome::horizontal_tab_geometry(lane, scale, (false, true), (1, 0), &cfg);
+        super::chrome::horizontal_tab_geometry(lane, width * scale, scale, (false, true), (1, 0), &cfg);
     let mut bar = kettle_render::TabBar::hidden();
     bar.height = lane.3;
     bar.band = lane;
@@ -1704,7 +1700,14 @@ fn compact_header_controls_join_plus_then_menu() {
     let cfg = kettle_config::Config::default();
     for scale in [1.0, 2.0] {
         let lane = macos_titlebar_lane(1280.0, scale);
-        let geometry = super::chrome::horizontal_tab_geometry(lane, scale, (false, true), (1, 0), &cfg);
+        let geometry = super::chrome::horizontal_tab_geometry(
+            lane,
+            lane.0 + lane.2,
+            scale,
+            (false, true),
+            (1, 0),
+            &cfg,
+        );
         let plus = geometry.plus_rect;
         let menu = geometry.arrow_rect;
         assert_eq!(plus.0 + plus.2, menu.0);
@@ -1742,7 +1745,14 @@ fn compact_header_tearoff_clamps_grip_to_actual_destination() {
     for scale in [1.0, 2.0] {
         for width in [640.0, 1280.0] {
             let band = macos_titlebar_lane(width, scale);
-            let geometry = super::chrome::horizontal_tab_geometry(band, scale, (false, true), (1, 0), &cfg);
+            let geometry = super::chrome::horizontal_tab_geometry(
+                band,
+                width * scale,
+                scale,
+                (false, true),
+                (1, 0),
+                &cfg,
+            );
             let tab = tear_off_destination_tab(&cfg, band, (false, true), scale, &buttons);
             assert_eq!(tab.0, band.0);
             assert_eq!(tab.2, geometry.strip - super::TITLEBAR_DRAG_LANE * scale);
@@ -1770,27 +1780,46 @@ fn compact_header_divider_is_menu_control_and_gaps_remain_draggable() {
 }
 
 /// Plain strips keep their full-width-aligned layout; the GNOME header's
-/// tabs split what its `+`, Find, `≡` and the drag lane leave evenly.
+/// multi-tab seams snap to the window split grid while preserving its `+`,
+/// Find, `≡`, and drag lane.
 #[test]
-fn compact_header_preserves_plain_geometry_and_splits_gnome_tabs_evenly() {
+fn compact_header_preserves_plain_geometry_and_snaps_gnome_tabs_to_window_grid() {
     use super::chrome::*;
     let cfg = kettle_config::Config::default();
     for scale in [1.0, 1.5, 2.0] {
-        let plain = horizontal_tab_geometry((0.0, 0.0, 1280.0 * scale, 32.0 * scale), scale, (false, false), (1, 0), &cfg);
+        let plain = horizontal_tab_geometry(
+            (0.0, 0.0, 1280.0 * scale, 32.0 * scale),
+            1280.0 * scale,
+            scale,
+            (false, false),
+            (1, 0),
+            &cfg,
+        );
         assert_eq!(plain.plus_rect, (1240.0 * scale, 0.0, 32.0 * scale, 32.0 * scale));
         assert_eq!(plain.arrow_rect, (1204.0 * scale, 0.0, 32.0 * scale, 32.0 * scale));
-        assert_eq!(plain.layout.last_width, 1200.0 * scale);
-        let gnome = horizontal_tab_geometry((0.0, 0.0, 1280.0 * scale, 46.0 * scale), scale, (true, true), (3, 0), &cfg);
+        assert_eq!(plain.layout.tab_width(0), 1200.0 * scale);
+        let gnome = horizontal_tab_geometry(
+            (0.0, 0.0, 1280.0 * scale, 46.0 * scale),
+            1280.0 * scale,
+            scale,
+            (true, true),
+            (3, 0),
+            &cfg,
+        );
         assert_eq!(gnome.plus_rect, (7.0 * scale, 6.0 * scale, 34.0 * scale, 34.0 * scale));
         assert_eq!(gnome.arrow_rect, (1239.0 * scale, 6.0 * scale, 34.0 * scale, 34.0 * scale));
         assert_eq!(gnome.search_rect, (1199.0 * scale, 6.0 * scale, 34.0 * scale, 34.0 * scale));
-        // 1280 less the 47-point lead, the 87-point trail and the 48-point
-        // drag lane, in three.
-        assert!((gnome.layout.width - 366.0 * scale).abs() < 0.01);
-        assert_eq!(gnome.layout.last_width, gnome.layout.width);
-        for (i, x) in gnome.layout.xs.iter().enumerate() {
-            assert!((x.unwrap() - i as f32 * 366.0 * scale).abs() < 0.01);
-        }
+        // 1280 split into thirds: first tab absorbs the 47-point lead, last
+        // tab absorbs the 87-point trail plus 48-point drag lane.
+        let grid_w = 1280.0 * scale / 3.0;
+        let first_w = grid_w - 47.0 * scale;
+        let last_w = grid_w - (87.0 + 48.0) * scale;
+        assert!((gnome.layout.first_width - first_w).abs() < 0.01);
+        assert!((gnome.layout.width - grid_w).abs() < 0.01);
+        assert!((gnome.layout.last_width - last_w).abs() < 0.01);
+        assert!((gnome.layout.xs[0].unwrap()).abs() < 0.01);
+        assert!((gnome.lead + gnome.layout.xs[1].unwrap() - grid_w).abs() < 0.01);
+        assert!((gnome.lead + gnome.layout.xs[2].unwrap() - 2.0 * grid_w).abs() < 0.01);
     }
 }
 
@@ -1871,7 +1900,14 @@ fn compact_header_sweep_keeps_controls_tabs_and_fullscreen_drag_space_disjoint()
                 let lane = (left, 0.0, width * scale - left, 32.0 * scale);
                 for count in [1, 3, 20] {
                     for active in [0, count - 1] {
-                        let g = chrome::horizontal_tab_geometry(lane, scale, (false, true), (count, active), &cfg);
+                        let g = chrome::horizontal_tab_geometry(
+                            lane,
+                            width * scale,
+                            scale,
+                            (false, true),
+                            (count, active),
+                            &cfg,
+                        );
                         assert!(g.layout.xs[active].is_some());
                         assert_eq!(g.plus_rect.0 + g.plus_rect.2, g.arrow_rect.0);
                         let gear = g.settings_rect.2 > 0.0;
@@ -1889,7 +1925,7 @@ fn compact_header_sweep_keeps_controls_tabs_and_fullscreen_drag_space_disjoint()
                         let mut end = lane.0;
                         for (i, x) in g.layout.xs.iter().enumerate() {
                             let Some(x) = x else { continue };
-                            let w = if i + 1 == count { g.layout.last_width } else { g.layout.width };
+                            let w = g.layout.tab_width(i);
                             assert!(lane.0 + x + 0.01 >= end, "{width} @{scale}, {count} tabs, fullscreen={fullscreen}: {} < {end}", lane.0 + x);
                             end = lane.0 + x + w;
                             assert!(end + lane_left <= controls + 0.01);
@@ -1942,8 +1978,8 @@ fn compact_header_open_popup_has_no_inert_background_actions_and_can_dismiss() {
 fn compact_header_rtl_and_wide_literal_titles_fit_the_lone_tab() {
     let cfg = kettle_config::Config::default();
     let lane = macos_titlebar_lane(1280.0, 1.0);
-    let g = super::chrome::horizontal_tab_geometry(lane, 1.0, (false, true), (1, 0), &cfg);
-    let rect = (lane.0, 0.0, g.layout.last_width, lane.3);
+    let g = super::chrome::horizontal_tab_geometry(lane, lane.0 + lane.2, 1.0, (false, true), (1, 0), &cfg);
+    let rect = (lane.0, 0.0, g.layout.tab_width(0), lane.3);
     for title in ["שלום עולם", "مرحبا", "目录窗口", "abc שלום"] {
         for hovered in [false, true] {
             let content = kettle_render::horizontal_tab_content_layout(rect, hovered, true, 0.0, title, None, 8.0);

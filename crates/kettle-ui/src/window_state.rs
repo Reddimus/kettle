@@ -1034,7 +1034,8 @@ pub(crate) struct TitlebarStrip {
     pub(crate) first: usize,
     /// How many tabs fit between its arrows; 0 while it does not overflow.
     pub(crate) slots: usize,
-    /// The tab width, the arrow width and the strip width last laid out.
+    /// The first-tab width, per-tab width, arrow width and strip width last laid out.
+    pub(crate) first_width: f32,
     pub(crate) width: f32,
     pub(crate) arrow: f32,
     pub(crate) strip: f32,
@@ -1055,6 +1056,7 @@ pub(crate) struct HeldTabs {
     /// The tab count and strip width the hold applies to; any other lets go.
     pub(crate) tabs: usize,
     pub(crate) strip: u32,
+    pub(crate) first_width: f32,
     pub(crate) width: f32,
     pub(crate) arrow: f32,
     pub(crate) first: usize,
@@ -1070,6 +1072,7 @@ impl TitlebarStrip {
         (self.strip > 0.0 && tabs > 0).then_some(HeldTabs {
             tabs,
             strip: self.strip.to_bits(),
+            first_width: self.first_width,
             width: self.width,
             arrow: self.arrow,
             first: self.first,

@@ -284,6 +284,7 @@ impl App {
             layout,
         } = horizontal_tab_geometry_in(
             tab_lane,
+            band.0 + band.2,
             scale,
             (ws.linux_titlebar, ws.macos_titlebar_tabs),
             (n, active),
@@ -318,14 +319,7 @@ impl App {
                 // here") unless the bell rang in the focused pane and the user
                 // has not answered it.
                 let activity = tab_render_activity(ws, i, now, silence);
-                // The last tab yields the trailing `▾`/`+` button reservation
-                // in the full-width-aligned layout, so it is narrower than the
-                // rest; every other layout has `last_width == width`.
-                let seg_w = if i + 1 == n {
-                    layout.last_width
-                } else {
-                    layout.width
-                };
+                let seg_w = layout.tab_width(i);
                 let rect = (x, y, seg_w, height);
                 // A tab narrowed below its close button's width has no room
                 // for one: the button would reach past it onto the arrows.
@@ -898,15 +892,7 @@ pub(super) fn horizontal_tab_insert_x(layout: &TabStripLayout, index: usize, str
                 .enumerate()
                 .take(index)
                 .rev()
-                .find_map(|(previous, x)| {
-                    x.map(|x| {
-                        x + if previous + 1 == layout.xs.len() {
-                            layout.last_width
-                        } else {
-                            layout.width
-                        }
-                    })
-                })
+                .find_map(|(previous, x)| x.map(|x| x + layout.tab_width(previous)))
         })
         .or_else(|| layout.xs.iter().copied().flatten().next())
         .unwrap_or(0.0)
@@ -917,12 +903,17 @@ pub(super) fn horizontal_tab_insert_x(layout: &TabStripLayout, index: usize, str
 }
 
 pub(super) struct TabStripLayout {
-    /// Per-tab width for every tab EXCEPT the last one.
+    /// Width of the FIRST tab when `xs.len() > 1`. Equal to `width` in every
+    /// layout except window-grid titlebar layout, where the first tab absorbs
+    /// the leading titlebar inset so multi-tab seams align with the window
+    /// split grid.
+    pub(super) first_width: f32,
+    /// Per-tab width for middle tabs (and every tab in even/scrolled layouts).
     pub(super) width: f32,
-    /// Width of the LAST tab. Equal to `width` in every layout except the
-    /// full-width-aligned one, where the last tab yields the trailing `▾`/`+`
-    /// button reservation so the other tab boundaries land on the same grid as
-    /// vertical pane splits.
+    /// Width of the LAST tab (and the lone tab when `xs.len() == 1`). Equal to
+    /// `width` except in window-grid-aligned layouts, where the last tab yields
+    /// trailing controls and drag-lane insets so tab boundaries land on the
+    /// same grid as vertical pane splits.
     pub(super) last_width: f32,
     /// On-screen left x per tab, or `None` when scrolled out of view.
     pub(super) xs: Vec<Option<f32>>,
@@ -934,8 +925,20 @@ pub(super) struct TabStripLayout {
 }
 
 impl TabStripLayout {
+    /// Width of tab `index` in this layout.
+    pub(super) fn tab_width(&self, index: usize) -> f32 {
+        if index + 1 == self.xs.len() {
+            self.last_width
+        } else if index == 0 {
+            self.first_width
+        } else {
+            self.width
+        }
+    }
+
     fn empty(n: usize) -> Self {
         Self {
+            first_width: 0.0,
             width: 0.0,
             last_width: 0.0,
             xs: vec![None; n.max(1)],
@@ -948,6 +951,7 @@ impl TabStripLayout {
     /// Every tab `width` wide from the strip's start, none scrolled away.
     fn even(n: usize, width: f32) -> Self {
         Self {
+            first_width: width,
             width,
             last_width: width,
             xs: (0..n.max(1)).map(|i| Some(i as f32 * width)).collect(),
@@ -965,6 +969,7 @@ impl TabStripLayout {
             .map(|i| (i >= first && i < first + slots).then(|| arrow + (i - first) as f32 * width))
             .collect();
         Self {
+            first_width: width,
             width,
             last_width: width,
             xs,
@@ -1005,6 +1010,7 @@ pub(super) fn tab_strip_layout(
     if last_full >= min_w {
         let xs = (0..n).map(|i| Some(i as f32 * even_full)).collect();
         return TabStripLayout {
+            first_width: even_full,
             width: even_full,
             last_width: last_full,
             xs,
@@ -1019,16 +1025,7 @@ pub(super) fn tab_strip_layout(
         // back to the original behavior: tabs divide the button-trimmed `strip`
         // evenly and fill it, left-packed. (With scrolling off and many tabs,
         // width may fall below min_w — they just keep shrinking, no overflow.)
-        let width = even;
-        let xs = (0..n).map(|i| Some(i as f32 * width)).collect();
-        return TabStripLayout {
-            width,
-            last_width: width,
-            xs,
-            arrow_left: None,
-            arrow_right: None,
-            arrow_width: 0.0,
-        };
+        return TabStripLayout::even(n, even);
     }
     // Overflow: tabs at `min_w`, arrows reserve both ends, whole tabs only. A
     // strip with less than `min_w` between its arrows still shows the active
@@ -1053,6 +1050,7 @@ pub(super) fn tab_strip_layout(
         })
         .collect();
     TabStripLayout {
+        first_width: width,
         width,
         last_width: width,
         xs,
@@ -1954,6 +1952,12 @@ pub(super) struct TitlebarLane {
     /// Between the leading and trailing controls: the tabs, the overflow
     /// arrows and the drag lane share it.
     pub(super) strip: f32,
+    /// Full window width across which vertical pane splits divide, or `<= 0.0`
+    /// to skip window-grid seam alignment.
+    pub(super) band_width: f32,
+    /// Distance from the window's left edge to the tab strip's start
+    /// (`lane.0 + lead`).
+    pub(super) left_inset: f32,
     /// Each overflow arrow's width.
     pub(super) arrow: f32,
     /// `tab-min-width`, scaled.
@@ -1993,8 +1997,11 @@ pub(super) fn titlebar_tab_room(n: usize, min: f32, arrow: f32, scroll: bool) ->
 }
 
 /// Lay a title-bar strip's `n` tabs out, as the macOS title bar and the GNOME
-/// header both do: they divide the room the drag lane leaves evenly, starting
-/// at the strip's start, a lone tab included. Once they would be narrower
+/// header both do: a lone tab fills the room the drag lane leaves from the
+/// strip's start, while multiple tabs snap their inter-tab seams to the window
+/// split grid (`i * band_width / n`) whenever the inset-shortened first and
+/// last tabs both stay at or above `min` and within a 0.50 width ratio of each
+/// other, falling back to an even split otherwise. Once they would be narrower
 /// than the minimum (and `scroll-tabbar` is on) they stay at the minimum and
 /// the strip scrolls: `‹` at its start, `›` right after the tabs shown, the
 /// drag lane after that. `state` keeps where it is scrolled to: a new active
@@ -2030,6 +2037,8 @@ pub(super) fn titlebar_tab_layout(
     {
         state.held = Some(held);
         state.first = if held.slots > 0 { held.first } else { 0 };
+        state.first_width = held.first_width;
+        state.width = held.width;
         state.seen = Some((active, n, held.slots, bits));
         return layout;
     }
@@ -2038,11 +2047,56 @@ pub(super) fn titlebar_tab_layout(
     let arrow = lane.arrow.min(space * 0.5).max(0.0);
     let room = space - 2.0 * arrow;
     let (layout, first, slots) = if !overflow {
-        (TabStripLayout::even(n, even), 0, 0)
+        // Align multi-tab seams to the window split grid (`band_width / n`)
+        // when leading/trailing chrome leaves balanced end tabs at or above
+        // `min`; fall back to even division otherwise.
+        let grid_layout = if n >= 2
+            && lane.band_width.is_finite()
+            && lane.left_inset.is_finite()
+            && lane.band_width > space
+            && lane.left_inset >= 0.0
+        {
+            let right_inset = lane.band_width - lane.left_inset - space;
+            let grid_w = lane.band_width / n as f32;
+            let first_w = grid_w - lane.left_inset;
+            let last_w = grid_w - right_inset;
+            let aligned = right_inset >= 0.0
+                && first_w >= min
+                && last_w >= min
+                && (first_w.min(last_w) / first_w.max(last_w)) >= 0.50;
+            aligned.then(|| {
+                let xs = (0..n)
+                    .map(|i| {
+                        Some(if i == 0 {
+                            0.0
+                        } else {
+                            i as f32 * grid_w - lane.left_inset
+                        })
+                    })
+                    .collect();
+                TabStripLayout {
+                    first_width: first_w,
+                    width: grid_w,
+                    last_width: last_w,
+                    xs,
+                    arrow_left: None,
+                    arrow_right: None,
+                    arrow_width: 0.0,
+                }
+            })
+        } else {
+            None
+        };
+        (
+            grid_layout.unwrap_or_else(|| TabStripLayout::even(n, even)),
+            0,
+            0,
+        )
     } else if room < arrow.max(1.0) {
         // Too narrow for the arrows and a tab between them: the active tab
         // alone across the strip.
         let mut layout = TabStripLayout::empty(n);
+        layout.first_width = space;
         layout.width = space;
         layout.last_width = space;
         layout.xs[active] = Some(0.0);
@@ -2068,6 +2122,7 @@ pub(super) fn titlebar_tab_layout(
     *state = TitlebarStrip {
         first,
         slots,
+        first_width: layout.first_width,
         width: layout.width,
         arrow: layout.arrow_width,
         strip,
@@ -2077,7 +2132,7 @@ pub(super) fn titlebar_tab_layout(
     layout
 }
 
-/// The layout a hold keeps: the held width and first tab, the closed tab's
+/// The layout a hold keeps: the held widths and first tab, the closed tab's
 /// successors moved up into its place. `None` when the active tab would not
 /// show or the tabs no longer fit, which ends the hold.
 fn held_tab_layout(
@@ -2087,7 +2142,32 @@ fn held_tab_layout(
     space: f32,
 ) -> Option<TabStripLayout> {
     if held.slots == 0 {
-        return (n as f32 * held.width <= space + 0.5).then(|| TabStripLayout::even(n, held.width));
+        let total = held.first_width + (n - 1) as f32 * held.width;
+        return (held.first_width.is_finite()
+            && held.width.is_finite()
+            && held.first_width >= 0.0
+            && held.width >= 0.0
+            && total <= space + 0.5)
+            .then(|| {
+                let xs = (0..n)
+                    .map(|i| {
+                        Some(if i == 0 {
+                            0.0
+                        } else {
+                            held.first_width + (i - 1) as f32 * held.width
+                        })
+                    })
+                    .collect();
+                TabStripLayout {
+                    first_width: held.first_width,
+                    width: held.width,
+                    last_width: if n == 1 { held.first_width } else { held.width },
+                    xs,
+                    arrow_left: None,
+                    arrow_right: None,
+                    arrow_width: 0.0,
+                }
+            });
     }
     let first = held.first.min(n - 1);
     (active >= first && active < first + held.slots)
@@ -2168,6 +2248,7 @@ pub(super) struct HorizontalTabGeometry {
 /// own strip goes through [`horizontal_tab_geometry_in`] with its state.
 pub(super) fn horizontal_tab_geometry(
     lane: Rect,
+    band_width: f32,
     scale: f32,
     header: (bool, bool),
     tabs: (usize, usize),
@@ -2175,6 +2256,7 @@ pub(super) fn horizontal_tab_geometry(
 ) -> HorizontalTabGeometry {
     horizontal_tab_geometry_in(
         lane,
+        band_width,
         scale,
         header,
         tabs,
@@ -2188,6 +2270,7 @@ pub(super) fn horizontal_tab_geometry(
 /// [`titlebar_tab_layout`]). Plain strips ignore it.
 pub(super) fn horizontal_tab_geometry_in(
     lane: Rect,
+    band_width: f32,
     scale: f32,
     header: (bool, bool),
     tabs: (usize, usize),
@@ -2237,6 +2320,8 @@ pub(super) fn horizontal_tab_geometry_in(
     let layout = if titlebar {
         let lane = TitlebarLane {
             strip,
+            band_width,
+            left_inset: lane.0 + lead,
             arrow,
             min,
             drag,
@@ -2277,11 +2362,11 @@ pub(super) fn tear_off_destination_tab(
         (0.0, 0.0)
     };
     let lane = horizontal_tab_lane(band, reservations);
-    let geometry = horizontal_tab_geometry(lane, scale, header, (1, 0), cfg);
+    let geometry = horizontal_tab_geometry(lane, band.0 + band.2, scale, header, (1, 0), cfg);
     (
         lane.0 + geometry.lead + geometry.layout.xs[0].unwrap_or(0.0),
         band.1,
-        geometry.layout.last_width,
+        geometry.layout.tab_width(0),
         band.3,
     )
 }

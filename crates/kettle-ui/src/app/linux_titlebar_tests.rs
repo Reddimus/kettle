@@ -110,6 +110,8 @@ fn linux_header_one_and_many_tabs_leave_controls_and_empty_drag_space() {
             let strip = controls_start - lead - trail;
             let lane = TitlebarLane {
                 strip,
+                band_width: width,
+                left_inset: lead,
                 arrow: (LINUX_HEADER_BUTTON * scale).min(height),
                 min: 80.0 * scale,
                 drag: TITLEBAR_DRAG_LANE * scale,
@@ -134,11 +136,7 @@ fn linux_header_one_and_many_tabs_leave_controls_and_empty_drag_space() {
                 let Some(x) = x else {
                     continue;
                 };
-                let w = if idx + 1 == count {
-                    layout.last_width
-                } else {
-                    layout.width
-                };
+                let w = layout.tab_width(idx);
                 // The drag lane follows the tabs, before Find.
                 assert!(*x + w + TITLEBAR_DRAG_LANE * scale <= strip + 0.01);
                 let rect = (lead + *x, 0.0, w, height);
@@ -501,7 +499,8 @@ fn gnome_header_bar(width: f32, scale: f32, layout: &str, tabs: usize) -> TabBar
     let height = LINUX_HEADER_HEIGHT * scale;
     let band = (0.0, 0.0, width * scale, height);
     let lane = horizontal_tab_lane(band, preferences.reservations(band.2, height));
-    let geometry = horizontal_tab_geometry(lane, scale, (true, true), (tabs, 0), &cfg);
+    let geometry =
+        horizontal_tab_geometry(lane, band.0 + band.2, scale, (true, true), (tabs, 0), &cfg);
     let mut bar = TabBar::hidden();
     bar.height = height;
     bar.band = band;
@@ -520,11 +519,7 @@ fn gnome_header_bar(width: f32, scale: f32, layout: &str, tabs: usize) -> TabBar
         &preferences,
     );
     for (idx, x) in geometry.layout.xs.iter().enumerate() {
-        let w = if idx + 1 == tabs {
-            geometry.layout.last_width
-        } else {
-            geometry.layout.width
-        };
+        let w = geometry.layout.tab_width(idx);
         let rect = (lane.0 + geometry.lead + x.unwrap(), 0.0, w, height);
         let content = kettle_render::horizontal_tab_content_layout(
             rect,
