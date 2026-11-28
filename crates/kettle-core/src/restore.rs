@@ -160,12 +160,16 @@ pub fn snapshot_from<T: EventListener>(
             // Replay writes a wide character's second half, and the blank
             // before one that did not fit, from the character itself. That
             // blank comes from the next row only when that row still starts
-            // with the character, in the same style; any other is saved as
-            // the blank it shows, so the next row keeps its columns.
+            // with the character, in the same style and protection; any other
+            // (a reflow adds it unprotected) is saved as the blank it shows,
+            // so the next row keeps its columns.
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
                 || (cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) && row + 1 < end && {
                     let next = &grid[Point::new(Line(row + 1), Column(0))];
-                    next.flags.contains(Flags::WIDE_CHAR) && cell_style(next) == cell_style(cell)
+                    next.flags.contains(Flags::WIDE_CHAR)
+                        && cell_style(next) == cell_style(cell)
+                        && next.flags.contains(Flags::PROTECTED)
+                            == cell.flags.contains(Flags::PROTECTED)
                 })
             {
                 continue;
@@ -1225,6 +1229,51 @@ mod tests {
         assert!(saved_cell(&restored, 0, 1).flags.contains(Flags::PROTECTED));
         assert!(saved_cell(&restored, 2, 4).flags.contains(Flags::PROTECTED));
         assert!(!saved_cell(&restored, 2, 5).flags.contains(Flags::PROTECTED));
+    }
+
+    /// Narrowing a pane moves a protected wide character to the next row and
+    /// puts an unprotected blank in front of it. That blank is saved as the
+    /// blank it shows, so the wrap replay makes does not protect it.
+    #[test]
+    fn restored_reflow_spacer_keeps_its_own_protection() {
+        let mut source = sized_terminal(40, 10);
+        let mut script = vec![b'a'; 38];
+        script.extend_from_slice("\x1b[1\"q\u{4e16}\x1b[0\"q".as_bytes());
+        Processor::new().advance(&mut source, &script);
+        source.resize(TermSize::new(39, 10));
+        let spacer = saved_cell(&source, 0, 38);
+        assert!(spacer.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER));
+        assert!(!spacer.flags.contains(Flags::PROTECTED));
+        assert!(saved_cell(&source, 1, 0).flags.contains(Flags::PROTECTED));
+        let saved = snapshot(&source, MAX_RESTORE_LINES, &mut usize::MAX.clone());
+        let mut restored = sized_terminal(39, 10);
+        let mut parser = Processor::new();
+        parser.advance(
+            &mut restored,
+            replay(&saved, "divider", 39, true).unwrap().as_bytes(),
+        );
+        for k in 0..2 {
+            for col in 0..39 {
+                assert_eq!(
+                    saved_cell(&restored, k, col)
+                        .flags
+                        .contains(Flags::PROTECTED),
+                    saved_cell(&source, k, col).flags.contains(Flags::PROTECTED),
+                    "row {k} column {col}"
+                );
+            }
+        }
+        // A selective erase clears the blank, and its soft wrap, in both.
+        parser.advance(&mut restored, b"\x1b[?2J");
+        Processor::new().advance(&mut source, b"\x1b[?2J");
+        for (k, col) in [(0, 38), (1, 0), (1, 1)] {
+            let wrap_and_protection = Flags::WRAPLINE | Flags::PROTECTED;
+            assert_eq!(
+                saved_cell(&restored, k, col).flags & wrap_and_protection,
+                saved_cell(&source, k, col).flags & wrap_and_protection,
+                "row {k} column {col}"
+            );
+        }
     }
 
     #[test]
