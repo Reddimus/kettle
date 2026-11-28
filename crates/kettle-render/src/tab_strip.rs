@@ -634,7 +634,7 @@ pub(crate) fn tab_pill_text_span(
     (clear_top, (pill.3 - accent_room).max(1.0))
 }
 
-/// Fit titlebar tab text into the band, or into [`tab_pill_text_span`] when
+/// Fit titlebar tab text into the band, or into the pill's clear text span when
 /// `inset_pills` paints an inner accent inside the pill so enlarged text
 /// stays clear of the accent.
 pub fn titlebar_tab_text_scale(
