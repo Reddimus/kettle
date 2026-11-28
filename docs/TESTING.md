@@ -236,7 +236,7 @@ over a scrolled-back pane never lands on it; that leaving the window ends a
 press; and, with `App::area`'s `pane_area`, that the button and the label
 stay out of the search bar at every window size and bar placement.
 `accessibility_id_tests` checks that no two AccessKit ids collide.
-Checked live with Orca in a private headless GNOME session on Tower
+Checked live with Orca in a private headless GNOME session on Ubuntu 26.04
 (2026-11-14): Orca spoke "Viewing history" on the first Shift+PageUp from live
 output, not on the two that scrolled further, and again on the first
 Shift+PageUp after Ctrl+End returned to live output; AT-SPI showed one
@@ -2688,8 +2688,8 @@ failure. Unix job control has no equivalent Windows acceptance leg.
   `Ctrl+Shift+S`. Both aliases show `from ~/.ssh/config`; typing a third name
   offers **Connect to "…"**; `-oX` shows the refusal row. Repeat with
   `ssh-config-hosts = false` (no aliases) and on Windows with `USERPROFILE`.
-  Run VoiceOver on macOS and Orca on Linux against the same fixture. Keep the
-  owner's real aliases out of screenshots and audit artifacts.
+  Run VoiceOver on macOS and Orca on Linux against the same fixture. Keep personal
+  SSH aliases out of screenshots and test artifacts.
 - [ ] Check Save and Remove with the same scratch `HOME` and a scratch
   `--config` file. Type `me@db.example.com`, press Down to the Save row and
   Enter: the name editor suggests `db.example.com`; Enter adds the
@@ -3731,7 +3731,7 @@ For macOS publication acceptance, copy the previously published notarized app
 to a private writable folder and run that copy's own `kettle update --yes`
 against the production signed feed. Require the new version and source, verify
 the resulting terminal/worker identity and bundle trust, then require a second
-update to report that it is current. Preserve the original app and the owner's
+update to report that it is current. Preserve the original app and your existing
 installation. Record this separately from the candidate archive swap smoke.
 
 
@@ -4306,7 +4306,7 @@ one shared registration lock and takeover after owner exit.
 The optional `scripts/check-quick-terminal-portal.py --execute --binary PATH`
 starts a private bus and headless GNOME Shell. `--seed` preconfigures only private
 dconf for the returning-shortcut path; omit it to exercise the private dialog.
-Do not run these checks on the owner's desktop. The script replaces the entire
+Do not run these checks on your active desktop session. The script replaces the entire
 environment, including HOME, XDG directories, XDG_RUNTIME_DIR, TMPDIR and
 KETTLE_TEST_OS_CTL_DIR, and routes both D-Bus addresses to its private daemon.
 It excludes systemd service activation. Its `--self-test` checks isolation without

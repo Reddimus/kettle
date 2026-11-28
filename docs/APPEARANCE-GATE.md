@@ -20,50 +20,47 @@ each run, including what did not run and why.
 ## 6.0.0 preflight - 2026-11-27
 
 macOS 27.3, Apple silicon, 1920x1080 at 1x. Native composited captures ran on
-`9d1e754e9` (matching final candidate `d541c9852` apart from non-chrome fixes
-`#964` and `#965`). Earlier
+`9d1e754e9` (same window chrome and renderer code as `d541c9852`, before
+non-chrome fixes `#964` and `#965`). Earlier
 [main rehearsal 44352280619](https://github.com/Reddimus/kettle/actions/runs/44352280619)
 at `1415a82b1` passed deep codesign, Gatekeeper, notarization, stapled-ticket
 validation and universal packaging checks for the 6.0-era bundle.
 
 ### Passed
 
-- **Both titlebar styles (`tabs` and `native`):** Composited captures covered
+- **Titlebar styles (`tabs` and `native`):** Composited captures covered
   `default` (86% opacity, native blur on), `blur-off`, `opaque` (opacity 1.0,
   blur off), `opaque-blur` (opacity 1.0, blur on), `custom-bg`, `light-start`
   (cold light theme under system Dark) and `borderless`, plus resize,
   fullscreen round trips, two-tab/one-tab transitions and live light/dark
-  toggles. The automated runner recorded 184 passes, 9 not-run, 7 fails and 23
-  marked for visual review.
-- **One-tab geometry against current spec:** All 7 automated fails came from an
-  outdated `lone title centre` check in the audit runner. Re-evaluating all 35
-  recorded one-tab geometries against the current spec (tab starts the strip
-  and leaves a 48 pt drag lane) passed 35/35.
-- **Visual audit of all 23 review items (83 composited captures):** Material
-  reaches both rounded top corners without clear strips or seams in `default`,
-  `opaque` and `opaque-blur`; `borderless` stays visible through fullscreen via
-  the sharp-alpha fallback; `blur-off` keeps an opaque backdrop without a clear
-  strip; cold `light-start` keeps titles clear of the traffic lights in both
-  styles; `tabs/opaque` and `tabs/custom-bg` show intact traffic lights and
-  opaque chrome; and multi-tab and live light/dark toggles transition cleanly.
-  In `tabs/borderless`, `after-resize-comp.png` was dropped by the harness
-  because a transient foreign macOS overlay intersected the window rect. Final
-  owner visual sign-off on the 23 captures stays required before tagging.
-- **Native and update gates:** Native smokes (`gpu-render`, `touchpad-scroll`,
+  toggles. All 35 recorded one-tab geometries match the current spec (the tab
+  starts the strip and keeps a 48 pt drag lane); 7 older script assertions
+  failed only because the script still checked the superseded centred lone-tab
+  layout.
+- **Visual review (83 composited captures across 23 review items):** Material
+  reaches both rounded top corners cleanly without seams or clear strips in
+  `default`, `opaque` and `opaque-blur`; `borderless` stays visible across
+  fullscreen via the sharp-alpha fallback; `blur-off` keeps an opaque backdrop;
+  cold `light-start` keeps titles clear of the traffic lights in both styles;
+  `tabs/opaque` and `tabs/custom-bg` preserve traffic lights and opaque chrome;
+  and multi-tab and live light/dark toggles transition cleanly. One
+  `tabs/borderless` resize capture was skipped when a transient system overlay
+  overlapped the window. Final visual sign-off before tagging stays required
+  per [`RELEASING.md`](RELEASING.md#macos-appearance-gate).
+- **Native and update smokes:** Native smokes (`gpu-render`, `touchpad-scroll`,
   `split-exit-resize`, `text-presentation`, `line-edit-chords`,
   `native-titlebar`, `dock-menu`, `modal-shortcuts`) passed on `9d1e754e9`.
-  On final candidate `d541c9852` (covering the `kettle-update` and installer
-  fixes from `#956`), `just macos-update-smoke`
+  On `d541c9852` (covering the updater and installer fixes from `#956`),
+  `just macos-update-smoke`
   (`a_published_archive_extracts_verifies_and_swaps_for_real`) passed against
   both the published `v5.9.0` universal archive and the notarized `44352280619`
   universal rehearsal archive.
 
 ### Not run
 
-- Live Reduce Transparency toggle (not changed live under automation policy;
-  portable policy tests cover it).
-- Dock magnification and Cmd-Tab app switcher (foreground pointer/key hold
-  checks remain unrun; icon assets match verified bundle resources).
+- Live Reduce Transparency toggle (covered by portable policy unit tests).
+- Dock magnification and Cmd-Tab app switcher (icon assets match verified
+  bundle resources).
 - Physical Intel and mixed-DPI displays.
 - Re-capture after `#964` and `#965` (neither touches window chrome, blur or
   material rendering).

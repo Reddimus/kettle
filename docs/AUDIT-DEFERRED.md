@@ -235,7 +235,7 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   `setsid()` outright, as the media worker's does, but that breaks
   legitimate daemons. This is the route to choose, perhaps as an opt-in, if
   breaking nested sandboxes and set-user-id programs is an acceptable price
-  for macOS containment; that is the owner's call.
+  for macOS containment; that is a maintainer decision.
 
   Deferred until Kettle can keep kernel ownership of each command's escaped
   descendants, ownership they cannot drop and that holds after the
@@ -245,8 +245,8 @@ Each entry names the gap, its source, the reason for deferral, and the closing e
   descendants client is the candidate if Apple grants Kettle the
   entitlement; nothing beyond its refusal has been tested. The Seatbelt
   mark above met the ownership test on the Mac tested but breaks nested
-  sandboxes and set-user-id programs; shipping it, even as an opt-in, needs
-  the owner to accept that. Close with native macOS timeout, cancellation
+  sandboxes and set-user-id programs; shipping it, even as an opt-in, requires
+  accepting that trade-off. Close with native macOS timeout, cancellation
   and concurrent-command isolation tests, including a fixture
   that double-forks and calls `setsid()` at once. A normal exit keeps
   leaving detached daemons running.
@@ -407,7 +407,7 @@ campaign and startup outlier remain inconclusive. These entries stay open.
   its cleanup path when AppleScript times out after creating a window for an
   already-running app, and `scripts/perf/macos-standing/latency-probe.swift`
   checks focus only before and after a sample, so a focus round trip in between
-  passes. Both affect only owner-run measurements on a quiet machine. Close
+  passes. Both affect only manual benchmark runs on an idle machine. Close
   with a per-launch window identity recorded before the AppleScript reply, and
   an activation observer around each sample.
 

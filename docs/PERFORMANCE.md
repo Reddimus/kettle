@@ -71,11 +71,11 @@ on `main`, and the setup after the device 43.8 against 77.1 ms. A screenshot
 
 History rows stop storing the blank cells that end them (see
 [Scrollback row storage](ARCHITECTURE.md#scrollback-row-storage)). Measured
-2026-11-18 on the Linux panel host (Ubuntu 26.04, GNOME Shell 50.1, RTX 2080,
-i9-10900K) with the panel protocol: a fresh private headless GNOME Shell per
-run, the window maximized to 1600x1000, PSS of Kettle's own processes 3 s
-after launch and 4 s after `seq 1 100000`, and a bash-timed `cat` of two
-50 MiB files: the panel's 69-character lines, and lines of 5 to 150
+2026-11-18 on an Ubuntu 26.04 host (GNOME Shell 50.1, RTX 2080, i9-10900K)
+in a fresh private headless GNOME Shell per run: the window maximized to
+1600x1000, PSS of Kettle's own processes 3 s after launch and 4 s after
+`seq 1 100000`, and a bash-timed `cat` of two 50 MiB files: 69-character
+lines, and lines of 5 to 150
 characters. Release builds of `1415a82b` (base) and the branch (new), nine
 rounds interleaved, every run under 0.05 cores of foreign CPU. Medians:
 
