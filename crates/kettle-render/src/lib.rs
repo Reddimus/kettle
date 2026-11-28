@@ -56,6 +56,7 @@ mod tab_strip;
 mod terminal;
 pub use tab_strip::{
     HorizontalTabContent, activity_lane, horizontal_tab_content_layout, tab_text_scale,
+    titlebar_tab_text_scale,
 };
 mod theme;
 mod theme_picker;
@@ -2797,7 +2798,12 @@ impl Renderer {
             });
 
         let (tab_metrics, tab_cw, tab_ch) = if tabbar.in_titlebar {
-            let text_scale = tab_text_scale(tabbar.height, metrics.line_height);
+            let text_scale = tab_strip::titlebar_tab_text_scale(
+                tabbar.height,
+                metrics.line_height,
+                self.scale,
+                tab_strip::inset_pill_tabs(tabbar),
+            );
             let tab_metrics = Metrics::new(
                 metrics.font_size * text_scale,
                 metrics.line_height * text_scale,
@@ -4810,8 +4816,18 @@ impl Renderer {
                     s.active || cfg.tab_bar_pos.is_vertical(),
                     overlay.window_focused,
                 );
+                let tab_title_rect = if tab_strip::inset_pill_tabs(tabbar) {
+                    tab_strip::tab_pill_title_lane(
+                        s.title_rect,
+                        self.scale,
+                        cfg.tab_bar_pos == kettle_config::TabBarPos::Bottom,
+                        tab_ch,
+                    )
+                } else {
+                    s.title_rect
+                };
                 let (centered_left, label_top) = tab_strip::tab_label_origin(
-                    s.title_rect,
+                    tab_title_rect,
                     &self.tab_texts[bi],
                     (tab_cw, tab_ch),
                 );
@@ -4839,7 +4855,7 @@ impl Renderer {
                     areas.push(TextArea {
                         buffer: &self.tab_hint_buffers[bi],
                         left: hint_rect.0,
-                        top: hint_rect.1 + ((hint_rect.3 - tab_ch) * 0.5).max(0.0),
+                        top: tab_title_rect.1 + ((tab_title_rect.3 - tab_ch) * 0.5).max(0.0),
                         scale: 1.0,
                         bounds: text_bounds_for_rect(*hint_rect),
                         default_color: gc(hint_fg),
@@ -4849,7 +4865,7 @@ impl Renderer {
                 if !cfg.tab_bar_pos.is_vertical()
                     && let Some(marker) = tab_strip::activity_marker_rect(
                         s.rect,
-                        s.title_rect,
+                        tab_title_rect,
                         centered_left,
                         s.activity,
                         self.scale,

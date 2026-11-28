@@ -1031,9 +1031,18 @@ impl App {
         let cell_w = target.renderer.as_ref().map(|r| r.cell_w).unwrap_or(8.0);
         let cell_h = target.renderer.as_ref().map(|r| r.cell_h).unwrap_or(16.0);
         let bar = self.tab_bar(target);
+        let scale = target
+            .window
+            .as_ref()
+            .map_or(target.startup_scale, |w| w.scale_factor() as f32);
         let tab_cell_w = if bar.in_titlebar {
             self.overlay_text_cell_width(target)
-                * kettle_render::tab_text_scale(bar.height, self.overlay_text_line_height(target))
+                * kettle_render::titlebar_tab_text_scale(
+                    bar.height,
+                    self.overlay_text_line_height(target),
+                    scale,
+                    !bar.lone_title,
+                )
         } else {
             self.overlay_text_cell_width(target)
         };

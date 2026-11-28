@@ -9173,3 +9173,71 @@ fn the_current_search_match_keeps_its_descender_rows_clear() {
     }
 }
 }
+
+parity_scene! {
+fn titlebar_pill_accent_stays_clear_of_enlarged_title() {
+    let _serialized = gpu_test_guard();
+    for scale in [1.0_f32, 2.0] {
+        for theme_name in ["TokyoNight Night", "Kettle Day"] {
+            let mut cfg = gpu_test_config();
+            cfg.font_size = 24.0;
+            cfg.background_opacity = 1.0;
+            cfg.theme = cfg.theme_by_name(theme_name);
+            let (w, h) = ((360.0 * scale) as u32, (160.0 * scale) as u32);
+            let Some(mut renderer) =
+                crate::visual_parity_tests::renderer_with(&cfg, w, h, scale, false).unwrap()
+            else {
+                eprintln!("enlarged titlebar accent check skipped: no GPU adapter");
+                return;
+            };
+            let band_h = 28.0 * scale;
+            let tab_rect = (78.0 * scale, 0.0, 200.0 * scale, band_h);
+            let mut tabs = TabBar::hidden();
+            tabs.height = band_h;
+            tabs.in_titlebar = true;
+            tabs.band = (78.0 * scale, 0.0, w as f32 - 78.0 * scale, band_h);
+            tabs.segments.push(TabSeg {
+                idx: 0,
+                rect: tab_rect,
+                title_rect: (86.0 * scale, 0.0, 164.0 * scale, band_h),
+                hint: None,
+                close: (0.0, 0.0, 0.0, 0.0),
+                title: "Hgypq".into(),
+                path: None,
+                active: true,
+                activity: TabActivity::Normal,
+            });
+            let snap = snapshot_of(20, 2, b"");
+            let mut terminal = pane(&snap, w, h);
+            terminal.rect = (0.0, band_h, w as f32, h as f32 - band_h);
+            terminal.terminal = terminal.rect;
+            let frame = capture_with_tabs(&mut renderer, &cfg, &[terminal], &focused(true), &tabs);
+            let pill = crate::tab_strip::tab_pill_rect(tab_rect, scale);
+            let accent = crate::tab_strip::tab_pill_accent_rect(pill, scale, false)
+                .expect("titlebar pill accent");
+            let case = format!("{theme_name} @{scale}x");
+            let above_accent = (pill.0, pill.1, pill.2, (accent.1 - pill.1).max(0.0));
+            let ink_box = glyph_ink(&frame, above_accent, cfg.theme.background)
+                .unwrap_or_else(|| panic!("{case}: missing title ink above accent"));
+            assert!(
+                ink_box.1 + ink_box.3 <= accent.1,
+                "{case}: title ink {ink_box:?} overlaps accent {accent:?}"
+            );
+            let ax0 = accent.0.ceil() as u32;
+            let ax1 = (accent.0 + accent.2).floor() as u32;
+            let ay0 = accent.1.ceil() as u32;
+            let ay1 = (accent.1 + accent.3).floor() as u32;
+            let accent_px = *frame.get_pixel(ax0, ay0);
+            for y in ay0..ay1 {
+                for x in ax0..ax1 {
+                    assert_eq!(
+                        *frame.get_pixel(x, y),
+                        accent_px,
+                        "{case}: accent pixel disturbed at ({x}, {y}) under enlarged title"
+                    );
+                }
+            }
+        }
+    }
+}
+}

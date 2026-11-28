@@ -597,6 +597,86 @@ pub(crate) fn tab_pill_accent_rect(pill: Rect4, scale: f32, bottom_strip: bool) 
     Some((x + radius, top, width, thickness))
 }
 
+/// Vertical span `(top, height)` inside an inset titlebar pill that stays clear
+/// of the inner accent bar by at least one point (`gap`).
+pub(crate) fn tab_pill_text_span(
+    band_y: f32,
+    band_height: f32,
+    scale: f32,
+    bottom_strip: bool,
+) -> (f32, f32) {
+    let pill = tab_pill_rect(
+        (
+            0.0,
+            band_y,
+            (TAB_PILL_RADIUS * 2.0 + 16.0) * scale,
+            band_height,
+        ),
+        scale,
+    );
+    let gap = scale.round().max(1.0);
+    let accent_room = match tab_pill_accent_rect(pill, scale, bottom_strip) {
+        Some(accent) => {
+            let room = if bottom_strip {
+                accent.1 + accent.3 - pill.1
+            } else {
+                pill.1 + pill.3 - accent.1
+            };
+            room.max(0.0) + gap
+        }
+        None => 0.0,
+    };
+    let clear_top = if bottom_strip {
+        pill.1 + accent_room
+    } else {
+        pill.1
+    };
+    (clear_top, (pill.3 - accent_room).max(1.0))
+}
+
+/// Fit titlebar tab text into the band, or into [`tab_pill_text_span`] when
+/// `inset_pills` paints an inner accent inside the pill so enlarged text
+/// stays clear of the accent.
+pub fn titlebar_tab_text_scale(
+    band_height: f32,
+    line_height: f32,
+    scale: f32,
+    inset_pills: bool,
+) -> f32 {
+    if inset_pills {
+        tab_text_scale(
+            tab_pill_text_span(0.0, band_height, scale, false).1,
+            line_height,
+        )
+    } else {
+        tab_text_scale(band_height, line_height)
+    }
+}
+
+/// Vertical lane for a titlebar pill label: keeps `title_rect` unchanged when
+/// centering `line_height` already clears the inner accent, and shifts it just
+/// enough otherwise so titles never cross the accent.
+pub(crate) fn tab_pill_title_lane(
+    title_rect: Rect4,
+    scale: f32,
+    bottom_strip: bool,
+    line_height: f32,
+) -> Rect4 {
+    let (clear_top, clear_h) = tab_pill_text_span(title_rect.1, title_rect.3, scale, bottom_strip);
+    let centered_top = title_rect.1 + ((title_rect.3 - line_height) * 0.5).max(0.0);
+    let max_top = (clear_top + clear_h - line_height).max(clear_top);
+    let clamped_top = centered_top.clamp(clear_top, max_top);
+    if (clamped_top - centered_top).abs() < 1e-3 {
+        return title_rect;
+    }
+    (
+        title_rect.0,
+        clamped_top,
+        title_rect.2,
+        line_height.min(clear_h),
+    )
+}
+
 /// The hover chip behind a tab's close glyph in its `close` rect. It keeps
 /// 5 px off the rect's edges, and on a pill tab at least one point inside
 /// the pill too, so the chip never pokes past the pill's top, bottom or end.
@@ -3478,6 +3558,52 @@ mod inset_pill_tests {
                 .expect("a divider between resting tabs");
             assert_eq!(divider.pos[1], 6.0);
             assert_eq!(divider.size[1], second.3 - 12.0);
+        }
+    }
+
+    #[test]
+    fn enlarged_titlebar_text_clears_pill_accent_without_shifting_tall_strips() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            for band in [28.0_f32, 32.0, 38.0, 46.0] {
+                for font_size in [14.0_f32, 24.0, 48.0] {
+                    let bh = band * scale;
+                    let raw_line = font_size * 1.25 * scale;
+                    let text_scale = titlebar_tab_text_scale(bh, raw_line, scale, true);
+                    let scaled_line = raw_line * text_scale;
+                    let tab = (78.0 * scale, 0.0, 180.0 * scale, bh);
+                    let title_rect = (86.0 * scale, 0.0, 140.0 * scale, bh);
+                    let pill = tab_pill_rect(tab, scale);
+                    let accent = tab_pill_accent_rect(pill, scale, false).unwrap();
+                    let gap = scale.round().max(1.0);
+                    let (clear_top, clear_h) = tab_pill_text_span(0.0, bh, scale, false);
+                    assert!(
+                        scaled_line <= clear_h + 1e-3,
+                        "{scale}x band {band} font {font_size}: line {scaled_line} > clear {clear_h}"
+                    );
+                    let lane = tab_pill_title_lane(title_rect, scale, false, scaled_line);
+                    let (_, label_top) =
+                        tab_label_origin(lane, "Hgypq", (8.0 * scale * text_scale, scaled_line));
+                    assert!(
+                        label_top >= clear_top - 1e-3 && label_top >= pill.1 - 1e-3,
+                        "{scale}x band {band} font {font_size}: label_top {label_top} < pill.1 {}",
+                        pill.1
+                    );
+                    assert!(
+                        label_top + scaled_line <= accent.1 - gap + 1e-3,
+                        "{scale}x band {band} font {font_size}: bottom {} enters accent {} (gap {gap})",
+                        label_top + scaled_line,
+                        accent.1
+                    );
+                    if (band == 38.0 || band == 46.0) && font_size == 14.0 {
+                        assert_eq!(text_scale, 1.0);
+                        assert_eq!(lane, title_rect);
+                    }
+                }
+            }
+            assert_eq!(
+                titlebar_tab_text_scale(28.0 * scale, 24.0 * 1.25 * scale, scale, false),
+                tab_text_scale(28.0 * scale, 24.0 * 1.25 * scale)
+            );
         }
     }
 }

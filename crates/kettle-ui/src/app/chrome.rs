@@ -112,7 +112,16 @@ impl App {
             tr: &self.ui_text,
             tab_format: &self.cfg.tab_format,
             tab_cell_width: if bar.in_titlebar {
-                cell * kettle_render::tab_text_scale(bar.height, self.overlay_text_line_height(ws))
+                let scale = ws
+                    .window
+                    .as_ref()
+                    .map_or(ws.startup_scale, |w| w.scale_factor() as f32);
+                cell * kettle_render::titlebar_tab_text_scale(
+                    bar.height,
+                    self.overlay_text_line_height(ws),
+                    scale,
+                    !bar.lone_title,
+                )
             } else {
                 cell
             },
@@ -350,7 +359,12 @@ impl App {
                 let cell_w = self.overlay_text_cell_width(ws);
                 let cell_w = if ws.macos_titlebar_tabs {
                     cell_w
-                        * kettle_render::tab_text_scale(height, self.overlay_text_line_height(ws))
+                        * kettle_render::titlebar_tab_text_scale(
+                            height,
+                            self.overlay_text_line_height(ws),
+                            scale,
+                            !lone_title,
+                        )
                 } else {
                     cell_w
                 };

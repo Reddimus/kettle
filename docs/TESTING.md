@@ -4247,8 +4247,10 @@ anchor, and that `≡` is drawn as a 14 by 12 point icon at every font size.
 `tab_strip::inset_pill_tests` checks title bar pills at 1x, 1.5x and 2x: all
 four corners cut, clear of the band's edges, the accent inside the pill, the
 separator's full width and colour, a translucent pill's surface quads cutting
-the band exactly, dividers and the close hover chip inside the pill, and plain
-strips keeping band-high tabs.
+the band exactly, dividers and the close hover chip inside the pill, enlarged
+titlebar text staying clear of the pill accent, and plain
+strips keeping band-high tabs; `titlebar_pill_accent_stays_clear_of_enlarged_title`
+verifies this rendered in a 28-point titlebar at 1x and 2x.
 Run the kettle-config, kettle-i18n, kettle-ui and kettle-render suites, then
 host clippy with `--all-targets -- -D warnings`. The Linux CI matrix compiles
 and runs the same suites on Linux, where the header code is built. Cross-clippy with
