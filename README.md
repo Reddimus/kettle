@@ -2,3 +2,4 @@
 
 Media for the 6.0.0 release review (PR #823). Each figure pairs one scripted step captured from the public Kettle 5.9.0 build (`e58e367b9`) and from a 6.0.0 candidate by the same harness, in the same private session, then marks what changed. Linux: `4c4aa880c`, the final candidate. macOS: `9d1e754e9`, built from the final candidate `4c4aa880c`'s source apart from its CHANGELOG and one test module. `*-old.png` and `*-new.png` are the unmarked originals. `claims.json` lists every figure with its measured basis.
 
+`linux/videos/` holds side-by-side recordings (5.9.0 left, 6.0.0 right) of the same scripted steps in Tower's private GNOME 50 session on Ubuntu 26.04, recorded at 30 fps from the compositor. Each MP4 has a GIF preview. `fallback`, `opacity` and `links` were recorded with the 6.0.0 side on `4c4aa880c`; `appearance`, `exit`, `search`, `menu`, `palette` and `settings` were recorded on both builds on 2026-11-27, 6.0.0 again on `4c4aa880c`.
