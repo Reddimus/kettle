@@ -1,7 +1,7 @@
 use super::settings::{SettingsTextKind, settings_text_items};
 use super::{
     Rect4, SettingsControl, SettingsHit, SettingsOverlay, SettingsRow, display_width,
-    settings_control_height, settings_layout,
+    settings_control_height, settings_layout, settings_toggle_track_size,
 };
 use kettle_i18n::{Language, Text, Translator};
 
@@ -137,10 +137,28 @@ fn reset_yields_in_order_without_overlap_at_any_width() {
                     disjoint(row.label_rect, row.chip_rect, &context);
                     disjoint(row.description_rect, row.chip_rect, &context);
                     let inner = row.rect.2;
-                    assert!(
-                        row.chip_rect.2 + 0.01 >= (8.0 * cw + 20.0).min(inner * 0.48),
-                        "{context}: the value chip lost its minimum"
-                    );
+                    let control_h = settings_control_height(layout.line / scale) * scale;
+                    if matches!(data.control, SettingsControl::Toggle(_)) {
+                        let (track_w, track_h) = settings_toggle_track_size(
+                            settings_control_height(layout.line / scale),
+                        );
+                        assert!(
+                            (row.chip_rect.2 - (track_w * scale).min(inner)).abs() < 0.01
+                                && (row.chip_rect.3 - track_h * scale).abs() < 0.01,
+                            "{context}: toggle capsule lost its fixed size: {:?}",
+                            row.chip_rect
+                        );
+                    } else {
+                        assert!(
+                            row.chip_rect.2 + 0.01 >= (8.0 * cw + 20.0).min(inner * 0.48),
+                            "{context}: the value chip lost its minimum"
+                        );
+                    }
+                    if let Some(status) = row.status_rect {
+                        inside(row.rect, status, &context);
+                        disjoint(row.label_rect, status, &context);
+                        disjoint(status, row.chip_rect, &context);
+                    }
                     for item in items.iter().filter(|item| match item.kind {
                         SettingsTextKind::Label(i)
                         | SettingsTextKind::Value(i)
@@ -172,8 +190,14 @@ fn reset_yields_in_order_without_overlap_at_any_width() {
                     };
                     inside(row.rect, reset.rect, &context);
                     disjoint(reset.rect, row.chip_rect, &context);
+                    if let Some(status) = row.status_rect {
+                        disjoint(reset.rect, status, &context);
+                    }
                     disjoint(reset.rect, row.label_rect, &context);
-                    assert_eq!(reset.rect.3, row.chip_rect.3, "{context}");
+                    assert_eq!(reset.rect.3, control_h, "{context}");
+                    if !matches!(data.control, SettingsControl::Toggle(_)) {
+                        assert_eq!(reset.rect.3, row.chip_rect.3, "{context}");
+                    }
                     assert!(reset.rect.3 >= 24.0 * scale, "{context}");
                     assert!(reset.rect.2 >= 24.0 * scale, "{context}");
                     assert_eq!(
@@ -265,11 +289,22 @@ fn controls_share_one_height_and_keep_their_width() {
                 first.rows[0].chip_rect, second.rows[0].chip_rect,
                 "{control:?} {line}: the chip moved with its value"
             );
-            assert!(first.rows[0].chip_rect.2 >= 8.0 * cw + 20.0, "{control:?}");
-            for layout in [&first, &second] {
-                assert_eq!(layout.search_rect.3, control_h);
-                for row in &layout.rows {
-                    assert_eq!(row.chip_rect.3, control_h, "{control:?} {line}");
+            if matches!(control, SettingsControl::Toggle(_)) {
+                let (track_w, track_h) = settings_toggle_track_size(control_h / scale);
+                assert_eq!(first.rows[0].chip_rect.2, track_w * scale);
+                assert_eq!(first.rows[0].chip_rect.3, track_h * scale);
+                for layout in [&first, &second] {
+                    assert_eq!(layout.search_rect.3, control_h);
+                    assert_eq!(layout.rows[0].chip_rect.3, track_h * scale);
+                    assert_eq!(layout.rows[1].chip_rect.3, control_h);
+                }
+            } else {
+                assert!(first.rows[0].chip_rect.2 >= 8.0 * cw + 20.0, "{control:?}");
+                for layout in [&first, &second] {
+                    assert_eq!(layout.search_rect.3, control_h);
+                    for row in &layout.rows {
+                        assert_eq!(row.chip_rect.3, control_h, "{control:?} {line}");
+                    }
                 }
             }
         }

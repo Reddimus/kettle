@@ -132,6 +132,56 @@ pub(crate) fn settings_pressable(base: Rgb) -> Rgb {
     super::confirm::button_mix(base, super::confirm::BUTTON_HOVER_MIX)
 }
 
+/// Resolve `(on_track, on_thumb)` for a switched-on Settings toggle.
+///
+/// Prefers a crisp white thumb (`#ffffff`) and adjusts `on_track` from `accent`
+/// along its hue when needed so both `on_thumb` against `on_track` and
+/// `on_track` against `bg` (and the focused row's fill where possible) meet
+/// `ICON_CONTRAST` (3.0:1). Falls back to a dark thumb if no track color can
+/// satisfy both with a white thumb on an extreme mid-tone background.
+pub(crate) fn switch_on_colors(bg: Rgb, accent: Rgb, linear: bool) -> (Rgb, Rgb) {
+    use super::chrome::ICON_CONTRAST;
+    use super::color::{contrast_ratio, with_min_contrast_on_both};
+
+    const WHITE: Rgb = Rgb::new(255, 255, 255);
+    const BLACK: Rgb = Rgb::new(0, 0, 0);
+
+    let selected = settings_selected_fill(bg, accent, linear);
+    let passes = |track: Rgb, thumb: Rgb, check_selected: bool| {
+        contrast_ratio(thumb, track) >= ICON_CONTRAST
+            && contrast_ratio(track, bg) >= ICON_CONTRAST
+            && (!check_selected || contrast_ratio(track, selected) >= ICON_CONTRAST)
+    };
+    let resolve = |thumb: Rgb, check_selected: bool| -> Option<Rgb> {
+        let surfaces: &[Rgb] = if check_selected {
+            &[selected, bg]
+        } else {
+            &[bg]
+        };
+        for keep_hue in [true, false] {
+            for &surface in surfaces {
+                let candidate =
+                    with_min_contrast_on_both(accent, surface, thumb, ICON_CONTRAST, keep_hue);
+                if passes(candidate, thumb, check_selected) {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
+    };
+
+    for (thumb, check_selected) in [(WHITE, true), (WHITE, false), (BLACK, true), (BLACK, false)] {
+        if let Some(track) = resolve(thumb, check_selected) {
+            return (track, thumb);
+        }
+    }
+    if contrast_ratio(WHITE, bg) >= contrast_ratio(BLACK, bg) {
+        (WHITE, BLACK)
+    } else {
+        (BLACK, WHITE)
+    }
+}
+
 /// How far a description may fall below its label: at least this fraction
 /// of the label's contrast, between `TEXT_CONTRAST` and
 /// `SECONDARY_TEXT_CONTRAST`. A theme whose labels are only 7:1 still keeps
@@ -178,6 +228,9 @@ pub(crate) struct SettingsColors {
     pub(crate) hover_well_control: Rgb,
     pub(crate) hover_unavailable_control: Rgb,
     pub(crate) description_hover: Rgb,
+    /// Switched-on toggle track fill and elevated circular thumb.
+    pub(crate) switch_on_track: Rgb,
+    pub(crate) switch_on_thumb: Rgb,
 }
 
 /// The key `Colors` keeps the resolved `SettingsColors` under.
@@ -278,12 +331,15 @@ pub(crate) fn settings_colors(
     let description_hover =
         settings_quieter_ink(colors, theme.foreground, hover, SETTINGS_DESCRIPTION_SHARE);
     let focus = with_min_contrast_on_both(accent, bg, selected, ICON_CONTRAST, true);
+    let (switch_on_track, switch_on_thumb) = switch_on_colors(bg, accent, linear);
     let palette = SettingsColors {
         hover,
         hover_control,
         hover_well_control,
         hover_unavailable_control,
         description_hover,
+        switch_on_track,
+        switch_on_thumb,
         selected,
         border,
         control,
@@ -415,6 +471,7 @@ pub struct SettingsRowGeometry {
     pub label_rect: Rect4,
     pub description_rect: Rect4,
     pub chip_rect: Rect4,
+    pub status_rect: Option<Rect4>,
     pub reset: Option<SettingsResetChip>,
 }
 
@@ -482,6 +539,9 @@ impl SettingsLayout {
             rect(&mut row.label_rect);
             rect(&mut row.description_rect);
             rect(&mut row.chip_rect);
+            if let Some(status) = &mut row.status_rect {
+                rect(status);
+            }
             if let Some(reset) = &mut row.reset {
                 rect(&mut reset.rect);
             }
@@ -604,11 +664,18 @@ impl SettingsLayout {
     }
 }
 
-/// The diameter of a settings switch's knob in a chip `height` tall: 3 px in
-/// from the track, and no more than four fifths of it, so a tall chip at a
-/// large font keeps room for its label.
+/// Fixed capsule dimensions `(width, height)` in logical pixels for a
+/// Settings toggle switch at control slot height `control_h`.
+pub fn settings_toggle_track_size(control_h: f32) -> (f32, f32) {
+    let track_h = (control_h * 0.80).round().max(22.0).min(control_h);
+    let track_w = (track_h * 1.75).round();
+    (track_w, track_h)
+}
+
+/// The diameter of a settings switch's circular thumb in a track `height`
+/// tall: inset by 3 logical px on top, bottom, and its active end.
 pub(crate) fn settings_toggle_knob(height: f32, scale: f32) -> f32 {
-    (height - 6.0 * scale).min(height * 0.8).max(4.0 * scale)
+    (height - 6.0 * scale).max(6.0 * scale)
 }
 
 /// Height in logical pixels of each Settings control for a logical line.
@@ -972,57 +1039,83 @@ pub fn settings_layout(
             groups.push((index, (inner.0, y, inner.2, group_h)));
             y += group_h;
         }
-        // A switch also holds its knob beside the label.
-        let knob = if matches!(row.control, SettingsControl::Toggle(_)) {
-            settings_toggle_knob(control_h, 1.0) + 2.0
-        } else {
-            0.0
-        };
-        // Every chip keeps one width while its value changes and is at
-        // least eight columns wide. It may take what the label leaves, so a
-        // long value shows whole beside a short label; where both are long
-        // it keeps about half the row.
-        let chip_w = if row.control == SettingsControl::Text {
-            inner.2 * 0.48
-        } else {
-            let label_need = display_width(&row.label) as f32 * text_cw;
-            (row.chip_cols() as f32 * text_cw + 20.0 + knob)
-                .max(8.0 * text_cw + 20.0)
-                .min((inner.2 - 18.0 - label_need).max(inner.2 * 0.48))
-        };
-        let chip_rect = (inner.0 + inner.2 - chip_w, y + 1.0, chip_w, control_h);
+        let control_y = y + 1.0;
         let label_x = inner.0 + 6.0;
+        let chip_rect = if matches!(row.control, SettingsControl::Toggle(_)) {
+            let (raw_w, track_h) = settings_toggle_track_size(control_h);
+            let track_w = raw_w.min(inner.2);
+            (
+                inner.0 + inner.2 - track_w,
+                control_y + (control_h - track_h) * 0.5,
+                track_w,
+                track_h,
+            )
+        } else {
+            // Every chip keeps one width while its value changes and is at
+            // least eight columns wide. It may take what the label leaves, so a
+            // long value shows whole beside a short label; where both are long
+            // it keeps about half the row.
+            let chip_w = if row.control == SettingsControl::Text {
+                inner.2 * 0.48
+            } else {
+                let label_need = display_width(&row.label) as f32 * text_cw;
+                (row.chip_cols() as f32 * text_cw + 20.0)
+                    .max(8.0 * text_cw + 20.0)
+                    .min((inner.2 - 18.0 - label_need).max(inner.2 * 0.48))
+            };
+            (inner.0 + inner.2 - chip_w, control_y, chip_w, control_h)
+        };
+        let status_rect = if matches!(row.control, SettingsControl::Toggle(_))
+            && row.unavailable
+            && !row.value.is_empty()
+        {
+            let avail = (chip_rect.0 - 8.0 - label_x).max(0.0);
+            let label_need = display_width(&row.label) as f32 * text_cw;
+            let max_w = (avail - 12.0 - label_need)
+                .max((avail - 12.0).max(0.0) * 0.48)
+                .min(avail);
+            let width = (display_width(&row.value) as f32 * text_cw).min(max_w);
+            (width > 0.0).then_some((
+                chip_rect.0 - 8.0 - width,
+                control_y + (control_h - line) * 0.5,
+                width,
+                line,
+            ))
+        } else {
+            None
+        };
+        let control_left = status_rect.map_or(chip_rect.0, |rect| rect.0);
         let reset = place_reset(
             row,
             row.reset == Some(true) || (index == focused && !set.search_focused),
             &set.reset_label,
-            (label_x, chip_rect.0),
+            (label_x, control_left),
             control_h,
             text_cw,
         )
         .map(|(width, enabled, icon)| SettingsResetChip {
             rect: (
-                chip_rect.0
+                control_left
                     - if matches!(row.control, SettingsControl::Toggle(_)) {
                         4.0
                     } else {
                         0.0
                     }
                     - width,
-                chip_rect.1,
+                control_y,
                 width,
                 control_h,
             ),
             enabled,
             icon,
         });
-        let label_end = reset.map_or(chip_rect.0, |reset| reset.rect.0);
+        let label_end = reset.map_or(control_left, |reset| reset.rect.0);
         rows.push(SettingsRowGeometry {
             index,
             rect: (inner.0, y, inner.2, row_h),
             label_rect: (
                 label_x,
-                chip_rect.1 + (control_h - line) * 0.5,
+                control_y + (control_h - line) * 0.5,
                 (label_end - 12.0 - label_x).max(0.0),
                 line,
             ),
@@ -1033,6 +1126,7 @@ pub fn settings_layout(
                 line,
             ),
             chip_rect,
+            status_rect,
             reset,
         });
         y += row_h;
@@ -1303,42 +1397,54 @@ pub(crate) fn settings_text_items(
                 SettingsTextKind::Reset(row.index),
             );
         }
-        let mut room = chip_text_rect(row.chip_rect, line, 4.0 * layout.scale);
-        // Reserve the knob after chip-width clamping, on either end of the switch.
         if matches!(data.control, SettingsControl::Toggle(_)) {
-            let knob = (settings_toggle_knob(row.chip_rect.3, layout.scale) + 2.0 * layout.scale)
-                .min(room.2);
-            if !settings_knob_on_right(data) {
-                room.0 += knob;
+            if let Some(status_rect) = row.status_rect {
+                let cols = (status_rect.2 / cw.max(1.0)).floor().max(0.0) as usize;
+                let text = fit_single_line_label(&data.value, cols);
+                if !text.is_empty() {
+                    let width = (display_width(&text) as f32 * cw).min(status_rect.2);
+                    centred_items.push(SettingsTextItem {
+                        rect: (
+                            status_rect.0 + status_rect.2 - width,
+                            status_rect.1,
+                            width,
+                            status_rect.3,
+                        ),
+                        text,
+                        kind: SettingsTextKind::Value(row.index),
+                        runs: Vec::new(),
+                    });
+                }
             }
-            room.2 -= knob;
-        }
-        let cols = (room.2 / cw.max(1.0)).floor().max(0.0) as usize;
-        let value =
-            if data.control == SettingsControl::Choice && !data.value.is_empty() && cols >= 4 {
-                // The arrows sit at the chip's ends, the value centred
-                // between them, so they stay put as the value changes.
-                let value = fit_single_line_label(&data.value, cols - 4);
-                let spare = (cols - 4).saturating_sub(display_width(&value));
-                format!(
-                    "‹ {}{value}{} ›",
-                    " ".repeat(spare / 2),
-                    " ".repeat(spare - spare / 2)
-                )
-            } else {
-                data.chip_text()
-            };
-        if data.control == SettingsControl::Text {
-            // Free text starts where its inline editor does, so opening
-            // the editor does not move it.
-            push(&value, room, SettingsTextKind::Value(row.index));
         } else {
-            centred(
-                &mut centred_items,
-                &value,
-                room,
-                SettingsTextKind::Value(row.index),
-            );
+            let room = chip_text_rect(row.chip_rect, line, 4.0 * layout.scale);
+            let cols = (room.2 / cw.max(1.0)).floor().max(0.0) as usize;
+            let value =
+                if data.control == SettingsControl::Choice && !data.value.is_empty() && cols >= 4 {
+                    // The arrows sit at the chip's ends, the value centred
+                    // between them, so they stay put as the value changes.
+                    let value = fit_single_line_label(&data.value, cols - 4);
+                    let spare = (cols - 4).saturating_sub(display_width(&value));
+                    format!(
+                        "‹ {}{value}{} ›",
+                        " ".repeat(spare / 2),
+                        " ".repeat(spare - spare / 2)
+                    )
+                } else {
+                    data.chip_text()
+                };
+            if data.control == SettingsControl::Text {
+                // Free text starts where its inline editor does, so opening
+                // the editor does not move it.
+                push(&value, room, SettingsTextKind::Value(row.index));
+            } else {
+                centred(
+                    &mut centred_items,
+                    &value,
+                    room,
+                    SettingsTextKind::Value(row.index),
+                );
+            }
         }
         push(
             &data.description,
@@ -1386,7 +1492,7 @@ pub(crate) fn settings_text_color(
     set: &SettingsOverlay,
     kind: SettingsTextKind,
     palette: &SettingsColors,
-    (theme, accent, on_ink): (&kettle_config::Theme, Rgb, Rgb),
+    theme: &kettle_config::Theme,
     colors: &mut super::chrome::Colors,
 ) -> Rgb {
     let (fg, bg) = (theme.foreground, theme.background);
@@ -1416,46 +1522,36 @@ pub(crate) fn settings_text_color(
         return colors.text(fg, bg);
     };
     let fill = settings_row_fill(set, index);
-    // Labels and descriptions sit on the row's fill; chips are filled with
-    // the panel, or a well, moved for the pointer over a choice or Reset.
+    let row_surface = match fill {
+        SettingsRowFill::Panel => bg,
+        SettingsRowFill::Focused => palette.selected,
+        SettingsRowFill::Hovered => palette.hover,
+    };
+    // Labels, descriptions, and external toggle status text sit on the row's
+    // fill; value/choice/Reset chips sit on their own control fills.
     let surface = match kind {
+        SettingsTextKind::Value(_) if matches!(row.control, SettingsControl::Toggle(_)) => {
+            row_surface
+        }
         SettingsTextKind::Value(_)
             if matches!(row.control, SettingsControl::Value | SettingsControl::Text) =>
         {
             palette.well
         }
-        SettingsTextKind::Value(_)
-            if matches!(
-                set.hover,
-                Some(SettingsHover::Choice(hovered) | SettingsHover::Switch(hovered))
-                    if hovered == index
-            ) =>
-        {
+        SettingsTextKind::Value(_) if set.hover == Some(SettingsHover::Choice(index)) => {
             settings_pressable(bg)
         }
         SettingsTextKind::Reset(_) if set.hover == Some(SettingsHover::Reset(index)) => {
             settings_pressable(bg)
         }
         SettingsTextKind::Value(_) | SettingsTextKind::Reset(_) => bg,
-        _ => match fill {
-            SettingsRowFill::Panel => bg,
-            SettingsRowFill::Focused => palette.selected,
-            SettingsRowFill::Hovered => palette.hover,
-        },
+        _ => row_surface,
     };
     if row.disabled {
         return colors.muted(fg, surface);
     }
     match kind {
         SettingsTextKind::Value(_) if row.unavailable => colors.text(palette.description, surface),
-        SettingsTextKind::Value(_) if settings_knob_on_right(row) => colors.text(
-            on_ink,
-            if set.hover == Some(SettingsHover::Switch(index)) {
-                settings_pressable(accent)
-            } else {
-                accent
-            },
-        ),
         SettingsTextKind::Description(_) => match fill {
             SettingsRowFill::Panel => palette.description,
             SettingsRowFill::Focused => palette.description_selected,
@@ -1509,27 +1605,35 @@ pub(crate) fn settings_row_surfaces(
     row: &SettingsRowGeometry,
     data: &SettingsRow,
     palette: &SettingsColors,
-    (bg, accent, on_ink): (Rgb, Rgb, Rgb),
+    bg: Rgb,
     (row_fill, hover): (SettingsRowFill, Option<SettingsHover>),
     scale: f32,
 ) -> Vec<SettingsSurface> {
     let switch = matches!(data.control, SettingsControl::Toggle(_));
     let on = settings_knob_on_right(data) && !data.unavailable;
     let well = matches!(data.control, SettingsControl::Value | SettingsControl::Text);
+    let hovered_switch = hover == Some(SettingsHover::Switch(row.index));
     // A switch or a choice under the pointer moves its own fill, so it
     // answers the pointer on the focused row too, whose fill stays.
-    let fill = match (on, well, hover) {
-        (true, _, Some(SettingsHover::Switch(index))) if index == row.index => {
-            settings_pressable(accent)
+    let fill = if switch {
+        let base = if data.unavailable {
+            bg
+        } else if on {
+            palette.switch_on_track
+        } else {
+            palette.well
+        };
+        if hovered_switch {
+            settings_pressable(base)
+        } else {
+            base
         }
-        (true, _, _) => accent,
-        (false, true, _) => palette.well,
-        (false, false, Some(SettingsHover::Choice(index) | SettingsHover::Switch(index)))
-            if index == row.index =>
-        {
-            settings_pressable(bg)
-        }
-        (false, false, _) => bg,
+    } else if well {
+        palette.well
+    } else if hover == Some(SettingsHover::Choice(row.index)) {
+        settings_pressable(bg)
+    } else {
+        bg
     };
     // Reset's own fill, where it is not the joined chip's.
     let reset_fill = if hover == Some(SettingsHover::Reset(row.index)) {
@@ -1537,7 +1641,8 @@ pub(crate) fn settings_row_surfaces(
     } else {
         bg
     };
-    let control = match (row_fill, switch && data.unavailable, well) {
+    let well_outlined = well || (switch && !on && !data.unavailable);
+    let control = match (row_fill, switch && data.unavailable, well_outlined) {
         (SettingsRowFill::Hovered, true, _) => palette.hover_unavailable_control,
         (_, true, _) => palette.unavailable_control,
         (SettingsRowFill::Panel, _, true) => palette.well_control,
@@ -1598,18 +1703,11 @@ pub(crate) fn settings_row_surfaces(
             0.0,
             0.0,
         );
+    } else if switch {
+        let (stroke, width) = if on { (fill, 0.0) } else { (control, scale) };
+        shape(row.chip_rect, fill, stroke, width, row.chip_rect.3 / 2.0);
     } else {
-        shape(
-            row.chip_rect,
-            fill,
-            control,
-            scale,
-            if switch {
-                row.chip_rect.3 / 2.0
-            } else {
-                4.0 * scale
-            },
-        );
+        shape(row.chip_rect, fill, control, scale, 4.0 * scale);
     }
     if switch {
         let (x, y, w, h) = row.chip_rect;
@@ -1621,10 +1719,10 @@ pub(crate) fn settings_row_surfaces(
         };
         let knob = (kx, y + (h - d) / 2.0, d, d);
         if data.unavailable {
-            shape(knob, bg, control, 1.5 * scale, d / 2.0);
+            shape(knob, fill, control, 1.5 * scale, d / 2.0);
         } else {
-            let fill = if on { on_ink } else { control };
-            shape(knob, fill, fill, 0.0, d / 2.0);
+            let thumb = if on { palette.switch_on_thumb } else { control };
+            shape(knob, thumb, thumb, 0.0, d / 2.0);
         }
     }
     if let Some(reset) = row.reset.filter(|_| joined.is_none()) {

@@ -321,7 +321,7 @@ fn settings_reset_segments_share_an_outline_and_switches_keep_four_logical_pixel
                     row,
                     &set.rows[0],
                     &palette,
-                    (theme.background, theme.accent, theme.foreground),
+                    theme.background,
                     (settings::SettingsRowFill::Focused, None),
                     scale,
                 );
@@ -337,6 +337,28 @@ fn settings_reset_segments_share_an_outline_and_switches_keep_four_logical_pixel
                 }
             }
         }
+    }
+    // An unavailable toggle places Reset 4 logical px to the left of its
+    // external status_rect, which in turn sits 8 logical px left of chip_rect.
+    set.rows[0].control = SettingsControl::Toggle(true);
+    set.rows[0].unavailable = true;
+    set.rows[0].value = "Unavailable".into();
+    for scale in [1.0, 2.0] {
+        let layout = settings_layout(
+            &set,
+            (8.4 * scale, 17.5 * scale),
+            (1280.0 * scale, 820.0 * scale),
+            8.4 * scale,
+            scale,
+        );
+        let row = &layout.rows[0];
+        let status = row.status_rect.expect("unavailable toggle reserves status");
+        let reset = row.reset.expect("changed row shows Reset");
+        assert!(((row.chip_rect.0 - (status.0 + status.2)) / scale - 8.0).abs() < 0.01);
+        assert!(((status.0 - (reset.rect.0 + reset.rect.2)) / scale - 4.0).abs() < 0.01);
+        assert!(disjoint(row.label_rect, reset.rect));
+        assert!(disjoint(reset.rect, status));
+        assert!(disjoint(status, row.chip_rect));
     }
 }
 
@@ -402,14 +424,18 @@ fn settings_new_control_surfaces_and_inks_meet_their_adjacent_backgrounds() {
                             &set,
                             SettingsTextKind::Value(0),
                             &palette,
-                            (&theme, accent, theme.foreground),
+                            &theme,
                             &mut colors,
                         );
+                        let value_surface = if well {
+                            palette.well
+                        } else if matches!(control, SettingsControl::Toggle(_)) {
+                            palette.selected
+                        } else {
+                            theme.background
+                        };
                         assert!(
-                            color::contrast_ratio(
-                                ink,
-                                if well { palette.well } else { theme.background }
-                            ) >= 4.5,
+                            color::contrast_ratio(ink, value_surface) >= 4.5,
                             "{name} {control:?} disabled={disabled}"
                         );
                         let layout = settings_layout(&set, (8.4, 17.5), (1280.0, 820.0), 8.4, 1.0);
@@ -417,7 +443,7 @@ fn settings_new_control_surfaces_and_inks_meet_their_adjacent_backgrounds() {
                             &layout.rows[0],
                             &set.rows[0],
                             &palette,
-                            (theme.background, accent, theme.foreground),
+                            theme.background,
                             (settings::SettingsRowFill::Focused, None),
                             1.0,
                         );
@@ -428,7 +454,42 @@ fn settings_new_control_surfaces_and_inks_meet_their_adjacent_backgrounds() {
                         if matches!(control, SettingsControl::Toggle(_)) && set.rows[0].unavailable
                         {
                             assert_eq!(surfaces[0].stroke, palette.unavailable_control);
+                            assert_eq!(surfaces[1].width, 1.5);
+                            assert_eq!(surfaces[1].stroke, palette.unavailable_control);
                         }
+                    }
+                }
+                // Available ON and OFF switches meet WCAG 3:1+ across all themes.
+                assert!(
+                    color::contrast_ratio(palette.switch_on_thumb, palette.switch_on_track) >= 3.0,
+                    "{name} {linear} switch_on thumb-on-track"
+                );
+                assert!(
+                    color::contrast_ratio(palette.switch_on_track, theme.background) >= 3.0,
+                    "{name} {linear} switch_on track-on-bg"
+                );
+                for on in [false, true] {
+                    let mut set = grouped();
+                    set.rows[0].control = SettingsControl::Toggle(on);
+                    set.rows[0].unavailable = false;
+                    let layout = settings_layout(&set, (8.4, 17.5), (1280.0, 820.0), 8.4, 1.0);
+                    let surfaces = settings_row_surfaces(
+                        &layout.rows[0],
+                        &set.rows[0],
+                        &palette,
+                        theme.background,
+                        (settings::SettingsRowFill::Panel, None),
+                        1.0,
+                    );
+                    if on {
+                        assert_eq!(surfaces[0].fill, palette.switch_on_track);
+                        assert_eq!(surfaces[0].width, 0.0);
+                        assert_eq!(surfaces[1].fill, palette.switch_on_thumb);
+                    } else {
+                        assert_eq!(surfaces[0].fill, palette.well);
+                        assert_eq!(surfaces[0].width, 1.0);
+                        assert_eq!(surfaces[0].stroke, palette.well_control);
+                        assert_eq!(surfaces[1].fill, palette.well_control);
                     }
                 }
             }

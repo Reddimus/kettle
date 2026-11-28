@@ -39,7 +39,7 @@ fn a_search_marks_no_category_as_open() {
             set,
             SettingsTextKind::Category(index),
             &palette,
-            (&theme, theme.accent, theme.foreground),
+            &theme,
             colors,
         )
     };
@@ -235,13 +235,12 @@ fn hover_prelight_stays_apart_from_the_keyboard_focus() {
     assert_ne!(settings_pressable(bg), bg);
     let layout = settings_layout(&set, (8.4, 17.5), (1280.0, 820.0), 8.4, 1.0);
     let row = |index: usize| layout.rows.iter().find(|row| row.index == index).unwrap();
-    let ink = (bg, theme.accent, theme.foreground);
     let surfaces = |index: usize, hover| {
         settings_row_surfaces(
             row(index),
             &set.rows[index],
             &palette,
-            ink,
+            bg,
             (SettingsRowFill::Hovered, hover),
             1.0,
         )
@@ -338,32 +337,39 @@ fn hover_inks_meet_their_floors() {
                     (SettingsHover::Reset(2), SettingsTextKind::Reset(2)),
                 ] {
                     set.hover = Some(hover);
-                    let ink = settings_text_color(
-                        &set,
-                        kind,
-                        &palette,
-                        (&theme, accent, theme.foreground),
-                        &mut colors,
-                    );
+                    let ink = settings_text_color(&set, kind, &palette, &theme, &mut colors);
                     if ratio(ink, super::settings::settings_pressable(bg)) + 0.005 < TEXT_CONTRAST {
                         failures.push(format!("{at}: {hover:?} text"));
                     }
                 }
-                // A switch's label on its own hover fill, on and off.
-                for on in [true, false] {
-                    set.rows[1].control = SettingsControl::Toggle(on);
-                    set.hover = Some(SettingsHover::Switch(1));
+                // An unavailable switch's external status text keeps 4.5:1 on
+                // resting, focused, and hovered row fills, and the ON switch
+                // track and thumb clear 3:1 against each other and the panel.
+                set.rows[1].control = SettingsControl::Toggle(true);
+                set.rows[1].unavailable = true;
+                for (focused, hover, surface) in [
+                    (0, None, bg),
+                    (1, None, palette.selected),
+                    (0, Some(SettingsHover::Row(1)), palette.hover),
+                ] {
+                    set.focused_row = focused;
+                    set.hover = hover;
                     let ink = settings_text_color(
                         &set,
                         SettingsTextKind::Value(1),
                         &palette,
-                        (&theme, accent, theme.foreground),
+                        &theme,
                         &mut colors,
                     );
-                    let fill = super::settings::settings_pressable(if on { accent } else { bg });
-                    if ratio(ink, fill) + 0.005 < TEXT_CONTRAST {
-                        failures.push(format!("{at}: switch on={on} text"));
+                    if ratio(ink, surface) + 0.005 < TEXT_CONTRAST {
+                        failures.push(format!("{at}: unavailable switch status on {surface:?}"));
                     }
+                }
+                if ratio(palette.switch_on_thumb, palette.switch_on_track) + 0.005 < ICON_CONTRAST {
+                    failures.push(format!("{at}: switch on thumb/track"));
+                }
+                if ratio(palette.switch_on_track, bg) + 0.005 < ICON_CONTRAST {
+                    failures.push(format!("{at}: switch on track/bg"));
                 }
             }
         }
@@ -380,6 +386,7 @@ fn a_switch_under_the_pointer_answers_it_on_the_focused_row() {
     use super::color::contrast_ratio as ratio;
     use super::settings::{
         SettingsRowFill, settings_pressable, settings_row_fill, settings_row_surfaces,
+        settings_text_items,
     };
     let theme = kettle_config::Theme::by_name("TokyoNight Night");
     let (bg, accent) = (theme.background, theme.accent);
@@ -392,31 +399,42 @@ fn a_switch_under_the_pointer_answers_it_on_the_focused_row() {
         assert_eq!(settings_row_fill(&set, 1), SettingsRowFill::Focused);
         let layout = settings_layout(&set, (8.4, 17.5), (1280.0, 820.0), 8.4, 1.0);
         let row = layout.rows.iter().find(|row| row.index == 1).unwrap();
-        let fill = |hover| {
+        let surfaces = |hover| {
             settings_row_surfaces(
                 row,
                 &set.rows[1],
                 &palette,
-                (bg, accent, theme.foreground),
+                bg,
                 (SettingsRowFill::Focused, hover),
                 1.0,
-            )[0]
-            .fill
+            )
         };
-        let resting = if on { accent } else { bg };
-        assert_eq!(fill(None), resting);
+        let resting = if on {
+            palette.switch_on_track
+        } else {
+            palette.well
+        };
+        assert_eq!(surfaces(None)[0].fill, resting);
         assert_eq!(
-            fill(Some(SettingsHover::Switch(1))),
+            surfaces(Some(SettingsHover::Switch(1)))[0].fill,
             settings_pressable(resting)
         );
-        assert_eq!(fill(Some(SettingsHover::Switch(0))), resting);
-        let ink = settings_text_color(
-            &set,
-            SettingsTextKind::Value(1),
-            &palette,
-            (&theme, accent, theme.foreground),
-            &mut colors,
+        assert_eq!(surfaces(Some(SettingsHover::Switch(0)))[0].fill, resting);
+        let hovered = surfaces(Some(SettingsHover::Switch(1)));
+        if on {
+            assert_eq!(hovered[0].width, 0.0);
+            assert_eq!(hovered[1].fill, palette.switch_on_thumb);
+            assert!(ratio(palette.switch_on_thumb, palette.switch_on_track) >= 3.0);
+        } else {
+            assert_eq!(hovered[0].width, 1.0);
+            assert_eq!(hovered[1].fill, palette.selected_well_control);
+            assert!(ratio(palette.selected_well_control, palette.well) >= 3.0);
+        }
+        assert!(
+            !settings_text_items(&set, &layout, 8.4)
+                .iter()
+                .any(|item| item.kind == SettingsTextKind::Value(1)),
+            "available switch emits no inside-track text (on={on})"
         );
-        assert!(ratio(ink, settings_pressable(resting)) >= 4.5, "on={on}");
     }
 }

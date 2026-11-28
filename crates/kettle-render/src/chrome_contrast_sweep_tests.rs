@@ -711,6 +711,18 @@ fn settings_outlines_text_and_focus_reach_their_floors() {
                 {
                     fail(format!("{at} focus bar {:.3}", both(palette.focus)));
                 }
+                if ratio(palette.switch_on_thumb, palette.switch_on_track) < ICON_CONTRAST {
+                    fail(format!(
+                        "{at} switch_on thumb/track {:.3}",
+                        ratio(palette.switch_on_thumb, palette.switch_on_track)
+                    ));
+                }
+                if ratio(palette.switch_on_track, bg) < ICON_CONTRAST {
+                    fail(format!(
+                        "{at} switch_on track/bg {:.3}",
+                        ratio(palette.switch_on_track, bg)
+                    ));
+                }
                 for (role, ink, surface, share) in [
                     (
                         "description",
@@ -786,6 +798,58 @@ fn settings_judged_panels_read_clearly() {
     }
 }
 
+/// `switch_on_colors` clears WCAG 3:1+ for both thumb-on-track and track-on-bg
+/// across every bundled theme and synthetic extreme mid-tone backgrounds.
+#[test]
+fn switch_on_colors_meet_contrast_floor_across_all_themes_and_midtones() {
+    let mut failures = Vec::new();
+    for name in Theme::list() {
+        let theme = Theme::by_name(name);
+        for linear in [true, false] {
+            for accent in [theme.accent, theme.palette[4], Rgb::new(0xbb, 0x99, 0xf8)] {
+                let (track, thumb) = settings::switch_on_colors(theme.background, accent, linear);
+                let thumb_ratio = color::contrast_ratio(thumb, track);
+                let track_ratio = color::contrast_ratio(track, theme.background);
+                if thumb_ratio < ICON_CONTRAST || track_ratio < ICON_CONTRAST {
+                    failures.push(format!(
+                        "{name} linear={linear} accent={accent:?}: thumb={thumb_ratio:.3} track={track_ratio:.3}"
+                    ));
+                }
+            }
+        }
+    }
+    for bg in [
+        Rgb::new(0, 0, 0),
+        Rgb::new(0x40, 0x40, 0x40),
+        Rgb::new(0x4c, 0x4c, 0x4c),
+        Rgb::new(0x50, 0x50, 0x50),
+        Rgb::new(0x58, 0x58, 0x58),
+        Rgb::new(0x60, 0x60, 0x60),
+        Rgb::new(0x80, 0x80, 0x80),
+        Rgb::new(255, 255, 255),
+    ] {
+        for accent in [
+            Rgb::new(0x7a, 0xa2, 0xf7),
+            Rgb::new(0x50, 0x50, 0x50),
+            Rgb::new(0xff, 0xff, 0x00),
+            Rgb::new(0x10, 0x10, 0x10),
+        ] {
+            for linear in [true, false] {
+                let (track, thumb) = settings::switch_on_colors(bg, accent, linear);
+                assert!(
+                    color::contrast_ratio(thumb, track) >= ICON_CONTRAST,
+                    "bg={bg:?} accent={accent:?} linear={linear}"
+                );
+                assert!(
+                    color::contrast_ratio(track, bg) >= ICON_CONTRAST,
+                    "bg={bg:?} accent={accent:?} linear={linear}"
+                );
+            }
+        }
+    }
+    report(&failures, "switch_on_colors");
+}
+
 /// The painter takes these colours from the helpers the sweeps test.
 #[test]
 fn the_painter_uses_the_swept_helpers() {
@@ -805,8 +869,9 @@ fn the_painter_uses_the_swept_helpers() {
         "scrollback::scrollback_pill_quads(&mutmenu_q,pill,surface,self.scale);",
         "scrollback::kept_history_label_quads(&mutmenu_q,label,rest.fill);",
         "letpalette=settings::settings_colors(",
-        "settings::settings_row_surfaces(row,data,&palette,(theme.background,acc,on_ink),(row_fill,set.hover),self.scale,)",
-        "letcolor=settings::settings_text_color(set,item.kind,&palette,(theme,acc,on_ink),&mutself.chrome_colors,);",
+        "let(switch_on_track,switch_on_thumb)=switch_on_colors(bg,accent,linear);",
+        "settings::settings_row_surfaces(row,data,&palette,theme.background,(row_fill,set.hover),self.scale,)",
+        "letcolor=settings::settings_text_color(set,item.kind,&palette,theme,&mutself.chrome_colors,);",
         "settings::settings_focus_bar(row.rect,bar,self.scale),focus,",
         "settings::settings_focus_bar(*r,bar,self.scale),focus,",
     ] {

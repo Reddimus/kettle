@@ -4517,6 +4517,11 @@ mod control_size_tests {
             .flat_map(|c| &c.fields)
             .find(|f| f.key == "window-blur")
             .unwrap();
+        let blink = cats
+            .iter()
+            .flat_map(|c| &c.fields)
+            .find(|f| f.key == "cursor-blink")
+            .unwrap();
         for language in [Language::En, Language::Es] {
             let tr = Translator::new(language);
             for surface in [(1280.0_f32, 820.0_f32), (640.0, 820.0)] {
@@ -4526,22 +4531,49 @@ mod control_size_tests {
                         window_blur: saved,
                         ..Config::default()
                     };
-                    for &state in blur_states(std::env::consts::OS) {
+                    for &state in &[
+                        BlurState::Available,
+                        BlurState::Checking,
+                        BlurState::Unavailable,
+                    ] {
                         let set = kettle_render::SettingsOverlay {
-                            rows: vec![kettle_render::SettingsRow {
-                                label: tr.text(blur.label).into(),
-                                value: row_value(blur, state, &cfg, &tr),
-                                control: kettle_render::SettingsControl::Toggle(saved),
-                                unavailable: state != BlurState::Available,
-                                value_cols: field_value_cols(&cfg, blur, &tr),
-                                reset: Some(!saved),
-                                ..Default::default()
-                            }],
+                            rows: vec![
+                                kettle_render::SettingsRow {
+                                    label: tr.text(blur.label).into(),
+                                    value: row_value(blur, state, &cfg, &tr),
+                                    control: kettle_render::SettingsControl::Toggle(saved),
+                                    unavailable: state != BlurState::Available,
+                                    value_cols: field_value_cols(&cfg, blur, &tr),
+                                    reset: Some(!saved),
+                                    ..Default::default()
+                                },
+                                kettle_render::SettingsRow {
+                                    label: tr.text(blink.label).into(),
+                                    value: row_value(blink, BlurState::Available, &cfg, &tr),
+                                    control: kettle_render::SettingsControl::Toggle(true),
+                                    value_cols: field_value_cols(&cfg, blink, &tr),
+                                    reset: Some(false),
+                                    ..Default::default()
+                                },
+                            ],
                             reset_label: tr.text(Text::SettingsResetButton).into(),
                             ..Default::default()
                         };
                         let layout =
                             kettle_render::settings_layout(&set, (8.4, 17.5), surface, 8.4, 1.0);
+                        assert_eq!(
+                            (
+                                layout.rows[0].chip_rect.0,
+                                layout.rows[0].chip_rect.2,
+                                layout.rows[0].chip_rect.3
+                            ),
+                            (
+                                layout.rows[1].chip_rect.0,
+                                layout.rows[1].chip_rect.2,
+                                layout.rows[1].chip_rect.3
+                            ),
+                            "{language:?} {surface:?} saved {saved} {state:?}: blur capsule must match cursor-blink"
+                        );
                         chips.push((saved, state, layout.rows[0].chip_rect));
                     }
                 }
@@ -4559,12 +4591,15 @@ mod control_size_tests {
     /// Every row's widest value, in English and Spanish, shows whole in the
     /// default window (1280x820 at the 14 px font's 8.4x17.5 cell). In the
     /// narrow one (640x820) it does wherever it fits beside the whole label,
-    /// and elsewhere keeps about half the row. Every changed row keeps a
-    /// Reset chip in both, its word or its icon.
+    /// and elsewhere keeps about half the row. Toggle switches always use the
+    /// fixed capsule size regardless of language or label. Every changed row
+    /// keeps a Reset chip in both, its word or its icon.
     #[test]
     fn longest_values_stay_whole_where_they_fit() {
         let cfg = Config::default();
         let (cw, line) = (8.4_f32, 17.5_f32);
+        let control_h = kettle_render::settings_control_height(line);
+        let toggle_size = kettle_render::settings_toggle_track_size(control_h);
         for language in [Language::En, Language::Es] {
             let tr = Translator::new(language);
             for (surface, all_fit) in [((1280.0, 820.0), true), ((640.0, 820.0), false)] {
@@ -4577,26 +4612,24 @@ mod control_size_tests {
                     let layout = kettle_render::settings_layout(&set, (cw, line), surface, cw, 1.0);
                     let geometry = &layout.rows[0];
                     let chip = geometry.chip_rect;
-                    let knob = match row.control {
-                        kettle_render::SettingsControl::Toggle(_) => {
-                            kettle_render::settings_control_height(line) - 4.0
-                        }
-                        _ => 0.0,
-                    };
-                    let arrows = if row.control == kettle_render::SettingsControl::Choice {
-                        4
-                    } else {
-                        0
-                    };
-                    let need = (row.value_cols + arrows) as f32 * cw;
-                    let fits = need <= chip.2 - 8.0 - knob + 0.01;
-                    let inner = geometry.rect.2;
-                    let label = kettle_render::display_width(&row.label) as f32 * cw;
                     let context = format!("{language:?} {surface:?} {key}");
-                    if all_fit || label + 18.0 + need + 20.0 + knob <= inner {
-                        assert!(fits, "{context}: {need} in {chip:?}");
+                    if matches!(row.control, kettle_render::SettingsControl::Toggle(_)) {
+                        assert_eq!((chip.2, chip.3), toggle_size, "{context}");
                     } else {
-                        assert!(chip.2 >= inner * 0.48 - 0.01, "{context}");
+                        let arrows = if row.control == kettle_render::SettingsControl::Choice {
+                            4
+                        } else {
+                            0
+                        };
+                        let need = (row.value_cols + arrows) as f32 * cw;
+                        let fits = need <= chip.2 - 8.0 + 0.01;
+                        let inner = geometry.rect.2;
+                        let label = kettle_render::display_width(&row.label) as f32 * cw;
+                        if all_fit || label + 18.0 + need + 20.0 <= inner {
+                            assert!(fits, "{context}: {need} in {chip:?}");
+                        } else {
+                            assert!(chip.2 >= inner * 0.48 - 0.01, "{context}");
+                        }
                     }
                     assert!(geometry.reset.is_some(), "{context}: no Reset");
                 }

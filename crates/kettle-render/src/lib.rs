@@ -198,7 +198,7 @@ pub use settings::{
     SettingsControl, SettingsHintLine, SettingsHit, SettingsHover, SettingsLayout, SettingsOverlay,
     SettingsPanelGeometry, SettingsResetChip, SettingsRow, SettingsRowGeometry,
     settings_control_height, settings_hit_test, settings_hit_test_with_text_width, settings_layout,
-    settings_panel_geometry, settings_value_rect,
+    settings_panel_geometry, settings_toggle_track_size, settings_value_rect,
 };
 pub use terminal::{HighlightRect, LinkRect, PaintedCard, PaneBroadcast, PaneView};
 use terminal::{
@@ -3544,7 +3544,7 @@ impl Renderer {
                             set,
                             item.kind,
                             &palette,
-                            (theme, accent, theme.foreground),
+                            theme,
                             &mut self.chrome_colors,
                         )
                     } else {
@@ -5437,15 +5437,6 @@ impl Renderer {
                 hover,
                 ..
             } = palette;
-            // Ink on a switched-on toggle: whichever theme end stands out more
-            // against the accent, for its knob and its label.
-            let on_ink = if color::contrast_ratio(theme.foreground, acc)
-                >= color::contrast_ratio(theme.background, acc)
-            {
-                theme.foreground
-            } else {
-                theme.background
-            };
             let rgba = |c: Rgb, a| {
                 [
                     c.r as f32 / 255.0,
@@ -5554,7 +5545,7 @@ impl Renderer {
                     row,
                     data,
                     &palette,
-                    (theme.background, acc, on_ink),
+                    theme.background,
                     (row_fill, set.hover),
                     self.scale,
                 ) {
@@ -5601,7 +5592,7 @@ impl Renderer {
                     set,
                     item.kind,
                     &palette,
-                    (theme, acc, on_ink),
+                    theme,
                     &mut self.chrome_colors,
                 );
                 menu_areas.push(TextArea {
@@ -5630,7 +5621,7 @@ impl Renderer {
                         set,
                         settings::SettingsTextKind::Value(set.focused_row),
                         &palette,
-                        (theme, accent, theme.foreground),
+                        theme,
                         &mut self.chrome_colors,
                     ))
                 } else {
