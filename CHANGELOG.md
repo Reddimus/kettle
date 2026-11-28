@@ -1124,6 +1124,10 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 - Restored output keeps blinking text's blink attribute.
 
+- Restored output keeps the protection a program gave text with DECSCA
+  (`CSI 1 " q`), so a selective erase (`CSI ? J`, `CSI ? K`) spares that text
+  as it did before the restore.
+
 - Restored output keeps the colors of the blank a wide character leaves at the
   end of a row it did not fit, and the row after it keeps its columns.
 

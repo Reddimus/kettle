@@ -6569,6 +6569,10 @@ The raw PTY stream is never persisted for this feature. Hyperlinks and other
 controls cannot enter the snapshot. Validated UTF-8 cell boundaries and each
 cell's grapheme mode preserve widths even across DEC 2027 changes; replay
 generates its own mode controls, then restores the new shell's configured mode.
+DECSCA protection is not SGR, so each row saves it as runs of cell indexes;
+replay generates `CSI 1 " q` and `CSI 0 " q` around those runs and turns
+protection off before the row ends, so nothing the new shell writes is
+protected.
 Rows, encoded bytes and pane/window counts
 are bounded. `kettle-ui::session_content` stores a versioned, SHA-256-bound
 sidecar next to the session layout through `kettle-state` private durable writes.
