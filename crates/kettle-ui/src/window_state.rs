@@ -1519,6 +1519,10 @@ pub(crate) struct WindowState {
     pub(crate) hovered_scroll_arrow: Option<bool>,
     /// When the tooltip of the control under the pointer shows.
     pub(crate) tooltip: crate::tooltip::TooltipClock,
+    /// A tab just opened shows its go-to-tab chord briefly.
+    pub(crate) new_tab_hint_fade: crate::tab_hints::NewTabHintFade,
+    /// Holding the go-to-tab modifiers shows each tab's digit.
+    pub(crate) tab_hint_peek: crate::tab_hints::TabHintPeek,
     /// The pointer is over the tab bar's update chip.
     /// What a screen reader calls the open context menu, when it is not the
     /// terminal's. Each new menu resets it.
@@ -2099,6 +2103,8 @@ impl WindowState {
             pressed_search: false,
             hovered_scroll_arrow: None,
             tooltip: crate::tooltip::TooltipClock::default(),
+            new_tab_hint_fade: Default::default(),
+            tab_hint_peek: Default::default(),
             context_menu_a11y_label: None,
             context_menu_output_row: None,
             context_menu_session: Default::default(),

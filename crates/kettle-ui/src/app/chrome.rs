@@ -174,6 +174,131 @@ impl App {
         self.tab_bar_at_height(ws, height)
     }
 
+    /// The window lets the strip's shortcut pills show: it is focused, no
+    /// modal or menu owns the keyboard, no title is being edited and there
+    /// is more than one tab to go to.
+    fn tab_hints_allowed(&self, ws: &WindowState) -> bool {
+        ws.window_focused
+            && ws.mux.tabs.len() > 1
+            && ws.context_menu.is_none()
+            && ws.editing_title.is_none()
+            && !self.any_modal_open(ws)
+    }
+
+    /// The new-tab hint still names the active tab, at its place.
+    fn new_tab_hint_current(ws: &WindowState) -> bool {
+        let mux = &ws.mux;
+        ws.new_tab_hint_fade
+            .still_names(mux.active, mux.tabs.len(), |tab, pane| {
+                mux.tabs.get(tab).is_some_and(|tab| tab.root.contains(pane))
+            })
+    }
+
+    /// A tab was just opened from New Tab, `+` or the new-tab menu: show
+    /// its go-to-tab chord briefly, unless motion is reduced (the modifier
+    /// peek and the tab's tooltip still teach it) or nothing would show it.
+    pub(super) fn arm_new_tab_hint(&self, ws: &mut WindowState) {
+        let tab = ws.mux.active;
+        let Some(pane) = ws.mux.tabs.get(tab).map(|tab| tab.focus) else {
+            return;
+        };
+        if self.cfg.tab_bar_pos.is_vertical() || tab_goto_hint(&self.cfg.keybinds, tab).is_none() {
+            ws.new_tab_hint_fade.cancel();
+            return;
+        }
+        let reduced = !self.motion_allowed();
+        let tabs = ws.mux.tabs.len();
+        ws.new_tab_hint_fade
+            .arm(tab, tabs, pane, reduced, std::time::Instant::now());
+    }
+
+    /// The modifiers held changed: holding exactly the go-to-tab set arms
+    /// the digit peek, anything else ends it. A link under the pointer
+    /// keeps it off, since the same modifier makes a click open the link.
+    pub(super) fn sync_tab_hint_peek(&self, ws: &mut WindowState) {
+        let allows = self.tab_hints_allowed(ws)
+            && !self.cfg.tab_bar_pos.is_vertical()
+            && self.hovered_link_at_cursor(ws).is_none();
+        let held = keyboard::to_mods(ws.mods);
+        let peek = crate::tab_hints::tab_goto_peek_modifiers(&self.cfg.keybinds);
+        if ws
+            .tab_hint_peek
+            .modifiers_changed(held, peek, allows, std::time::Instant::now())
+            && let Some(window) = &ws.window
+        {
+            window.request_redraw();
+        }
+    }
+
+    /// End both shortcut pills at once, as a focus loss does.
+    pub(super) fn clear_tab_hints(ws: &mut WindowState) {
+        let fade = ws.new_tab_hint_fade.cancel();
+        if (ws.tab_hint_peek.clear() || fade)
+            && let Some(window) = &ws.window
+        {
+            window.request_redraw();
+        }
+    }
+
+    /// The scheduler's turn for the shortcut pills: end those the window no
+    /// longer allows, step the fade, show the peek once its delay is up.
+    /// Returns the next wake: one at the end of the hold or the delay, one
+    /// per frame only through the fade, none at rest.
+    pub(super) fn tick_tab_hints(
+        &self,
+        ws: &mut WindowState,
+        now: std::time::Instant,
+        render_hidden: bool,
+    ) -> Option<std::time::Instant> {
+        let quiet = ws.tab_hint_peek == crate::tab_hints::TabHintPeek::Idle
+            && !ws.new_tab_hint_fade.is_armed();
+        if quiet {
+            return None;
+        }
+        let allowed = !render_hidden && self.tab_hints_allowed(ws);
+        let mut redraw = false;
+        if ws.new_tab_hint_fade.is_armed() && !(allowed && Self::new_tab_hint_current(ws)) {
+            redraw |= ws.new_tab_hint_fade.cancel();
+        }
+        let (fade_due, fade_wake) = ws.new_tab_hint_fade.poll(now);
+        redraw |= fade_due;
+        if ws.tab_hint_peek != crate::tab_hints::TabHintPeek::Idle
+            && (!allowed || self.hovered_link_at_cursor(ws).is_some())
+        {
+            redraw |= ws.tab_hint_peek.clear();
+        }
+        let (peek_due, peek_wake) = ws.tab_hint_peek.poll(now);
+        redraw |= peek_due;
+        if redraw && let Some(window) = &ws.window {
+            window.request_redraw();
+        }
+        fade_wake.into_iter().chain(peek_wake).min()
+    }
+
+    /// The shortcut pills over `segments` in this frame: every visible
+    /// tab's digit while the peek shows, else the new tab's chord while it
+    /// fades. `cell` is the strip's text cell width and scale.
+    fn tab_shortcut_badges(
+        &self,
+        ws: &WindowState,
+        segments: &[TabSeg],
+        cell: (f32, f32),
+        now: std::time::Instant,
+    ) -> Vec<kettle_render::TabBadge> {
+        if !self.tab_hints_allowed(ws) {
+            return Vec::new();
+        }
+        let peek = ws.tab_hint_peek.visible();
+        let fade = if peek || !Self::new_tab_hint_current(ws) {
+            None
+        } else {
+            ws.new_tab_hint_fade
+                .tab()
+                .zip(ws.new_tab_hint_fade.alpha(now))
+        };
+        tab_shortcut_badges(segments, &self.cfg.keybinds, (peek, fade), cell)
+    }
+
     pub(super) fn tab_bar_at_height(&self, ws: &WindowState, height: f32) -> TabBar {
         let band = self.tab_band(ws, height);
         let button_layout = self.linux_button_layout(ws);
@@ -218,6 +343,7 @@ impl App {
                 height,
                 y,
                 segments: Vec::new(),
+                badges: Vec::new(),
                 new_tab: (strip_x, y, strip_w, height),
                 new_tab_menu: (0.0, 0.0, 0.0, 0.0),
                 hovered_new_tab: false,
@@ -303,6 +429,12 @@ impl App {
         // list, idx-indexed, so reorder / dock / ghost logic is undisturbed).
         let now = std::time::Instant::now();
         let silence = std::time::Duration::from_millis(self.cfg.tab_silence_threshold_ms);
+        let cell_w = self.overlay_text_cell_width(ws);
+        let cell_w = if ws.macos_titlebar_tabs {
+            cell_w * kettle_render::tab_text_scale(height, self.overlay_text_line_height(ws))
+        } else {
+            cell_w
+        };
         let segments: Vec<TabSeg> = labels
             .iter()
             .enumerate()
@@ -340,29 +472,18 @@ impl App {
                 if i == active && !recording_notice.is_empty() {
                     full_label = format!("{recording_notice} {full_label}");
                 }
-                // A lone title-bar tab stands for the window's title: its
-                // go-to-tab key would go nowhere.
-                let hint = if ws.macos_titlebar_tabs && n == 1 {
-                    None
-                } else {
-                    tab_goto_hint(&self.cfg.keybinds, i)
-                };
-                let cell_w = self.overlay_text_cell_width(ws);
-                let cell_w = if ws.macos_titlebar_tabs {
-                    cell_w
-                        * kettle_render::tab_text_scale(height, self.overlay_text_line_height(ws))
-                } else {
-                    cell_w
-                };
-                // A lone header title is no tab: no close button or hint.
+                // A lone header title is no tab: no close button.
                 let show_controls = n > 1 || (hovered && !lone_title);
+                // At rest a tab keeps its whole lane for its title, centred;
+                // its go-to-tab key shows only as a passing pill
+                // (`tab_shortcut_badges`) and in its tooltip.
                 let mut content = kettle_render::horizontal_tab_content_layout(
                     rect,
                     show_controls,
                     self.cfg.close_button_on_tab,
                     kettle_render::activity_lane(activity, scale),
                     &full_label,
-                    hint.as_deref(),
+                    None,
                     cell_w,
                 );
                 // GNOME centres a header bar's title on the window.
@@ -375,7 +496,7 @@ impl App {
                     idx: i,
                     rect,
                     title_rect: content.title,
-                    hint: content.hint.zip(hint),
+                    hint: None,
                     // ✕ hit zone = the trailing `height`-wide square.
                     close,
                     title: label.text.clone(),
@@ -392,6 +513,11 @@ impl App {
         let arrow_width = layout.arrow_width;
         let to_btn =
             |ox: Option<f32>| ox.map_or((0.0, 0.0, 0.0, 0.0), |x| (x0 + x, y, arrow_width, height));
+        let badges = if lone_title {
+            Vec::new()
+        } else {
+            self.tab_shortcut_badges(ws, &segments, (cell_w, scale), now)
+        };
         let mut bar = TabBar {
             window_controls,
             pressed_new_tab: ws.pressed_new_tab,
@@ -419,6 +545,7 @@ impl App {
             height,
             y,
             segments,
+            badges,
             new_tab: plus_rect,
             new_tab_menu: arrow_rect,
             hovered_new_tab: ws.hovered_new_tab,
@@ -595,6 +722,7 @@ impl App {
             height,
             y: strip_y,
             segments,
+            badges: Vec::new(),
             new_tab: plus,
             new_tab_menu: menu,
             hovered_new_tab: ws.hovered_new_tab,
@@ -669,6 +797,7 @@ impl App {
                 match ws.mux.new_tab_geometry(&self.cfg, geometry, self.waker()) {
                     Ok(()) => {
                         self.note_focus_change(ws, pre);
+                        self.arm_new_tab_hint(ws);
                         self.fire_tab_add_event(ws);
                     }
                     Err(e) => log::warn!("could not open a new tab (+ button): {e}"),
@@ -1333,8 +1462,11 @@ pub(super) fn strip_tooltip_target(
     strip(target, text, rect)
 }
 
-/// The tab under the pointer, off its close button, when the strip shows
-/// its title shortened: the tooltip names the whole title. A lone title-bar
+/// The tab under the pointer, off its close button. In a strip of several
+/// tabs the tooltip names the whole title and the tab's go-to-tab key, as
+/// the overflow arrows name theirs, since the strip shows that key only in
+/// passing. Otherwise, or for a tab with no such key, it shows only when the
+/// strip shortened the title, and names the whole title. A lone title-bar
 /// title stands for the window and has none.
 fn cut_tab_title_tooltip(
     ws: &WindowState,
@@ -1350,15 +1482,28 @@ fn cut_tab_title_tooltip(
     if seg.close.2 > 0.0 && rect_contains(seg.close, x, y) {
         return None;
     }
-    kettle_render::tab_segment_label_cut(
-        seg,
-        context.tab_format,
-        context.tab_cell_width,
-        &bar.recording_notice,
-    )
-    .then(|| ChromeTooltip {
+    let title = seg.path.as_deref().unwrap_or(&seg.title);
+    let key = if bar.segments.len() > 1 {
+        tab_goto_hint(context.bindings, seg.idx)
+    } else {
+        None
+    };
+    let text = match key {
+        Some(key) => format!("{title}  {key}"),
+        None if kettle_render::tab_segment_label_cut(
+            seg,
+            context.tab_format,
+            context.tab_cell_width,
+            &bar.recording_notice,
+        ) =>
+        {
+            title.to_owned()
+        }
+        None => return None,
+    };
+    Some(ChromeTooltip {
         target: crate::tooltip::TooltipTarget::TabTitle(seg.idx),
-        text: seg.path.as_deref().unwrap_or(&seg.title).to_owned(),
+        text,
         anchor: Some(seg.rect),
         rect: tab_title_region(seg),
     })
@@ -2302,7 +2447,7 @@ pub(super) fn titlebar_tear_off_grab_x(
     f64::from(tab.0) + in_tab.clamp(f64::from(margin), f64::from((tab.2 - margin).max(margin)))
 }
 
-/// The shortcut shown on tab `index`: whatever key the bindings give "go to
+/// The shortcut shown for tab `index`: whatever key the bindings give "go to
 /// tab N" (Cmd+N on macOS and Alt+N elsewhere by default, or the user's own),
 /// so the tab bar teaches the shortcut on every platform. Only the first nine
 /// tabs have one.
@@ -2312,6 +2457,48 @@ pub(super) fn tab_goto_hint(
 ) -> Option<String> {
     let index = u8::try_from(index).ok().filter(|index| *index < 9)?;
     kettle_config::keybinds::ui_hint_label(bindings, &Action::GotoTab(index))
+}
+
+/// The shortcut pills over a horizontal strip's `segments`. With `peek`,
+/// each of the first nine tabs in view shows its digit at full opacity;
+/// otherwise `fade`, a tab and its opacity, shows that tab's whole go-to-tab
+/// chord. A pill that does not fit its tab's title lane is left out, and a
+/// tab with no go-to-tab key has none. `cell` is the strip's text cell
+/// width and scale.
+pub(super) fn tab_shortcut_badges(
+    segments: &[TabSeg],
+    bindings: &kettle_config::keybinds::Bindings,
+    (peek, fade): (bool, Option<(usize, f32)>),
+    (cell_width, scale): (f32, f32),
+) -> Vec<kettle_render::TabBadge> {
+    let badge = |seg: &TabSeg, text: String, alpha: f32| {
+        // A tab scrolled out of view is parked off the strip.
+        if seg.rect.0 <= PARKED_TAB * 0.5 || alpha <= 0.0 {
+            return None;
+        }
+        kettle_render::tab_badge_rect(seg.rect, seg.title_rect, &text, cell_width, scale).map(
+            |rect| kettle_render::TabBadge {
+                idx: seg.idx,
+                rect,
+                text,
+                alpha,
+            },
+        )
+    };
+    if peek {
+        segments
+            .iter()
+            .filter(|seg| seg.idx < 9 && tab_goto_hint(bindings, seg.idx).is_some())
+            .filter_map(|seg| badge(seg, (seg.idx + 1).to_string(), 1.0))
+            .collect()
+    } else {
+        fade.and_then(|(idx, alpha)| {
+            let seg = segments.iter().find(|seg| seg.idx == idx)?;
+            badge(seg, tab_goto_hint(bindings, idx)?, alpha.clamp(0.0, 1.0))
+        })
+        .into_iter()
+        .collect()
+    }
 }
 
 pub(super) fn titlebar_new_tab_controls(band: Rect, scale: f32) -> (Rect, Rect, f32) {

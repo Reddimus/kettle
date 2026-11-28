@@ -1294,6 +1294,7 @@ impl Renderer {
             pane_titlebar_buffers: Vec::new(),
             tab_buffers: Vec::new(),
             tab_hint_buffers: Vec::new(),
+            tab_badge_buffers: Vec::new(),
             hint_buffers: Vec::new(),
             pane_status_buffers: Vec::new(),
             context_menu_buffers: Vec::new(),

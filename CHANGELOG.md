@@ -6,6 +6,16 @@ durable, fully-tested cycles (lint · build · test · docs · commit · CI).
 
 ## [Unreleased]
 
+### Changed
+
+- Horizontal tabs no longer show `Cmd+1`-`9` (or `Alt+1`-`9`) beside every
+  title, which pushed short titles off centre and crowded Linux and Windows
+  tabs. A tab opened from New Tab, `+` or the new-tab menu shows its key in
+  a pill for about two seconds, fading out (or not at all with reduced
+  motion); holding the go-to-tab modifiers for a moment shows each of the
+  first nine tabs' digits; and with several tabs open, each tab's tooltip
+  names its key.
+
 ## [6.0.0] — 2026-11-27
 
 ### Added

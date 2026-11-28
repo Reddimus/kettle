@@ -114,6 +114,36 @@ pub fn horizontal_tab_content_layout(
     }
 }
 
+/// Where a tab's shortcut pill sits: at the trailing end of its `title`
+/// lane, centred on the `segment`'s height, as wide as `label` in
+/// `cell_width` cells plus padding and never narrower than it is tall. The
+/// pill overlays the lane, so the title never moves for it. `None` when the
+/// lane is too narrow to hold it or there is nothing to show.
+pub fn tab_badge_rect(
+    segment: Rect4,
+    title: Rect4,
+    label: &str,
+    cell_width: f32,
+    scale: f32,
+) -> Option<Rect4> {
+    let (_, y, _, h) = segment;
+    if label.is_empty() || title.2 <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    let scale = scale.max(0.5);
+    let inset = (4.0 * scale).round();
+    let height = (h - 2.0 * inset).max(1.0).round();
+    let pad = (5.0 * scale).round();
+    let text_width = display_width(label) as f32 * cell_width.max(1.0);
+    let width = (text_width + 2.0 * pad).max(height).round();
+    let right = (title.0 + title.2).floor();
+    let left = right - width;
+    if left < title.0 {
+        return None;
+    }
+    Some((left, (y + (h - height) * 0.5).round(), width, height))
+}
+
 /// Where a tab's `kind` activity marker draws: a box of [`marker_side`]
 /// device pixels whose right edge leaves the lane's gap before the title text
 /// at `label_left`, centred on the title line. `None` when the box would not
@@ -841,6 +871,57 @@ pub(crate) fn flat_button_fill(
 mod tests {
     use super::*;
     use crate::TabActivity;
+
+    #[test]
+    fn a_shortcut_pill_overlays_the_trailing_end_of_the_title_lane() {
+        for scale in [1.0, 2.0] {
+            let h = 28.0 * scale;
+            let segment = (100.0, 0.0, 200.0 * scale, h);
+            let content =
+                horizontal_tab_content_layout(segment, true, true, 0.0, "~/src", None, 8.0 * scale);
+            for label in ["3", "⌘3", "Alt+3"] {
+                let pill = tab_badge_rect(segment, content.title, label, 8.0 * scale, scale)
+                    .expect("a wide tab holds the pill");
+                // Flush with the lane's trailing edge, inside it, and clear of
+                // the close button.
+                assert_eq!(pill.0 + pill.2, (content.title.0 + content.title.2).floor());
+                assert!(pill.0 >= content.title.0);
+                assert!(pill.0 + pill.2 <= content.close.0);
+                // Centred on the tab's height, inset from its edges, never
+                // narrower than tall, and wide enough for the label.
+                assert_eq!(pill.1 - segment.1, segment.1 + h - (pill.1 + pill.3));
+                assert!(pill.3 < h && pill.3 > h * 0.5, "{pill:?}");
+                assert!(pill.2 >= pill.3);
+                assert!(pill.2 >= display_width(label) as f32 * 8.0 * scale);
+            }
+            // The digit pill is a circle-ended chip no wider than tall.
+            let digit = tab_badge_rect(segment, content.title, "3", 8.0 * scale, scale).unwrap();
+            assert_eq!(digit.2, digit.3);
+        }
+    }
+
+    #[test]
+    fn a_shortcut_pill_never_moves_the_title_lane() {
+        let segment = (0.0, 0.0, 160.0, 28.0);
+        let at_rest = horizontal_tab_content_layout(segment, true, true, 0.0, "zsh", None, 8.0);
+        // The lane is the same with or without a pill, and centred between
+        // the tab's leading padding and its close button.
+        let pill = tab_badge_rect(segment, at_rest.title, "Alt+2", 8.0, 1.0).unwrap();
+        let again = horizontal_tab_content_layout(segment, true, true, 0.0, "zsh", None, 8.0);
+        assert_eq!(at_rest.title, again.title);
+        assert_eq!(at_rest.title.0, segment.0 + 8.0);
+        assert_eq!(at_rest.title.0 + at_rest.title.2, at_rest.close.0);
+        assert!(pill.0 > at_rest.title.0);
+    }
+
+    #[test]
+    fn a_shortcut_pill_is_left_out_where_it_does_not_fit() {
+        let segment = (0.0, 0.0, 40.0, 28.0);
+        let content = horizontal_tab_content_layout(segment, true, true, 0.0, "x", None, 8.0);
+        assert!(tab_badge_rect(segment, content.title, "Ctrl+Shift+3", 8.0, 1.0).is_none());
+        assert!(tab_badge_rect(segment, content.title, "", 8.0, 1.0).is_none());
+        assert!(tab_badge_rect(segment, (0.0, 0.0, 0.0, 28.0), "3", 8.0, 1.0).is_none());
+    }
 
     #[test]
     fn fixed_titlebar_text_fits_at_large_terminal_zoom() {

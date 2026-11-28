@@ -2208,17 +2208,24 @@ fn a_cut_tab_title_shows_whole_in_a_tooltip() {
         strip_tooltip_target(ws, bar, &context)
     };
     let at = |ws: &mut crate::window_state::WindowState, x: f64| at_on(ws, &bar, x);
-    assert_eq!(at(&mut ws, 20.0), None, "a title shown whole");
+    // In a strip of several tabs every tab names its go-to-tab key too.
+    let key = |idx: usize| super::chrome::tab_goto_hint(&bindings, idx).unwrap();
+    assert_eq!(
+        at(&mut ws, 20.0).map(|tip| tip.text),
+        Some(format!("vim  {}", key(0))),
+        "a title shown whole names only its key"
+    );
     let tip = at(&mut ws, 120.0).expect("a cut title");
     assert_eq!(
         tip.target,
         crate::tooltip::TooltipTarget::TabTitle(1)
     );
-    assert_eq!(tip.text, long);
+    let long_tip = format!("{long}  {}", key(1));
+    assert_eq!(tip.text, long_tip);
     assert_eq!(tip.anchor, Some(bar.segments[1].rect));
     assert_eq!(at(&mut ws, 185.0), None, "the close button names nothing");
     let folder = at(&mut ws, 220.0).expect("a folder shown by its leaf");
-    assert_eq!(folder.text, path);
+    assert_eq!(folder.text, format!("{path}  {}", key(2)));
     // It waits for a rest, as every chrome tooltip does.
     let t0 = Instant::now();
     ws.tooltip.hover(Some((tip.target, tip.rect)), Some((120.0, 14.0)), t0);
@@ -2226,14 +2233,16 @@ fn a_cut_tab_title_shows_whole_in_a_tooltip() {
     assert_eq!(shown_strip_tooltip(&ws, &bar, &context, t0), None);
     assert_eq!(
         shown_strip_tooltip(&ws, &bar, &context, t0 + Duration::from_millis(500))
-            .map(|tip| tip.text)
-            .as_deref(),
-        Some(long)
+            .map(|tip| tip.text),
+        Some(long_tip)
     );
+    // A single tab shows its title whole only when the strip cut it.
     let mut lone = kettle_render::TabBar::hidden();
     lone.height = 28.0;
+    lone.segments = vec![seg(0, 0.0, "vim", None)];
+    assert_eq!(at_on(&mut ws, &lone, 20.0), None, "a single tab shown whole");
     lone.segments = vec![seg(0, 0.0, long, None)];
-    assert!(at_on(&mut ws, &lone, 20.0).is_some());
+    assert_eq!(at_on(&mut ws, &lone, 20.0).map(|tip| tip.text).as_deref(), Some(long));
     lone.lone_title = true;
     assert_eq!(
         at_on(&mut ws, &lone, 20.0),

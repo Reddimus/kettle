@@ -757,6 +757,12 @@ impl App {
             at.saturating_duration_since(now)
                 .max(std::time::Duration::from_millis(1))
         });
+        // The tab strip's shortcut pills: one wake at the end of the new
+        // tab's hold or the peek's delay, frames only through the fade.
+        let tab_hint_wait = self.tick_tab_hints(ws, now, render_hidden).map(|at| {
+            at.saturating_duration_since(now)
+                .max(std::time::Duration::from_millis(1))
+        });
         // A tab drag resting on an overflow arrow scrolls the strip.
         let tab_drag_scroll_wait = self.scroll_tab_drag_at_arrow(ws, now).map(|at| {
             at.saturating_duration_since(now)
@@ -1055,6 +1061,9 @@ impl App {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = tooltip_wait {
+            wait = Some(wait.map_or(next, |current| current.min(next)));
+        }
+        if let Some(next) = tab_hint_wait {
             wait = Some(wait.map_or(next, |current| current.min(next)));
         }
         if let Some(next) = tab_drag_scroll_wait {

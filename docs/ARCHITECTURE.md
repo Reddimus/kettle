@@ -4767,8 +4767,20 @@ starfield or transparent background, and past the cap, the text is best effort.
 At the default 0.86 that raises three mid-tone themes, five on macOS. The search
 bar, which was 98% opaque, is drawn opaque over a translucent terminal in the
 colour it has over the theme's background, so its labels do not depend on the
-backdrop. An unfocused window does not paint the tabs' Cmd+N hints but keeps
-their lanes, so titles do not move. These labels are swept over every bundled
+backdrop. Horizontal tabs show no go-to-tab hint at rest, so every title keeps
+its whole lane and stays centred. The key shows instead as a transient pill
+(`TabBar::badges`, placed by `tab_badge_rect` at the trailing end of the title
+lane without moving it): a tab opened from New Tab, `+` or the new-tab menu
+shows its whole chord for 1.6 s and fades it out over 0.4 s
+(`tab_hints::NewTabHintFade`, skipped under reduced motion), and holding exactly
+the go-to-tab modifiers for 150 ms shows the first nine tabs' digits
+(`tab_hints::TabHintPeek`) until they are released or another key is pressed.
+Neither shows in an unfocused window, under a modal or menu, with one tab, or,
+for the peek, with a link under the pointer. The scheduler wakes once at the
+end of the hold or the delay and steps frames only through the fade. Every tab
+in a strip of several also names its key in its tooltip. The pill is an opaque
+chip of the text colour, at least 3:1 against the tab, with ink at least 4.5:1
+on it (`Colors::tab_badge`). These labels are swept over every bundled
 theme at 0.86, 0.7, 0.43, 0.99 and opaque in `chrome_contrast_sweep_tests`.
 The tab accent bar, the jump-to-bottom pill's fill and terminal text, including
 `minimum-contrast`, are still resolved against the opaque colour.
@@ -6732,7 +6744,7 @@ disc of the header's foreground (10 % at rest, 15 % hovered, 30 % pressed,
 floored at 1.15:1, 1.4:1 and 2:1) under its symbolic glyph, 1.5 to 2 points
 wide. Glyphs and the title retain 4.5:1 contrast when focused and 3:1 when an
 unfocused window fades the header; tab titles keep 4.5:1 when dimmed, since
-they still name the tabs, and an unfocused window paints no shortcut hints.
+they still name the tabs, and an unfocused window paints no shortcut pills.
 Outer corners remain square.
 
 Stock winit cannot report whether the compositor granted server-side

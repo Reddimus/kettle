@@ -179,6 +179,9 @@ impl App {
                     ws.macos_right_option_pressed = m.ralt_state() == ModifiersKeyState::Pressed;
                     refresh_macos_modifiers(ws, self.cfg.macos_option_as_alt);
                 }
+                // Holding exactly the go-to-tab modifiers peeks at the tabs'
+                // digits; any other change ends the peek.
+                self.sync_tab_hint_peek(ws);
                 // Modifier change can flip the URL hover affordance from
                 // text-I-beam to pointing-hand without the mouse moving
                 // (Ctrl held = "this click would open"). Re-sync the
@@ -1497,6 +1500,8 @@ impl App {
                 }
                 if !f {
                     ws.release_titlebar_buttons();
+                    // Shortcut pills are for the keyboard in a focused window.
+                    Self::clear_tab_hints(ws);
                     let at = (ws.cursor.x as f32, ws.cursor.y as f32);
                     self.track_titlebar_pointer(ws, TitlebarPointer::Release(at.0, at.1));
                     ws.titlebar_click = None;
@@ -1740,6 +1745,15 @@ impl App {
                 if key_dismisses_link_hover(event.state, &event.logical_key, event.physical_key) {
                     dismiss_link_hover(ws);
                     self.dismiss_selection_hint(ws);
+                }
+                // Any other key pressed with the go-to-tab modifiers held is
+                // a shortcut, not a peek at the tabs' digits.
+                if event.state == ElementState::Pressed
+                    && !crate::cursor_exit_log::is_modifier(&event.logical_key, event.physical_key)
+                    && ws.tab_hint_peek.clear()
+                    && let Some(window) = &ws.window
+                {
+                    window.request_redraw();
                 }
                 // A key press returns focus from a card that assistive
                 // technology focused to the pane, where the key goes.

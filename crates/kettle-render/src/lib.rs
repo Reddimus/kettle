@@ -55,7 +55,8 @@ mod settings;
 mod tab_strip;
 mod terminal;
 pub use tab_strip::{
-    HorizontalTabContent, activity_lane, horizontal_tab_content_layout, tab_text_scale,
+    HorizontalTabContent, activity_lane, horizontal_tab_content_layout, tab_badge_rect,
+    tab_text_scale,
 };
 mod theme;
 mod theme_picker;
@@ -146,13 +147,14 @@ pub use overlays::{
     ConfirmDialogButton, ConfirmDialogDetail, ConfirmDialogFinding, ConfirmDialogOverlay,
     ContextMenu, ContextMenuRow, HintLabel, ImePreedit, MediaPasteReceiptGeometry,
     MediaPasteReceiptHit, MediaPasteReceiptKind, MediaPasteReceiptOverlay, MenuStatus, MenuToggle,
-    NotificationGeometry, Overlay, StatusBar, TabActivity, TabBar, TabSeg, TitleEditOverlay,
-    UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay, WindowControl, WindowControlButton,
-    context_menu_row_rects, format_media_size, hint_label_rect, media_paste_receipt_geometry, menu,
-    menu_option_row, menu_row_chars, menu_row_description_left, menu_row_option,
-    notification_geometry, notification_geometry_with_notices, persistent_notice_geometry,
-    persistent_notice_geometry_at_bottom, tab_drag, theme_picker_prefix, title_edit_prefix,
-    toast_text_rows, update_toast_columns, update_toast_geometry,
+    NotificationGeometry, Overlay, StatusBar, TabActivity, TabBadge, TabBar, TabSeg,
+    TitleEditOverlay, UpdateToastGeometry, UpdateToastHit, UpdateToastOverlay, WindowControl,
+    WindowControlButton, context_menu_row_rects, format_media_size, hint_label_rect,
+    media_paste_receipt_geometry, menu, menu_option_row, menu_row_chars, menu_row_description_left,
+    menu_row_option, notification_geometry, notification_geometry_with_notices,
+    persistent_notice_geometry, persistent_notice_geometry_at_bottom, tab_drag,
+    theme_picker_prefix, title_edit_prefix, toast_text_rows, update_toast_columns,
+    update_toast_geometry,
 };
 use overlays::{
     MAX_LANE_IMAGES, NEW_TAB_MENU_GLYPH, NEW_TAB_PLUS_GLYPH, context_menu_panel_width,
@@ -649,6 +651,8 @@ pub struct Renderer {
     pane_titlebar_buffers: Vec<TextBuffer>,
     tab_buffers: Vec<TextBuffer>,
     tab_hint_buffers: Vec<TextBuffer>,
+    /// One buffer per shortcut pill over the tabs (`TabBar::badges`).
+    tab_badge_buffers: Vec<TextBuffer>,
     hint_buffers: Vec<TextBuffer>,
     pane_status_buffers: Vec<TextBuffer>,
     /// One text buffer per row of the right-click context menu. Reused
@@ -2899,6 +2903,24 @@ impl Renderer {
                 }
                 buf.shape_until_scroll(&mut self.font_system, false);
             }
+            // Shortcut pills: a chord or digit each, shaped on one line.
+            while self.tab_badge_buffers.len() < tabbar.badges.len() {
+                self.tab_badge_buffers
+                    .push(TextBuffer::new(&mut self.font_system, metrics));
+            }
+            self.tab_badge_buffers.truncate(tabbar.badges.len());
+            for (badge, buf) in tabbar.badges.iter().zip(&mut self.tab_badge_buffers) {
+                buf.set_metrics(tab_metrics);
+                buf.set_size(None, Some(tabbar.height));
+                buf.set_wrap(Wrap::None);
+                buf.set_text(
+                    &badge.text,
+                    &Attrs::new().family(Family::Name(&family)),
+                    Shaping::Advanced,
+                    None,
+                );
+                buf.shape_until_scroll(&mut self.font_system, false);
+            }
             // Shared `✕` glyph buffer for every tab's close button.
             // Sized once; positioned per-tab via TextArea below.
             self.tab_close_buffer.set_metrics(close_metrics);
@@ -4810,6 +4832,19 @@ impl Renderer {
                     &self.tab_texts[bi],
                     (tab_cw, tab_ch),
                 );
+                // A shortcut pill overlays the tab without moving its title;
+                // the title is clipped short of the pill rather than drawn
+                // under its text. Pills are keyboard hints: an unfocused
+                // window paints none.
+                let badge = tabbar
+                    .badges
+                    .iter()
+                    .enumerate()
+                    .find(|(_, badge)| badge.idx == s.idx && badge.alpha > 0.0)
+                    .filter(|_| overlay.window_focused);
+                let title_right = badge.map_or(tx + tw, |(_, badge)| {
+                    (badge.rect.0 - (2.0 * self.scale).round()).clamp(tx, tx + tw)
+                });
                 areas.push(TextArea {
                     buffer: &self.tab_buffers[bi],
                     left: centered_left,
@@ -4818,12 +4853,43 @@ impl Renderer {
                     bounds: TextBounds {
                         left: tx as i32,
                         top: ty_px as i32,
-                        right: (tx + tw) as i32,
+                        right: title_right as i32,
                         bottom: (ty_px + th) as i32,
                     },
                     default_color: gc(title_fg),
                     custom_glyphs: &[],
                 });
+                if let Some((k, badge)) = badge {
+                    let (fill, ink) = self.chrome_colors.tab_badge(fg, tab_background);
+                    let alpha = badge.alpha.clamp(0.0, 1.0);
+                    tab_strip::rounded_fill(
+                        &mut quads,
+                        badge.rect,
+                        badge.rect.3 * 0.5,
+                        (true, true),
+                        (fill, alpha),
+                        None,
+                    );
+                    let text_w = self.tab_badge_buffers[k]
+                        .layout_runs()
+                        .next()
+                        .map_or(0.0, |run| run.line_w);
+                    let (left, top) = centered_text_origin(badge.rect, (text_w, tab_ch));
+                    areas.push(TextArea {
+                        buffer: &self.tab_badge_buffers[k],
+                        left,
+                        top,
+                        scale: 1.0,
+                        bounds: text_bounds_for_rect((badge.rect.0, ty_px, badge.rect.2, th)),
+                        default_color: GColor::rgba(
+                            ink.r,
+                            ink.g,
+                            ink.b,
+                            (alpha * 255.0).round() as u8,
+                        ),
+                        custom_glyphs: &[],
+                    });
+                }
                 // The Cmd+N hints are for the keyboard in a focused window.
                 // An unfocused one keeps their lane, so nothing moves when
                 // focus returns, but does not paint them.
@@ -5995,6 +6061,14 @@ impl Renderer {
             self.tab_texts.hash(&mut h);
             for segment in &tabbar.segments {
                 segment.hint.as_ref().map(|(_, text)| text).hash(&mut h);
+            }
+            for badge in &tabbar.badges {
+                badge.idx.hash(&mut h);
+                badge.text.hash(&mut h);
+                badge.alpha.to_bits().hash(&mut h);
+                [badge.rect.0, badge.rect.1, badge.rect.2, badge.rect.3]
+                    .map(f32::to_bits)
+                    .hash(&mut h);
             }
             self.tabbar_text.hash(&mut h);
             self.status_bar_text.hash(&mut h);

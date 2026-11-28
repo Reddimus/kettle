@@ -213,7 +213,10 @@ fn a_lone_macos_titlebar_tab_fills_the_lane_from_its_start() {
     assert!(body.contains(
         "iflone_title{letwindow_width=band.0+band.2;content.title=centered_title_lane(content.title,window_width*0.5);}"
     ));
-    assert!(body.contains("lethint=ifws.macos_titlebar_tabs&&n==1{None}"));
+    // No tab has an inline go-to-tab hint, and a lone tab gets no shortcut
+    // pill either: its key would go nowhere.
+    assert!(body.contains("&full_label,None,cell_w,"));
+    assert!(source.contains("ws.window_focused&&ws.mux.tabs.len()>1&&"));
 }
 
 /// Every title-bar strip leaves empty space for moving the window between

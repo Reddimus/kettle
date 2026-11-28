@@ -1347,6 +1347,9 @@ mod quick_terminal_regression_tests;
 mod link_hint_ux_tests;
 
 #[cfg(test)]
+mod tab_hint_tests;
+
+#[cfg(test)]
 mod scrollback_receipt_hit_tests;
 
 #[cfg(test)]

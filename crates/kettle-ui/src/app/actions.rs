@@ -202,7 +202,10 @@ impl App {
             .mux
             .new_tab_with_launch_geometry(&self.cfg, geometry, waker, argv.to_vec(), cwd)
         {
-            Ok(()) => self.fire_tab_add_event(ws),
+            Ok(()) => {
+                self.arm_new_tab_hint(ws);
+                self.fire_tab_add_event(ws);
+            }
             Err(e) => log::warn!("could not open shell tab ({argv:?}): {e}"),
         }
     }
@@ -413,9 +416,13 @@ impl App {
                 // Fire LuaEvent::TabAdd with the new active tab index (via
                 // fire_tab_add_event) only when a tab was actually created, so
                 // Lua never hears of a tab that doesn't exist. A PTY-spawn
-                // failure is logged.
+                // failure is logged. The new tab shows its go-to-tab chord
+                // briefly, armed first so a hook that switches away ends it.
                 match ws.mux.new_tab_geometry(&self.cfg, tab_geometry, waker) {
-                    Ok(()) => self.fire_tab_add_event(ws),
+                    Ok(()) => {
+                        self.arm_new_tab_hint(ws);
+                        self.fire_tab_add_event(ws);
+                    }
                     Err(e) => log::warn!("could not open a new tab (shell spawn failed?): {e}"),
                 }
             }

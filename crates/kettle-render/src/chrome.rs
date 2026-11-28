@@ -188,6 +188,20 @@ impl Colors {
         self.on(ink, backing, TEXT_CONTRAST)
     }
 
+    /// A tab's shortcut pill on `surface`: a chip of the text colour, at
+    /// least 3:1 against the tab so its shape reads, with ink at least 4.5:1
+    /// on the chip. Returns `(fill, ink)`. The chip is opaque, so the ink
+    /// never depends on what shows through a translucent tab.
+    pub(crate) fn tab_badge(&mut self, fg: Rgb, surface: Rgb) -> (Rgb, Rgb) {
+        let fill = self.resolve(
+            color::over(surface, fg, 0.85, false),
+            surface,
+            ICON_CONTRAST,
+        );
+        let ink = self.text(surface, fill);
+        (fill, ink)
+    }
+
     /// A tab's close glyph, `ink` on `surface`: text-strong in a focused
     /// window, an icon's floor in an unfocused one.
     pub(crate) fn tab_close(

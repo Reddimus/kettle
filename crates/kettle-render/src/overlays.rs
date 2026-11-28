@@ -1529,6 +1529,20 @@ pub struct TabSeg {
     pub activity: TabActivity,
 }
 
+/// A transient shortcut pill drawn over a horizontal tab: the go-to-tab
+/// chord on a tab just opened, or its digit while the go-to-tab modifiers
+/// are held. It overlays the tab and never moves its title lane.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabBadge {
+    /// Index of the segment it sits on.
+    pub idx: usize,
+    /// The pill, from [`crate::tab_badge_rect`].
+    pub rect: Rect4,
+    pub text: String,
+    /// 0.0..=1.0 opacity of the whole pill, fill and text.
+    pub alpha: f32,
+}
+
 /// Thin status-bar strip at the top or bottom of the
 /// surface. Disabled by default; when on, the App sets `height` > 0
 /// and supplies a pre-formatted single-line string.
@@ -1617,6 +1631,8 @@ pub struct TabBar {
     /// above the search lane and any bottom status bar.
     pub y: f32,
     pub segments: Vec<TabSeg>,
+    /// Shortcut pills over horizontal tabs; empty at rest.
+    pub badges: Vec<TabBadge>,
     /// The trailing "new tab" (+) button rect.
     pub new_tab: Rect4,
     /// The `▾` dropdown-arrow rect, beside `new_tab`.
@@ -1728,6 +1744,7 @@ impl TabBar {
             height: 0.0,
             y: 0.0,
             segments: Vec::new(),
+            badges: Vec::new(),
             new_tab: (0.0, 0.0, 0.0, 0.0),
             new_tab_menu: (0.0, 0.0, 0.0, 0.0),
             hovered_new_tab: false,

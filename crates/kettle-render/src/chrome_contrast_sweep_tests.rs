@@ -818,3 +818,34 @@ fn the_painter_uses_the_swept_helpers() {
     assert_eq!(source.matches("border,1.0,6.0);").count(), 1);
     assert!(!source.contains("{acc}else{border}"));
 }
+
+/// A tab's shortcut pill reads on every tab it can sit on: the active tab,
+/// a background tab and a hovered one, in every bundled theme. The chip is
+/// opaque, so its ink needs only the text floor against the chip itself,
+/// and the chip clears the non-text floor against the tab so its shape
+/// reads. The painter takes both from the helper swept here.
+#[test]
+fn tab_shortcut_pills_clear_their_floors_on_every_tab() {
+    let mut colors = Colors::default();
+    let mut failures = Vec::new();
+    for name in Theme::list() {
+        let theme = Theme::by_name(name);
+        let (bg, fg) = (theme.background, theme.foreground);
+        let strip = crate::resolve_chrome_bg(&kettle_config::Config::default(), &theme, None);
+        let hovered = chrome::strip_hover(strip, fg, false);
+        for (role, surface) in [("active", bg), ("background", strip), ("hovered", hovered)] {
+            let (fill, ink) = colors.tab_badge(fg, surface);
+            let text = color::contrast_ratio(ink, fill);
+            if text < TEXT_CONTRAST {
+                failures.push(format!("{name} {role} ink: {text:.3}"));
+            }
+            let shape = color::contrast_ratio(fill, surface);
+            if shape < ICON_CONTRAST && reachable(&[surface], ICON_CONTRAST) {
+                failures.push(format!("{name} {role} chip: {shape:.3}"));
+            }
+        }
+    }
+    report(&failures, "tab shortcut pill");
+    let source: String = crate::production_source().split_whitespace().collect();
+    assert!(source.contains("let(fill,ink)=self.chrome_colors.tab_badge(fg,tab_background);"));
+}

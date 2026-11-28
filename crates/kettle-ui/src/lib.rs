@@ -99,6 +99,7 @@ mod search_input;
 mod session;
 mod session_content;
 mod settings;
+mod tab_hints;
 mod text_editor;
 mod tooltip;
 mod typed_echo;
